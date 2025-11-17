@@ -2,12 +2,15 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import json
 import logging
 import platform
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from .constants import COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
@@ -110,3 +113,56 @@ def resolve_windows_shortcut(shortcut_path: Path) -> Optional[Path]:
         pass
     return None
 
+
+def verify_api_key(api_key: str) -> bool:
+    """
+    Verify API key by calling the models endpoint.
+    
+    Args:
+        api_key: API key to verify
+        
+    Returns:
+        True if API key is valid (200 response), False otherwise
+    """
+    url = "https://api.getunbound.ai/v1/models"
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", f"Bearer {api_key}")
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            return response.getcode() == 200
+    except urllib.error.HTTPError as e:
+        logger.debug(f"API key verification failed: {e.code}")
+        return False
+    except Exception as e:
+        logger.debug(f"API key verification error: {e}")
+        return False
+
+
+def send_report_to_backend(api_key: str, report: Dict) -> bool:
+    """
+    Send discovery report to backend endpoint.
+    
+    Args:
+        api_key: API key for authentication
+        report: Report dictionary to send
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    url = "https://backend.getunbound.ai/api/v1/ai-tools/report/"
+    data = json.dumps(report).encode('utf-8')
+    
+    req = urllib.request.Request(url, data=data, method='POST')
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Content-Type", "application/json")
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            return response.getcode() in (200, 201)
+    except urllib.error.HTTPError as e:
+        logger.error(f"Failed to send report: {e.code} - {e.reason}")
+        return False
+    except Exception as e:
+        logger.error(f"Error sending report: {e}")
+        return False

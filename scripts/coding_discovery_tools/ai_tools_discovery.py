@@ -20,6 +20,8 @@ try:
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        CursorMCPConfigExtractorFactory,
+        ClaudeMCPConfigExtractorFactory,
     )
 except ImportError:
     # Running as script directly - add parent directory to path
@@ -29,6 +31,8 @@ except ImportError:
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        CursorMCPConfigExtractorFactory,
+        ClaudeMCPConfigExtractorFactory,
     )
 
 # Set up logger
@@ -61,6 +65,8 @@ class AIToolsDetector:
             self._tool_detectors = ToolDetectorFactory.create_all_tool_detectors(self.system)
             self._cursor_rules_extractor = CursorRulesExtractorFactory.create(self.system)
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
+            self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
+            self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -145,7 +151,7 @@ class AIToolsDetector:
         Generate complete discovery report with tool detection and rules extraction.
         
         Returns:
-            Dictionary with device_id, tools, cursor_rules, claude_rules, and timestamp
+            Dictionary with device_id, tools (with nested projects), and timestamp
         """
         device_id = self.get_device_id()
         tools = self.detect_all_tools()
@@ -156,11 +162,53 @@ class AIToolsDetector:
         logger.info("Extracting Claude Code rules...")
         claude_projects = self.extract_all_claude_rules()
 
+        logger.info("Extracting MCP configs...")
+        cursor_mcp_config = self._cursor_mcp_extractor.extract_mcp_config()
+        claude_mcp_config = self._claude_mcp_extractor.extract_mcp_config()
+
+        # Transform projects: change project_root to path
+        cursor_projects_transformed = [
+            {
+                "path": project["project_root"],
+                "rules": project["rules"]
+            }
+            for project in cursor_projects
+        ]
+        
+        claude_projects_transformed = [
+            {
+                "path": project["project_root"],
+                "rules": project["rules"]
+            }
+            for project in claude_projects
+        ]
+
+        # Group projects by tool and add to tools array
+        tools_with_projects = []
+        for tool in tools:
+            tool_name = tool.get("name", "").lower()
+            projects = []
+            mcp_config = None
+            
+            if tool_name == "cursor":
+                projects = cursor_projects_transformed
+                mcp_config = cursor_mcp_config
+            elif tool_name == "claude code":
+                projects = claude_projects_transformed
+                mcp_config = claude_mcp_config
+            
+            tool_with_projects = {
+                "name": tool.get("name"),
+                "version": tool.get("version"),
+                "install_path": tool.get("install_path"),
+                "projects": projects,
+                "mcp_config": mcp_config
+            }
+            tools_with_projects.append(tool_with_projects)
+
         return {
             "device_id": device_id,
-            "tools": tools,
-            "cursor_rules": cursor_projects,
-            "claude_rules": claude_projects,
+            "tools": tools_with_projects,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
 
@@ -173,10 +221,8 @@ def main():
 
         # Print summary
         num_tools = len(report['tools'])
-        num_cursor_projects = len(report['cursor_rules'])
-        num_cursor_rules = sum(len(p['rules']) for p in report['cursor_rules'])
-        num_claude_projects = len(report['claude_rules'])
-        num_claude_rules = sum(len(p['rules']) for p in report['claude_rules'])
+        total_projects = 0
+        total_rules = 0
         
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
@@ -186,10 +232,19 @@ def main():
         logger.info("")
         logger.info(f"Tools Detected: {num_tools}")
         for tool in report['tools']:
-            logger.info(f"  - {tool.get('name', 'Unknown')}: {tool.get('version', 'Unknown version')} at {tool.get('install_path', 'Unknown path')}")
+            tool_name = tool.get('name', 'Unknown')
+            tool_version = tool.get('version', 'Unknown version')
+            tool_path = tool.get('install_path', 'Unknown path')
+            projects = tool.get('projects', [])
+            num_projects = len(projects)
+            num_rules = sum(len(p.get('rules', [])) for p in projects)
+            total_projects += num_projects
+            total_rules += num_rules
+            
+            logger.info(f"  - {tool_name}: {tool_version} at {tool_path}")
+            logger.info(f"    Projects: {num_projects}, Rules: {num_rules}")
         logger.info("")
-        logger.info(f"Cursor Rules: {num_cursor_projects} projects, {num_cursor_rules} rule files")
-        logger.info(f"Claude Rules: {num_claude_projects} projects, {num_claude_rules} rule files")
+        logger.info(f"Total: {total_projects} projects, {total_rules} rule files")
         logger.info("")
         logger.info("Full Report (JSON):")
         logger.info(json.dumps(report, indent=2))

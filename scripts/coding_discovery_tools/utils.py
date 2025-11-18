@@ -113,44 +113,30 @@ def resolve_windows_shortcut(shortcut_path: Path) -> Optional[Path]:
         pass
     return None
 
-
-def verify_api_key(api_key: str) -> bool:
-    """
-    Verify API key by calling the models endpoint.
+def normalize_url(domain: str) -> str:
+    """Normalize domain to proper URL format."""
+    domain = domain.strip()
     
-    Args:
-        api_key: API key to verify
-        
-    Returns:
-        True if API key is valid (200 response), False otherwise
-    """
-    url = "https://api.getunbound.ai/v1/models"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {api_key}")
+    if domain.startswith("http://") or domain.startswith("https://"):
+        url = domain
+    else:
+        url = f"https://{domain}"
     
-    try:
-        with urllib.request.urlopen(req) as response:
-            return response.getcode() == 200
-    except urllib.error.HTTPError as e:
-        logger.debug(f"API key verification failed: {e.code}")
-        return False
-    except Exception as e:
-        logger.debug(f"API key verification error: {e}")
-        return False
+    return url.rstrip('/')
 
-
-def send_report_to_backend(api_key: str, report: Dict) -> bool:
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict) -> bool:
     """
     Send discovery report to backend endpoint.
     
     Args:
+        backend_url: Backend URL to send the report to
         api_key: API key for authentication
         report: Report dictionary to send
         
     Returns:
         True if successful, False otherwise
     """
-    url = "https://backend.getunbound.ai/api/v1/ai-tools/report/"
+    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     data = json.dumps(report).encode('utf-8')
     
     req = urllib.request.Request(url, data=data, method='POST')

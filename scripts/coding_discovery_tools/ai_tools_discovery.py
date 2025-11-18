@@ -22,7 +22,7 @@ try:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
     )
-    from .utils import verify_api_key, send_report_to_backend
+    from .utils import send_report_to_backend
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -32,7 +32,7 @@ except ImportError:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import verify_api_key, send_report_to_backend
+    from scripts.coding_discovery_tools.utils import send_report_to_backend
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -172,20 +172,14 @@ def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
     parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
+    parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     args = parser.parse_args()
     
-    # Check for API key
-    if not args.api_key:
-        print("Error: --api-key argument is required")
-        print("Please provide an API key: python ai_tools_discovery.py --api-key YOUR_API_KEY")
+    # Check for API key and domain
+    if not args.api_key or not args.domain:
+        print("Error: --api-key and --domain arguments are required")
+        print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
         sys.exit(1)
-    
-    # Verify API key
-    print("Verifying API key...")
-    if not verify_api_key(args.api_key):
-        print("Error: Invalid API key")
-        sys.exit(1)
-    print("API key verified successfully")
     
     try:
         detector = AIToolsDetector()
@@ -218,7 +212,7 @@ def main():
         # Send report to backend
         logger.info("")
         print("Sending report to backend...")
-        if send_report_to_backend(args.api_key, report):
+        if send_report_to_backend(args.domain, args.api_key, report):
             print("Report sent successfully")
         else:
             print("Failed to send report to backend")

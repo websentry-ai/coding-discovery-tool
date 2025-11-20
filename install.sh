@@ -20,7 +20,6 @@ set -e  # Exit on any error
 REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
 BRANCH="main"
 TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'coding-discovery-tool')
-SCRIPT_DIR="$TEMP_DIR/scripts/coding_discovery_tools"
 
 # ==============================================================================
 # OUTPUT COLORS

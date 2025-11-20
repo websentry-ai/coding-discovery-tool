@@ -19,11 +19,13 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     """
     Transform mcpServers from object format to array format.
     
+    Excludes 'env' field from server configs as it's not needed in the output.
+    
     Args:
         mcp_servers: Dictionary mapping server names to server configs
         
     Returns:
-        List of server config objects with 'name' field added
+        List of server config objects with 'name' field added (env field excluded)
     """
     if not isinstance(mcp_servers, dict):
         return []
@@ -31,9 +33,10 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     servers_array = []
     for server_name, server_config in mcp_servers.items():
         if isinstance(server_config, dict):
+            # Create server object excluding 'env' field
             server_obj = {
                 "name": server_name,
-                **server_config
+                **{field_name: field_value for field_name, field_value in server_config.items() if field_name != "env"}
             }
             servers_array.append(server_obj)
     

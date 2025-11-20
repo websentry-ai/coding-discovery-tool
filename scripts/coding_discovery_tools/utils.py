@@ -2,12 +2,15 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import json
 import logging
 import platform
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from .constants import COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
@@ -110,3 +113,42 @@ def resolve_windows_shortcut(shortcut_path: Path) -> Optional[Path]:
         pass
     return None
 
+def normalize_url(domain: str) -> str:
+    """Normalize domain to proper URL format."""
+    domain = domain.strip()
+    
+    if domain.startswith("http://") or domain.startswith("https://"):
+        url = domain
+    else:
+        url = f"https://{domain}"
+    
+    return url.rstrip('/')
+
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict) -> bool:
+    """
+    Send discovery report to backend endpoint.
+    
+    Args:
+        backend_url: Backend URL to send the report to
+        api_key: API key for authentication
+        report: Report dictionary to send
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+    data = json.dumps(report).encode('utf-8')
+    
+    req = urllib.request.Request(url, data=data, method='POST')
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Content-Type", "application/json")
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            return response.getcode() in (200, 201)
+    except urllib.error.HTTPError as e:
+        logger.error(f"Failed to send report: {e.code} - {e.reason}")
+        return False
+    except Exception as e:
+        logger.error(f"Error sending report: {e}")
+        return False

@@ -166,50 +166,96 @@ class AIToolsDetector:
         cursor_mcp_config = self._cursor_mcp_extractor.extract_mcp_config()
         claude_mcp_config = self._claude_mcp_extractor.extract_mcp_config()
 
-        # Transform projects: change project_root to path
-        cursor_projects_transformed = [
-            {
+        # Transform projects: change project_root to path and prepare for merging
+        cursor_projects_dict = {
+            project["project_root"]: {
                 "path": project["project_root"],
-                "rules": project["rules"]
+                "rules": project.get("rules", [])  # Ensure rules is always an array
             }
             for project in cursor_projects
-        ]
+        }
         
-        claude_projects_transformed = [
-            {
+        claude_projects_dict = {
+            project["project_root"]: {
                 "path": project["project_root"],
-                "rules": project["rules"]
+                "rules": project.get("rules", [])  # Ensure rules is always an array
             }
             for project in claude_projects
-        ]
+        }
+
+        # Merge MCP configs into projects
+        if cursor_mcp_config and "projects" in cursor_mcp_config:
+            for mcp_project in cursor_mcp_config["projects"]:
+                project_path = mcp_project["path"]
+                if project_path in cursor_projects_dict:
+                    # Merge MCP config into existing project
+                    cursor_projects_dict[project_path]["mcpServers"] = mcp_project.get("mcpServers", [])
+                    # Ensure rules field exists
+                    if "rules" not in cursor_projects_dict[project_path]:
+                        cursor_projects_dict[project_path]["rules"] = []
+                else:
+                    # Create new project entry with MCP config and empty rules
+                    cursor_projects_dict[project_path] = {
+                        "path": project_path,
+                        "mcpServers": mcp_project.get("mcpServers", []),
+                        "rules": []
+                    }
+        
+        if claude_mcp_config and "projects" in claude_mcp_config:
+            for mcp_project in claude_mcp_config["projects"]:
+                project_path = mcp_project["path"]
+                mcp_servers = mcp_project.get("mcpServers", [])
+                additional_mcp_data = {}
+                
+                # Extract Claude Code specific fields into additionalMcpData
+                if mcp_project.get("mcpContextUris"):
+                    additional_mcp_data["mcpContextUris"] = mcp_project["mcpContextUris"]
+                if mcp_project.get("enabledMcpjsonServers"):
+                    additional_mcp_data["enabledMcpjsonServers"] = mcp_project["enabledMcpjsonServers"]
+                if mcp_project.get("disabledMcpjsonServers"):
+                    additional_mcp_data["disabledMcpjsonServers"] = mcp_project["disabledMcpjsonServers"]
+                
+                if project_path in claude_projects_dict:
+                    # Merge MCP config into existing project
+                    claude_projects_dict[project_path]["mcpServers"] = mcp_servers
+                    if additional_mcp_data:
+                        claude_projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
+                    # Ensure rules field exists
+                    if "rules" not in claude_projects_dict[project_path]:
+                        claude_projects_dict[project_path]["rules"] = []
+                else:
+                    # Create new project entry with MCP config and empty rules
+                    new_project = {
+                        "path": project_path,
+                        "mcpServers": mcp_servers,
+                        "rules": []
+                    }
+                    if additional_mcp_data:
+                        new_project["additionalMcpData"] = additional_mcp_data
+                    claude_projects_dict[project_path] = new_project
 
         # Group projects by tool and add to tools array
         tools_with_projects = []
         for tool in tools:
             tool_name = tool.get("name", "").lower()
             projects = []
-            mcp_config = None
             
             if tool_name == "cursor":
-                projects = cursor_projects_transformed
-                mcp_config = cursor_mcp_config
+                projects = list(cursor_projects_dict.values())
             elif tool_name == "claude code":
-                projects = claude_projects_transformed
-                mcp_config = claude_mcp_config
+                projects = list(claude_projects_dict.values())
             
             tool_with_projects = {
                 "name": tool.get("name"),
                 "version": tool.get("version"),
                 "install_path": tool.get("install_path"),
-                "projects": projects,
-                "mcp_config": mcp_config
+                "projects": projects
             }
             tools_with_projects.append(tool_with_projects)
 
         return {
             "device_id": device_id,
-            "tools": tools_with_projects,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "tools": tools_with_projects
         }
 
 
@@ -228,7 +274,6 @@ def main():
         logger.info("AI Tools Discovery Report")
         logger.info("=" * 60)
         logger.info(f"Device ID: {report['device_id']}")
-        logger.info(f"Timestamp: {report['timestamp']}")
         logger.info("")
         logger.info(f"Tools Detected: {num_tools}")
         for tool in report['tools']:

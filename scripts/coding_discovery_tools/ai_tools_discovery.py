@@ -13,7 +13,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# Handle both direct execution and module import
 try:
     from .coding_tool_factory import (
         DeviceIdExtractorFactory,
@@ -146,6 +145,82 @@ class AIToolsDetector:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
             return []
 
+    def _merge_mcp_configs_into_projects(
+        self,
+        mcp_projects: List[Dict],
+        projects_dict: Dict[str, Dict]
+    ) -> None:
+        """
+        Merge MCP configs into projects dictionary.
+        
+        Args:
+            mcp_projects: List of MCP project configs
+            projects_dict: Dictionary mapping project paths to project configs
+        """
+        for mcp_project in mcp_projects:
+            project_path = mcp_project["path"]
+            mcp_servers = mcp_project.get("mcpServers", [])
+            
+            if project_path in projects_dict:
+                # Merge MCP config into existing project
+                projects_dict[project_path]["mcpServers"] = mcp_servers
+                # Ensure rules field exists
+                if "rules" not in projects_dict[project_path]:
+                    projects_dict[project_path]["rules"] = []
+            else:
+                # Create new project entry with MCP config and empty rules
+                projects_dict[project_path] = {
+                    "path": project_path,
+                    "mcpServers": mcp_servers,
+                    "rules": []
+                }
+
+    def _merge_claude_mcp_configs_into_projects(
+        self,
+        mcp_projects: List[Dict],
+        projects_dict: Dict[str, Dict]
+    ) -> None:
+        """
+        Merge Claude Code MCP configs into projects dictionary.
+        
+        Includes additionalMcpData extraction for Claude Code specific fields.
+        
+        Args:
+            mcp_projects: List of MCP project configs
+            projects_dict: Dictionary mapping project paths to project configs
+        """
+        for mcp_project in mcp_projects:
+            project_path = mcp_project["path"]
+            mcp_servers = mcp_project.get("mcpServers", [])
+            additional_mcp_data = {}
+            
+            # Extract Claude Code specific fields into additionalMcpData
+            if mcp_project.get("mcpContextUris"):
+                additional_mcp_data["mcpContextUris"] = mcp_project["mcpContextUris"]
+            if mcp_project.get("enabledMcpjsonServers"):
+                additional_mcp_data["enabledMcpjsonServers"] = mcp_project["enabledMcpjsonServers"]
+            if mcp_project.get("disabledMcpjsonServers"):
+                additional_mcp_data["disabledMcpjsonServers"] = mcp_project["disabledMcpjsonServers"]
+            
+            if project_path in projects_dict:
+                # Merge MCP config into existing project
+                projects_dict[project_path]["mcpServers"] = mcp_servers
+                if additional_mcp_data:
+                    projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
+                # Ensure rules field exists
+                if "rules" not in projects_dict[project_path]:
+                    projects_dict[project_path]["rules"] = []
+            else:
+                # Create new project entry with MCP config and empty rules
+                new_project = {
+                    "path": project_path,
+                    "mcpServers": mcp_servers,
+                    "rules": []
+                }
+                if additional_mcp_data:
+                    new_project["additionalMcpData"] = additional_mcp_data
+                projects_dict[project_path] = new_project
+
     def generate_report(self) -> Dict:
         """
         Generate complete discovery report with tool detection and rules extraction.
@@ -185,54 +260,16 @@ class AIToolsDetector:
 
         # Merge MCP configs into projects
         if cursor_mcp_config and "projects" in cursor_mcp_config:
-            for mcp_project in cursor_mcp_config["projects"]:
-                project_path = mcp_project["path"]
-                if project_path in cursor_projects_dict:
-                    # Merge MCP config into existing project
-                    cursor_projects_dict[project_path]["mcpServers"] = mcp_project.get("mcpServers", [])
-                    # Ensure rules field exists
-                    if "rules" not in cursor_projects_dict[project_path]:
-                        cursor_projects_dict[project_path]["rules"] = []
-                else:
-                    # Create new project entry with MCP config and empty rules
-                    cursor_projects_dict[project_path] = {
-                        "path": project_path,
-                        "mcpServers": mcp_project.get("mcpServers", []),
-                        "rules": []
-                    }
+            self._merge_mcp_configs_into_projects(
+                cursor_mcp_config["projects"],
+                cursor_projects_dict
+            )
         
         if claude_mcp_config and "projects" in claude_mcp_config:
-            for mcp_project in claude_mcp_config["projects"]:
-                project_path = mcp_project["path"]
-                mcp_servers = mcp_project.get("mcpServers", [])
-                additional_mcp_data = {}
-                
-                # Extract Claude Code specific fields into additionalMcpData
-                if mcp_project.get("mcpContextUris"):
-                    additional_mcp_data["mcpContextUris"] = mcp_project["mcpContextUris"]
-                if mcp_project.get("enabledMcpjsonServers"):
-                    additional_mcp_data["enabledMcpjsonServers"] = mcp_project["enabledMcpjsonServers"]
-                if mcp_project.get("disabledMcpjsonServers"):
-                    additional_mcp_data["disabledMcpjsonServers"] = mcp_project["disabledMcpjsonServers"]
-                
-                if project_path in claude_projects_dict:
-                    # Merge MCP config into existing project
-                    claude_projects_dict[project_path]["mcpServers"] = mcp_servers
-                    if additional_mcp_data:
-                        claude_projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
-                    # Ensure rules field exists
-                    if "rules" not in claude_projects_dict[project_path]:
-                        claude_projects_dict[project_path]["rules"] = []
-                else:
-                    # Create new project entry with MCP config and empty rules
-                    new_project = {
-                        "path": project_path,
-                        "mcpServers": mcp_servers,
-                        "rules": []
-                    }
-                    if additional_mcp_data:
-                        new_project["additionalMcpData"] = additional_mcp_data
-                    claude_projects_dict[project_path] = new_project
+            self._merge_claude_mcp_configs_into_projects(
+                claude_mcp_config["projects"],
+                claude_projects_dict
+            )
 
         # Group projects by tool and add to tools array
         tools_with_projects = []

@@ -2,18 +2,17 @@
 
 This repository contains scripts for discovering and extracting coding tool configurations.
 
-## Usage
-
-The scripts are located in the `scripts/` directory.
-
-To run the AI tools discovery script:
+## Quick Start
 
 ```bash
-python -m scripts.coding_discovery_tools.ai_tools_discovery --api-key API_KEY --domain DOMAIN
+curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh | bash -s -- --api-key YOUR_API_KEY --domain YOUR_DOMAIN
 ```
 
-Or run it directly:
+Or download and run locally:
 
 ```bash
-python scripts/coding_discovery_tools/ai_tools_discovery.py --api-key API_KEY --domain DOMAIN
+curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh -o install.sh
+chmod +x install.sh
+./install.sh --api-key YOUR_API_KEY --domain YOUR_DOMAIN
 ```
+

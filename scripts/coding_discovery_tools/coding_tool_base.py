@@ -97,3 +97,18 @@ class BaseClaudeRulesExtractor(ABC):
         """
         pass
 
+
+class BaseMCPConfigExtractor(ABC):
+    """Abstract base class for extracting MCP configuration."""
+
+    @abstractmethod
+    def extract_mcp_config(self) -> Optional[Dict]:
+        """
+        Extract MCP configuration for the tool.
+        
+        Returns:
+            Dict with MCP config info (file_path, file_name, content, size,
+            last_modified) or None if not found
+        """
+        pass
+

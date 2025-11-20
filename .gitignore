@@ -37,3 +37,5 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Cursor MCP config
+.cursor/mcp.json

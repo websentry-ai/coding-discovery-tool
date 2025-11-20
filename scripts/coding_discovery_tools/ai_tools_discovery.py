@@ -14,13 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# Handle both direct execution and module import
 try:
     from .coding_tool_factory import (
         DeviceIdExtractorFactory,
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        CursorMCPConfigExtractorFactory,
+        ClaudeMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend
 except ImportError:
@@ -31,6 +32,8 @@ except ImportError:
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        CursorMCPConfigExtractorFactory,
+        ClaudeMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend
 
@@ -64,6 +67,8 @@ class AIToolsDetector:
             self._tool_detectors = ToolDetectorFactory.create_all_tool_detectors(self.system)
             self._cursor_rules_extractor = CursorRulesExtractorFactory.create(self.system)
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
+            self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
+            self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -143,12 +148,88 @@ class AIToolsDetector:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
             return []
 
+    def _merge_mcp_configs_into_projects(
+        self,
+        mcp_projects: List[Dict],
+        projects_dict: Dict[str, Dict]
+    ) -> None:
+        """
+        Merge MCP configs into projects dictionary.
+        
+        Args:
+            mcp_projects: List of MCP project configs
+            projects_dict: Dictionary mapping project paths to project configs
+        """
+        for mcp_project in mcp_projects:
+            project_path = mcp_project["path"]
+            mcp_servers = mcp_project.get("mcpServers", [])
+            
+            if project_path in projects_dict:
+                # Merge MCP config into existing project
+                projects_dict[project_path]["mcpServers"] = mcp_servers
+                # Ensure rules field exists
+                if "rules" not in projects_dict[project_path]:
+                    projects_dict[project_path]["rules"] = []
+            else:
+                # Create new project entry with MCP config and empty rules
+                projects_dict[project_path] = {
+                    "path": project_path,
+                    "mcpServers": mcp_servers,
+                    "rules": []
+                }
+
+    def _merge_claude_mcp_configs_into_projects(
+        self,
+        mcp_projects: List[Dict],
+        projects_dict: Dict[str, Dict]
+    ) -> None:
+        """
+        Merge Claude Code MCP configs into projects dictionary.
+        
+        Includes additionalMcpData extraction for Claude Code specific fields.
+        
+        Args:
+            mcp_projects: List of MCP project configs
+            projects_dict: Dictionary mapping project paths to project configs
+        """
+        for mcp_project in mcp_projects:
+            project_path = mcp_project["path"]
+            mcp_servers = mcp_project.get("mcpServers", [])
+            additional_mcp_data = {}
+            
+            # Extract Claude Code specific fields into additionalMcpData
+            if mcp_project.get("mcpContextUris"):
+                additional_mcp_data["mcpContextUris"] = mcp_project["mcpContextUris"]
+            if mcp_project.get("enabledMcpjsonServers"):
+                additional_mcp_data["enabledMcpjsonServers"] = mcp_project["enabledMcpjsonServers"]
+            if mcp_project.get("disabledMcpjsonServers"):
+                additional_mcp_data["disabledMcpjsonServers"] = mcp_project["disabledMcpjsonServers"]
+            
+            if project_path in projects_dict:
+                # Merge MCP config into existing project
+                projects_dict[project_path]["mcpServers"] = mcp_servers
+                if additional_mcp_data:
+                    projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
+                # Ensure rules field exists
+                if "rules" not in projects_dict[project_path]:
+                    projects_dict[project_path]["rules"] = []
+            else:
+                # Create new project entry with MCP config and empty rules
+                new_project = {
+                    "path": project_path,
+                    "mcpServers": mcp_servers,
+                    "rules": []
+                }
+                if additional_mcp_data:
+                    new_project["additionalMcpData"] = additional_mcp_data
+                projects_dict[project_path] = new_project
+
     def generate_report(self) -> Dict:
         """
         Generate complete discovery report with tool detection and rules extraction.
         
         Returns:
-            Dictionary with device_id, tools, cursor_rules, claude_rules, and timestamp
+            Dictionary with device_id, tools (with nested projects), and timestamp
         """
         device_id = self.get_device_id()
         tools = self.detect_all_tools()
@@ -159,12 +240,62 @@ class AIToolsDetector:
         logger.info("Extracting Claude Code rules...")
         claude_projects = self.extract_all_claude_rules()
 
+        logger.info("Extracting MCP configs...")
+        cursor_mcp_config = self._cursor_mcp_extractor.extract_mcp_config()
+        claude_mcp_config = self._claude_mcp_extractor.extract_mcp_config()
+
+        # Transform projects: change project_root to path and prepare for merging
+        cursor_projects_dict = {
+            project["project_root"]: {
+                "path": project["project_root"],
+                "rules": project.get("rules", [])  # Ensure rules is always an array
+            }
+            for project in cursor_projects
+        }
+        
+        claude_projects_dict = {
+            project["project_root"]: {
+                "path": project["project_root"],
+                "rules": project.get("rules", [])  # Ensure rules is always an array
+            }
+            for project in claude_projects
+        }
+
+        # Merge MCP configs into projects
+        if cursor_mcp_config and "projects" in cursor_mcp_config:
+            self._merge_mcp_configs_into_projects(
+                cursor_mcp_config["projects"],
+                cursor_projects_dict
+            )
+        
+        if claude_mcp_config and "projects" in claude_mcp_config:
+            self._merge_claude_mcp_configs_into_projects(
+                claude_mcp_config["projects"],
+                claude_projects_dict
+            )
+
+        # Group projects by tool and add to tools array
+        tools_with_projects = []
+        for tool in tools:
+            tool_name = tool.get("name", "").lower()
+            projects = []
+            
+            if tool_name == "cursor":
+                projects = list(cursor_projects_dict.values())
+            elif tool_name == "claude code":
+                projects = list(claude_projects_dict.values())
+            
+            tool_with_projects = {
+                "name": tool.get("name"),
+                "version": tool.get("version"),
+                "install_path": tool.get("install_path"),
+                "projects": projects
+            }
+            tools_with_projects.append(tool_with_projects)
+
         return {
             "device_id": device_id,
-            "tools": tools,
-            "cursor_rules": cursor_projects,
-            "claude_rules": claude_projects,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "tools": tools_with_projects
         }
 
 
@@ -187,23 +318,29 @@ def main():
 
         # Print summary
         num_tools = len(report['tools'])
-        num_cursor_projects = len(report['cursor_rules'])
-        num_cursor_rules = sum(len(p['rules']) for p in report['cursor_rules'])
-        num_claude_projects = len(report['claude_rules'])
-        num_claude_rules = sum(len(p['rules']) for p in report['claude_rules'])
+        total_projects = 0
+        total_rules = 0
         
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
         logger.info("=" * 60)
         logger.info(f"Device ID: {report['device_id']}")
-        logger.info(f"Timestamp: {report['timestamp']}")
         logger.info("")
         logger.info(f"Tools Detected: {num_tools}")
         for tool in report['tools']:
-            logger.info(f"  - {tool.get('name', 'Unknown')}: {tool.get('version', 'Unknown version')} at {tool.get('install_path', 'Unknown path')}")
+            tool_name = tool.get('name', 'Unknown')
+            tool_version = tool.get('version', 'Unknown version')
+            tool_path = tool.get('install_path', 'Unknown path')
+            projects = tool.get('projects', [])
+            num_projects = len(projects)
+            num_rules = sum(len(p.get('rules', [])) for p in projects)
+            total_projects += num_projects
+            total_rules += num_rules
+            
+            logger.info(f"  - {tool_name}: {tool_version} at {tool_path}")
+            logger.info(f"    Projects: {num_projects}, Rules: {num_rules}")
         logger.info("")
-        logger.info(f"Cursor Rules: {num_cursor_projects} projects, {num_cursor_rules} rule files")
-        logger.info(f"Claude Rules: {num_claude_projects} projects, {num_claude_rules} rule files")
+        logger.info(f"Total: {total_projects} projects, {total_rules} rule files")
         logger.info("")
         logger.info("Full Report (JSON):")
         logger.info(json.dumps(report, indent=2))

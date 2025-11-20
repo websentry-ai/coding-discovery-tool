@@ -8,13 +8,17 @@ based on the operating system.
 import platform
 from typing import Optional
 
-from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor
+from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor, BaseMCPConfigExtractor
 from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetector
 from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
+from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
 from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
+from .macos.claude_code.mcp_config_extractor import MacOSClaudeMCPConfigExtractor
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
+from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
 from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
+from .windows.claude_code.mcp_config_extractor import WindowsClaudeMCPConfigExtractor
 
 
 class DeviceIdExtractorFactory:
@@ -171,6 +175,62 @@ class ClaudeRulesExtractorFactory:
             return MacOSClaudeRulesExtractor()
         elif os_name == "Windows":
             return WindowsClaudeRulesExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class CursorMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Cursor MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseMCPConfigExtractor:
+        """
+        Create appropriate Cursor MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCursorMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsCursorMCPConfigExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class ClaudeMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Claude Code MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseMCPConfigExtractor:
+        """
+        Create appropriate Claude Code MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSClaudeMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsClaudeMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 

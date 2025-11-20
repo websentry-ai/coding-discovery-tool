@@ -15,6 +15,31 @@ from .constants import MAX_SEARCH_DEPTH
 logger = logging.getLogger(__name__)
 
 
+def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
+    """
+    Transform mcpServers from object format to array format.
+    
+    Args:
+        mcp_servers: Dictionary mapping server names to server configs
+        
+    Returns:
+        List of server config objects with 'name' field added
+    """
+    if not isinstance(mcp_servers, dict):
+        return []
+    
+    servers_array = []
+    for server_name, server_config in mcp_servers.items():
+        if isinstance(server_config, dict):
+            server_obj = {
+                "name": server_name,
+                **server_config
+            }
+            servers_array.append(server_obj)
+    
+    return servers_array
+
+
 def extract_claude_mcp_fields(config_data: Dict) -> List[Dict]:
     """
     Extract MCP-related fields from Claude Code configuration.
@@ -32,10 +57,14 @@ def extract_claude_mcp_fields(config_data: Dict) -> List[Dict]:
         for project_path, project_data in config_data["projects"].items():
             if not isinstance(project_data, dict):
                 continue
+            
+            # Transform mcpServers from object to array
+            mcp_servers_obj = project_data.get("mcpServers", {})
+            mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
                 
             project_mcp = {
                 "path": project_path,
-                "mcpServers": project_data.get("mcpServers", {}),
+                "mcpServers": mcp_servers_array,
                 "mcpContextUris": project_data.get("mcpContextUris", []),
                 "enabledMcpjsonServers": project_data.get("enabledMcpjsonServers", []),
                 "disabledMcpjsonServers": project_data.get("disabledMcpjsonServers", [])
@@ -73,13 +102,16 @@ def extract_cursor_mcp_from_dir(
         content = mcp_config_file.read_text(encoding='utf-8', errors='replace')
         config_data = json.loads(content)
         
-        mcp_servers = config_data.get("mcpServers", {})
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        
+        # Transform mcpServers from object to array
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
         
         # Only add if there are MCP servers configured
-        if mcp_servers:
+        if mcp_servers_array:
             projects.append({
                 "path": str(project_root),
-                "mcpServers": mcp_servers
+                "mcpServers": mcp_servers_array
             })
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON in MCP config {mcp_config_file}: {e}")

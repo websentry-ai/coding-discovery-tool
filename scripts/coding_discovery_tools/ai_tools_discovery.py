@@ -23,7 +23,7 @@ try:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
     )
-    from .utils import send_report_to_backend
+    from .utils import send_report_to_backend, get_user_info
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -35,7 +35,7 @@ except ImportError:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -229,9 +229,10 @@ class AIToolsDetector:
         Generate complete discovery report with tool detection and rules extraction.
         
         Returns:
-            Dictionary with device_id, tools (with nested projects), and timestamp
+            Dictionary with user info, device data, and tools (with nested projects)
         """
         device_id = self.get_device_id()
+        user_info = get_user_info()
         tools = self.detect_all_tools()
         
         logger.info("Extracting Cursor rules...")
@@ -275,6 +276,13 @@ class AIToolsDetector:
             )
 
         # Group projects by tool and add to tools array
+        # Filter out projects with both empty mcpServers and empty rules
+        def is_project_empty(project: Dict) -> bool:
+            """Check if a project has no meaningful data (empty mcpServers and rules)."""
+            mcp_servers = project.get("mcpServers", [])
+            rules = project.get("rules", [])
+            return len(mcp_servers) == 0 and len(rules) == 0
+        
         tools_with_projects = []
         for tool in tools:
             tool_name = tool.get("name", "").lower()
@@ -285,16 +293,22 @@ class AIToolsDetector:
             elif tool_name == "claude code":
                 projects = list(claude_projects_dict.values())
             
+            # Filter out empty projects (no mcpServers and no rules)
+            filtered_projects = [project for project in projects if not is_project_empty(project)]
+            
             tool_with_projects = {
                 "name": tool.get("name"),
                 "version": tool.get("version"),
                 "install_path": tool.get("install_path"),
-                "projects": projects
+                "projects": filtered_projects
             }
             tools_with_projects.append(tool_with_projects)
 
+        # Build report with user and device data separated
+        # Keep device_id for backward compatibility
         return {
-            "device_id": device_id,
+            "system_user": user_info,
+            "device_id": device_id,  # Backward compatibility
             "tools": tools_with_projects
         }
 
@@ -324,6 +338,7 @@ def main():
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
         logger.info("=" * 60)
+        logger.info(f"System User: {report.get('system_user', 'unknown')}")
         logger.info(f"Device ID: {report['device_id']}")
         logger.info("")
         logger.info(f"Tools Detected: {num_tools}")

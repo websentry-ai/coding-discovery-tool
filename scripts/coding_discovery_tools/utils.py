@@ -90,6 +90,42 @@ def get_hostname() -> str:
     return platform.node()
 
 
+def get_user_info() -> str:
+    """
+    Get current user information (whoami equivalent).
+    Cross-platform function that returns username.
+    Gets username directly from system information, not environment variables.
+    
+    Returns:
+        Current username as string
+    """
+    try:
+        username = None
+        
+        if platform.system() == "Windows":
+            # Use whoami command on Windows (works reliably)
+            username = run_command(["whoami"], COMMAND_TIMEOUT)
+            # Extract just the username if whoami returns DOMAIN\username format
+            if username and "\\" in username:
+                username = username.split("\\")[-1]
+        else:
+            # Use whoami or id -un on Unix-like systems
+            username = run_command(["whoami"], COMMAND_TIMEOUT)
+            if not username:
+                # Fallback to id -un
+                username = run_command(["id", "-un"], COMMAND_TIMEOUT)
+        
+        # Final fallback to getpass (uses system user database)
+        if not username:
+            import getpass
+            username = getpass.getuser()
+        
+        return username or "unknown"
+    except Exception as e:
+        logger.warning(f"Could not extract username: {e}")
+        return "unknown"
+
+
 def resolve_windows_shortcut(shortcut_path: Path) -> Optional[Path]:
     """
     Resolve Windows .lnk shortcut to its target path.

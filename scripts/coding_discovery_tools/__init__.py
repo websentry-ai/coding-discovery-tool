@@ -10,9 +10,15 @@ This package provides a modular, class-based architecture for detecting AI tools
 - Backward-compatible function interfaces
 """
 
-from .ai_tools_discovery import AIToolsDetector, main
 from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor
 from .coding_tool_factory import DeviceIdExtractorFactory, ToolDetectorFactory, CursorRulesExtractorFactory, ClaudeRulesExtractorFactory
+
+def __getattr__(name):
+    if name in ('AIToolsDetector', 'main'):
+        from .ai_tools_discovery import AIToolsDetector, main
+        globals()[name] = locals()[name]
+        return locals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # Main detector

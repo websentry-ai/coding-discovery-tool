@@ -19,6 +19,11 @@ from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
 from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
 from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
 from .windows.claude_code.mcp_config_extractor import WindowsClaudeMCPConfigExtractor
+from .linux import LinuxDeviceIdExtractor, LinuxCursorDetector, LinuxClaudeDetector
+from .linux.cursor.cursor_rules_extractor import LinuxCursorRulesExtractor
+from .linux.cursor.mcp_config_extractor import LinuxCursorMCPConfigExtractor
+from .linux.claude_code.claude_rules_extractor import LinuxClaudeRulesExtractor
+from .linux.claude_code.mcp_config_extractor import LinuxClaudeMCPConfigExtractor
 
 
 class DeviceIdExtractorFactory:
@@ -45,6 +50,8 @@ class DeviceIdExtractorFactory:
             return MacOSDeviceIdExtractor()
         elif os_name == "Windows":
             return WindowsDeviceIdExtractor()
+        elif os_name == "Linux":
+            return LinuxDeviceIdExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -73,6 +80,8 @@ class ToolDetectorFactory:
             return MacOSCursorDetector()
         elif os_name == "Windows":
             return WindowsCursorDetector()
+        elif os_name == "Linux":
+            return LinuxCursorDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -97,6 +106,8 @@ class ToolDetectorFactory:
             return MacOSClaudeDetector()
         elif os_name == "Windows":
             return WindowsClaudeDetector()
+        elif os_name == "Linux":
+            return LinuxClaudeDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -114,7 +125,7 @@ class ToolDetectorFactory:
         if os_name is None:
             os_name = platform.system()
 
-        if os_name not in ["Darwin", "Windows"]:
+        if os_name not in ["Darwin", "Windows", "Linux"]:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
         return [
@@ -147,6 +158,8 @@ class CursorRulesExtractorFactory:
             return MacOSCursorRulesExtractor()
         elif os_name == "Windows":
             return WindowsCursorRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -175,6 +188,8 @@ class ClaudeRulesExtractorFactory:
             return MacOSClaudeRulesExtractor()
         elif os_name == "Windows":
             return WindowsClaudeRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxClaudeRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -203,6 +218,8 @@ class CursorMCPConfigExtractorFactory:
             return MacOSCursorMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCursorMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -231,6 +248,8 @@ class ClaudeMCPConfigExtractorFactory:
             return MacOSClaudeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsClaudeMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxClaudeMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 

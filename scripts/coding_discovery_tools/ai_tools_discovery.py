@@ -354,8 +354,8 @@ class AIToolsDetector:
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
-    parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
-    parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
+    parser.add_argument('--api-key', type=str, required=True, help='API key for authentication and report submission')
+    parser.add_argument('--domain', type=str, required=True, help='Domain of the backend to send the report to')
     args = parser.parse_args()
     
     try:
@@ -393,18 +393,14 @@ def main():
         logger.info(json.dumps(report, indent=2))
         logger.info("=" * 60)
         
-        # Send report to backend (only if api-key and domain are provided)
-        if args.api_key and args.domain:
-            logger.info("")
-            print("Sending report to backend...")
-            if send_report_to_backend(args.domain, args.api_key, report):
-                print("Report sent successfully")
-            else:
-                print("Failed to send report to backend")
-                sys.exit(1)
+        # Send report to backend
+        logger.info("")
+        print("Sending report to backend...")
+        if send_report_to_backend(args.domain, args.api_key, report):
+            print("Report sent successfully")
         else:
-            logger.info("")
-            logger.info("Skipping backend submission (--api-key and --domain not provided)")
+            print("Failed to send report to backend")
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)

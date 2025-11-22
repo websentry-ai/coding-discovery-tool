@@ -37,12 +37,50 @@ except ImportError:
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
-# Set up logger
+# Set up logger with OS information
+def get_os_name() -> str:
+    """Get a friendly OS name for logging."""
+    system = platform.system()
+    if system == "Darwin":
+        return "macOS"
+    elif system == "Windows":
+        return "Windows"
+    elif system == "Linux":
+        return "Linux"
+    else:
+        return system
+
+class OSFormatter(logging.Formatter):
+    """Custom formatter that includes OS information."""
+    
+    def __init__(self, fmt=None, datefmt=None):
+        self.os_name = get_os_name()
+        # Default format if none provided
+        if fmt is None:
+            fmt = '%(asctime)s - [%(os)s] - %(name)s - %(levelname)s - %(message)s'
+        super().__init__(fmt, datefmt)
+    
+    def format(self, record):
+        # Add OS name to the record
+        record.os = self.os_name
+        return super().format(record)
+
+# Configure root logger with OS information
+# Remove any existing handlers to avoid duplicates
+root_logger = logging.getLogger()
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+# Create handler with OS formatter
+handler = logging.StreamHandler()
+formatter = OSFormatter('%(asctime)s - [%(os)s] - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+
+# Configure root logger
+root_logger.addHandler(handler)
+root_logger.setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 
 
 class AIToolsDetector:
@@ -320,12 +358,6 @@ def main():
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     args = parser.parse_args()
     
-    # Check for API key and domain
-    if not args.api_key or not args.domain:
-        print("Error: --api-key and --domain arguments are required")
-        print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
-        sys.exit(1)
-    
     try:
         detector = AIToolsDetector()
         report = detector.generate_report()
@@ -361,14 +393,18 @@ def main():
         logger.info(json.dumps(report, indent=2))
         logger.info("=" * 60)
         
-        # Send report to backend
-        logger.info("")
-        print("Sending report to backend...")
-        if send_report_to_backend(args.domain, args.api_key, report):
-            print("Report sent successfully")
+        # Send report to backend (only if api-key and domain are provided)
+        if args.api_key and args.domain:
+            logger.info("")
+            print("Sending report to backend...")
+            if send_report_to_backend(args.domain, args.api_key, report):
+                print("Report sent successfully")
+            else:
+                print("Failed to send report to backend")
+                sys.exit(1)
         else:
-            print("Failed to send report to backend")
-            sys.exit(1)
+            logger.info("")
+            logger.info("Skipping backend submission (--api-key and --domain not provided)")
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)

@@ -1,73 +1,68 @@
 """
-MCP configuration extraction for Claude Code on Linux
+MCP config extraction for Claude Code on Linux systems.
 """
 
 import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict
-from datetime import datetime
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...mcp_extraction_helpers import extract_claude_mcp_fields
 
 logger = logging.getLogger(__name__)
 
 
 class LinuxClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
-    """MCP config extractor for Claude Code on Linux systems."""
+    """Extractor for Claude Code MCP config on Linux systems."""
+
+    # Try both possible locations: ~/.claude.json (preferred) and ~/.claude/mcp.json (fallback)
+    MCP_CONFIG_PATH_PREFERRED = Path.home() / ".claude.json"
+    MCP_CONFIG_PATH_FALLBACK = Path.home() / ".claude" / "mcp.json"
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
-        Extract MCP configuration for Claude Code on Linux.
-
+        Extract Claude Code MCP configuration on Linux.
+        
+        Checks two possible locations:
+        1. ~/.claude.json (preferred - main Claude Code config file)
+        2. ~/.claude/mcp.json (fallback - separate MCP config file)
+        
+        Extracts only MCP-related fields (mcpServers, mcpContextUris, 
+        enabledMcpjsonServers, disabledMcpjsonServers) from the config file.
+        
         Returns:
             Dict with MCP config info or None if not found
         """
-        # Claude Code stores config in ~/.config/claude/claude_desktop_config.json
-        config_file = Path.home() / ".config" / "claude" / "claude_desktop_config.json"
-
-        if not config_file.exists():
-            # Try alternative locations
-            alternative_paths = [
-                Path.home() / ".claude" / "claude_desktop_config.json",
-                Path.home() / ".config" / "claude-code" / "config.json",
-                Path.home() / ".claude" / "config.json",
-            ]
-
-            for alt_path in alternative_paths:
-                if alt_path.exists():
-                    config_file = alt_path
-                    break
-            else:
-                logger.debug("Claude Code config file not found")
+        # Try preferred location first
+        config_path = self.MCP_CONFIG_PATH_PREFERRED
+        if not config_path.exists():
+            # Fallback to alternative location
+            config_path = self.MCP_CONFIG_PATH_FALLBACK
+            if not config_path.exists():
                 return None
 
-        return self._extract_mcp_config_from_file(config_file)
-
-    def _extract_mcp_config_from_file(self, file_path: Path) -> Optional[Dict]:
-        """
-        Extract MCP config from a file.
-
-        Args:
-            file_path: Path to the MCP config file
-
-        Returns:
-            Dict with file metadata and content, or None if extraction fails
-        """
         try:
-            if not file_path.exists():
+            stat = config_path.stat()
+            content = config_path.read_text(encoding='utf-8', errors='replace')
+            
+            # Parse JSON
+            try:
+                config_data = json.loads(content)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid JSON in MCP config {config_path}: {e}")
                 return None
 
-            stat = file_path.stat()
-            content = file_path.read_text(encoding='utf-8', errors='replace')
-
+            # Extract only MCP-related configuration
+            projects = extract_claude_mcp_fields(config_data)
+            
+            # Return projects array (even if empty)
             return {
-                "file_path": str(file_path),
-                "file_name": file_path.name,
-                "content": content,
-                "size": stat.st_size,
-                "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat() + "Z"
+                "projects": projects
             }
+        except PermissionError as e:
+            logger.warning(f"Permission denied reading MCP config {config_path}: {e}")
+            return None
         except Exception as e:
-            logger.warning(f"Error reading MCP config file {file_path}: {e}")
+            logger.warning(f"Error reading MCP config {config_path}: {e}")
             return None

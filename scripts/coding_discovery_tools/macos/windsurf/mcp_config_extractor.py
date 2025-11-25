@@ -57,7 +57,7 @@ class MacOSWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
         }
 
     def _extract_global_config(self) -> Optional[Dict]:
-        """Extract global MCP config from ~/.windsurf/mcp_config.json"""
+        """Extract global MCP config from ~/.codeium/windsurf/mcp_config.json"""
         if not self.GLOBAL_MCP_CONFIG_PATH.exists():
             return None
         

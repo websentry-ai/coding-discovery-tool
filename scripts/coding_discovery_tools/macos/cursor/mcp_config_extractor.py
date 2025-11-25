@@ -57,12 +57,38 @@ class MacOSCursorMCPConfigExtractor(BaseMCPConfigExtractor):
         }
 
     def _extract_global_config(self) -> Optional[Dict]:
-        """Extract global MCP config from ~/.cursor/mcp.json"""
-        if not self.GLOBAL_MCP_CONFIG_PATH.exists():
-            return None
+        """
+        Extract global MCP config from ~/.cursor/mcp.json
         
+        When running as root, collects global configs from ALL users.
+        Returns the first non-empty config found, or None if none found.
+        """
+        # When running as root, prioritize checking user directories first
+        if Path.home() == Path("/root"):
+            users_dir = Path("/Users")
+            if users_dir.exists():
+                for user_dir in users_dir.iterdir():
+                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                        user_global_config = user_dir / ".cursor" / "mcp.json"
+                        if user_global_config.exists():
+                            config = self._read_global_config(user_global_config)
+                            if config:
+                                return config
+            
+            # Fallback to root's global config if no user config found
+            if self.GLOBAL_MCP_CONFIG_PATH.exists():
+                return self._read_global_config(self.GLOBAL_MCP_CONFIG_PATH)
+        else:
+            # For regular users, check their own home directory
+            if self.GLOBAL_MCP_CONFIG_PATH.exists():
+                return self._read_global_config(self.GLOBAL_MCP_CONFIG_PATH)
+        
+        return None
+    
+    def _read_global_config(self, config_path: Path) -> Optional[Dict]:
+        """Read and parse a global MCP config file."""
         try:
-            content = self.GLOBAL_MCP_CONFIG_PATH.read_text(encoding='utf-8', errors='replace')
+            content = config_path.read_text(encoding='utf-8', errors='replace')
             config_data = json.loads(content)
             
             mcp_servers_obj = config_data.get("mcpServers", {})
@@ -73,17 +99,17 @@ class MacOSCursorMCPConfigExtractor(BaseMCPConfigExtractor):
             # Only return if there are MCP servers configured
             if mcp_servers_array:
                 # Use the actual path of the global config file's parent directory
-                global_config_path = str(self.GLOBAL_MCP_CONFIG_PATH.parent.parent)
+                global_config_path = str(config_path.parent.parent)
                 return {
                     "path": global_config_path,
                     "mcpServers": mcp_servers_array
                 }
         except json.JSONDecodeError as e:
-            logger.warning(f"Invalid JSON in global MCP config {self.GLOBAL_MCP_CONFIG_PATH}: {e}")
+            logger.warning(f"Invalid JSON in global MCP config {config_path}: {e}")
         except PermissionError as e:
-            logger.warning(f"Permission denied reading global MCP config {self.GLOBAL_MCP_CONFIG_PATH}: {e}")
+            logger.warning(f"Permission denied reading global MCP config {config_path}: {e}")
         except Exception as e:
-            logger.warning(f"Error reading global MCP config {self.GLOBAL_MCP_CONFIG_PATH}: {e}")
+            logger.warning(f"Error reading global MCP config {config_path}: {e}")
         
         return None
 

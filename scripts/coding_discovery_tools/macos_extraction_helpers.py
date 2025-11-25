@@ -302,3 +302,38 @@ def get_top_level_directories(root_path: Path) -> List[Path]:
             continue
     return top_level_dirs
 
+
+def scan_user_directories(check_func) -> Optional[Path]:
+    """
+    Scan /Users directory for tool installations when running as root.
+    
+    When running as root (Path.home() == Path("/root")), this function
+    scans all user directories in /Users to find tool installations.
+    This is useful for MDM deployments where tools are installed per-user.
+    
+    Args:
+        check_func: Function that takes a user_dir Path and returns a Path
+                    if tool is found, or None if not found.
+                    Signature: check_func(user_dir: Path) -> Optional[Path]
+    
+    Returns:
+        Path to the first found tool installation, or None if not found
+    """
+    if Path.home() != Path("/root"):
+        return None
+    
+    users_dir = Path("/Users")
+    if not users_dir.exists():
+        return None
+    
+    for user_dir in users_dir.iterdir():
+        if user_dir.is_dir() and not user_dir.name.startswith('.'):
+            try:
+                result = check_func(user_dir)
+                if result:
+                    return result
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping user directory {user_dir}: {e}")
+                continue
+    
+    return None

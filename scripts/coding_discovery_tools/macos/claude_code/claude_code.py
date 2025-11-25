@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...utils import run_command, extract_version_number
+from ...macos_extraction_helpers import scan_user_directories
 from .claude_rules_extractor import MacOSClaudeRulesExtractor
 
 logger = logging.getLogger(__name__)
@@ -29,12 +30,23 @@ class MacOSClaudeDetector(BaseToolDetector):
         Returns:
             Dict with tool info or None if not found
         """
-        # Check PATH
+        # Check PATH first (works for both regular users and root)
         claude_info = self._check_in_path()
         if claude_info:
             return claude_info
 
-        # Check .claude directory
+        # When running as root, scan user directories first
+        user_claude_dir = scan_user_directories(
+            lambda user_dir: user_dir / ".claude" if (user_dir / ".claude").exists() else None
+        )
+        if user_claude_dir:
+            return {
+                "name": self.tool_name,
+                "version": self.get_version(),
+                "install_path": str(user_claude_dir)
+            }
+        
+        # Check current user's home directory (works for both root and regular users)
         claude_dir = Path.home() / ".claude"
         if claude_dir.exists():
             return {

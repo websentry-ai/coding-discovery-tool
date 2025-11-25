@@ -4,7 +4,6 @@ MCP config extraction for Cursor on Windows systems.
 
 import json
 import logging
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -89,9 +88,13 @@ class WindowsCursorMCPConfigExtractor(BaseMCPConfigExtractor):
             import ctypes
             return ctypes.windll.shell32.IsUserAnAdmin() != 0
         except Exception:
-            # Fallback: check if current user is Administrator or SYSTEM
-            current_user = os.environ.get("USERNAME", "").lower()
-            return current_user in ["administrator", "system"] or "admin" in current_user
+            # Fallback: check if current user is Administrator or SYSTEM (exact match only)
+            try:
+                import getpass
+                current_user = getpass.getuser().lower()
+                return current_user in ["administrator", "system"]
+            except Exception:
+                return False
     
     def _read_global_config(self, config_path: Path) -> Optional[Dict]:
         """Read and parse a global MCP config file."""

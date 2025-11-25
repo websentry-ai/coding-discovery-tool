@@ -56,7 +56,7 @@ class WindowsWindsurfRulesExtractor(BaseWindsurfRulesExtractor):
         Args:
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        global_rules_path = Path.home() / ".windsurf" / "global_rules.md"
+        global_rules_path = Path.home() / "codeium" / ".windsurf" / "memories" / "global_rules.md"
         if global_rules_path.exists() and global_rules_path.is_file():
             try:
                 rule_info = extract_single_rule_file(global_rules_path)

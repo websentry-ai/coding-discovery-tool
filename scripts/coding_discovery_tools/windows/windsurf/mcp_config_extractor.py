@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class WindowsWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Windsurf MCP config on Windows systems."""
 
-    GLOBAL_MCP_CONFIG_PATH = Path.home() / ".windsurf" / "mcp_config.json"
+    GLOBAL_MCP_CONFIG_PATH = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """

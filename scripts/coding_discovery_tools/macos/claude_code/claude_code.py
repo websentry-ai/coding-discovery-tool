@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...utils import run_command, extract_version_number
+from ...macos_extraction_helpers import scan_user_directories
 from .claude_rules_extractor import MacOSClaudeRulesExtractor
 
 logger = logging.getLogger(__name__)
@@ -34,36 +35,25 @@ class MacOSClaudeDetector(BaseToolDetector):
         if claude_info:
             return claude_info
 
-        # When running as root, prioritize checking user directories first
-        if Path.home() == Path("/root"):
-            users_dir = Path("/Users")
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        claude_dir = user_dir / ".claude"
-                        if claude_dir.exists():
-                            return {
-                                "name": self.tool_name,
-                                "version": self.get_version(),
-                                "install_path": str(claude_dir)
-                            }
-            # Fallback to root's .claude directory if no user installation found
-            claude_dir = Path.home() / ".claude"
-            if claude_dir.exists():
-                return {
-                    "name": self.tool_name,
-                    "version": self.get_version(),
-                    "install_path": str(claude_dir)
-                }
-        else:
-            # For regular users, check their own home directory
-            claude_dir = Path.home() / ".claude"
-            if claude_dir.exists():
-                return {
-                    "name": self.tool_name,
-                    "version": self.get_version(),
-                    "install_path": str(claude_dir)
-                }
+        # When running as root, scan user directories first
+        user_claude_dir = scan_user_directories(
+            lambda user_dir: user_dir / ".claude" if (user_dir / ".claude").exists() else None
+        )
+        if user_claude_dir:
+            return {
+                "name": self.tool_name,
+                "version": self.get_version(),
+                "install_path": str(user_claude_dir)
+            }
+        
+        # Check current user's home directory (works for both root and regular users)
+        claude_dir = Path.home() / ".claude"
+        if claude_dir.exists():
+            return {
+                "name": self.tool_name,
+                "version": self.get_version(),
+                "install_path": str(claude_dir)
+            }
 
         return None
 

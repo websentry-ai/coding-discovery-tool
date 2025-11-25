@@ -321,10 +321,10 @@ def main():
     args = parser.parse_args()
     
     # Check for API key and domain
-    # if not args.api_key or not args.domain:
-    #     print("Error: --api-key and --domain arguments are required")
-    #     print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
-    #     sys.exit(1)
+    if not args.api_key or not args.domain:
+        print("Error: --api-key and --domain arguments are required")
+        print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
+        sys.exit(1)
     
     try:
         detector = AIToolsDetector()
@@ -363,12 +363,12 @@ def main():
         
         # Send report to backend
         logger.info("")
-        # print("Sending report to backend...")
-        # if send_report_to_backend(args.domain, args.api_key, report):
-        #     print("Report sent successfully")
-        # else:
-        #     print("Failed to send report to backend")
-        #     sys.exit(1)
+        print("Sending report to backend...")
+        if send_report_to_backend(args.domain, args.api_key, report):
+            print("Report sent successfully")
+        else:
+            print("Failed to send report to backend")
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)

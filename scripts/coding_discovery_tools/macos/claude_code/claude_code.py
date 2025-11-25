@@ -29,19 +29,41 @@ class MacOSClaudeDetector(BaseToolDetector):
         Returns:
             Dict with tool info or None if not found
         """
-        # Check PATH
+        # Check PATH first (works for both regular users and root)
         claude_info = self._check_in_path()
         if claude_info:
             return claude_info
 
-        # Check .claude directory
-        claude_dir = Path.home() / ".claude"
-        if claude_dir.exists():
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": str(claude_dir)
-            }
+        # When running as root, prioritize checking user directories first
+        if Path.home() == Path("/root"):
+            users_dir = Path("/Users")
+            if users_dir.exists():
+                for user_dir in users_dir.iterdir():
+                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                        claude_dir = user_dir / ".claude"
+                        if claude_dir.exists():
+                            return {
+                                "name": self.tool_name,
+                                "version": self.get_version(),
+                                "install_path": str(claude_dir)
+                            }
+            # Fallback to root's .claude directory if no user installation found
+            claude_dir = Path.home() / ".claude"
+            if claude_dir.exists():
+                return {
+                    "name": self.tool_name,
+                    "version": self.get_version(),
+                    "install_path": str(claude_dir)
+                }
+        else:
+            # For regular users, check their own home directory
+            claude_dir = Path.home() / ".claude"
+            if claude_dir.exists():
+                return {
+                    "name": self.tool_name,
+                    "version": self.get_version(),
+                    "install_path": str(claude_dir)
+                }
 
         return None
 

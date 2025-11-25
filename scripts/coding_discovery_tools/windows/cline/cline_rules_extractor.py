@@ -1,14 +1,14 @@
-"""
+r"""
 Cline rules extraction for Windows systems.
 
 According to Cline documentation (https://docs.cline.bot/features/cline-rules):
-- Global rules: Documents\Cline\Rules (all markdown files)
+- Global rules: Documents/Cline/Rules (all markdown files)
 - Workspace rules: **/.clinerules/** (all markdown files in folders)
 - Workspace rules: **/.clinerules (single file)
 - Workspace rules: **/AGENTS.md (AGENTS.md standard support)
 
 Global Rules:
-  - Windows: Documents\Cline\Rules (uses system Documents folder)
+  - Windows: Documents/Cline/Rules (uses system Documents folder)
   - All .md files in this directory are processed as global rules
 
 Workspace Rules:
@@ -92,12 +92,12 @@ class WindowsClineRulesExtractor(BaseClineRulesExtractor):
         return build_project_list(projects_by_root)
 
     def _extract_global_rules(self, projects_by_root: Dict[str, List[Dict]]) -> None:
-        """
-        Extract global Cline rules from Documents\Cline\Rules.
+        r"""
+        Extract global Cline rules from Documents/Cline/Rules.
         
         According to Cline documentation (https://docs.cline.bot/features/cline-rules):
-        - Global rules are stored in Documents\Cline\Rules on Windows
-        - Uses system Documents folder (typically %USERPROFILE%\Documents\Cline\Rules)
+        - Global rules are stored in Documents/Cline/Rules on Windows
+        - Uses system Documents folder (typically %USERPROFILE%/Documents/Cline/Rules)
         - All markdown files (*.md) in this directory are processed as global rules
         - These rules apply to every conversation globally
         

@@ -103,13 +103,13 @@ class BaseClineRulesExtractor(ABC):
 
     @abstractmethod
     def extract_all_cline_rules(self) -> List[Dict]:
-        """
+        r"""
         Extract all Cline rules from all projects on the machine.
         
         According to Cline documentation (https://docs.cline.bot/features/cline-rules):
         
         Global Rules:
-        - Windows: Documents\Cline\Rules (uses system Documents folder)
+        - Windows: Documents/Cline/Rules (uses system Documents folder)
         - macOS: ~/Documents/Cline/Rules
         - Linux/WSL: ~/Documents/Cline/Rules (may fall back to ~/Cline/Rules)
         - All markdown files (*.md) in the Rules directory are processed

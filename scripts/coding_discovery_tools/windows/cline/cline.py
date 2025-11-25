@@ -23,15 +23,24 @@ class WindowsClineDetector(BaseToolDetector):
 
     def detect(self) -> Optional[Dict]:
         """
-        Detect Cline CLI installation on Windows.
+        Detect Cline installation on Windows.
         
-        Cline CLI is installed via: npm install -g cline
+        Note: Cline CLI is not available on Windows (only macOS/Linux).
+        This detector checks for Cline configuration files instead:
+        - Global rules: Documents/Cline/Rules
+        - MCP config: IDE globalStorage directories
+        - Project rules: .clinerules directories/files
         
         Returns:
             Dict with tool info or None if not found
         """
-        # Check for CLI only
-        return self._check_cli_in_path()
+        # First check for CLI (in case it's installed via WSL or other means)
+        cli_result = self._check_cli_in_path()
+        if cli_result:
+            return cli_result
+        
+        # Since CLI isn't available on Windows, check for configuration files
+        return self._check_configuration_files()
     
     def _check_cli_in_path(self) -> Optional[Dict]:
         """
@@ -101,5 +110,50 @@ class WindowsClineDetector(BaseToolDetector):
             logger.debug(f"Could not get version from CLI: {e}")
         
         logger.debug("Could not determine Cline CLI version")
+        return None
+    
+    def _check_configuration_files(self) -> Optional[Dict]:
+        """
+        Check for Cline configuration files to detect Cline usage.
+        
+        Since Cline CLI is not available on Windows, we detect Cline
+        based on the presence of configuration files:
+        - Global rules directory: Documents/Cline/Rules
+        - MCP config files in IDE directories
+        
+        Returns:
+            Dict with tool info or None if not found
+        """
+        from pathlib import Path
+        
+        # Check for global rules directory
+        global_rules_path = Path.home() / "Documents" / "Cline" / "Rules"
+        has_global_rules = global_rules_path.exists() and global_rules_path.is_dir()
+        
+        # Check for MCP config files
+        base_path = Path.home() / "AppData" / "Roaming"
+        ide_names = ["Cursor", "Windsurf", "VSCode", "Code"]
+        has_mcp_config = False
+        
+        for ide_name in ide_names:
+            mcp_settings_path = (
+                base_path / ide_name / "User" / "globalStorage" / 
+                "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
+            )
+            if mcp_settings_path.exists():
+                has_mcp_config = True
+                break
+        
+        # If either rules or MCP config exists, Cline is configured
+        if has_global_rules or has_mcp_config:
+            install_path = str(global_rules_path) if has_global_rules else "IDE Configuration"
+            logger.debug(f"Found Cline configuration files (rules: {has_global_rules}, MCP: {has_mcp_config})")
+            return {
+                "name": self.tool_name,
+                "version": "configured",  # No CLI version available on Windows
+                "install_path": install_path
+            }
+        
+        logger.debug("No Cline configuration files found")
         return None
 

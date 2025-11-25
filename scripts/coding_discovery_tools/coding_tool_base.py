@@ -98,6 +98,36 @@ class BaseClaudeRulesExtractor(ABC):
         pass
 
 
+class BaseClineRulesExtractor(ABC):
+    """Abstract base class for extracting Cline rules from all projects."""
+
+    @abstractmethod
+    def extract_all_cline_rules(self) -> List[Dict]:
+        """
+        Extract all Cline rules from all projects on the machine.
+        
+        According to Cline documentation (https://docs.cline.bot/features/cline-rules):
+        
+        Global Rules:
+        - Windows: Documents\Cline\Rules (uses system Documents folder)
+        - macOS: ~/Documents/Cline/Rules
+        - Linux/WSL: ~/Documents/Cline/Rules (may fall back to ~/Cline/Rules)
+        - All markdown files (*.md) in the Rules directory are processed
+        
+        Workspace Rules:
+        - .clinerules/ directory: All .md files inside are processed (folder system)
+        - .clinerules file: Single file in project root
+        - AGENTS.md: Fallback support for AGENTS.md standard
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

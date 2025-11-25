@@ -20,8 +20,10 @@ try:
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        ClineRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
+        ClineMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
 except ImportError:
@@ -32,8 +34,10 @@ except ImportError:
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        ClineRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
+        ClineMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
@@ -67,8 +71,10 @@ class AIToolsDetector:
             self._tool_detectors = ToolDetectorFactory.create_all_tool_detectors(self.system)
             self._cursor_rules_extractor = CursorRulesExtractorFactory.create(self.system)
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
+            self._cline_rules_extractor = ClineRulesExtractorFactory.create(self.system)
             self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
+            self._cline_mcp_extractor = ClineMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -146,6 +152,21 @@ class AIToolsDetector:
             return self._claude_rules_extractor.extract_all_claude_rules()
         except Exception as e:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_cline_rules(self) -> List[Dict]:
+        """
+        Extract all Cline rules from all projects.
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            return self._cline_rules_extractor.extract_all_cline_rules()
+        except Exception as e:
+            logger.error(f"Error extracting Cline rules: {e}", exc_info=True)
             return []
 
     def _merge_mcp_configs_into_projects(
@@ -240,10 +261,14 @@ class AIToolsDetector:
         
         logger.info("Extracting Claude Code rules...")
         claude_projects = self.extract_all_claude_rules()
+        
+        logger.info("Extracting Cline rules...")
+        cline_projects = self.extract_all_cline_rules()
 
         logger.info("Extracting MCP configs...")
         cursor_mcp_config = self._cursor_mcp_extractor.extract_mcp_config()
         claude_mcp_config = self._claude_mcp_extractor.extract_mcp_config()
+        cline_mcp_config = self._cline_mcp_extractor.extract_mcp_config()
 
         # Transform projects: change project_root to path and prepare for merging
         cursor_projects_dict = {
@@ -261,6 +286,14 @@ class AIToolsDetector:
             }
             for project in claude_projects
         }
+        
+        cline_projects_dict = {
+            project["project_root"]: {
+                "path": project["project_root"],
+                "rules": project.get("rules", [])  # Ensure rules is always an array
+            }
+            for project in cline_projects
+        }
 
         # Merge MCP configs into projects
         if cursor_mcp_config and "projects" in cursor_mcp_config:
@@ -273,6 +306,12 @@ class AIToolsDetector:
             self._merge_claude_mcp_configs_into_projects(
                 claude_mcp_config["projects"],
                 claude_projects_dict
+            )
+        
+        if cline_mcp_config and "projects" in cline_mcp_config:
+            self._merge_mcp_configs_into_projects(
+                cline_mcp_config["projects"],
+                cline_projects_dict
             )
 
         # Group projects by tool and add to tools array
@@ -292,6 +331,8 @@ class AIToolsDetector:
                 projects = list(cursor_projects_dict.values())
             elif tool_name == "claude code":
                 projects = list(claude_projects_dict.values())
+            elif tool_name == "cline":
+                projects = list(cline_projects_dict.values())
             
             # Filter out empty projects (no mcpServers and no rules)
             filtered_projects = [project for project in projects if not is_project_empty(project)]
@@ -321,10 +362,10 @@ def main():
     args = parser.parse_args()
     
     # Check for API key and domain
-    if not args.api_key or not args.domain:
-        print("Error: --api-key and --domain arguments are required")
-        print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
-        sys.exit(1)
+    # if not args.api_key or not args.domain:
+    #     print("Error: --api-key and --domain arguments are required")
+    #     print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
+    #     sys.exit(1)
     
     try:
         detector = AIToolsDetector()
@@ -363,12 +404,12 @@ def main():
         
         # Send report to backend
         logger.info("")
-        print("Sending report to backend...")
-        if send_report_to_backend(args.domain, args.api_key, report):
-            print("Report sent successfully")
-        else:
-            print("Failed to send report to backend")
-            sys.exit(1)
+        # print("Sending report to backend...")
+        # if send_report_to_backend(args.domain, args.api_key, report):
+        #     print("Report sent successfully")
+        # else:
+        #     print("Failed to send report to backend")
+        #     sys.exit(1)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)

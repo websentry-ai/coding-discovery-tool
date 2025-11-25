@@ -20,8 +20,10 @@ try:
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        WindsurfRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
+        WindsurfMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
 except ImportError:
@@ -32,8 +34,10 @@ except ImportError:
         ToolDetectorFactory,
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
+        WindsurfRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
+        WindsurfMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
@@ -67,8 +71,10 @@ class AIToolsDetector:
             self._tool_detectors = ToolDetectorFactory.create_all_tool_detectors(self.system)
             self._cursor_rules_extractor = CursorRulesExtractorFactory.create(self.system)
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
+            self._windsurf_rules_extractor = WindsurfRulesExtractorFactory.create(self.system)
             self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
+            self._windsurf_mcp_extractor = WindsurfMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -146,6 +152,21 @@ class AIToolsDetector:
             return self._claude_rules_extractor.extract_all_claude_rules()
         except Exception as e:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_windsurf_rules(self) -> List[Dict]:
+        """
+        Extract all Windsurf rules from all projects.
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            return self._windsurf_rules_extractor.extract_all_windsurf_rules()
+        except Exception as e:
+            logger.error(f"Error extracting Windsurf rules: {e}", exc_info=True)
             return []
 
     def _merge_mcp_configs_into_projects(
@@ -240,10 +261,14 @@ class AIToolsDetector:
         
         logger.info("Extracting Claude Code rules...")
         claude_projects = self.extract_all_claude_rules()
+        
+        logger.info("Extracting Windsurf rules...")
+        windsurf_projects = self.extract_all_windsurf_rules()
 
         logger.info("Extracting MCP configs...")
         cursor_mcp_config = self._cursor_mcp_extractor.extract_mcp_config()
         claude_mcp_config = self._claude_mcp_extractor.extract_mcp_config()
+        windsurf_mcp_config = self._windsurf_mcp_extractor.extract_mcp_config()
 
         # Transform projects: change project_root to path and prepare for merging
         cursor_projects_dict = {
@@ -261,6 +286,14 @@ class AIToolsDetector:
             }
             for project in claude_projects
         }
+        
+        windsurf_projects_dict = {
+            project["project_root"]: {
+                "path": project["project_root"],
+                "rules": project.get("rules", [])  # Ensure rules is always an array
+            }
+            for project in windsurf_projects
+        }
 
         # Merge MCP configs into projects
         if cursor_mcp_config and "projects" in cursor_mcp_config:
@@ -273,6 +306,12 @@ class AIToolsDetector:
             self._merge_claude_mcp_configs_into_projects(
                 claude_mcp_config["projects"],
                 claude_projects_dict
+            )
+        
+        if windsurf_mcp_config and "projects" in windsurf_mcp_config:
+            self._merge_mcp_configs_into_projects(
+                windsurf_mcp_config["projects"],
+                windsurf_projects_dict
             )
 
         # Group projects by tool and add to tools array
@@ -292,6 +331,8 @@ class AIToolsDetector:
                 projects = list(cursor_projects_dict.values())
             elif tool_name == "claude code":
                 projects = list(claude_projects_dict.values())
+            elif tool_name == "windsurf":
+                projects = list(windsurf_projects_dict.values())
             
             # Filter out empty projects (no mcpServers and no rules)
             filtered_projects = [project for project in projects if not is_project_empty(project)]

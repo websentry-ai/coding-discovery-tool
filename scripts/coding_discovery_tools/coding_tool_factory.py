@@ -8,17 +8,23 @@ based on the operating system.
 import platform
 from typing import Optional
 
-from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor, BaseMCPConfigExtractor
+from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor, BaseWindsurfRulesExtractor, BaseMCPConfigExtractor
 from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetector
 from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
 from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
 from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
 from .macos.claude_code.mcp_config_extractor import MacOSClaudeMCPConfigExtractor
+from .macos.windsurf.windsurf import MacOSWindsurfDetector
+from .macos.windsurf.windsurf_rules_extractor import MacOSWindsurfRulesExtractor
+from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
 from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
 from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
 from .windows.claude_code.mcp_config_extractor import WindowsClaudeMCPConfigExtractor
+from .windows.windsurf.windsurf import WindowsWindsurfDetector
+from .windows.windsurf.windsurf_rules_extractor import WindowsWindsurfRulesExtractor
+from .windows.windsurf.mcp_config_extractor import WindowsWindsurfMCPConfigExtractor
 
 
 class DeviceIdExtractorFactory:
@@ -101,6 +107,30 @@ class ToolDetectorFactory:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
     @staticmethod
+    def create_windsurf_detector(os_name: Optional[str] = None) -> BaseToolDetector:
+        """
+        Create appropriate Windsurf detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSWindsurfDetector()
+        elif os_name == "Windows":
+            return WindowsWindsurfDetector()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -120,6 +150,7 @@ class ToolDetectorFactory:
         return [
             ToolDetectorFactory.create_cursor_detector(os_name),
             ToolDetectorFactory.create_claude_detector(os_name),
+            ToolDetectorFactory.create_windsurf_detector(os_name),
         ]
 
 
@@ -231,6 +262,62 @@ class ClaudeMCPConfigExtractorFactory:
             return MacOSClaudeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsClaudeMCPConfigExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class WindsurfRulesExtractorFactory:
+    """Factory for creating OS-specific Windsurf rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseWindsurfRulesExtractor:
+        """
+        Create appropriate Windsurf rules extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseWindsurfRulesExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSWindsurfRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsWindsurfRulesExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class WindsurfMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Windsurf MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseMCPConfigExtractor:
+        """
+        Create appropriate Windsurf MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSWindsurfMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsWindsurfMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 

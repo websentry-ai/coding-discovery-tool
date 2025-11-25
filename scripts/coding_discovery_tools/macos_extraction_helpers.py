@@ -184,6 +184,39 @@ def find_claude_project_root(rule_file: Path) -> Path:
     return parent
 
 
+def find_windsurf_project_root(rule_file: Path) -> Path:
+    """
+    Find the project root directory for a Windsurf rule file.
+    
+    Determines project root based on file location:
+    - .windsurf/rules/* -> parent of .windsurf (2 levels up from rules)
+    - ~/.windsurf/global_rules.md -> home directory (special case for global rules)
+    
+    Args:
+        rule_file: Path to the rule file
+        
+    Returns:
+        Project root path
+    """
+    parent = rule_file.parent
+    
+    # Case 1: File is in .windsurf/rules/ subdirectory
+    if parent.name == "rules" and parent.parent.name == ".windsurf":
+        return parent.parent.parent
+    
+    # Case 2: Global rules file in ~/.windsurf/global_rules.md
+    # Use the .windsurf directory's parent (which would be home directory)
+    if parent.name == ".windsurf" and rule_file.name == "global_rules.md":
+        return parent.parent
+    
+    # Case 3: File is directly in .windsurf directory (shouldn't happen per docs, but handle it)
+    if parent.name == ".windsurf":
+        return parent.parent
+    
+    # Fallback: use the directory containing the file
+    return parent
+
+
 def get_file_metadata(rule_file: Path) -> Dict[str, str]:
     """
     Get file metadata (size and last modified timestamp).

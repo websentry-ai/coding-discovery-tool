@@ -186,3 +186,112 @@ def walk_for_cursor_mcp_configs(
     except Exception as e:
         logger.debug(f"Error walking {current_dir}: {e}")
 
+
+def extract_windsurf_mcp_from_dir(
+    windsurf_dir: Path,
+    projects: List[Dict],
+    global_windsurf_dir: Path
+) -> None:
+    """
+    Extract MCP config from a .windsurf directory if mcp_config.json exists.
+    
+    Args:
+        windsurf_dir: Path to .windsurf directory
+        projects: List to append project configs to
+        global_windsurf_dir: Path to global .windsurf directory to skip
+    """
+    mcp_config_file = windsurf_dir / "mcp_config.json"
+    if not mcp_config_file.exists():
+        return
+    
+    try:
+        project_root = windsurf_dir.parent
+        
+        # Skip if this is the global config directory
+        if windsurf_dir == global_windsurf_dir:
+            return
+        
+        content = mcp_config_file.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+        
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        
+        # Transform mcpServers from object to array
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+        
+        # Only add if there are MCP servers configured
+        if mcp_servers_array:
+            projects.append({
+                "path": str(project_root),
+                "mcpServers": mcp_servers_array
+            })
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in Windsurf MCP config {mcp_config_file}: {e}")
+    except PermissionError as e:
+        logger.warning(f"Permission denied reading Windsurf MCP config {mcp_config_file}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading Windsurf MCP config {mcp_config_file}: {e}")
+
+
+def walk_for_windsurf_mcp_configs(
+    root_path: Path,
+    current_dir: Path,
+    projects: List[Dict],
+    global_windsurf_dir: Path,
+    should_skip_func: Callable[[Path], bool],
+    current_depth: int = 0
+) -> None:
+    """
+    Recursively walk directory tree looking for .windsurf/mcp_config.json files.
+    
+    Args:
+        root_path: Root search path (for depth calculation)
+        current_dir: Current directory being processed
+        projects: List to append project configs to
+        global_windsurf_dir: Path to global .windsurf directory to skip
+        should_skip_func: Function to check if a path should be skipped
+        current_depth: Current recursion depth
+    """
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+    
+    try:
+        for item in current_dir.iterdir():
+            try:
+                # Check if we should skip this path
+                if should_skip_func(item):
+                    continue
+                
+                # Check depth
+                try:
+                    depth = len(item.relative_to(root_path).parts)
+                    if depth > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    # Path not relative to root (different drive on Windows)
+                    continue
+                
+                if item.is_dir():
+                    # Found a .windsurf directory!
+                    if item.name == ".windsurf":
+                        extract_windsurf_mcp_from_dir(item, projects, global_windsurf_dir)
+                        # Don't recurse into .windsurf directory
+                        continue
+                    
+                    # Recurse into subdirectories
+                    walk_for_windsurf_mcp_configs(
+                        root_path, item, projects, global_windsurf_dir,
+                        should_skip_func, current_depth + 1
+                    )
+                
+            except (PermissionError, OSError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing {item}: {e}")
+                continue
+                
+    except (PermissionError, OSError):
+        pass
+    except Exception as e:
+        logger.debug(f"Error walking {current_dir}: {e}")
+

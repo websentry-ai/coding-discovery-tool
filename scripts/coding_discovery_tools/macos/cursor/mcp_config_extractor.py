@@ -10,6 +10,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...macos_extraction_helpers import (
     get_top_level_directories,
+    is_running_as_root,
     should_process_directory,
     should_skip_path,
     should_skip_system_path,
@@ -64,7 +65,7 @@ class MacOSCursorMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns the first non-empty config found, or None if none found.
         """
         # When running as root, prioritize checking user directories first
-        if Path.home() == Path("/root"):
+        if is_running_as_root():
             users_dir = Path("/Users")
             if users_dir.exists():
                 for user_dir in users_dir.iterdir():
@@ -75,7 +76,7 @@ class MacOSCursorMCPConfigExtractor(BaseMCPConfigExtractor):
                             if config:
                                 return config
             
-            # Fallback to root's global config if no user config found
+            # Fallback to root's global config if no user config found (only if file exists)
             if self.GLOBAL_MCP_CONFIG_PATH.exists():
                 return self._read_global_config(self.GLOBAL_MCP_CONFIG_PATH)
         else:

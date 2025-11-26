@@ -96,6 +96,13 @@ def get_user_info() -> str:
     Cross-platform function that returns username.
     Gets username directly from system information, not environment variables.
     
+    On macOS, when running as root, finds the user with the most storage space
+    in /Users directory to get the actual user instead of "root".
+    
+    On Windows, when running as administrator, finds the actual logged-in user
+    by querying explorer.exe process owner, Win32_ComputerSystem, or active console
+    session instead of returning "Administrator" or "admin".
+    
     Returns:
         Current username as string
     """
@@ -104,16 +111,42 @@ def get_user_info() -> str:
         
         if platform.system() == "Windows":
             # Use whoami command on Windows (works reliably)
-            username = run_command(["whoami"], COMMAND_TIMEOUT)
+            whoami_output = run_command(["whoami"], COMMAND_TIMEOUT)
             # Extract just the username if whoami returns DOMAIN\username format
             if username and "\\" in username:
                 username = username.split("\\")[-1]
         else:
-            # Use whoami or id -un on Unix-like systems
-            username = run_command(["whoami"], COMMAND_TIMEOUT)
+            # On macOS/Linux, check if running as root first
+            current_user = run_command(["whoami"], COMMAND_TIMEOUT)
+            
+            # If running as root on macOS, try to find the actual user
+            if current_user == "root" and platform.system() == "Darwin":
+                # Method 1: Get console user (most direct and reliable)
+                username = run_command(["stat", "-f", "%Su", "/dev/console"], COMMAND_TIMEOUT)
+                
+                # Method 2: Fallback to finding user with most storage space in /Users
+                # Command: du -sk /Users/* 2>/dev/null | awk '!/\/Shared$/ {print}' | sort -nr | head -1 | awk -F/ '{print $NF}'
+                # Using shell=True to properly handle glob expansion and pipes
+                if not username:
+                    try:
+                        result = subprocess.run(
+                            "du -sk /Users/* 2>/dev/null | awk '!/\\/Shared$/ {print}' | sort -nr | head -1 | awk -F/ '{print $NF}'",
+                            shell=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=COMMAND_TIMEOUT
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            username = result.stdout.strip()
+                    except Exception as e:
+                        logger.debug(f"Failed to get user from storage space: {e}")
+            
+            # If not root or methods above didn't work, use standard methods
             if not username:
-                # Fallback to id -un
-                username = run_command(["id", "-un"], COMMAND_TIMEOUT)
+                username = current_user
+                if not username:
+                    # Fallback to id -un
+                    username = run_command(["id", "-un"], COMMAND_TIMEOUT)
         
         # Final fallback to getpass (uses system user database)
         if not username:

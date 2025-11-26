@@ -6,6 +6,7 @@ on macOS to avoid code duplication.
 """
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -13,6 +14,25 @@ from typing import List, Dict, Optional, Tuple
 from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
 
 logger = logging.getLogger(__name__)
+
+
+def is_running_as_root() -> bool:
+    """
+    Check if the current process is running as root user.
+    
+    Uses os.getuid() to check if UID is 0, which is portable across
+    Unix-like systems (macOS, Linux, etc.).
+    
+    Returns:
+        True if running as root (UID 0), False otherwise
+    """
+    try:
+        return os.getuid() == 0
+    except AttributeError:
+        # Windows doesn't have os.getuid(), fallback to checking home directory
+        # On Windows, this would be a different check anyway
+        home = Path.home()
+        return str(home) in ["/root", "/var/root"]
 
 
 def add_rule_to_project(
@@ -340,9 +360,9 @@ def scan_user_directories(check_func) -> Optional[Path]:
     """
     Scan /Users directory for tool installations when running as root.
     
-    When running as root (Path.home() == Path("/root")), this function
-    scans all user directories in /Users to find tool installations.
-    This is useful for MDM deployments where tools are installed per-user.
+    When running as root, this function scans all user directories in /Users
+    to find tool installations. This is useful for MDM deployments where
+    tools are installed per-user.
     
     Args:
         check_func: Function that takes a user_dir Path and returns a Path
@@ -352,7 +372,7 @@ def scan_user_directories(check_func) -> Optional[Path]:
     Returns:
         Path to the first found tool installation, or None if not found
     """
-    if Path.home() != Path("/root"):
+    if not is_running_as_root():
         return None
     
     users_dir = Path("/Users")

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...macos_extraction_helpers import is_running_as_root
 from ...mcp_extraction_helpers import extract_claude_mcp_fields
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         all_projects = []
         
         # When running as root, collect from ALL users
-        if Path.home() == Path("/root"):
+        if is_running_as_root():
             users_dir = Path("/Users")
             if users_dir.exists():
                 # Collect configs from all users
@@ -60,7 +61,7 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
                             if user_projects:
                                 all_projects.extend(user_projects)
                 
-                # Also check root's config if it exists
+                # Also check root's config if it exists (only if file exists, don't try if it doesn't)
                 root_config = self.MCP_CONFIG_PATH_PREFERRED
                 if root_config.exists():
                     root_projects = self._extract_from_config_file(root_config)
@@ -73,11 +74,12 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
                         if root_projects:
                             all_projects.extend(root_projects)
             else:
-                # /Users doesn't exist, try root's config
-                root_projects = self._extract_from_config_file(self.MCP_CONFIG_PATH_PREFERRED)
-                if root_projects:
-                    all_projects.extend(root_projects)
-                else:
+                # /Users doesn't exist, try root's config (only if file exists)
+                if self.MCP_CONFIG_PATH_PREFERRED.exists():
+                    root_projects = self._extract_from_config_file(self.MCP_CONFIG_PATH_PREFERRED)
+                    if root_projects:
+                        all_projects.extend(root_projects)
+                elif self.MCP_CONFIG_PATH_FALLBACK.exists():
                     root_projects = self._extract_from_config_file(self.MCP_CONFIG_PATH_FALLBACK)
                     if root_projects:
                         all_projects.extend(root_projects)
@@ -110,6 +112,10 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             List of project dicts or empty list if extraction fails
         """
         try:
+            # Check if file exists first to avoid unnecessary warnings
+            if not config_path.exists():
+                return []
+            
             stat = config_path.stat()
             content = config_path.read_text(encoding='utf-8', errors='replace')
             
@@ -125,6 +131,9 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             return projects
         except PermissionError as e:
             logger.warning(f"Permission denied reading MCP config {config_path}: {e}")
+            return []
+        except FileNotFoundError:
+            # File doesn't exist - this is expected and not an error
             return []
         except Exception as e:
             logger.warning(f"Error reading MCP config {config_path}: {e}")

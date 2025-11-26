@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/
 ### Windows (PowerShell)
 
 ```powershell
-$script = Invoke-WebRequest -Uri https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1 -UseBasicParsing; Invoke-Expression $script.Content --api-key YOUR_API_KEY --domain YOUR_DOMAIN
+Invoke-Expression "& { $($((Invoke-WebRequest -Uri https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1 -UseBasicParsing).Content)) } --api-key YOUR_API_KEY --domain YOUR_DOMAIN"
 ```
 
 **Note:** If you encounter execution policy restrictions on Windows, run:

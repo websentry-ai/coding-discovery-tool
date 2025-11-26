@@ -192,7 +192,7 @@ if (-not $ApiKey -or -not $Domain) {
     Write-Host "  .\install.ps1 --api-key YOUR_API_KEY --domain YOUR_DOMAIN"
     Write-Host ""
     Write-Host "Or run via PowerShell:"
-    Write-Host "  `$script = Invoke-WebRequest -Uri https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1 -UseBasicParsing; Invoke-Expression `$script.Content --api-key YOUR_API_KEY --domain YOUR_DOMAIN"
+    Write-Host "  Invoke-Expression \"& { `$(`$((Invoke-WebRequest -Uri https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1 -UseBasicParsing).Content)) } --api-key YOUR_API_KEY --domain YOUR_DOMAIN\""
     Write-Host ""
     exit 1
 }

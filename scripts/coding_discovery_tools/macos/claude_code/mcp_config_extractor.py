@@ -132,9 +132,6 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         except PermissionError as e:
             logger.warning(f"Permission denied reading MCP config {config_path}: {e}")
             return []
-        except FileNotFoundError:
-            # File doesn't exist - this is expected and not an error
-            return []
         except Exception as e:
             logger.warning(f"Error reading MCP config {config_path}: {e}")
             return []

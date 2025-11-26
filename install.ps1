@@ -47,7 +47,7 @@ function Write-Warning {
     Write-Host "⚠ $Message" -ForegroundColor Yellow
 }
 
-function Write-Error {
+function Log-Error {
     param([string]$Message)
     Write-Host "✗ $Message" -ForegroundColor Red
 }
@@ -81,13 +81,13 @@ function Test-Python {
         if ($version -match "Python 3") {
             return "python"
         } else {
-            Write-Error "Python 3 is required but only Python 2 was found."
+            Log-Error "Python 3 is required but only Python 2 was found."
             Write-Info "Please install Python 3 and try again."
             exit 1
         }
     }
     
-    Write-Error "Python 3 is required but not found."
+    Log-Error "Python 3 is required but not found."
     Write-Info "Please install Python 3 and try again."
     exit 1
 }
@@ -100,7 +100,7 @@ function Download-Repo {
     # Check if git is available
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
     if (-not $gitCmd) {
-        Write-Error "Git is not installed."
+        Log-Error "Git is not installed."
         Write-Info "This script requires git to download the full package structure."
         Write-Info "Please install git and try again, or clone the repository manually."
         exit 1
@@ -125,7 +125,7 @@ function Download-Repo {
             }
         }
     } catch {
-        Write-Error "Failed to clone repository: $_"
+        Log-Error "Failed to clone repository: $_"
         exit 1
     }
 }
@@ -186,7 +186,7 @@ if ($args.Count -gt 0) {
 
 # Check if required arguments are provided
 if (-not $ApiKey -or -not $Domain) {
-    Write-Error "Missing required arguments"
+    Log-Error "Missing required arguments"
     Write-Host ""
     Write-Host "Usage:"
     Write-Host "  .\install.ps1 --api-key YOUR_API_KEY --domain YOUR_DOMAIN"

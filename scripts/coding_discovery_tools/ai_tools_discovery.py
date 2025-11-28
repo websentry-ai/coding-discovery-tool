@@ -21,10 +21,12 @@ try:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
+        ClineRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
+        ClineMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
 except ImportError:
@@ -36,10 +38,12 @@ except ImportError:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
+        ClineRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
+        ClineMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
@@ -78,6 +82,14 @@ class AIToolsDetector:
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
             self._windsurf_mcp_extractor = WindsurfMCPConfigExtractorFactory.create(self.system)
             self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Cline extractors only for macOS
+            if self.system == "Darwin":
+                self._cline_rules_extractor = ClineRulesExtractorFactory.create(self.system)
+                self._cline_mcp_extractor = ClineMCPConfigExtractorFactory.create(self.system)
+            else:
+                self._cline_rules_extractor = None
+                self._cline_mcp_extractor = None
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -516,6 +528,53 @@ class AIToolsDetector:
             else:
                 logger.info("  ⚠ No MCP configs found")
         
+        elif tool_name == "cline":
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            # Extract rules
+            logger.info(f"  Extracting {tool.get('name')} rules...")
+            if self._cline_rules_extractor:
+                cline_projects = self._cline_rules_extractor.extract_all_cline_rules()
+                num_projects_with_rules = len(cline_projects)
+                total_rules = sum(len(project.get("rules", [])) for project in cline_projects)
+                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
+                
+                projects_dict = {
+                    project["project_root"]: {
+                        "path": project["project_root"],
+                        "rules": project.get("rules", [])
+                    }
+                    for project in cline_projects
+                }
+                
+                # Log rules details
+                if total_rules > 0:
+                    self._log_rules_details(projects_dict, tool.get('name'))
+            else:
+                logger.info("  ⚠ Cline rules extractor not available for this OS")
+                projects_dict = {}
+            
+            # Extract and merge MCP configs
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+            if self._cline_mcp_extractor:
+                cline_mcp_config = self._cline_mcp_extractor.extract_mcp_config()
+                if cline_mcp_config and "projects" in cline_mcp_config:
+                    num_mcp_projects = len(cline_mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    self._merge_mcp_configs_into_projects(
+                        cline_mcp_config["projects"],
+                        projects_dict
+                    )
+                    # Log MCP details
+                    self._log_mcp_details(projects_dict, tool.get('name'))
+                else:
+                    logger.info("  ⚠ No MCP configs found")
+            else:
+                logger.info("  ⚠ Cline MCP extractor not available for this OS")
+        
         # Filter out empty projects (no mcpServers and no rules)
         total_projects_before_filter = len(projects_dict)
         filtered_projects = [
@@ -585,10 +644,10 @@ def main():
     args = parser.parse_args()
     
     # Check for API key and domain
-    if not args.api_key or not args.domain:
-        print("Error: --api-key and --domain arguments are required")
-        print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
-        sys.exit(1)
+    # if not args.api_key or not args.domain:
+    #     print("Error: --api-key and --domain arguments are required")
+    #     print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
+    #     sys.exit(1)
     
     try:
         detector = AIToolsDetector()
@@ -656,10 +715,10 @@ def main():
                 
                 # Send report immediately after processing
                 logger.info(f"Sending {tool_name} report to backend...")
-                if send_report_to_backend(args.domain, args.api_key, single_tool_report):
-                    logger.info(f"{tool_name} report sent successfully")
-                else:
-                    logger.error(f"Failed to send {tool_name} report to backend")
+                # if send_report_to_backend(args.domain, args.api_key, single_tool_report):
+                #     logger.info(f"{tool_name} report sent successfully")
+                # else:
+                #     logger.error(f"Failed to send {tool_name} report to backend")
                 
                 logger.info("")
                 

@@ -408,3 +408,112 @@ def walk_for_roo_mcp_configs(
     except Exception as e:
         logger.debug(f"Error walking {current_dir}: {e}")
 
+
+def extract_kilocode_mcp_from_dir(
+    kilocode_dir: Path,
+    projects: List[Dict],
+    global_kilocode_dir: Optional[Path] = None
+) -> None:
+    """
+    Extract MCP config from a .kilocode directory if mcp.json exists.
+    
+    Args:
+        kilocode_dir: Path to .kilocode directory
+        projects: List to append project configs to
+        global_kilocode_dir: Path to global .kilocode directory to skip (optional)
+    """
+    mcp_config_file = kilocode_dir / "mcp.json"
+    if not mcp_config_file.exists():
+        return
+    
+    try:
+        project_root = kilocode_dir.parent
+        
+        # Skip if this is the global config directory
+        if global_kilocode_dir and kilocode_dir == global_kilocode_dir:
+            return
+        
+        content = mcp_config_file.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+        
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        
+        # Transform mcpServers from object to array
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+        
+        # Only add if there are MCP servers configured
+        if mcp_servers_array:
+            projects.append({
+                "path": str(project_root),
+                "mcpServers": mcp_servers_array
+            })
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in Kilo Code MCP config {mcp_config_file}: {e}")
+    except PermissionError as e:
+        logger.warning(f"Permission denied reading Kilo Code MCP config {mcp_config_file}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading Kilo Code MCP config {mcp_config_file}: {e}")
+
+
+def walk_for_kilocode_mcp_configs(
+    root_path: Path,
+    current_dir: Path,
+    projects: List[Dict],
+    global_kilocode_dir: Optional[Path],
+    should_skip_func: Callable[[Path], bool],
+    current_depth: int = 0
+) -> None:
+    """
+    Recursively walk directory tree looking for .kilocode/mcp.json files.
+    
+    Args:
+        root_path: Root search path (for depth calculation)
+        current_dir: Current directory being processed
+        projects: List to append project configs to
+        global_kilocode_dir: Path to global .kilocode directory to skip (optional)
+        should_skip_func: Function to check if a path should be skipped
+        current_depth: Current recursion depth
+    """
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+    
+    try:
+        for item in current_dir.iterdir():
+            try:
+                # Check if we should skip this path
+                if should_skip_func(item):
+                    continue
+                
+                # Check depth
+                try:
+                    depth = len(item.relative_to(root_path).parts)
+                    if depth > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    # Path not relative to root (different drive on Windows)
+                    continue
+                
+                if item.is_dir():
+                    # Found a .kilocode directory!
+                    if item.name == ".kilocode":
+                        extract_kilocode_mcp_from_dir(item, projects, global_kilocode_dir)
+                        # Don't recurse into .kilocode directory
+                        continue
+                    
+                    # Recurse into subdirectories
+                    walk_for_kilocode_mcp_configs(
+                        root_path, item, projects, global_kilocode_dir,
+                        should_skip_func, current_depth + 1
+                    )
+                
+            except (PermissionError, OSError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing {item}: {e}")
+                continue
+                
+    except (PermissionError, OSError):
+        pass
+    except Exception as e:
+        logger.debug(f"Error walking {current_dir}: {e}")
+

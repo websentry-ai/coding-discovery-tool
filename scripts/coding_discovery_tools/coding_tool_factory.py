@@ -8,7 +8,7 @@ based on the operating system.
 import platform
 from typing import Optional
 
-from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor, BaseWindsurfRulesExtractor, BaseMCPConfigExtractor
+from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor, BaseWindsurfRulesExtractor, BaseKiloCodeRulesExtractor, BaseMCPConfigExtractor
 from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetector
 from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
 from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
@@ -19,6 +19,9 @@ from .macos.windsurf.windsurf_rules_extractor import MacOSWindsurfRulesExtractor
 from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
 from .macos.roo_code.roo_code import MacOSRooDetector
 from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
+from .macos.kilocode.kilocode import MacOSKiloCodeDetector
+from .macos.kilocode.kilocode_rules_extractor import MacOSKiloCodeRulesExtractor
+from .macos.kilocode.mcp_config_extractor import MacOSKiloCodeMCPConfigExtractor
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
 from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
@@ -153,6 +156,26 @@ class ToolDetectorFactory:
             return MacOSRooDetector()
 
     @staticmethod
+    def create_kilocode_detector(os_name: Optional[str] = None) -> BaseToolDetector:
+        """
+        Create appropriate Kilo Code detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSKiloCodeDetector()
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -169,12 +192,18 @@ class ToolDetectorFactory:
         if os_name not in ["Darwin", "Windows"]:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
-        return [
+        detectors = [
             ToolDetectorFactory.create_cursor_detector(os_name),
             ToolDetectorFactory.create_claude_detector(os_name),
             ToolDetectorFactory.create_windsurf_detector(os_name),
             ToolDetectorFactory.create_roo_detector(os_name),
         ]
+        
+        # Add Kilo Code detector for macOS
+        if os_name == "Darwin":
+            detectors.append(ToolDetectorFactory.create_kilocode_detector(os_name))
+        
+        return detectors
 
 
 class CursorRulesExtractorFactory:
@@ -367,3 +396,55 @@ class RooMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSRooMCPConfigExtractor()
+
+
+class KiloCodeRulesExtractorFactory:
+    """Factory for creating OS-specific Kilo Code rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseKiloCodeRulesExtractor:
+        """
+        Create appropriate Kilo Code rules extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseKiloCodeRulesExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSKiloCodeRulesExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class KiloCodeMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Kilo Code MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseMCPConfigExtractor:
+        """
+        Create appropriate Kilo Code MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSKiloCodeMCPConfigExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")

@@ -21,10 +21,12 @@ try:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
+        KiloCodeRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
+        KiloCodeMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
 except ImportError:
@@ -36,10 +38,12 @@ except ImportError:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
+        KiloCodeRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
+        KiloCodeMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
@@ -78,6 +82,14 @@ class AIToolsDetector:
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
             self._windsurf_mcp_extractor = WindsurfMCPConfigExtractorFactory.create(self.system)
             self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Kilo Code extractors only for macOS
+            if self.system == "Darwin":
+                self._kilocode_rules_extractor = KiloCodeRulesExtractorFactory.create(self.system)
+                self._kilocode_mcp_extractor = KiloCodeMCPConfigExtractorFactory.create(self.system)
+            else:
+                self._kilocode_rules_extractor = None
+                self._kilocode_mcp_extractor = None
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -515,6 +527,53 @@ class AIToolsDetector:
                 self._log_mcp_details(projects_dict, tool.get('name'))
             else:
                 logger.info("  ⚠ No MCP configs found")
+        
+        elif tool_name == "kilo code":
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            # Extract rules
+            logger.info(f"  Extracting {tool.get('name')} rules...")
+            if self._kilocode_rules_extractor:
+                kilocode_projects = self._kilocode_rules_extractor.extract_all_kilocode_rules()
+                num_projects_with_rules = len(kilocode_projects)
+                total_rules = sum(len(project.get("rules", [])) for project in kilocode_projects)
+                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
+                
+                projects_dict = {
+                    project["project_root"]: {
+                        "path": project["project_root"],
+                        "rules": project.get("rules", [])
+                    }
+                    for project in kilocode_projects
+                }
+                
+                # Log rules details
+                if total_rules > 0:
+                    self._log_rules_details(projects_dict, tool.get('name'))
+            else:
+                logger.info("  ⚠ Kilo Code rules extractor not available for this OS")
+                projects_dict = {}
+            
+            # Extract and merge MCP configs
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+            if self._kilocode_mcp_extractor:
+                kilocode_mcp_config = self._kilocode_mcp_extractor.extract_mcp_config()
+                if kilocode_mcp_config and "projects" in kilocode_mcp_config:
+                    num_mcp_projects = len(kilocode_mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    self._merge_mcp_configs_into_projects(
+                        kilocode_mcp_config["projects"],
+                        projects_dict
+                    )
+                    # Log MCP details
+                    self._log_mcp_details(projects_dict, tool.get('name'))
+                else:
+                    logger.info("  ⚠ No MCP configs found")
+            else:
+                logger.info("  ⚠ Kilo Code MCP extractor not available for this OS")
         
         # Filter out empty projects (no mcpServers and no rules)
         total_projects_before_filter = len(projects_dict)

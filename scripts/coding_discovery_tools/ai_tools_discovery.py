@@ -24,6 +24,7 @@ try:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
+        RooMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
 except ImportError:
@@ -38,6 +39,7 @@ except ImportError:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
+        RooMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
@@ -75,6 +77,7 @@ class AIToolsDetector:
             self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
             self._windsurf_mcp_extractor = WindsurfMCPConfigExtractorFactory.create(self.system)
+            self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -277,6 +280,87 @@ class AIToolsDetector:
         rules = project.get("rules", [])
         return len(mcp_servers) == 0 and len(rules) == 0
 
+    def _log_rules_details(self, projects_dict: Dict[str, Dict], tool_name: str) -> None:
+        """
+        Log detailed information about rules found.
+        
+        Args:
+            projects_dict: Dictionary mapping project paths to project configs
+            tool_name: Name of the tool
+        """
+        total_rules = 0
+        projects_with_rules = []
+        
+        for project_path, project_data in projects_dict.items():
+            rules = project_data.get("rules", [])
+            if rules:
+                total_rules += len(rules)
+                projects_with_rules.append((project_path, rules))
+        
+        if total_rules == 0:
+            logger.info("    No rules found")
+            return
+        
+        logger.info("")
+        logger.info("    ┌─ Rules Summary ─────────────────────────────────────────────")
+        for idx, (project_path, rules) in enumerate(projects_with_rules, 1):
+            logger.info(f"    │ Project #{idx}: {project_path}")
+            logger.info(f"    │   Rules: {len(rules)}")
+            for rule_idx, rule in enumerate(rules, 1):
+                rule_file = rule.get("file_name") or rule.get("file_path", "Unknown")
+                rule_size = rule.get("size", 0)
+                size_str = f"{rule_size:,} bytes" if rule_size > 0 else "size unknown"
+                logger.info(f"    │     {rule_idx}. {rule_file} ({size_str})")
+            if idx < len(projects_with_rules):
+                logger.info("    │")
+        
+        logger.info(f"    └─ Total: {total_rules} rule file(s) across {len(projects_with_rules)} project(s)")
+        logger.info("")
+
+    def _log_mcp_details(self, projects_dict: Dict[str, Dict], tool_name: str) -> None:
+        """
+        Log detailed information about MCP servers found.
+        
+        Args:
+            projects_dict: Dictionary mapping project paths to project configs
+            tool_name: Name of the tool
+        """
+        total_mcp_servers = 0
+        projects_with_mcp = []
+        
+        for project_path, project_data in projects_dict.items():
+            mcp_servers = project_data.get("mcpServers", [])
+            if mcp_servers:
+                total_mcp_servers += len(mcp_servers)
+                projects_with_mcp.append((project_path, mcp_servers))
+        
+        if total_mcp_servers == 0:
+            logger.info("    No MCP servers found")
+            return
+        
+        logger.info("")
+        logger.info("    ┌─ MCP Servers Summary ───────────────────────────────────────")
+        for idx, (project_path, mcp_servers) in enumerate(projects_with_mcp, 1):
+            logger.info(f"    │ Project #{idx}: {project_path}")
+            logger.info(f"    │   MCP Servers: {len(mcp_servers)}")
+            for server_idx, server in enumerate(mcp_servers, 1):
+                server_name = server.get("name", "Unknown")
+                server_command = server.get("command", "")
+                server_args = server.get("args", [])
+                
+                logger.info(f"    │     {server_idx}. {server_name}")
+                if server_command:
+                    args_str = " ".join(str(arg) for arg in server_args) if server_args else ""
+                    full_command = f"{server_command} {args_str}".strip()
+                    logger.info(f"    │        Command: {full_command}")
+                elif server_args:
+                    logger.info(f"    │        Args: {' '.join(str(arg) for arg in server_args)}")
+            if idx < len(projects_with_mcp):
+                logger.info("    │")
+        
+        logger.info(f"    └─ Total: {total_mcp_servers} MCP server(s) across {len(projects_with_mcp)} project(s)")
+        logger.info("")
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
@@ -292,11 +376,16 @@ class AIToolsDetector:
         
         # Extract rules for the tool
         if tool_name == "cursor":
-            logger.info(f"Extracting {tool.get('name')} rules...")
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            logger.info(f"  Extracting {tool.get('name')} rules...")
             cursor_projects = self.extract_all_cursor_rules()
             num_projects_with_rules = len(cursor_projects)
             total_rules = sum(len(project.get("rules", [])) for project in cursor_projects)
-            logger.info(f"  Found {num_projects_with_rules} projects with {total_rules} total rule files")
+            logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
             
             projects_dict = {
                 project["project_root"]: {
@@ -306,25 +395,36 @@ class AIToolsDetector:
                 for project in cursor_projects
             }
             
+            # Log rules details
+            if total_rules > 0:
+                self._log_rules_details(projects_dict, tool.get('name'))
+            
             # Extract and merge MCP configs
-            logger.info(f"Extracting {tool.get('name')} MCP configs...")
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
             cursor_mcp_config = self._cursor_mcp_extractor.extract_mcp_config()
             if cursor_mcp_config and "projects" in cursor_mcp_config:
                 num_mcp_projects = len(cursor_mcp_config["projects"])
-                logger.info(f"  Found {num_mcp_projects} projects with MCP configs")
+                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
                 self._merge_mcp_configs_into_projects(
                     cursor_mcp_config["projects"],
                     projects_dict
                 )
+                # Log MCP details
+                self._log_mcp_details(projects_dict, tool.get('name'))
             else:
-                logger.info(f"  No MCP configs found for {tool.get('name')}")
+                logger.info("  ⚠ No MCP configs found")
         
         elif tool_name == "claude code":
-            logger.info(f"Extracting {tool.get('name')} rules...")
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            logger.info(f"  Extracting {tool.get('name')} rules...")
             claude_projects = self.extract_all_claude_rules()
             num_projects_with_rules = len(claude_projects)
             total_rules = sum(len(project.get("rules", [])) for project in claude_projects)
-            logger.info(f"  Found {num_projects_with_rules} projects with {total_rules} total rule files")
+            logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
             
             projects_dict = {
                 project["project_root"]: {
@@ -334,25 +434,36 @@ class AIToolsDetector:
                 for project in claude_projects
             }
             
+            # Log rules details
+            if total_rules > 0:
+                self._log_rules_details(projects_dict, tool.get('name'))
+            
             # Extract and merge MCP configs
-            logger.info(f"Extracting {tool.get('name')} MCP configs...")
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
             claude_mcp_config = self._claude_mcp_extractor.extract_mcp_config()
             if claude_mcp_config and "projects" in claude_mcp_config:
                 num_mcp_projects = len(claude_mcp_config["projects"])
-                logger.info(f"  Found {num_mcp_projects} projects with MCP configs")
+                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
                 self._merge_claude_mcp_configs_into_projects(
                     claude_mcp_config["projects"],
                     projects_dict
                 )
+                # Log MCP details
+                self._log_mcp_details(projects_dict, tool.get('name'))
             else:
-                logger.info(f"  No MCP configs found for {tool.get('name')}")
+                logger.info("  ⚠ No MCP configs found")
         
         elif tool_name == "windsurf":
-            logger.info(f"Extracting {tool.get('name')} rules...")
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            logger.info(f"  Extracting {tool.get('name')} rules...")
             windsurf_projects = self.extract_all_windsurf_rules()
             num_projects_with_rules = len(windsurf_projects)
             total_rules = sum(len(project.get("rules", [])) for project in windsurf_projects)
-            logger.info(f"  Found {num_projects_with_rules} projects with {total_rules} total rule files")
+            logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
             
             projects_dict = {
                 project["project_root"]: {
@@ -362,18 +473,48 @@ class AIToolsDetector:
                 for project in windsurf_projects
             }
             
+            # Log rules details
+            if total_rules > 0:
+                self._log_rules_details(projects_dict, tool.get('name'))
+            
             # Extract and merge MCP configs
-            logger.info(f"Extracting {tool.get('name')} MCP configs...")
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
             windsurf_mcp_config = self._windsurf_mcp_extractor.extract_mcp_config()
             if windsurf_mcp_config and "projects" in windsurf_mcp_config:
                 num_mcp_projects = len(windsurf_mcp_config["projects"])
-                logger.info(f"  Found {num_mcp_projects} projects with MCP configs")
+                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
                 self._merge_mcp_configs_into_projects(
                     windsurf_mcp_config["projects"],
                     projects_dict
                 )
+                # Log MCP details
+                self._log_mcp_details(projects_dict, tool.get('name'))
             else:
-                logger.info(f"  No MCP configs found for {tool.get('name')}")
+                logger.info("  ⚠ No MCP configs found")
+        
+        elif tool_name == "roo code":
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            # Roo Code doesn't have rules, only MCP configs
+            projects_dict = {}
+            
+            # Extract and merge MCP configs
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+            roo_mcp_config = self._roo_mcp_extractor.extract_mcp_config()
+            if roo_mcp_config and "projects" in roo_mcp_config:
+                num_mcp_projects = len(roo_mcp_config["projects"])
+                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                self._merge_mcp_configs_into_projects(
+                    roo_mcp_config["projects"],
+                    projects_dict
+                )
+                # Log MCP details
+                self._log_mcp_details(projects_dict, tool.get('name'))
+            else:
+                logger.info("  ⚠ No MCP configs found")
         
         # Filter out empty projects (no mcpServers and no rules)
         total_projects_before_filter = len(projects_dict)
@@ -383,8 +524,9 @@ class AIToolsDetector:
         ]
         filtered_count = total_projects_before_filter - len(filtered_projects)
         if filtered_count > 0:
-            logger.info(f"  Filtered out {filtered_count} empty project(s) (no rules and no MCP servers)")
-        logger.info(f"  Final project count: {len(filtered_projects)} projects")
+            logger.info(f"  ⚠ Filtered out {filtered_count} empty project(s) (no rules and no MCP servers)")
+        logger.info(f"  ✓ Final project count: {len(filtered_projects)} project(s)")
+        logger.info("=" * 70)
         
         return {
             "name": tool.get("name"),
@@ -480,7 +622,6 @@ def main():
         
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
-            logger.info(f"Processing {tool_name}...")
             
             try:
                 # Process the tool (extract rules and MCP configs)

@@ -17,6 +17,8 @@ from .macos.claude_code.mcp_config_extractor import MacOSClaudeMCPConfigExtracto
 from .macos.windsurf.windsurf import MacOSWindsurfDetector
 from .macos.windsurf.windsurf_rules_extractor import MacOSWindsurfRulesExtractor
 from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
+from .macos.roo_code.roo_code import MacOSRooDetector
+from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
 from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
@@ -131,6 +133,26 @@ class ToolDetectorFactory:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
     @staticmethod
+    def create_roo_detector(os_name: Optional[str] = None) -> BaseToolDetector:
+        """
+        Create appropriate Roo Code detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSRooDetector()
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -151,6 +173,7 @@ class ToolDetectorFactory:
             ToolDetectorFactory.create_cursor_detector(os_name),
             ToolDetectorFactory.create_claude_detector(os_name),
             ToolDetectorFactory.create_windsurf_detector(os_name),
+            ToolDetectorFactory.create_roo_detector(os_name),
         ]
 
 
@@ -321,3 +344,26 @@ class WindsurfMCPConfigExtractorFactory:
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
+
+class RooMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Roo Code MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseMCPConfigExtractor:
+        """
+        Create appropriate Roo Code MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSRooMCPConfigExtractor()

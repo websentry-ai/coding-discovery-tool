@@ -39,3 +39,6 @@ Thumbs.db
 
 # Cursor MCP config
 .cursor/mcp.json
+
+# Roo Code config
+.roo/

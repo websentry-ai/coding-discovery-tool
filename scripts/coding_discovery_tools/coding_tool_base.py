@@ -119,6 +119,27 @@ class BaseWindsurfRulesExtractor(ABC):
         pass
 
 
+class BaseClineRulesExtractor(ABC):
+    """Abstract base class for extracting Cline rules from all projects."""
+
+    @abstractmethod
+    def extract_all_cline_rules(self) -> List[Dict]:
+        """
+        Extract all Cline rules from all projects on the machine.
+        
+        Searches for:
+        - Workspace-level rules: **/.clinerules/*.md (recursive)
+        - Global rules: ~/Documents/Cline/Rules/*.md or ~/Cline/Rules/*.md
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

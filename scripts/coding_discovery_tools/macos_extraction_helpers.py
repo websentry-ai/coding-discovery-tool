@@ -390,3 +390,195 @@ def scan_user_directories(check_func) -> Optional[Path]:
                 continue
     
     return None
+
+
+def extract_project_level_rules_with_fallback(
+    root_path: Path,
+    tool_dir_name: str,
+    extract_from_dir_func,
+    walk_for_dirs_func,
+    projects_by_root: Dict[str, List[Dict]]
+) -> None:
+    """
+    Shared helper for extracting project-level rules with root path handling.
+    
+    This function handles the common pattern of:
+    1. If searching from root (/), get top-level directories and walk each
+    2. If searching from non-root, use rglob to find tool directories
+    3. Fallback to home directory if root access fails
+    
+    Args:
+        root_path: Root directory to search from (Path("/") for system-wide, or home)
+        tool_dir_name: Name of the tool directory to search for (e.g., ".cursor", ".windsurf")
+        extract_from_dir_func: Function to extract rules from a found tool directory
+                              Signature: func(tool_dir: Path, projects_by_root: Dict)
+        walk_for_dirs_func: Function to recursively walk for tool directories
+                           Signature: func(root_path: Path, current_dir: Path, 
+                                          projects_by_root: Dict, current_depth: int)
+        projects_by_root: Dictionary to populate with rules grouped by project root
+    """
+    # When searching from root, iterate top-level directories first to avoid system paths
+    if root_path == Path("/"):
+        try:
+            # Get top-level directories, skipping system ones
+            top_level_dirs = get_top_level_directories(root_path)
+            
+            # Search each top-level directory (like /Users, /opt, etc.)
+            for top_dir in top_level_dirs:
+                try:
+                    walk_for_dirs_func(root_path, top_dir, projects_by_root, current_depth=1)
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Skipping {top_dir}: {e}")
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Error accessing root directory: {e}")
+            # Fallback to home directory
+            logger.info("Falling back to home directory search")
+            home_path = Path.home()
+            extract_project_level_rules_with_fallback(
+                home_path, tool_dir_name, extract_from_dir_func, 
+                walk_for_dirs_func, projects_by_root
+            )
+    else:
+        # For non-root paths, use standard rglob
+        for tool_dir in root_path.rglob(tool_dir_name):
+            try:
+                if not should_process_directory(tool_dir, root_path):
+                    continue
+
+                # Extract rules from this tool directory
+                extract_from_dir_func(tool_dir, projects_by_root)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {tool_dir}: {e}")
+                continue
+
+
+def walk_for_tool_directories(
+    root_path: Path,
+    current_dir: Path,
+    tool_dir_name: str,
+    extract_from_dir_func,
+    projects_by_root: Dict[str, List[Dict]],
+    current_depth: int = 0
+) -> None:
+    """
+    Recursively walk directory tree looking for tool-specific directories.
+    
+    This is a generic helper that can be used by any tool's rules extractor.
+    
+    Args:
+        root_path: Root search path (for depth calculation)
+        current_dir: Current directory being processed
+        tool_dir_name: Name of the tool directory to look for (e.g., ".cursor", ".windsurf")
+        extract_from_dir_func: Function to extract rules from a found tool directory
+                              Signature: func(tool_dir: Path, projects_by_root: Dict)
+        projects_by_root: Dictionary to populate with rules
+        current_depth: Current recursion depth
+    """
+    # Check depth limit
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+
+    try:
+        for item in current_dir.iterdir():
+            try:
+                # Check if we should skip this path
+                if should_skip_path(item) or should_skip_system_path(item):
+                    continue
+                
+                # Check depth for this item
+                try:
+                    depth = len(item.relative_to(root_path).parts)
+                    if depth > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    continue
+                
+                if item.is_dir():
+                    # Found the tool directory!
+                    if item.name == tool_dir_name:
+                        # Extract rules from this tool directory
+                        extract_from_dir_func(item, projects_by_root)
+                        # Don't recurse into tool directory
+                        continue
+                    
+                    # Recurse into subdirectories
+                    walk_for_tool_directories(
+                        root_path, item, tool_dir_name, extract_from_dir_func,
+                        projects_by_root, current_depth + 1
+                    )
+                
+            except (PermissionError, OSError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing {item}: {e}")
+                continue
+                
+    except (PermissionError, OSError):
+        pass
+    except Exception as e:
+        logger.debug(f"Error walking {current_dir}: {e}")
+
+
+def extract_project_level_mcp_configs_with_fallback(
+    root_path: Path,
+    tool_dir_name: str,
+    global_tool_dir: Path,
+    extract_from_dir_func,
+    walk_for_configs_func,
+    should_skip_func
+) -> List[Dict]:
+    """
+    Shared helper for extracting project-level MCP configs with root path handling.
+    
+    This function handles the common pattern of:
+    1. If searching from root (/), get top-level directories and walk each
+    2. If searching from non-root, use rglob to find tool directories
+    3. Fallback to home directory if root access fails
+    
+    Args:
+        root_path: Root directory to search from (Path("/") for system-wide, or home)
+        tool_dir_name: Name of the tool directory to search for (e.g., ".cursor", ".windsurf")
+        global_tool_dir: Path to the global tool directory to skip
+        extract_from_dir_func: Function to extract MCP from a found tool directory
+                              Signature: func(tool_dir: Path, projects: List, global_dir: Path)
+        walk_for_configs_func: Function to recursively walk for MCP configs
+                             Signature: func(root_path: Path, current_dir: Path, projects: List,
+                                            global_dir: Path, should_skip: Callable, depth: int)
+        should_skip_func: Function to check if a path should be skipped
+    
+    Returns:
+        List of project dicts with MCP configs
+    """
+    projects = []
+    
+    try:
+        # Get top-level directories, skipping system ones
+        top_level_dirs = get_top_level_directories(root_path)
+        
+        # Search each top-level directory
+        for top_dir in top_level_dirs:
+            try:
+                walk_for_configs_func(
+                    root_path, top_dir, projects, global_tool_dir,
+                    should_skip_func, current_depth=1
+                )
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {top_dir}: {e}")
+                continue
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Error accessing root directory: {e}")
+        # Fallback to home directory
+        logger.info("Falling back to home directory search")
+        home_path = Path.home()
+        
+        for tool_dir in home_path.rglob(tool_dir_name):
+            try:
+                if not should_process_directory(tool_dir, home_path):
+                    continue
+                extract_from_dir_func(tool_dir, projects, global_tool_dir)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {tool_dir}: {e}")
+                continue
+    
+    return projects

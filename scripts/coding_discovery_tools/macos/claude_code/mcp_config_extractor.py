@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...macos_extraction_helpers import is_running_as_root
-from ...mcp_extraction_helpers import extract_claude_mcp_fields
+from ...mcp_extraction_helpers import (
+    extract_claude_mcp_fields,
+    extract_dual_path_configs_with_root_support,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,61 +39,13 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns:
             Dict with MCP config info (projects array) or None if not found
         """
-        all_projects = []
-        
-        # When running as root, collect from ALL users
-        if is_running_as_root():
-            users_dir = Path("/Users")
-            if users_dir.exists():
-                # Collect configs from all users
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        # Try preferred location for this user
-                        user_config = user_dir / ".claude.json"
-                        if user_config.exists():
-                            user_projects = self._extract_from_config_file(user_config)
-                            if user_projects:
-                                all_projects.extend(user_projects)
-                                continue
-                        
-                        # Try fallback location for this user
-                        user_config = user_dir / ".claude" / "mcp.json"
-                        if user_config.exists():
-                            user_projects = self._extract_from_config_file(user_config)
-                            if user_projects:
-                                all_projects.extend(user_projects)
-                
-                # Also check root's config if it exists (only if file exists, don't try if it doesn't)
-                root_config = self.MCP_CONFIG_PATH_PREFERRED
-                if root_config.exists():
-                    root_projects = self._extract_from_config_file(root_config)
-                    if root_projects:
-                        all_projects.extend(root_projects)
-                else:
-                    root_config = self.MCP_CONFIG_PATH_FALLBACK
-                    if root_config.exists():
-                        root_projects = self._extract_from_config_file(root_config)
-                        if root_projects:
-                            all_projects.extend(root_projects)
-            else:
-                # /Users doesn't exist, try root's config (only if file exists)
-                if self.MCP_CONFIG_PATH_PREFERRED.exists():
-                    root_projects = self._extract_from_config_file(self.MCP_CONFIG_PATH_PREFERRED)
-                    if root_projects:
-                        all_projects.extend(root_projects)
-                elif self.MCP_CONFIG_PATH_FALLBACK.exists():
-                    root_projects = self._extract_from_config_file(self.MCP_CONFIG_PATH_FALLBACK)
-                    if root_projects:
-                        all_projects.extend(root_projects)
-        else:
-            # For regular users, check their own home directory
-            user_projects = self._extract_from_config_file(self.MCP_CONFIG_PATH_PREFERRED)
-            if user_projects:
-                all_projects.extend(user_projects)
-            else:
-                user_projects = self._extract_from_config_file(self.MCP_CONFIG_PATH_FALLBACK)
-                if user_projects:
-                    all_projects.extend(user_projects)
+        # Extract configs using dual-path helper
+        all_projects = extract_dual_path_configs_with_root_support(
+            self.MCP_CONFIG_PATH_PREFERRED,
+            self.MCP_CONFIG_PATH_FALLBACK,
+            self._extract_from_config_file,
+            tool_name="Claude Code"
+        )
         
         # Return None if no configs found
         if not all_projects:

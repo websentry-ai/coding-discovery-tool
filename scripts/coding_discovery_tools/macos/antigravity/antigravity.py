@@ -50,7 +50,7 @@ class MacOSAntigravityDetector(BaseToolDetector):
         # Also check if .antigravity directories exist (indicates tool usage)
         # This is similar to how cursor and windsurf work
         home_path = Path.home()
-        if (home_path / ".gemini").exists():
+        if (home_path / ".antigravity").exists():
             return {
                 "name": self.tool_name,
                 "version": None,

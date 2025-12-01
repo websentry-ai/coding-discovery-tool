@@ -21,7 +21,7 @@ class MacOSAntigravityMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract Antigravity MCP configuration on macOS.
         
-        Extracts global MCP config from ~/.gemini/.antigravity/mcp_config.json
+        Extracts global MCP config from ~/.gemini/antigravity/mcp_config.json
         
         Returns:
             Dict with projects array containing MCP configs, or None if no configs found

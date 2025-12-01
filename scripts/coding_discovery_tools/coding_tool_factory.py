@@ -8,7 +8,7 @@ based on the operating system.
 import platform
 from typing import Optional
 
-from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor, BaseWindsurfRulesExtractor, BaseClineRulesExtractor, BaseMCPConfigExtractor
+from .coding_tool_base import BaseDeviceIdExtractor, BaseToolDetector, BaseCursorRulesExtractor, BaseClaudeRulesExtractor, BaseWindsurfRulesExtractor, BaseClineRulesExtractor, BaseAntigravityRulesExtractor, BaseMCPConfigExtractor
 from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetector
 from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
 from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
@@ -22,6 +22,9 @@ from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
 from .macos.cline.cline import MacOSClineDetector
 from .macos.cline.cline_rules_extractor import MacOSClineRulesExtractor
 from .macos.cline.mcp_config_extractor import MacOSClineMCPConfigExtractor
+from .macos.antigravity.antigravity import MacOSAntigravityDetector
+from .macos.antigravity.antigravity_rules_extractor import MacOSAntigravityRulesExtractor
+from .macos.antigravity.mcp_config_extractor import MacOSAntigravityMCPConfigExtractor
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
 from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
@@ -180,6 +183,28 @@ class ToolDetectorFactory:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
     @staticmethod
+    def create_antigravity_detector(os_name: Optional[str] = None) -> BaseToolDetector:
+        """
+        Create appropriate Antigravity detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSAntigravityDetector()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -203,9 +228,10 @@ class ToolDetectorFactory:
             ToolDetectorFactory.create_roo_detector(os_name),
         ]
         
-        # Add Cline detector only for macOS
+        # Add Cline and Antigravity detectors only for macOS
         if os_name == "Darwin":
             detectors.append(ToolDetectorFactory.create_cline_detector(os_name))
+            detectors.append(ToolDetectorFactory.create_antigravity_detector(os_name))
         
         return detectors
 
@@ -452,5 +478,57 @@ class ClineMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSClineMCPConfigExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class AntigravityRulesExtractorFactory:
+    """Factory for creating OS-specific Antigravity rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseAntigravityRulesExtractor:
+        """
+        Create appropriate Antigravity rules extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseAntigravityRulesExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSAntigravityRulesExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class AntigravityMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Antigravity MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseMCPConfigExtractor:
+        """
+        Create appropriate Antigravity MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSAntigravityMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")

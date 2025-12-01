@@ -8,14 +8,10 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...macos_extraction_helpers import (
-    get_top_level_directories,
-    is_running_as_root,
-    should_process_directory,
-    should_skip_path,
-    should_skip_system_path,
+from ...mcp_extraction_helpers import (
+    extract_ide_global_configs_with_root_support,
+    read_ide_global_mcp_config,
 )
-from ...mcp_extraction_helpers import transform_mcp_servers_to_array
 
 logger = logging.getLogger(__name__)
 
@@ -106,26 +102,10 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
         When running as root, collects global configs from ALL users.
         Returns list of configs found.
         """
-        all_configs = []
-        
-        # When running as root, check all users
-        if is_running_as_root():
-            users_dir = Path("/Users")
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        user_configs = self._extract_global_configs_for_user(user_dir)
-                        all_configs.extend(user_configs)
-            
-            # Also check root's configs
-            root_configs = self._extract_global_configs_for_user(Path.home())
-            all_configs.extend(root_configs)
-        else:
-            # For regular users, check their own home directory
-            user_configs = self._extract_global_configs_for_user(Path.home())
-            all_configs.extend(user_configs)
-        
-        return all_configs
+        return extract_ide_global_configs_with_root_support(
+            self._extract_global_configs_for_user,
+            tool_name="Cline"
+        )
     
     def _extract_global_configs_for_user(self, user_home: Path) -> List[Dict]:
         """
@@ -159,33 +139,14 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
         
         Args:
             config_path: Path to the global config file
-            ide_name: Name of the IDE (Code, Cursor, Windsurf)
+            ide_name: Name of the IDE (Code, Cursor, Windsurf) - unused but kept for compatibility
             
         Returns:
             Config dict or None
         """
-        try:
-            content = config_path.read_text(encoding='utf-8', errors='replace')
-            config_data = json.loads(content)
-            
-            mcp_servers_obj = config_data.get("mcpServers", {})
-            
-            # Transform mcpServers from object to array
-            mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-            
-            # Only return if there are MCP servers configured
-            if mcp_servers_array:
-                # Use the full path including cline_mcp_settings.json
-                return {
-                    "path": str(config_path),
-                    "mcpServers": mcp_servers_array
-                }
-        except json.JSONDecodeError as e:
-            logger.warning(f"Invalid JSON in global Cline MCP config {config_path}: {e}")
-        except PermissionError as e:
-            logger.warning(f"Permission denied reading global Cline MCP config {config_path}: {e}")
-        except Exception as e:
-            logger.warning(f"Error reading global Cline MCP config {config_path}: {e}")
-        
-        return None
+        return read_ide_global_mcp_config(
+            config_path,
+            tool_name="Cline",
+            use_full_path=True  # Cline uses full path including cline_mcp_settings.json
+        )
 

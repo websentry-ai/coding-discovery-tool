@@ -408,3 +408,352 @@ def walk_for_roo_mcp_configs(
     except Exception as e:
         logger.debug(f"Error walking {current_dir}: {e}")
 
+
+def read_global_mcp_config(
+    config_path: Path,
+    tool_name: str = "MCP",
+    parent_levels: int = 2
+) -> Optional[Dict]:
+    """
+    Read and parse a global MCP config file.
+    
+    This is a shared helper for reading global MCP configs that follow the standard pattern:
+    - Read JSON file
+    - Extract mcpServers object
+    - Transform to array
+    - Return dict with path and mcpServers
+    
+    Args:
+        config_path: Path to the MCP config JSON file
+        tool_name: Name of the tool (for logging)
+        parent_levels: Number of parent directories to go up for the path (default: 2)
+                      For ~/.cursor/mcp.json -> 2 levels up = ~
+                      For ~/.gemini/antigravity/mcp_config.json -> 3 levels up = ~
+    
+    Returns:
+        Dict with 'path' and 'mcpServers' keys, or None if no servers found
+    """
+    try:
+        content = config_path.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+        
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        
+        # Transform mcpServers from object to array
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+        
+        # Only return if there are MCP servers configured
+        if mcp_servers_array:
+            # Calculate the global config path by going up parent_levels
+            global_config_path = config_path
+            for _ in range(parent_levels):
+                global_config_path = global_config_path.parent
+            return {
+                "path": str(global_config_path),
+                "mcpServers": mcp_servers_array
+            }
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in global {tool_name} MCP config {config_path}: {e}")
+    except PermissionError as e:
+        logger.warning(f"Permission denied reading global {tool_name} MCP config {config_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading global {tool_name} MCP config {config_path}: {e}")
+    
+    return None
+
+
+def extract_global_mcp_config_with_root_support(
+    global_config_path: Path,
+    tool_name: str = "MCP",
+    parent_levels: int = 2
+) -> Optional[Dict]:
+    """
+    Extract global MCP config with support for root/admin user (checks all users).
+    
+    When running as root/admin, this function checks all user directories
+    and returns the first non-empty config found.
+    
+    Args:
+        global_config_path: Path to the global MCP config file (relative to home)
+        tool_name: Name of the tool (for logging)
+        parent_levels: Number of parent directories to go up for the path
+    
+    Returns:
+        Dict with 'path' and 'mcpServers' keys, or None if no config found
+    """
+    import platform
+    
+    # Check if running as admin/root
+    is_admin = False
+    users_dir = None
+    
+    if platform.system() == "Darwin":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/Users")
+        except ImportError:
+            pass
+    elif platform.system() == "Windows":
+        try:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            users_dir = Path("C:\\Users")
+        except Exception:
+            # Fallback: check if current user is Administrator or SYSTEM
+            try:
+                import getpass
+                current_user = getpass.getuser().lower()
+                is_admin = current_user in ["administrator", "system"]
+                users_dir = Path("C:\\Users")
+            except Exception:
+                pass
+    
+    # When running as admin/root, prioritize checking user directories first
+    if is_admin and users_dir and users_dir.exists():
+        for user_dir in users_dir.iterdir():
+            if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                # Build user-specific config path
+                # global_config_path is like ~/.cursor/mcp.json
+                # We need to replace ~ with user_dir
+                try:
+                    user_config_path = user_dir / global_config_path.relative_to(Path.home())
+                    if user_config_path.exists():
+                        config = read_global_mcp_config(user_config_path, tool_name, parent_levels)
+                        if config:
+                            return config
+                except (ValueError, OSError):
+                    # Path might not be relative to home, try direct construction
+                    continue
+        
+        # Fallback to admin's own global config if no user config found
+        if global_config_path.exists():
+            return read_global_mcp_config(global_config_path, tool_name, parent_levels)
+    else:
+        # For regular users, check their own home directory
+        if global_config_path.exists():
+            return read_global_mcp_config(global_config_path, tool_name, parent_levels)
+    
+    return None
+
+
+def extract_ide_global_configs_with_root_support(
+    extract_configs_for_user_func,
+    tool_name: str = "MCP"
+) -> List[Dict]:
+    """
+    Extract global MCP configs from IDE global storage with support for root user.
+    
+    This helper is for tools like Cline and Roo Code that store configs in IDE global storage
+    (multiple configs per user, one per IDE).
+    
+    When running as root/admin, this function checks all user directories
+    and returns all configs found.
+    
+    Args:
+        extract_configs_for_user_func: Function that extracts configs for a specific user
+                                      Signature: func(user_home: Path) -> List[Dict]
+        tool_name: Name of the tool (for logging)
+    
+    Returns:
+        List of config dicts with 'path' and 'mcpServers' keys
+    """
+    import platform
+    
+    all_configs = []
+    
+    # Check if running as admin/root
+    is_admin = False
+    users_dir = None
+    
+    if platform.system() == "Darwin":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/Users")
+        except ImportError:
+            pass
+    elif platform.system() == "Windows":
+        try:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            users_dir = Path("C:\\Users")
+        except Exception:
+            try:
+                import getpass
+                current_user = getpass.getuser().lower()
+                is_admin = current_user in ["administrator", "system"]
+                users_dir = Path("C:\\Users")
+            except Exception:
+                pass
+    
+    # When running as admin/root, check all users
+    if is_admin and users_dir and users_dir.exists():
+        for user_dir in users_dir.iterdir():
+            if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                try:
+                    user_configs = extract_configs_for_user_func(user_dir)
+                    all_configs.extend(user_configs)
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
+                    continue
+        
+        # Also check root/admin's own configs
+        try:
+            root_configs = extract_configs_for_user_func(Path.home())
+            all_configs.extend(root_configs)
+        except Exception as e:
+            logger.debug(f"Error extracting root configs for {tool_name}: {e}")
+    else:
+        # For regular users, check their own home directory
+        try:
+            user_configs = extract_configs_for_user_func(Path.home())
+            all_configs.extend(user_configs)
+        except Exception as e:
+            logger.debug(f"Error extracting user configs for {tool_name}: {e}")
+    
+    return all_configs
+
+
+def read_ide_global_mcp_config(
+    config_path: Path,
+    tool_name: str = "MCP",
+    use_full_path: bool = True
+) -> Optional[Dict]:
+    """
+    Read and parse a global MCP config file from IDE global storage.
+    
+    Args:
+        config_path: Path to the MCP config JSON file
+        tool_name: Name of the tool (for logging)
+        use_full_path: If True, use the full config_path as the path in result.
+                      If False, use parent directory
+    
+    Returns:
+        Dict with 'path' and 'mcpServers' keys, or None if no servers found
+    """
+    try:
+        content = config_path.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+        
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        
+        # Transform mcpServers from object to array
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+        
+        # Only return if there are MCP servers configured
+        if mcp_servers_array:
+            return {
+                "path": str(config_path) if use_full_path else str(config_path.parent),
+                "mcpServers": mcp_servers_array
+            }
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in global {tool_name} MCP config {config_path}: {e}")
+    except PermissionError as e:
+        logger.warning(f"Permission denied reading global {tool_name} MCP config {config_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading global {tool_name} MCP config {config_path}: {e}")
+    
+    return None
+
+
+def extract_dual_path_configs_with_root_support(
+    preferred_path: Path,
+    fallback_path: Path,
+    extract_from_file_func,
+    tool_name: str = "MCP"
+) -> List[Dict]:
+    """
+    Extract configs from dual paths (preferred + fallback) with root user support.
+    
+    This helper is for tools like Claude Code that have two possible config locations.
+    It tries the preferred path first, then falls back to the fallback path.
+    
+    When running as root/admin, checks all user directories.
+    
+    Args:
+        preferred_path: Preferred config file path (relative to home)
+        fallback_path: Fallback config file path (relative to home)
+        extract_from_file_func: Function to extract configs from a file
+                               Signature: func(config_path: Path) -> List[Dict]
+        tool_name: Name of the tool (for logging)
+    
+    Returns:
+        List of config dicts
+    """
+    import platform
+    
+    all_projects = []
+    
+    # Check if running as admin/root
+    is_admin = False
+    users_dir = None
+    
+    if platform.system() == "Darwin":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/Users")
+        except ImportError:
+            pass
+    elif platform.system() == "Windows":
+        try:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            users_dir = Path("C:\\Users")
+        except Exception:
+            try:
+                import getpass
+                current_user = getpass.getuser().lower()
+                is_admin = current_user in ["administrator", "system"]
+                users_dir = Path("C:\\Users")
+            except Exception:
+                pass
+    
+    # When running as admin/root, check all users
+    if is_admin and users_dir and users_dir.exists():
+        for user_dir in users_dir.iterdir():
+            if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                # Try preferred location for this user
+                try:
+                    user_preferred = user_dir / preferred_path.relative_to(Path.home())
+                    if user_preferred.exists():
+                        user_projects = extract_from_file_func(user_preferred)
+                        if user_projects:
+                            all_projects.extend(user_projects)
+                            continue
+                except (ValueError, OSError):
+                    pass
+                
+                # Try fallback location for this user
+                try:
+                    user_fallback = user_dir / fallback_path.relative_to(Path.home())
+                    if user_fallback.exists():
+                        user_projects = extract_from_file_func(user_fallback)
+                        if user_projects:
+                            all_projects.extend(user_projects)
+                except (ValueError, OSError):
+                    pass
+        
+        # Also check root/admin's configs
+        if preferred_path.exists():
+            root_projects = extract_from_file_func(preferred_path)
+            if root_projects:
+                all_projects.extend(root_projects)
+        elif fallback_path.exists():
+            root_projects = extract_from_file_func(fallback_path)
+            if root_projects:
+                all_projects.extend(root_projects)
+    else:
+        # For regular users, check their own home directory
+        if preferred_path.exists():
+            user_projects = extract_from_file_func(preferred_path)
+            if user_projects:
+                all_projects.extend(user_projects)
+        elif fallback_path.exists():
+            user_projects = extract_from_file_func(fallback_path)
+            if user_projects:
+                all_projects.extend(user_projects)
+    
+    return all_projects
+

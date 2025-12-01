@@ -42,3 +42,6 @@ Thumbs.db
 
 # Roo Code config
 .roo/
+
+# Antigravity config
+.agent/

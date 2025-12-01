@@ -87,17 +87,13 @@ class AIToolsDetector:
             self._windsurf_mcp_extractor = WindsurfMCPConfigExtractorFactory.create(self.system)
             self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
             
-            # Initialize Cline and Antigravity extractors only for macOS
-            if self.system == "Darwin":
-                self._cline_rules_extractor = ClineRulesExtractorFactory.create(self.system)
-                self._cline_mcp_extractor = ClineMCPConfigExtractorFactory.create(self.system)
-                self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
-                self._antigravity_mcp_extractor = AntigravityMCPConfigExtractorFactory.create(self.system)
-            else:
-                self._cline_rules_extractor = None
-                self._cline_mcp_extractor = None
-                self._antigravity_rules_extractor = None
-                self._antigravity_mcp_extractor = None
+            # Initialize Cline extractors (returns None for unsupported OS)
+            self._cline_rules_extractor = ClineRulesExtractorFactory.create(self.system)
+            self._cline_mcp_extractor = ClineMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Antigravity extractors for both macOS and Windows
+            self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
+            self._antigravity_mcp_extractor = AntigravityMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise

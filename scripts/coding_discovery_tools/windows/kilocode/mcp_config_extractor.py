@@ -24,14 +24,14 @@ class WindowsKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
 
     # Code base global storage paths for different IDEs
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
-    IDE_NAMES = ['Code', 'Cursor']
+    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Antigravity']
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract Kilo Code MCP configuration on Windows.
         
         Extracts both global and project-level MCP configs.
-        Global configs are stored in code base global storage for different IDEs (Code, Cursor).
+        Global configs are stored in code base global storage for different IDEs (Code, Cursor, Windsurf, Antigravity).
         Project-level configs are in .kilocode/mcp.json files.
         
         Returns:

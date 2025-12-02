@@ -7,7 +7,7 @@ from .cursor import MacOSCursorDetector
 from .claude_code import MacOSClaudeDetector
 from .windsurf import MacOSWindsurfDetector
 from .roo_code import MacOSRooDetector
-from .kilocode import MacOSKiloCodeDetector
+from .cline import MacOSClineDetector
 
 __all__ = [
     'MacOSDeviceIdExtractor',
@@ -15,6 +15,6 @@ __all__ = [
     'MacOSClaudeDetector',
     'MacOSWindsurfDetector',
     'MacOSRooDetector',
-    'MacOSKiloCodeDetector',
+    'MacOSClineDetector',
 ]
 

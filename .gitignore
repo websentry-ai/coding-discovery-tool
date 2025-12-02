@@ -37,8 +37,11 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Cursor MCP config
-.cursor/mcp.json
+# Cursor config
+.cursor/
 
 # Roo Code config
 .roo/
+
+# Antigravity config
+.agent/

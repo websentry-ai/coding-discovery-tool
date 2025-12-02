@@ -2,7 +2,6 @@
 MCP config extraction for Windsurf on Windows systems.
 """
 
-import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -13,7 +12,7 @@ from ...windows_extraction_helpers import should_skip_path
 from ...mcp_extraction_helpers import (
     extract_windsurf_mcp_from_dir,
     walk_for_windsurf_mcp_configs,
-    transform_mcp_servers_to_array,
+    extract_global_mcp_config_with_root_support,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,35 +52,14 @@ class WindowsWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
         }
 
     def _extract_global_config(self) -> Optional[Dict]:
-        r"""Extract global MCP config from ~/.windsurf/mcp_config.json"""
-        if not self.GLOBAL_MCP_CONFIG_PATH.exists():
-            return None
-        
-        try:
-            content = self.GLOBAL_MCP_CONFIG_PATH.read_text(encoding='utf-8', errors='replace')
-            config_data = json.loads(content)
-            
-            mcp_servers_obj = config_data.get("mcpServers", {})
-            
-            # Transform mcpServers from object to array
-            mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-            
-            # Only return if there are MCP servers configured
-            if mcp_servers_array:
-                # Use the actual path of the global config file's parent directory (Windsurf directory)
-                global_config_path = str(self.GLOBAL_MCP_CONFIG_PATH.parent)
-                return {
-                    "path": global_config_path,
-                    "mcpServers": mcp_servers_array
-                }
-        except json.JSONDecodeError as e:
-            logger.warning(f"Invalid JSON in global Windsurf MCP config {self.GLOBAL_MCP_CONFIG_PATH}: {e}")
-        except PermissionError as e:
-            logger.warning(f"Permission denied reading global Windsurf MCP config {self.GLOBAL_MCP_CONFIG_PATH}: {e}")
-        except Exception as e:
-            logger.warning(f"Error reading global Windsurf MCP config {self.GLOBAL_MCP_CONFIG_PATH}: {e}")
-        
-        return None
+        """Extract global MCP config from ~/.codeium/windsurf/mcp_config.json"""
+        # Note: Windows uses parent_levels=1 because path is ~/.codeium/windsurf/mcp_config.json
+        # and we want ~/.codeium/windsurf as the path
+        return extract_global_mcp_config_with_root_support(
+            self.GLOBAL_MCP_CONFIG_PATH,
+            tool_name="Windsurf",
+            parent_levels=1  # ~/.codeium/windsurf/mcp_config.json -> 1 level up = ~/.codeium/windsurf
+        )
 
     def _extract_project_level_configs(self) -> List[Dict]:
         """

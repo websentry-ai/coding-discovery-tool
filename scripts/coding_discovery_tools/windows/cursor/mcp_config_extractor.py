@@ -2,7 +2,6 @@
 MCP config extraction for Cursor on Windows systems.
 """
 
-import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -13,7 +12,7 @@ from ...windows_extraction_helpers import should_skip_path
 from ...mcp_extraction_helpers import (
     extract_cursor_mcp_from_dir,
     walk_for_cursor_mcp_configs,
-    transform_mcp_servers_to_array,
+    extract_global_mcp_config_with_root_support,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,70 +58,13 @@ class WindowsCursorMCPConfigExtractor(BaseMCPConfigExtractor):
         When running as admin, collects global configs from ALL users.
         Returns the first non-empty config found, or None if none found.
         """
-        # When running as admin, prioritize checking user directories first
-        is_admin = self._is_running_as_admin()
-        users_dir = Path("C:\\Users")
-        
-        if is_admin and users_dir.exists():
-            for user_dir in users_dir.iterdir():
-                if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                    user_global_config = user_dir / ".cursor" / "mcp.json"
-                    if user_global_config.exists():
-                        config = self._read_global_config(user_global_config)
-                        if config:
-                            return config
-            
-            # Fallback to admin's own global config if no user config found
-            if self.GLOBAL_MCP_CONFIG_PATH.exists():
-                return self._read_global_config(self.GLOBAL_MCP_CONFIG_PATH)
-        else:
-            # For regular users, check their own home directory
-            if self.GLOBAL_MCP_CONFIG_PATH.exists():
-                return self._read_global_config(self.GLOBAL_MCP_CONFIG_PATH)
-        
-        return None
-    
-    def _is_running_as_admin(self) -> bool:
-        """Check if running as administrator on Windows."""
-        try:
-            import ctypes
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except Exception:
-            # Fallback: check if current user is Administrator or SYSTEM (exact match only)
-            try:
-                import getpass
-                current_user = getpass.getuser().lower()
-                return current_user in ["administrator", "system"]
-            except Exception:
-                return False
-    
-    def _read_global_config(self, config_path: Path) -> Optional[Dict]:
-        """Read and parse a global MCP config file."""
-        try:
-            content = config_path.read_text(encoding='utf-8', errors='replace')
-            config_data = json.loads(content)
-            
-            mcp_servers_obj = config_data.get("mcpServers", {})
-            
-            # Transform mcpServers from object to array
-            mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-            
-            # Only return if there are MCP servers configured
-            if mcp_servers_array:
-                # Use the actual path of the global config file's parent directory (Cursor directory)
-                global_config_path = str(config_path.parent)
-                return {
-                    "path": global_config_path,
-                    "mcpServers": mcp_servers_array
-                }
-        except json.JSONDecodeError as e:
-            logger.warning(f"Invalid JSON in global MCP config {config_path}: {e}")
-        except PermissionError as e:
-            logger.warning(f"Permission denied reading global MCP config {config_path}: {e}")
-        except Exception as e:
-            logger.warning(f"Error reading global MCP config {config_path}: {e}")
-        
-        return None
+        # Note: Windows uses parent_levels=1 because path is ~/.cursor/mcp.json
+        # and we want ~/.cursor as the path (not ~)
+        return extract_global_mcp_config_with_root_support(
+            self.GLOBAL_MCP_CONFIG_PATH,
+            tool_name="Cursor",
+            parent_levels=1  # ~/.cursor/mcp.json -> 1 level up = ~/.cursor
+        )
 
     def _extract_project_level_configs(self) -> List[Dict]:
         """

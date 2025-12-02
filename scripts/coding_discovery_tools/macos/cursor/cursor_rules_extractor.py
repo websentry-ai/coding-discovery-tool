@@ -16,10 +16,8 @@ from ...macos_extraction_helpers import (
     build_project_list,
     extract_single_rule_file,
     find_cursor_project_root,
-    get_top_level_directories,
-    should_process_directory,
-    should_skip_path,
-    should_skip_system_path,
+    extract_project_level_rules_with_fallback,
+    walk_for_tool_directories,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,94 +54,20 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
             root_path: Root directory to search from (system root for MDM)
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        # When searching from root, iterate top-level directories first to avoid system paths
-        if root_path == Path("/"):
-            try:
-                # Get top-level directories, skipping system ones
-                top_level_dirs = get_top_level_directories(root_path)
-                
-                # Search each top-level directory (like /Users, /opt, etc.)
-                for top_dir in top_level_dirs:
-                    try:
-                        self._walk_for_cursor_directories(root_path, top_dir, projects_by_root, current_depth=1)
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Skipping {top_dir}: {e}")
-                        continue
-            except (PermissionError, OSError) as e:
-                logger.warning(f"Error accessing root directory: {e}")
-                # Fallback to home directory
-                logger.info("Falling back to home directory search")
-                home_path = Path.home()
-                self._extract_project_level_rules(home_path, projects_by_root)
-        else:
-            # For non-root paths, use standard rglob
-            for cursor_dir in root_path.rglob(".cursor"):
-                try:
-                    if not should_process_directory(cursor_dir, root_path):
-                        continue
-
-                    # Extract rules from this .cursor directory
-                    self._extract_rules_from_cursor_directory(cursor_dir, projects_by_root)
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Skipping {cursor_dir}: {e}")
-                    continue
-
-    def _walk_for_cursor_directories(
-        self,
-        root_path: Path,
-        current_dir: Path,
-        projects_by_root: Dict[str, List[Dict]],
-        current_depth: int = 0
-    ) -> None:
-        """
-        Recursively walk directory tree looking for .cursor directories.
+        def walk_for_cursor_dirs(root: Path, current: Path, projects: Dict, current_depth: int = 0) -> None:
+            """Wrapper to use shared walk helper with tool-specific extraction."""
+            walk_for_tool_directories(
+                root, current, ".cursor", self._extract_rules_from_cursor_directory,
+                projects, current_depth
+            )
         
-        Args:
-            root_path: Root search path (for depth calculation)
-            current_dir: Current directory being processed
-            projects_by_root: Dictionary to populate with rules
-            current_depth: Current recursion depth
-        """
-        # Check depth limit
-        if current_depth > MAX_SEARCH_DEPTH:
-            return
-
-        try:
-            for item in current_dir.iterdir():
-                try:
-                    # Check if we should skip this path
-                    if should_skip_path(item) or should_skip_system_path(item):
-                        continue
-                    
-                    # Check depth for this item
-                    try:
-                        depth = len(item.relative_to(root_path).parts)
-                        if depth > MAX_SEARCH_DEPTH:
-                            continue
-                    except ValueError:
-                        continue
-                    
-                    if item.is_dir():
-                        # Found a .cursor directory!
-                        if item.name == ".cursor":
-                            # Extract rules from this .cursor directory
-                            self._extract_rules_from_cursor_directory(item, projects_by_root)
-                            # Don't recurse into .cursor directory
-                            continue
-                        
-                        # Recurse into subdirectories
-                        self._walk_for_cursor_directories(root_path, item, projects_by_root, current_depth + 1)
-                    
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {item}: {e}")
-                    continue
-                    
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error walking {current_dir}: {e}")
+        extract_project_level_rules_with_fallback(
+            root_path,
+            ".cursor",
+            self._extract_rules_from_cursor_directory,
+            walk_for_cursor_dirs,
+            projects_by_root
+        )
 
 
     def _extract_rules_from_cursor_directory(self, cursor_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:

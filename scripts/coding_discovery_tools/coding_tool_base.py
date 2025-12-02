@@ -119,6 +119,48 @@ class BaseWindsurfRulesExtractor(ABC):
         pass
 
 
+class BaseClineRulesExtractor(ABC):
+    """Abstract base class for extracting Cline rules from all projects."""
+
+    @abstractmethod
+    def extract_all_cline_rules(self) -> List[Dict]:
+        """
+        Extract all Cline rules from all projects on the machine.
+        
+        Searches for:
+        - Workspace-level rules: **/.clinerules/*.md (recursive)
+        - Global rules: ~/Documents/Cline/Rules/*.md or ~/Cline/Rules/*.md
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
+class BaseAntigravityRulesExtractor(ABC):
+    """Abstract base class for extracting Antigravity rules from all projects."""
+
+    @abstractmethod
+    def extract_all_antigravity_rules(self) -> List[Dict]:
+        """
+        Extract all Antigravity rules from all projects on the machine.
+        
+        Searches for:
+        - Project-level rules: **/.agent/rules/*.md (recursive)
+        - Global rules: ~/.gemini/GEMINI.md
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseKiloCodeRulesExtractor(ABC):
     """Abstract base class for extracting Kilo Code rules from all projects."""
 
@@ -128,7 +170,7 @@ class BaseKiloCodeRulesExtractor(ABC):
         Extract all Kilo Code rules from all projects on the machine.
         
         Searches for:
-        - Workspace-level rules: **/.kilocode/rules/*.md (recursive)
+        - Project-level rules: **/.kilocode/rules/*.md (recursive)
         - Global rules: ~/.kilocode/rules/*.md
         
         Returns:

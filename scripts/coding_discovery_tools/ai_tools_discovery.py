@@ -21,11 +21,15 @@ try:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
+        ClineRulesExtractorFactory,
+        AntigravityRulesExtractorFactory,
         KiloCodeRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
+        ClineMCPConfigExtractorFactory,
+        AntigravityMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
@@ -38,11 +42,15 @@ except ImportError:
         CursorRulesExtractorFactory,
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
+        ClineRulesExtractorFactory,
+        AntigravityRulesExtractorFactory,
         KiloCodeRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
+        ClineMCPConfigExtractorFactory,
+        AntigravityMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
@@ -73,23 +81,36 @@ class AIToolsDetector:
         self.system = os_name or platform.system()
         
         try:
+            # Initialize shared extractors
             self._device_id_extractor = DeviceIdExtractorFactory.create(self.system)
             self._tool_detectors = ToolDetectorFactory.create_all_tool_detectors(self.system)
+            
+            # Initialize Cursor extractors
             self._cursor_rules_extractor = CursorRulesExtractorFactory.create(self.system)
-            self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
-            self._windsurf_rules_extractor = WindsurfRulesExtractorFactory.create(self.system)
             self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Claude Code extractors
+            self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Windsurf extractors
+            self._windsurf_rules_extractor = WindsurfRulesExtractorFactory.create(self.system)
             self._windsurf_mcp_extractor = WindsurfMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Roo Code extractors (MCP only)
             self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
             
-            # Initialize Kilo Code extractors only for macOS
-            if self.system == "Darwin":
-                self._kilocode_rules_extractor = KiloCodeRulesExtractorFactory.create(self.system)
-                self._kilocode_mcp_extractor = KiloCodeMCPConfigExtractorFactory.create(self.system)
-            else:
-                self._kilocode_rules_extractor = None
-                self._kilocode_mcp_extractor = None
+            # Initialize Cline extractors (macOS only, returns None for unsupported OS)
+            self._cline_rules_extractor = ClineRulesExtractorFactory.create(self.system)
+            self._cline_mcp_extractor = ClineMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Antigravity extractors (macOS and Windows)
+            self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
+            self._antigravity_mcp_extractor = AntigravityMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Kilo Code extractors (macOS only, returns None for unsupported OS)
+            self._kilocode_rules_extractor = KiloCodeRulesExtractorFactory.create(self.system)
+            self._kilocode_mcp_extractor = KiloCodeMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -182,6 +203,40 @@ class AIToolsDetector:
             return self._windsurf_rules_extractor.extract_all_windsurf_rules()
         except Exception as e:
             logger.error(f"Error extracting Windsurf rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_antigravity_rules(self) -> List[Dict]:
+        """
+        Extract all Antigravity rules from all projects.
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._antigravity_rules_extractor:
+                return self._antigravity_rules_extractor.extract_all_antigravity_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Antigravity rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_kilocode_rules(self) -> List[Dict]:
+        """
+        Extract all Kilo Code rules from all projects.
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._kilocode_rules_extractor:
+                return self._kilocode_rules_extractor.extract_all_kilocode_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Kilo Code rules: {e}", exc_info=True)
             return []
 
     def _merge_mcp_configs_into_projects(
@@ -528,7 +583,101 @@ class AIToolsDetector:
             else:
                 logger.info("  ⚠ No MCP configs found")
         
-        elif tool_name == "kilo code":
+        elif tool_name == "cline":
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            # Extract rules
+            logger.info(f"  Extracting {tool.get('name')} rules...")
+            if self._cline_rules_extractor:
+                cline_projects = self._cline_rules_extractor.extract_all_cline_rules()
+                num_projects_with_rules = len(cline_projects)
+                total_rules = sum(len(project.get("rules", [])) for project in cline_projects)
+                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
+                
+                projects_dict = {
+                    project["project_root"]: {
+                        "path": project["project_root"],
+                        "rules": project.get("rules", [])
+                    }
+                    for project in cline_projects
+                }
+                
+                # Log rules details
+                if total_rules > 0:
+                    self._log_rules_details(projects_dict, tool.get('name'))
+            else:
+                logger.info("  ⚠ Cline rules extractor not available for this OS")
+                projects_dict = {}
+            
+            # Extract and merge MCP configs
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+            if self._cline_mcp_extractor:
+                cline_mcp_config = self._cline_mcp_extractor.extract_mcp_config()
+                if cline_mcp_config and "projects" in cline_mcp_config:
+                    num_mcp_projects = len(cline_mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    self._merge_mcp_configs_into_projects(
+                        cline_mcp_config["projects"],
+                        projects_dict
+                    )
+                    # Log MCP details
+                    self._log_mcp_details(projects_dict, tool.get('name'))
+                else:
+                    logger.info("  ⚠ No MCP configs found")
+            else:
+                logger.info("  ⚠ Cline MCP extractor not available for this OS")
+        
+        elif tool_name == "antigravity":
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            # Extract rules
+            logger.info(f"  Extracting {tool.get('name')} rules...")
+            if self._antigravity_rules_extractor:
+                antigravity_projects = self._antigravity_rules_extractor.extract_all_antigravity_rules()
+                num_projects_with_rules = len(antigravity_projects)
+                total_rules = sum(len(project.get("rules", [])) for project in antigravity_projects)
+                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
+                
+                projects_dict = {
+                    project["project_root"]: {
+                        "path": project["project_root"],
+                        "rules": project.get("rules", [])
+                    }
+                    for project in antigravity_projects
+                }
+                
+                # Log rules details
+                if total_rules > 0:
+                    self._log_rules_details(projects_dict, tool.get('name'))
+            else:
+                logger.info("  ⚠ Antigravity rules extractor not available for this OS")
+                projects_dict = {}
+            
+            # Extract and merge MCP configs
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+            if self._antigravity_mcp_extractor:
+                antigravity_mcp_config = self._antigravity_mcp_extractor.extract_mcp_config()
+                if antigravity_mcp_config and "projects" in antigravity_mcp_config:
+                    num_mcp_projects = len(antigravity_mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    self._merge_mcp_configs_into_projects(
+                        antigravity_mcp_config["projects"],
+                        projects_dict
+                    )
+                    # Log MCP details
+                    self._log_mcp_details(projects_dict, tool.get('name'))
+                else:
+                    logger.info("  ⚠ No MCP configs found")
+            else:
+                logger.info("  ⚠ Antigravity MCP extractor not available for this OS")
+        
+        elif tool_name == "kilocode" or tool_name == "kilo code":
             logger.info("")
             logger.info("=" * 70)
             logger.info(f"Processing: {tool.get('name')}")
@@ -571,7 +720,7 @@ class AIToolsDetector:
                     # Log MCP details
                     self._log_mcp_details(projects_dict, tool.get('name'))
                 else:
-                    logger.info("  ⚠ No MCP configs found")
+                    logger.info("  ℹ No MCP configs found")
             else:
                 logger.info("  ⚠ Kilo Code MCP extractor not available for this OS")
         

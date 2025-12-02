@@ -12,8 +12,8 @@ from ...mcp_extraction_helpers import (
     walk_for_roo_mcp_configs,
     extract_ide_global_configs_with_root_support,
     read_ide_global_mcp_config,
+    extract_project_level_mcp_configs_with_fallback_windows,
 )
-from ...macos_extraction_helpers import extract_project_level_mcp_configs_with_fallback
 from ...windows_extraction_helpers import should_skip_path
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ class WindowsRooMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract project-level MCP configs from all .roo/mcp.json files.
         
-        Uses optimized walker with parallel processing for Windows.
+        Uses Windows-specific implementation with proper system directory skipping.
         """
         root_drive = Path.home().anchor  # Gets the root drive like "C:\"
         root_path = Path(root_drive)
@@ -125,7 +125,7 @@ class WindowsRooMCPConfigExtractor(BaseMCPConfigExtractor):
             system_dirs = self._get_system_directories()
             return should_skip_path(item, system_dirs)
         
-        return extract_project_level_mcp_configs_with_fallback(
+        return extract_project_level_mcp_configs_with_fallback_windows(
             root_path,
             ".roo",
             None,  # No global directory to skip

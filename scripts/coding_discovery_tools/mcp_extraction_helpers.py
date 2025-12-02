@@ -627,6 +627,83 @@ def read_ide_global_mcp_config(
     return None
 
 
+def extract_project_level_mcp_configs_with_fallback_windows(
+    root_path: Path,
+    tool_dir_name: str,
+    global_tool_dir: Optional[Path],
+    extract_from_dir_func,
+    walk_for_configs_func: Callable,
+    should_skip_func: Callable[[Path], bool]
+) -> List[Dict]:
+    """
+    Windows-specific helper for extracting project-level MCP configs with root path handling.
+    
+    This function handles the common pattern for Windows:
+    1. If searching from root drive (C:\), get top-level directories and walk each
+    2. If searching from non-root, use rglob to find tool directories
+    3. Fallback to home directory if root access fails
+    
+    Uses Windows-specific system directory skipping.
+    
+    Args:
+        root_path: Root directory to search from (root drive for MDM)
+        tool_dir_name: Name of the tool directory to search for (e.g., ".cursor", ".windsurf", ".roo")
+        global_tool_dir: Path to the global tool directory to skip
+        extract_from_dir_func: Function to extract MCP from a found tool directory
+                              Signature: func(tool_dir: Path, projects: List, global_dir: Path)
+        walk_for_configs_func: Function to recursively walk for MCP configs
+                             Signature: func(root_path: Path, current_dir: Path, projects: List,
+                                            global_dir: Path, should_skip: Callable, depth: int)
+        should_skip_func: Function to check if a path should be skipped (Windows-specific)
+    
+    Returns:
+        List of project dicts with MCP configs
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    projects = []
+    
+    try:
+        # Get top-level directories, skipping system ones using Windows-specific logic
+        top_level_dirs = [
+            item for item in root_path.iterdir()
+            if item.is_dir() and not should_skip_func(item)
+        ]
+        
+        # Use parallel processing for top-level directories
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(
+                    walk_for_configs_func,
+                    root_path, dir_path, projects, global_tool_dir,
+                    should_skip_func, current_depth=1
+                )
+                for dir_path in top_level_dirs
+            }
+            
+            for future in as_completed(futures):
+                try:
+                    future.result()  # Raises exception if any occurred
+                except Exception as e:
+                    logger.debug(f"Error in parallel processing: {e}")
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Error accessing root directory: {e}")
+        # Fallback to home directory
+        logger.info("Falling back to home directory search")
+        home_path = Path.home()
+        
+        for tool_dir in home_path.rglob(tool_dir_name):
+            try:
+                if should_skip_func(tool_dir):
+                    continue
+                extract_from_dir_func(tool_dir, projects, global_tool_dir)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {tool_dir}: {e}")
+                continue
+    
+    return projects
+
+
 def extract_dual_path_configs_with_root_support(
     preferred_path: Path,
     fallback_path: Path,

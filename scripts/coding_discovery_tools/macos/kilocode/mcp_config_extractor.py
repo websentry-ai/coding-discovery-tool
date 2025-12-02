@@ -28,14 +28,14 @@ class MacOSKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
 
     # Code base global storage paths for different IDEs
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
-    IDE_NAMES = ['Code', 'Cursor']
+    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Antigravity']
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract Kilo Code MCP configuration on macOS.
         
         Extracts both global and project-level MCP configs.
-        Global configs are stored in code base global storage for different IDEs (Code, Cursor).
+        Global configs are stored in code base global storage for different IDEs (Code, Cursor, Windsurf, Antigravity).
         Project-level configs are in .kilocode/mcp.json files.
         
         Returns:
@@ -86,7 +86,12 @@ class MacOSKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
         
         # Check each IDE
         for ide_name in self.IDE_NAMES:
-            config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
+            # Try with settings subdirectory first (actual structure)
+            config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "settings" / "mcp_settings.json"
+            if not config_path.exists():
+                # Fallback to direct path (for compatibility)
+                config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
+            
             if config_path.exists():
                 config = self._read_global_config(config_path, ide_name)
                 if config:

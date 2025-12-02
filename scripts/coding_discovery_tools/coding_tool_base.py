@@ -182,6 +182,28 @@ class BaseKiloCodeRulesExtractor(ABC):
         pass
 
 
+class BaseGeminiCliRulesExtractor(ABC):
+    """Abstract base class for extracting Gemini CLI rules from all projects."""
+
+    @abstractmethod
+    def extract_all_gemini_cli_rules(self) -> List[Dict]:
+        """
+        Extract all Gemini CLI rules from all projects on the machine.
+        
+        Searches for:
+        - Global context: ~/.gemini/GEMINI.md
+        - Project context: GEMINI.md in current working directory or any parent directory
+        - Sub-directory context: GEMINI.md files in subdirectories
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

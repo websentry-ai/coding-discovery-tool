@@ -18,6 +18,7 @@ from .coding_tool_base import (
     BaseClineRulesExtractor,
     BaseAntigravityRulesExtractor,
     BaseKiloCodeRulesExtractor,
+    BaseGeminiCliRulesExtractor,
     BaseMCPConfigExtractor,
 )
 
@@ -59,6 +60,11 @@ from .macos.antigravity.mcp_config_extractor import MacOSAntigravityMCPConfigExt
 from .macos.kilocode.kilocode import MacOSKiloCodeDetector
 from .macos.kilocode.kilocode_rules_extractor import MacOSKiloCodeRulesExtractor
 from .macos.kilocode.mcp_config_extractor import MacOSKiloCodeMCPConfigExtractor
+
+# macOS - Gemini CLI
+from .macos.gemini_cli.gemini_cli import MacOSGeminiCliDetector
+from .macos.gemini_cli.gemini_cli_rules_extractor import MacOSGeminiCliRulesExtractor
+from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtractor
 
 # Windows - Shared
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
@@ -280,6 +286,25 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_gemini_cli_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Gemini CLI detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSGeminiCliDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -314,6 +339,11 @@ class ToolDetectorFactory:
         kilocode_detector = ToolDetectorFactory.create_kilocode_detector(os_name)
         if kilocode_detector is not None:
             detectors.append(kilocode_detector)
+        
+        # Add Gemini CLI detector for macOS only
+        gemini_cli_detector = ToolDetectorFactory.create_gemini_cli_detector(os_name)
+        if gemini_cli_detector is not None:
+            detectors.append(gemini_cli_detector)
         
         # Filter out None values
         return [detector for detector in detectors if detector is not None]
@@ -658,5 +688,51 @@ class KiloCodeMCPConfigExtractorFactory:
             return MacOSKiloCodeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsKiloCodeMCPConfigExtractor()
+        else:
+            return None
+
+
+class GeminiCliRulesExtractorFactory:
+    """Factory for creating OS-specific Gemini CLI rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseGeminiCliRulesExtractor]:
+        """
+        Create appropriate Gemini CLI rules extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseGeminiCliRulesExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSGeminiCliRulesExtractor()
+        else:
+            return None
+
+
+class GeminiCliMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Gemini CLI MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate Gemini CLI MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSGeminiCliMCPConfigExtractor()
         else:
             return None

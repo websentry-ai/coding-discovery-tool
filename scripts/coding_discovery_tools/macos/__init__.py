@@ -8,6 +8,7 @@ from .claude_code import MacOSClaudeDetector
 from .windsurf import MacOSWindsurfDetector
 from .roo_code import MacOSRooDetector
 from .cline import MacOSClineDetector
+from .gemini_cli import MacOSGeminiCliDetector
 
 __all__ = [
     'MacOSDeviceIdExtractor',
@@ -16,5 +17,6 @@ __all__ = [
     'MacOSWindsurfDetector',
     'MacOSRooDetector',
     'MacOSClineDetector',
+    'MacOSGeminiCliDetector',
 ]
 

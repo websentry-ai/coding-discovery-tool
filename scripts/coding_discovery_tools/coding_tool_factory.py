@@ -77,6 +77,11 @@ from .windows.antigravity.antigravity import WindowsAntigravityDetector
 from .windows.antigravity.antigravity_rules_extractor import WindowsAntigravityRulesExtractor
 from .windows.antigravity.mcp_config_extractor import WindowsAntigravityMCPConfigExtractor
 
+# Windows - Cline
+from .windows.cline.cline import WindowsClineDetector
+from .windows.cline.cline_rules_extractor import WindowsClineRulesExtractor
+from .windows.cline.mcp_config_extractor import WindowsClineMCPConfigExtractor
+
 # Windows - Kilo Code
 from .windows.kilocode.kilocode import WindowsKiloCodeDetector
 from .windows.kilocode.kilocode_rules_extractor import WindowsKiloCodeRulesExtractor
@@ -221,6 +226,8 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSClineDetector()
+        elif os_name == "Windows":
+            return WindowsClineDetector()
         else:
             return None
 
@@ -287,7 +294,7 @@ class ToolDetectorFactory:
             ToolDetectorFactory.create_roo_detector(os_name),
         ]
         
-        # Add Cline detector only for macOS
+        # Add Cline detector for macOS and Windows
         cline_detector = ToolDetectorFactory.create_cline_detector(os_name)
         if cline_detector is not None:
             detectors.append(cline_detector)
@@ -516,6 +523,8 @@ class ClineRulesExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSClineRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsClineRulesExtractor()
         else:
             return None
 
@@ -539,6 +548,8 @@ class ClineMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSClineMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsClineMCPConfigExtractor()
         else:
             return None
 

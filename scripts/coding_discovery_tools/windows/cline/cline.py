@@ -1,10 +1,10 @@
 """
-Kilo Code detection for Windows.
+Cline detection for Windows.
 
-Kilo Code is an AI-powered coding assistant that operates as a VS Code extension.
-This module detects Kilo Code installations by checking for:
-1. IDE installations (VS Code, Cursor)
-2. Kilo Code extension settings in IDE global storage directories
+Cline is an AI-powered coding assistant that operates as a VS Code extension.
+This module detects Cline installations by checking for:
+1. IDE installations (VS Code, Cursor, Windsurf)
+2. Cline extension settings in IDE global storage directories
 """
 
 import logging
@@ -16,29 +16,29 @@ from ...coding_tool_base import BaseToolDetector
 logger = logging.getLogger(__name__)
 
 
-class WindowsKiloCodeDetector(BaseToolDetector):
+class WindowsClineDetector(BaseToolDetector):
     """
-    Detector for Kilo Code installations on Windows systems.
+    Detector for Cline installations on Windows systems.
     
-    Kilo Code operates as a VS Code extension, so detection involves:
-    - Checking for compatible IDE installations (VS Code, Cursor)
-    - Verifying Kilo Code extension settings exist in IDE global storage
+    Cline operates as a VS Code extension, so detection involves:
+    - Checking for compatible IDE installations (VS Code, Cursor, Windsurf)
+    - Verifying Cline extension settings exist in IDE global storage
     """
 
-    # Supported IDEs that can host the Kilo Code extension
-    SUPPORTED_IDES = ['Code', 'Cursor']
+    # Supported IDEs that can host the Cline extension
+    SUPPORTED_IDES = ['Code', 'Cursor', 'Windsurf']
     
-    # Kilo Code extension identifier
-    KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
+    # Cline extension identifier
+    CLINE_EXTENSION_ID = "saoudrizwan.claude-dev"
 
     @property
     def tool_name(self) -> str:
         """Return the name of the tool being detected."""
-        return "Kilo Code"
+        return "Cline"
 
     def detect(self) -> Optional[Dict]:
         """
-        Detect Kilo Code installation on Windows.
+        Detect Cline installation on Windows.
         
         When running as administrator, scans all user directories to find installations
         across multiple user accounts.
@@ -48,16 +48,16 @@ class WindowsKiloCodeDetector(BaseToolDetector):
         """
         # When running as administrator, scan all user directories first
         if self._is_running_as_admin():
-            user_kilocode_info = self._scan_user_directories()
-            if user_kilocode_info:
-                return user_kilocode_info
+            user_cline_info = self._scan_user_directories()
+            if user_cline_info:
+                return user_cline_info
         
         # Check current user (works for both admin and regular users)
-        return self._check_user_for_kilocode(Path.home())
+        return self._check_user_for_cline(Path.home())
 
     def get_version(self) -> Optional[str]:
         """
-        Extract Kilo Code version.
+        Extract Cline version.
         
         Note: Version extraction is currently not implemented.
         
@@ -87,7 +87,7 @@ class WindowsKiloCodeDetector(BaseToolDetector):
 
     def _scan_user_directories(self) -> Optional[Dict]:
         """
-        Scan all user directories for Kilo Code installations when running as admin.
+        Scan all user directories for Cline installations when running as admin.
         
         Returns:
             Dict with tool info (name, version, install_path) or None if not found
@@ -99,7 +99,7 @@ class WindowsKiloCodeDetector(BaseToolDetector):
         for user_dir in users_dir.iterdir():
             if user_dir.is_dir() and not user_dir.name.startswith('.'):
                 try:
-                    result = self._check_user_for_kilocode(user_dir)
+                    result = self._check_user_for_cline(user_dir)
                     if result:
                         return result
                 except (PermissionError, OSError) as e:
@@ -108,15 +108,15 @@ class WindowsKiloCodeDetector(BaseToolDetector):
         
         return None
 
-    def _check_user_for_kilocode(self, user_home: Path) -> Optional[Dict]:
+    def _check_user_for_cline(self, user_home: Path) -> Optional[Dict]:
         """
-        Check if Kilo Code is installed for a specific user.
+        Check if Cline is installed for a specific user.
         
-        Since Kilo Code is an extension, we first check if the extension exists
+        Since Cline is an extension, we first check if the extension exists
         in any IDE. Only if the extension is found, we proceed with detection.
         
         This method:
-        1. First checks for Kilo Code extension in any supported IDE
+        1. First checks for Cline extension in any supported IDE
         2. If extension found, returns detection result (extension can only exist if IDE is installed)
         
         Args:
@@ -125,18 +125,18 @@ class WindowsKiloCodeDetector(BaseToolDetector):
         Returns:
             Dict with tool info (name, version, install_path) or None if not found
         """
-        # First, check if Kilo Code extension exists in any IDE
+        # First, check if Cline extension exists in any IDE
         extension_path = None
         
         for ide_name in self.SUPPORTED_IDES:
-            extension_path = self._check_kilocode_extension(user_home, ide_name)
+            extension_path = self._check_cline_extension(user_home, ide_name)
             if extension_path:
-                logger.debug(f"Found Kilo Code extension in {ide_name} at: {extension_path}")
+                logger.debug(f"Found Cline extension in {ide_name} at: {extension_path}")
                 break
         
         # If no extension found, return None immediately
         if not extension_path:
-            logger.debug("Kilo Code extension not found in any IDE")
+            logger.debug("Cline extension not found in any IDE")
             return None
         
         # If extension found, IDE is installed (extension can only exist if IDE is installed)
@@ -147,9 +147,9 @@ class WindowsKiloCodeDetector(BaseToolDetector):
             "install_path": str(extension_path)
         }
 
-    def _check_kilocode_extension(self, user_home: Path, ide_name: str) -> Optional[Path]:
+    def _check_cline_extension(self, user_home: Path, ide_name: str) -> Optional[Path]:
         """
-        Check if Kilo Code extension directory exists for a specific IDE.
+        Check if Cline extension directory exists for a specific IDE.
         
         Args:
             user_home: User's home directory path
@@ -158,21 +158,21 @@ class WindowsKiloCodeDetector(BaseToolDetector):
         Returns:
             Path to extension directory if found, None otherwise
         """
-        # Windows VS Code/Cursor global storage path
+        # Windows VS Code/Cursor/Windsurf global storage path
         extension_dir = (
-            user_home / "AppData" / "Roaming" / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID
+            user_home / "AppData" / "Roaming" / ide_name / "User" / "globalStorage" / self.CLINE_EXTENSION_ID
         )
         
         try:
             # Check if extension directory exists
             if extension_dir.exists() and extension_dir.is_dir():
                 logger.debug(
-                    f"Found Kilo Code extension directory for {ide_name} at: {extension_dir}"
+                    f"Found Cline extension directory for {ide_name} at: {extension_dir}"
                 )
                 return extension_dir
                 
         except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check Kilo Code extension path for {ide_name}: {e}")
+            logger.debug(f"Could not check Cline extension path for {ide_name}: {e}")
         
         return None
 

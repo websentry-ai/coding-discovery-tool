@@ -45,3 +45,6 @@ Thumbs.db
 
 # Antigravity config
 .agent/
+
+# Kilo Code config
+.kilocode/

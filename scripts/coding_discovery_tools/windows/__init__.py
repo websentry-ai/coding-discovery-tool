@@ -8,6 +8,7 @@ from .claude_code import WindowsClaudeDetector
 from .windsurf import WindowsWindsurfDetector
 from .cline import WindowsClineDetector
 from .kilocode import WindowsKiloCodeDetector
+from .roo_code import WindowsRooDetector
 
 __all__ = [
     'WindowsDeviceIdExtractor',
@@ -16,5 +17,6 @@ __all__ = [
     'WindowsWindsurfDetector',
     'WindowsClineDetector',
     'WindowsKiloCodeDetector',
+    'WindowsRooDetector',
 ]
 

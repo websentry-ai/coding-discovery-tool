@@ -41,6 +41,10 @@ from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
 from .macos.roo_code.roo_code import MacOSRooDetector
 from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
 
+# Windows - Roo Code
+from .windows.roo_code.roo_code import WindowsRooDetector
+from .windows.roo_code.mcp_config_extractor import WindowsRooMCPConfigExtractor
+
 # macOS - Cline
 from .macos.cline.cline import MacOSClineDetector
 from .macos.cline.cline_rules_extractor import MacOSClineRulesExtractor
@@ -207,6 +211,8 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSRooDetector()
+        elif os_name == "Windows":
+            return WindowsRooDetector()
         else:
             return None
 
@@ -500,6 +506,8 @@ class RooMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSRooMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsRooMCPConfigExtractor()
         else:
             return None
 

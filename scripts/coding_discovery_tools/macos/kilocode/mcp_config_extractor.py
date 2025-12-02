@@ -86,7 +86,12 @@ class MacOSKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
         
         # Check each IDE
         for ide_name in self.IDE_NAMES:
-            config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
+            # Try with settings subdirectory first (actual structure)
+            config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "settings" / "mcp_settings.json"
+            if not config_path.exists():
+                # Fallback to direct path (for compatibility)
+                config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
+            
             if config_path.exists():
                 config = self._read_global_config(config_path, ide_name)
                 if config:

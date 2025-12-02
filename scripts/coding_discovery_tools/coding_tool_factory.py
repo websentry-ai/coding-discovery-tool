@@ -77,6 +77,11 @@ from .windows.antigravity.antigravity import WindowsAntigravityDetector
 from .windows.antigravity.antigravity_rules_extractor import WindowsAntigravityRulesExtractor
 from .windows.antigravity.mcp_config_extractor import WindowsAntigravityMCPConfigExtractor
 
+# Windows - Kilo Code
+from .windows.kilocode.kilocode import WindowsKiloCodeDetector
+from .windows.kilocode.kilocode_rules_extractor import WindowsKiloCodeRulesExtractor
+from .windows.kilocode.mcp_config_extractor import WindowsKiloCodeMCPConfigExtractor
+
 
 class DeviceIdExtractorFactory:
     """Factory for creating OS-specific device ID extractors."""
@@ -256,6 +261,8 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSKiloCodeDetector()
+        elif os_name == "Windows":
+            return WindowsKiloCodeDetector()
         else:
             return None
 
@@ -290,7 +297,7 @@ class ToolDetectorFactory:
         if antigravity_detector is not None:
             detectors.append(antigravity_detector)
         
-        # Add Kilo Code detector only for macOS
+        # Add Kilo Code detector for macOS and Windows
         kilocode_detector = ToolDetectorFactory.create_kilocode_detector(os_name)
         if kilocode_detector is not None:
             detectors.append(kilocode_detector)
@@ -605,6 +612,8 @@ class KiloCodeRulesExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSKiloCodeRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsKiloCodeRulesExtractor()
         else:
             return None
 
@@ -628,5 +637,7 @@ class KiloCodeMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSKiloCodeMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsKiloCodeMCPConfigExtractor()
         else:
             return None

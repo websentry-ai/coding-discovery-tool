@@ -161,6 +161,27 @@ class BaseAntigravityRulesExtractor(ABC):
         pass
 
 
+class BaseKiloCodeRulesExtractor(ABC):
+    """Abstract base class for extracting Kilo Code rules from all projects."""
+
+    @abstractmethod
+    def extract_all_kilocode_rules(self) -> List[Dict]:
+        """
+        Extract all Kilo Code rules from all projects on the machine.
+        
+        Searches for:
+        - Project-level rules: **/.kilocode/rules/*.md (recursive)
+        - Global rules: ~/.kilocode/rules/*.md
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

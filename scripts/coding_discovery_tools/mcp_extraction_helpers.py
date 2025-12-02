@@ -47,6 +47,131 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     return servers_array
 
 
+def extract_mcp_from_dir_generic(
+    tool_dir: Path,
+    projects: List[Dict],
+    config_filename: str,
+    tool_name: str,
+    global_tool_dir: Optional[Path] = None
+) -> None:
+    """
+    Generic function to extract MCP config from a tool directory.
+    
+    This replaces all tool-specific extract_*_mcp_from_dir functions.
+    
+    Args:
+        tool_dir: Path to the tool directory (e.g., .cursor, .windsurf, .roo, .kilocode)
+        projects: List to append project configs to
+        config_filename: Name of the MCP config file (e.g., "mcp.json", "mcp_config.json")
+        tool_name: Name of the tool (for logging)
+        global_tool_dir: Path to global tool directory to skip (optional)
+    """
+    mcp_config_file = tool_dir / config_filename
+    if not mcp_config_file.exists():
+        return
+    
+    try:
+        project_root = tool_dir.parent
+        
+        # Skip if this is the global config directory
+        if global_tool_dir and tool_dir == global_tool_dir:
+            return
+        
+        content = mcp_config_file.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+        
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        
+        # Transform mcpServers from object to array
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+        
+        # Only add if there are MCP servers configured
+        if mcp_servers_array:
+            projects.append({
+                "path": str(project_root),
+                "mcpServers": mcp_servers_array
+            })
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in {tool_name} MCP config {mcp_config_file}: {e}")
+    except PermissionError as e:
+        logger.warning(f"Permission denied reading {tool_name} MCP config {mcp_config_file}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading {tool_name} MCP config {mcp_config_file}: {e}")
+
+
+def walk_for_mcp_configs_generic(
+    root_path: Path,
+    current_dir: Path,
+    projects: List[Dict],
+    tool_dir_name: str,
+    config_filename: str,
+    tool_name: str,
+    global_tool_dir: Optional[Path],
+    should_skip_func: Callable[[Path], bool],
+    current_depth: int = 0
+) -> None:
+    """
+    Generic function to recursively walk directory tree looking for tool MCP config files.
+    
+    This replaces all tool-specific walk_for_*_mcp_configs functions.
+    
+    Args:
+        root_path: Root search path (for depth calculation)
+        current_dir: Current directory being processed
+        projects: List to append project configs to
+        tool_dir_name: Name of the tool directory to look for (e.g., ".cursor", ".windsurf")
+        config_filename: Name of the MCP config file (e.g., "mcp.json", "mcp_config.json")
+        tool_name: Name of the tool (for logging)
+        global_tool_dir: Path to global tool directory to skip (optional)
+        should_skip_func: Function to check if a path should be skipped
+        current_depth: Current recursion depth
+    """
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+    
+    try:
+        for item in current_dir.iterdir():
+            try:
+                # Check if we should skip this path
+                if should_skip_func(item):
+                    continue
+                
+                # Check depth
+                try:
+                    depth = len(item.relative_to(root_path).parts)
+                    if depth > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    # Path not relative to root (different drive on Windows)
+                    continue
+                
+                if item.is_dir():
+                    # Found the tool directory!
+                    if item.name == tool_dir_name:
+                        extract_mcp_from_dir_generic(
+                            item, projects, config_filename, tool_name, global_tool_dir
+                        )
+                        # Don't recurse into tool directory
+                        continue
+                    
+                    # Recurse into subdirectories
+                    walk_for_mcp_configs_generic(
+                        root_path, item, projects, tool_dir_name, config_filename,
+                        tool_name, global_tool_dir, should_skip_func, current_depth + 1
+                    )
+                
+            except (PermissionError, OSError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing {item}: {e}")
+                continue
+                
+    except (PermissionError, OSError):
+        pass
+    except Exception as e:
+        logger.debug(f"Error walking {current_dir}: {e}")
+
+
 def extract_claude_mcp_fields(config_data: Dict) -> List[Dict]:
     """
     Extract MCP-related fields from Claude Code configuration.
@@ -95,37 +220,9 @@ def extract_cursor_mcp_from_dir(
         projects: List to append project configs to
         global_cursor_dir: Path to global .cursor directory to skip
     """
-    mcp_config_file = cursor_dir / "mcp.json"
-    if not mcp_config_file.exists():
-        return
-    
-    try:
-        project_root = cursor_dir.parent
-        
-        # Skip if this is the global config directory
-        if cursor_dir == global_cursor_dir:
-            return
-        
-        content = mcp_config_file.read_text(encoding='utf-8', errors='replace')
-        config_data = json.loads(content)
-        
-        mcp_servers_obj = config_data.get("mcpServers", {})
-        
-        # Transform mcpServers from object to array
-        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-        
-        # Only add if there are MCP servers configured
-        if mcp_servers_array:
-            projects.append({
-                "path": str(project_root),
-                "mcpServers": mcp_servers_array
-            })
-    except json.JSONDecodeError as e:
-        logger.warning(f"Invalid JSON in MCP config {mcp_config_file}: {e}")
-    except PermissionError as e:
-        logger.warning(f"Permission denied reading MCP config {mcp_config_file}: {e}")
-    except Exception as e:
-        logger.warning(f"Error reading MCP config {mcp_config_file}: {e}")
+    extract_mcp_from_dir_generic(
+        cursor_dir, projects, "mcp.json", "Cursor", global_cursor_dir
+    )
 
 
 def walk_for_cursor_mcp_configs(
@@ -147,48 +244,10 @@ def walk_for_cursor_mcp_configs(
         should_skip_func: Function to check if a path should be skipped
         current_depth: Current recursion depth
     """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-    
-    try:
-        for item in current_dir.iterdir():
-            try:
-                # Check if we should skip this path
-                if should_skip_func(item):
-                    continue
-                
-                # Check depth
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    # Path not relative to root (different drive on Windows)
-                    continue
-                
-                if item.is_dir():
-                    # Found a .cursor directory!
-                    if item.name == ".cursor":
-                        extract_cursor_mcp_from_dir(item, projects, global_cursor_dir)
-                        # Don't recurse into .cursor directory
-                        continue
-                    
-                    # Recurse into subdirectories
-                    walk_for_cursor_mcp_configs(
-                        root_path, item, projects, global_cursor_dir,
-                        should_skip_func, current_depth + 1
-                    )
-                
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
-                continue
-                
-    except (PermissionError, OSError):
-        pass
-    except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+    walk_for_mcp_configs_generic(
+        root_path, current_dir, projects, ".cursor", "mcp.json",
+        "Cursor", global_cursor_dir, should_skip_func, current_depth
+    )
 
 
 def extract_windsurf_mcp_from_dir(
@@ -204,37 +263,9 @@ def extract_windsurf_mcp_from_dir(
         projects: List to append project configs to
         global_windsurf_dir: Path to global .windsurf directory to skip
     """
-    mcp_config_file = windsurf_dir / "mcp_config.json"
-    if not mcp_config_file.exists():
-        return
-    
-    try:
-        project_root = windsurf_dir.parent
-        
-        # Skip if this is the global config directory
-        if windsurf_dir == global_windsurf_dir:
-            return
-        
-        content = mcp_config_file.read_text(encoding='utf-8', errors='replace')
-        config_data = json.loads(content)
-        
-        mcp_servers_obj = config_data.get("mcpServers", {})
-        
-        # Transform mcpServers from object to array
-        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-        
-        # Only add if there are MCP servers configured
-        if mcp_servers_array:
-            projects.append({
-                "path": str(project_root),
-                "mcpServers": mcp_servers_array
-            })
-    except json.JSONDecodeError as e:
-        logger.warning(f"Invalid JSON in Windsurf MCP config {mcp_config_file}: {e}")
-    except PermissionError as e:
-        logger.warning(f"Permission denied reading Windsurf MCP config {mcp_config_file}: {e}")
-    except Exception as e:
-        logger.warning(f"Error reading Windsurf MCP config {mcp_config_file}: {e}")
+    extract_mcp_from_dir_generic(
+        windsurf_dir, projects, "mcp_config.json", "Windsurf", global_windsurf_dir
+    )
 
 
 def walk_for_windsurf_mcp_configs(
@@ -256,48 +287,10 @@ def walk_for_windsurf_mcp_configs(
         should_skip_func: Function to check if a path should be skipped
         current_depth: Current recursion depth
     """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-    
-    try:
-        for item in current_dir.iterdir():
-            try:
-                # Check if we should skip this path
-                if should_skip_func(item):
-                    continue
-                
-                # Check depth
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    # Path not relative to root (different drive on Windows)
-                    continue
-                
-                if item.is_dir():
-                    # Found a .windsurf directory!
-                    if item.name == ".windsurf":
-                        extract_windsurf_mcp_from_dir(item, projects, global_windsurf_dir)
-                        # Don't recurse into .windsurf directory
-                        continue
-                    
-                    # Recurse into subdirectories
-                    walk_for_windsurf_mcp_configs(
-                        root_path, item, projects, global_windsurf_dir,
-                        should_skip_func, current_depth + 1
-                    )
-                
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
-                continue
-                
-    except (PermissionError, OSError):
-        pass
-    except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+    walk_for_mcp_configs_generic(
+        root_path, current_dir, projects, ".windsurf", "mcp_config.json",
+        "Windsurf", global_windsurf_dir, should_skip_func, current_depth
+    )
 
 
 def extract_roo_mcp_from_dir(
@@ -313,37 +306,9 @@ def extract_roo_mcp_from_dir(
         projects: List to append project configs to
         global_roo_dir: Path to global .roo directory to skip (optional)
     """
-    mcp_config_file = roo_dir / "mcp.json"
-    if not mcp_config_file.exists():
-        return
-    
-    try:
-        project_root = roo_dir.parent
-        
-        # Skip if this is the global config directory
-        if global_roo_dir and roo_dir == global_roo_dir:
-            return
-        
-        content = mcp_config_file.read_text(encoding='utf-8', errors='replace')
-        config_data = json.loads(content)
-        
-        mcp_servers_obj = config_data.get("mcpServers", {})
-        
-        # Transform mcpServers from object to array
-        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-        
-        # Only add if there are MCP servers configured
-        if mcp_servers_array:
-            projects.append({
-                "path": str(project_root),
-                "mcpServers": mcp_servers_array
-            })
-    except json.JSONDecodeError as e:
-        logger.warning(f"Invalid JSON in Roo MCP config {mcp_config_file}: {e}")
-    except PermissionError as e:
-        logger.warning(f"Permission denied reading Roo MCP config {mcp_config_file}: {e}")
-    except Exception as e:
-        logger.warning(f"Error reading Roo MCP config {mcp_config_file}: {e}")
+    extract_mcp_from_dir_generic(
+        roo_dir, projects, "mcp.json", "Roo Code", global_roo_dir
+    )
 
 
 def walk_for_roo_mcp_configs(
@@ -365,48 +330,53 @@ def walk_for_roo_mcp_configs(
         should_skip_func: Function to check if a path should be skipped
         current_depth: Current recursion depth
     """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
+    walk_for_mcp_configs_generic(
+        root_path, current_dir, projects, ".roo", "mcp.json",
+        "Roo Code", global_roo_dir, should_skip_func, current_depth
+    )
+
+
+def extract_kilocode_mcp_from_dir(
+    kilocode_dir: Path,
+    projects: List[Dict],
+    global_kilocode_dir: Optional[Path] = None
+) -> None:
+    """
+    Extract MCP config from a .kilocode directory if mcp.json exists.
     
-    try:
-        for item in current_dir.iterdir():
-            try:
-                # Check if we should skip this path
-                if should_skip_func(item):
-                    continue
-                
-                # Check depth
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    # Path not relative to root (different drive on Windows)
-                    continue
-                
-                if item.is_dir():
-                    # Found a .roo directory!
-                    if item.name == ".roo":
-                        extract_roo_mcp_from_dir(item, projects, global_roo_dir)
-                        # Don't recurse into .roo directory
-                        continue
-                    
-                    # Recurse into subdirectories
-                    walk_for_roo_mcp_configs(
-                        root_path, item, projects, global_roo_dir,
-                        should_skip_func, current_depth + 1
-                    )
-                
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
-                continue
-                
-    except (PermissionError, OSError):
-        pass
-    except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+    Args:
+        kilocode_dir: Path to .kilocode directory
+        projects: List to append project configs to
+        global_kilocode_dir: Path to global .kilocode directory to skip (optional)
+    """
+    extract_mcp_from_dir_generic(
+        kilocode_dir, projects, "mcp.json", "Kilo Code", global_kilocode_dir
+    )
+
+
+def walk_for_kilocode_mcp_configs(
+    root_path: Path,
+    current_dir: Path,
+    projects: List[Dict],
+    global_kilocode_dir: Optional[Path],
+    should_skip_func: Callable[[Path], bool],
+    current_depth: int = 0
+) -> None:
+    """
+    Recursively walk directory tree looking for .kilocode/mcp.json files.
+    
+    Args:
+        root_path: Root search path (for depth calculation)
+        current_dir: Current directory being processed
+        projects: List to append project configs to
+        global_kilocode_dir: Path to global .kilocode directory to skip (optional)
+        should_skip_func: Function to check if a path should be skipped
+        current_depth: Current recursion depth
+    """
+    walk_for_mcp_configs_generic(
+        root_path, current_dir, projects, ".kilocode", "mcp.json",
+        "Kilo Code", global_kilocode_dir, should_skip_func, current_depth
+    )
 
 
 def read_global_mcp_config(

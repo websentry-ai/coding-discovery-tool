@@ -241,7 +241,7 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
-    def create_kilocode_detector(os_name: Optional[str] = None) -> BaseToolDetector:
+    def create_kilocode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate Kilo Code detector for the OS.
         
@@ -256,46 +256,6 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSKiloCodeDetector()
-        else:
-            return None
-
-    @staticmethod
-    def create_cline_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
-        """
-        Create appropriate Cline detector for the OS.
-        
-        Args:
-            os_name: Operating system name (defaults to current OS)
-            
-        Returns:
-            BaseToolDetector instance or None if OS is not supported
-        """
-        if os_name is None:
-            os_name = platform.system()
-
-        if os_name == "Darwin":
-            return MacOSClineDetector()
-        else:
-            return None
-
-    @staticmethod
-    def create_antigravity_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
-        """
-        Create appropriate Antigravity detector for the OS.
-        
-        Args:
-            os_name: Operating system name (defaults to current OS)
-            
-        Returns:
-            BaseToolDetector instance or None if OS is not supported
-        """
-        if os_name is None:
-            os_name = platform.system()
-
-        if os_name == "Darwin":
-            return MacOSAntigravityDetector()
-        elif os_name == "Windows":
-            return WindowsAntigravityDetector()
         else:
             return None
 

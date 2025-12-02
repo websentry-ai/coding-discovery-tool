@@ -677,7 +677,7 @@ class AIToolsDetector:
             else:
                 logger.info("  ⚠ Antigravity MCP extractor not available for this OS")
         
-        elif tool_name == "kilocode" or tool_name == "kilo code":
+        elif tool_name.replace(" ", "").lower() == "kilocode":
             logger.info("")
             logger.info("=" * 70)
             logger.info(f"Processing: {tool.get('name')}")

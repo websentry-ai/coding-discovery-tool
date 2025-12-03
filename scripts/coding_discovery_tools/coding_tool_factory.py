@@ -20,6 +20,7 @@ from .coding_tool_base import (
     BaseKiloCodeRulesExtractor,
     BaseGeminiCliRulesExtractor,
     BaseCodexRulesExtractor,
+    BaseOpenCodeRulesExtractor,
     BaseMCPConfigExtractor,
 )
 
@@ -71,6 +72,11 @@ from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtrac
 from .macos.codex.codex import MacOSCodexDetector
 from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
 from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
+
+# macOS - OpenCode
+from .macos.opencode.opencode import MacOSOpenCodeDetector
+from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
+from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
 
 # Windows - Gemini CLI
 from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
@@ -340,6 +346,28 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_opencode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate OpenCode detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSOpenCodeDetector()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
+        else:
+            return None
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -384,6 +412,11 @@ class ToolDetectorFactory:
         codex_detector = ToolDetectorFactory.create_codex_detector(os_name)
         if codex_detector is not None:
             detectors.append(codex_detector)
+        
+        # Add OpenCode detector for macOS
+        opencode_detector = ToolDetectorFactory.create_opencode_detector(os_name)
+        if opencode_detector is not None:
+            detectors.append(opencode_detector)
         
         # Filter out None values
         return [detector for detector in detectors if detector is not None]
@@ -827,6 +860,58 @@ class CodexMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSCodexMCPConfigExtractor()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
+        else:
+            return None
+
+
+class OpenCodeRulesExtractorFactory:
+    """Factory for creating OS-specific OpenCode rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseOpenCodeRulesExtractor]:
+        """
+        Create appropriate OpenCode rules extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseOpenCodeRulesExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSOpenCodeRulesExtractor()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
+        else:
+            return None
+
+
+class OpenCodeMCPConfigExtractorFactory:
+    """Factory for creating OS-specific OpenCode MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate OpenCode MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSOpenCodeMCPConfigExtractor()
         elif os_name == "Windows":
             # Windows support can be added later
             return None

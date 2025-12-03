@@ -370,6 +370,28 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_opencode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate OpenCode detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSOpenCodeDetector()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
+        else:
+            return None
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.

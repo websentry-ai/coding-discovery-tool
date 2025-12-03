@@ -72,6 +72,9 @@ from .macos.codex.codex import MacOSCodexDetector
 from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
 from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
 
+# macOS - Replit
+from .macos.replit.replit import MacOSReplitDetector
+
 # Windows - Gemini CLI
 from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
 from .windows.gemini_cli.gemini_cli_rules_extractor import WindowsGeminiCliRulesExtractor
@@ -340,6 +343,28 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_replit_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Replit detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSReplitDetector()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
+        else:
+            return None
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -384,6 +409,11 @@ class ToolDetectorFactory:
         codex_detector = ToolDetectorFactory.create_codex_detector(os_name)
         if codex_detector is not None:
             detectors.append(codex_detector)
+        
+        # Add Replit detector for macOS
+        replit_detector = ToolDetectorFactory.create_replit_detector(os_name)
+        if replit_detector is not None:
+            detectors.append(replit_detector)
         
         # Filter out None values
         return [detector for detector in detectors if detector is not None]

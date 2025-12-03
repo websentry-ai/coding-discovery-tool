@@ -8,7 +8,7 @@ on Windows and macOS to avoid code duplication.
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Callable
 
 from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
 
@@ -80,7 +80,10 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
     return False
 
 
-def extract_single_rule_file(rule_file: Path, find_project_root_func=None) -> Optional[Dict]:
+def extract_single_rule_file(
+    rule_file: Path, 
+    find_project_root_func: Optional[Callable[[Path], Path]] = None
+) -> Optional[Dict]:
     """
     Extract a single rule file with metadata.
     
@@ -98,11 +101,7 @@ def extract_single_rule_file(rule_file: Path, find_project_root_func=None) -> Op
             return None
 
         file_metadata = get_file_metadata(rule_file)
-        # Use provided function or default to find_project_root
-        if find_project_root_func is not None:
-            project_root = find_project_root_func(rule_file)
-        else:
-            project_root = find_project_root(rule_file)
+        project_root = (find_project_root_func or find_project_root)(rule_file)
         content, truncated = read_file_content(rule_file, file_metadata['size'])
 
         return {

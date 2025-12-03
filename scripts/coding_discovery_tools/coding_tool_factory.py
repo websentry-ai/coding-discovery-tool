@@ -75,6 +75,9 @@ from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
 
 # macOS - Replit
 from .macos.replit.replit import MacOSReplitDetector
+
+# Windows - Replit
+from .windows.replit.replit import WindowsReplitDetector
 # macOS - OpenCode
 from .macos.opencode.opencode import MacOSOpenCodeDetector
 from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
@@ -364,8 +367,7 @@ class ToolDetectorFactory:
         if os_name == "Darwin":
             return MacOSReplitDetector()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsReplitDetector()
         else:
             return None
 

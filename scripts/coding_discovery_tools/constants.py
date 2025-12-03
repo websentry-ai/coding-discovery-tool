@@ -26,8 +26,8 @@ INVALID_SERIAL_VALUES = [
 ]
 
 # Command execution timeouts
-COMMAND_TIMEOUT = 20
-VERSION_TIMEOUT = 10
+COMMAND_TIMEOUT = 30
+VERSION_TIMEOUT = 30
 
 # Cursor rules extraction settings
 MAX_CONFIG_FILE_SIZE = 50 * 1024  # 50KB in bytes

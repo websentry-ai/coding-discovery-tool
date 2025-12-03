@@ -8,7 +8,7 @@ on Windows and macOS to avoid code duplication.
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Callable
 
 from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
 
@@ -80,12 +80,17 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
     return False
 
 
-def extract_single_rule_file(rule_file: Path) -> Optional[Dict]:
+def extract_single_rule_file(
+    rule_file: Path, 
+    find_project_root_func: Optional[Callable[[Path], Path]] = None
+) -> Optional[Dict]:
     """
     Extract a single rule file with metadata.
     
     Args:
         rule_file: Path to the rule file
+        find_project_root_func: Optional function to find project root (tool-specific).
+                                If None, uses default find_project_root function.
         
     Returns:
         Dict with file info (file_path, file_name, project_root, content,
@@ -96,7 +101,7 @@ def extract_single_rule_file(rule_file: Path) -> Optional[Dict]:
             return None
 
         file_metadata = get_file_metadata(rule_file)
-        project_root = find_project_root(rule_file)
+        project_root = (find_project_root_func or find_project_root)(rule_file)
         content, truncated = read_file_content(rule_file, file_metadata['size'])
 
         return {
@@ -201,6 +206,34 @@ def find_project_root(rule_file: Path) -> Path:
         return parent
     
     # Case 6: File is directly in project root
+    return parent
+
+
+def find_gemini_cli_project_root(rule_file: Path) -> Path:
+    """
+    Find the project root directory for a Gemini CLI rule file.
+    
+    For Gemini CLI rules:
+    - Global rules in ~/.gemini/GEMINI.md -> home directory
+    - Project rules: GEMINI.md in current directory or parent -> directory containing GEMINI.md
+    - Sub-directory rules: GEMINI.md in subdirectories -> directory containing GEMINI.md
+    
+    Args:
+        rule_file: Path to the rule file (GEMINI.md)
+        
+    Returns:
+        Project root path
+    """
+    parent = rule_file.parent
+    
+    # Case 1: Global rules in ~/.gemini/GEMINI.md
+    # Return the .gemini directory's parent (which would be home directory)
+    if parent.name == ".gemini" and rule_file.name.upper() == "GEMINI.MD":
+        return parent.parent  # Home directory
+    
+    # Case 2: Project or sub-directory rules
+    # For Gemini CLI, the directory containing GEMINI.md is the project root
+    # (could be actual project root or a subdirectory)
     return parent
 
 

@@ -19,6 +19,7 @@ from .coding_tool_base import (
     BaseAntigravityRulesExtractor,
     BaseKiloCodeRulesExtractor,
     BaseGeminiCliRulesExtractor,
+    BaseCodexRulesExtractor,
     BaseMCPConfigExtractor,
 )
 
@@ -65,6 +66,11 @@ from .macos.kilocode.mcp_config_extractor import MacOSKiloCodeMCPConfigExtractor
 from .macos.gemini_cli.gemini_cli import MacOSGeminiCliDetector
 from .macos.gemini_cli.gemini_cli_rules_extractor import MacOSGeminiCliRulesExtractor
 from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtractor
+
+# macOS - Codex
+from .macos.codex.codex import MacOSCodexDetector
+from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
+from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
 
 # Windows - Gemini CLI
 from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
@@ -312,6 +318,28 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_codex_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Codex detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCodexDetector()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
+        else:
+            return None
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -351,6 +379,11 @@ class ToolDetectorFactory:
         gemini_cli_detector = ToolDetectorFactory.create_gemini_cli_detector(os_name)
         if gemini_cli_detector is not None:
             detectors.append(gemini_cli_detector)
+        
+        # Add Codex detector for macOS
+        codex_detector = ToolDetectorFactory.create_codex_detector(os_name)
+        if codex_detector is not None:
+            detectors.append(codex_detector)
         
         # Filter out None values
         return [detector for detector in detectors if detector is not None]
@@ -745,5 +778,57 @@ class GeminiCliMCPConfigExtractorFactory:
             return MacOSGeminiCliMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsGeminiCliMCPConfigExtractor()
+        else:
+            return None
+
+
+class CodexRulesExtractorFactory:
+    """Factory for creating OS-specific Codex rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCodexRulesExtractor]:
+        """
+        Create appropriate Codex rules extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseCodexRulesExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCodexRulesExtractor()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
+        else:
+            return None
+
+
+class CodexMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Codex MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate Codex MCP config extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCodexMCPConfigExtractor()
+        elif os_name == "Windows":
+            # Windows support can be added later
+            return None
         else:
             return None

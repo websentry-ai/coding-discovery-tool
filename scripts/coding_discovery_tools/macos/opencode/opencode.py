@@ -67,7 +67,7 @@ class MacOSOpenCodeDetector(BaseToolDetector):
                 # Version output might be just a number or include text
                 # Clean up the output to extract version
                 version = output.strip()
-                return version if version else None
+                return version or None
         except Exception as e:
             logger.debug(f"Could not extract OpenCode version: {e}")
         return None

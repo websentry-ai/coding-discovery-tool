@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseOpenCodeRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,

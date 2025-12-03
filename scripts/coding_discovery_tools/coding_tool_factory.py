@@ -66,6 +66,11 @@ from .macos.gemini_cli.gemini_cli import MacOSGeminiCliDetector
 from .macos.gemini_cli.gemini_cli_rules_extractor import MacOSGeminiCliRulesExtractor
 from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtractor
 
+# Windows - Gemini CLI
+from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
+from .windows.gemini_cli.gemini_cli_rules_extractor import WindowsGeminiCliRulesExtractor
+from .windows.gemini_cli.mcp_config_extractor import WindowsGeminiCliMCPConfigExtractor
+
 # Windows - Shared
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
 
@@ -301,6 +306,8 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSGeminiCliDetector()
+        elif os_name == "Windows":
+            return WindowsGeminiCliDetector()
         else:
             return None
 
@@ -340,7 +347,7 @@ class ToolDetectorFactory:
         if kilocode_detector is not None:
             detectors.append(kilocode_detector)
         
-        # Add Gemini CLI detector for macOS only
+        # Add Gemini CLI detector for macOS and Windows
         gemini_cli_detector = ToolDetectorFactory.create_gemini_cli_detector(os_name)
         if gemini_cli_detector is not None:
             detectors.append(gemini_cli_detector)
@@ -711,6 +718,8 @@ class GeminiCliRulesExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSGeminiCliRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsGeminiCliRulesExtractor()
         else:
             return None
 
@@ -734,5 +743,7 @@ class GeminiCliMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSGeminiCliMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsGeminiCliMCPConfigExtractor()
         else:
             return None

@@ -67,12 +67,11 @@ class WindowsGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
             
             if global_rules_path.exists() and global_rules_path.is_file():
                 try:
-                    rule_info = extract_single_rule_file(global_rules_path)
+                    rule_info = extract_single_rule_file(global_rules_path, find_gemini_cli_project_root)
                     if rule_info:
-                        # Override project_root using our custom function
-                        project_root = find_gemini_cli_project_root(global_rules_path)
-                        rule_info['project_root'] = str(project_root)
-                        add_rule_to_project(rule_info, str(project_root), projects_by_root)
+                        project_root = rule_info.get('project_root')
+                        if project_root:
+                            add_rule_to_project(rule_info, project_root, projects_by_root)
                 except Exception as e:
                     logger.debug(f"Error extracting global Gemini CLI rules for {user_home}: {e}")
         
@@ -194,12 +193,11 @@ class WindowsGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
             projects_by_root: Dictionary to populate with rules
         """
         try:
-            rule_info = extract_single_rule_file(gemini_md_file)
+            rule_info = extract_single_rule_file(gemini_md_file, find_gemini_cli_project_root)
             if rule_info:
-                # Override project_root using our custom function
-                project_root = find_gemini_cli_project_root(gemini_md_file)
-                rule_info['project_root'] = str(project_root)
-                add_rule_to_project(rule_info, str(project_root), projects_by_root)
+                project_root = rule_info.get('project_root')
+                if project_root:
+                    add_rule_to_project(rule_info, project_root, projects_by_root)
         except Exception as e:
             logger.debug(f"Error extracting GEMINI.md from {gemini_md_file}: {e}")
 

@@ -80,12 +80,14 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
     return False
 
 
-def extract_single_rule_file(rule_file: Path) -> Optional[Dict]:
+def extract_single_rule_file(rule_file: Path, find_project_root_func=None) -> Optional[Dict]:
     """
     Extract a single rule file with metadata.
     
     Args:
         rule_file: Path to the rule file
+        find_project_root_func: Optional function to find project root (tool-specific).
+                                If None, uses default find_project_root function.
         
     Returns:
         Dict with file info (file_path, file_name, project_root, content,
@@ -96,7 +98,11 @@ def extract_single_rule_file(rule_file: Path) -> Optional[Dict]:
             return None
 
         file_metadata = get_file_metadata(rule_file)
-        project_root = find_project_root(rule_file)
+        # Use provided function or default to find_project_root
+        if find_project_root_func is not None:
+            project_root = find_project_root_func(rule_file)
+        else:
+            project_root = find_project_root(rule_file)
         content, truncated = read_file_content(rule_file, file_metadata['size'])
 
         return {

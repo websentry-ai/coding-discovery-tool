@@ -1,5 +1,5 @@
 """
-Codex rules extraction for macOS systems.
+Codex rules extraction for Windows systems.
 
 Extracts Codex rules from AGENTS.md files:
 - Global rules: ~/.codex/AGENTS.md
@@ -7,22 +7,17 @@ Extracts Codex rules from AGENTS.md files:
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCodexRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH
-from ...macos_extraction_helpers import (
+from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
     extract_single_rule_file,
-    get_top_level_directories,
-    should_process_directory,
-    should_process_file,
     should_skip_path,
-    should_skip_system_path,
-    is_running_as_root,
-    scan_user_directories,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,12 +51,12 @@ def find_codex_project_root(agents_file: Path) -> Path:
     return parent
 
 
-class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
-    """Extractor for Codex rules on macOS systems."""
+class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
+    """Extractor for Codex rules on Windows systems."""
 
     def extract_all_codex_rules(self) -> List[Dict]:
         """
-        Extract all Codex rules from all projects on macOS.
+        Extract all Codex rules from all projects on Windows.
         
         Returns:
             List of project dicts, each containing:
@@ -73,8 +68,11 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
         # Extract global rules
         self._extract_global_rules(projects_by_root)
 
-        # Extract project-level rules from root filesystem
-        root_path = Path("/")
+        # Extract project-level rules from root drive (for MDM deployment)
+        root_drive = Path.home().anchor  # Gets the root drive like "C:\"
+        root_path = Path(root_drive)
+        
+        logger.info(f"Searching for Codex rules from root: {root_path}")
         self._extract_project_level_rules(root_path, projects_by_root)
 
         # Convert dictionary to list of project objects
@@ -84,7 +82,7 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
         """
         Extract global Codex rules from ~/.codex/AGENTS.md.
         
-        When running as root, scans all user directories.
+        When running as administrator, scans all user directories.
         
         Args:
             projects_by_root: Dictionary to populate with rules grouped by project root
@@ -95,7 +93,8 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
             
             if global_agents_path.exists() and global_agents_path.is_file():
                 try:
-                    if should_process_file(global_agents_path, user_home):
+                    # Check if file should be processed (not in skip directories)
+                    if not should_skip_path(global_agents_path):
                         rule_info = extract_single_rule_file(
                             global_agents_path, 
                             find_codex_project_root
@@ -107,9 +106,17 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
                 except Exception as e:
                     logger.debug(f"Error extracting global Codex rules for {user_home}: {e}")
         
-        # When running as root, scan all user directories
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
+        # When running as administrator, scan all user directories
+        if self._is_running_as_admin():
+            users_dir = Path("C:\\Users")
+            if users_dir.exists():
+                for user_dir in users_dir.iterdir():
+                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                        try:
+                            extract_for_user(user_dir)
+                        except (PermissionError, OSError) as e:
+                            logger.debug(f"Skipping user directory {user_dir}: {e}")
+                            continue
         else:
             # Check current user
             extract_for_user(Path.home())
@@ -118,21 +125,34 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
         """
         Extract project-level rules recursively from all projects.
         
-        Searches for AGENTS.md and AGENTS.override.md files in project directories.
+        Searches for AGENTS.md and AGENTS.override.md files in:
+        - Project directories
+        - Subdirectories
         
         Args:
-            root_path: Root directory to search from
+            root_path: Root directory to search from (root drive for MDM)
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        if root_path == Path("/"):
-            try:
-                top_level_dirs = get_top_level_directories()
-                for dir_path in top_level_dirs:
-                    if should_process_directory(dir_path):
-                        self._walk_for_agents_files(root_path, dir_path, projects_by_root, current_depth=1)
-            except (PermissionError, OSError):
-                pass
-        else:
+        # Process top-level directories in parallel for better performance
+        try:
+            system_dirs = self._get_system_directories()
+            top_level_dirs = [item for item in root_path.iterdir() 
+                            if item.is_dir() and not should_skip_path(item, system_dirs)]
+            
+            # Use parallel processing for top-level directories
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {
+                    executor.submit(self._walk_for_agents_files, root_path, dir_path, projects_by_root, current_depth=1)
+                    for dir_path in top_level_dirs
+                }
+                
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.debug(f"Error in parallel processing: {e}")
+        except (PermissionError, OSError):
+            # Fallback to sequential if parallel fails
             self._walk_for_agents_files(root_path, root_path, projects_by_root, current_depth=0)
 
     def _walk_for_agents_files(
@@ -159,7 +179,8 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
             for item in current_dir.iterdir():
                 try:
                     # Check if we should skip this path
-                    if should_skip_path(item) or should_skip_system_path(item):
+                    system_dirs = self._get_system_directories()
+                    if should_skip_path(item, system_dirs):
                         continue
                     
                     # Check depth for this item
@@ -211,3 +232,36 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
                     add_rule_to_project(rule_info, project_root, projects_by_root)
         except Exception as e:
             logger.debug(f"Error extracting AGENTS.md from {agents_file}: {e}")
+
+    def _is_running_as_admin(self) -> bool:
+        """
+        Check if the current process is running as administrator.
+        
+        Returns:
+            True if running as administrator, False otherwise
+        """
+        try:
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            # Fallback: check if current user is Administrator or SYSTEM
+            try:
+                import getpass
+                current_user = getpass.getuser().lower()
+                return current_user in ["administrator", "system"]
+            except Exception:
+                return False
+
+    def _get_system_directories(self) -> set:
+        """
+        Get Windows system directories to skip.
+        
+        Returns:
+            Set of system directory names
+        """
+        return {
+            'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
+            'System Volume Information', '$Recycle.Bin', 'Recovery',
+            'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
+            'Config.Msi', 'Documents and Settings', 'MSOCache'
+        }

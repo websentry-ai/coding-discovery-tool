@@ -1,12 +1,11 @@
 """
-MCP config extraction for Codex on macOS systems.
+MCP config extraction for Codex on Windows systems.
 
 Codex uses TOML format for configuration files located at ~/.codex/config.toml.
 This extractor parses the TOML file to extract MCP server configurations.
 """
 
 import logging
-import platform
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -286,21 +285,26 @@ def read_codex_toml_mcp_config(
 
 def _is_admin_user() -> Tuple[bool, Optional[Path]]:
     """
-    Check if running as admin/root user and get users directory.
+    Check if running as admin user and get users directory.
     
     Returns:
         Tuple of (is_admin, users_dir) where users_dir is None if not admin
     """
-    if platform.system() != "Darwin":
-        return False, None
-    
     try:
-        from ...macos_extraction_helpers import is_running_as_root
-        is_admin = is_running_as_root()
-        users_dir = Path("/Users") if is_admin else None
+        import ctypes
+        is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        users_dir = Path("C:\\Users") if is_admin else None
         return is_admin, users_dir
-    except ImportError:
-        return False, None
+    except Exception:
+        # Fallback: check if current user is Administrator or SYSTEM
+        try:
+            import getpass
+            current_user = getpass.getuser().lower()
+            is_admin = current_user in ["administrator", "system"]
+            users_dir = Path("C:\\Users") if is_admin else None
+            return is_admin, users_dir
+        except Exception:
+            return False, None
 
 
 def _extract_config_from_user_directories(
@@ -309,7 +313,7 @@ def _extract_config_from_user_directories(
     parent_levels: int
 ) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
     """
-    Extract MCP config from all user directories (when running as root).
+    Extract MCP config from all user directories (when running as administrator).
     
     Args:
         global_config_path: Path to the global MCP config file (relative to home)
@@ -346,7 +350,7 @@ def extract_codex_global_mcp_config_with_root_support(
     parent_levels: int = _PARENT_LEVELS
 ) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
     """
-    Extract global Codex MCP config with support for root/admin user.
+    Extract global Codex MCP config with support for admin user.
     
     Reuses the pattern from extract_global_mcp_config_with_root_support
     but calls read_codex_toml_mcp_config for TOML parsing.
@@ -359,7 +363,7 @@ def extract_codex_global_mcp_config_with_root_support(
     Returns:
         Dict with 'path' and 'mcpServers' keys, or None if no config found
     """
-    # When running as admin/root, check all user directories first
+    # When running as administrator, check all user directories first
     config = _extract_config_from_user_directories(
         global_config_path, tool_name, parent_levels
     )
@@ -373,14 +377,14 @@ def extract_codex_global_mcp_config_with_root_support(
     return None
 
 
-class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
-    """Extractor for Codex MCP config on macOS systems."""
+class WindowsCodexMCPConfigExtractor(BaseMCPConfigExtractor):
+    """Extractor for Codex MCP config on Windows systems."""
 
     GLOBAL_MCP_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 
     def extract_mcp_config(self) -> Optional[Dict[str, List[Dict[str, Any]]]]:
         """
-        Extract Codex MCP configuration on macOS.
+        Extract Codex MCP configuration on Windows.
         
         Extracts global MCP config from ~/.codex/config.toml.
         
@@ -399,7 +403,7 @@ class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract global MCP config from ~/.codex/config.toml.
         
-        When running as root, collects global configs from ALL users.
+        When running as administrator, collects global configs from ALL users.
         Returns the first non-empty config found, or None if none found.
         
         Returns:
@@ -410,3 +414,4 @@ class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
             tool_name=_TOOL_NAME,
             parent_levels=_PARENT_LEVELS
         )
+

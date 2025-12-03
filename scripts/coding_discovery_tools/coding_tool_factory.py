@@ -73,6 +73,11 @@ from .macos.codex.codex import MacOSCodexDetector
 from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
 from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
 
+# Windows - Codex
+from .windows.codex.codex import WindowsCodexDetector
+from .windows.codex.codex_rules_extractor import WindowsCodexRulesExtractor
+from .windows.codex.mcp_config_extractor import WindowsCodexMCPConfigExtractor
+
 # macOS - OpenCode
 from .macos.opencode.opencode import MacOSOpenCodeDetector
 from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
@@ -340,8 +345,7 @@ class ToolDetectorFactory:
         if os_name == "Darwin":
             return MacOSCodexDetector()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsCodexDetector()
         else:
             return None
 
@@ -835,8 +839,7 @@ class CodexRulesExtractorFactory:
         if os_name == "Darwin":
             return MacOSCodexRulesExtractor()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsCodexRulesExtractor()
         else:
             return None
 
@@ -861,8 +864,7 @@ class CodexMCPConfigExtractorFactory:
         if os_name == "Darwin":
             return MacOSCodexMCPConfigExtractor()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsCodexMCPConfigExtractor()
         else:
             return None
 

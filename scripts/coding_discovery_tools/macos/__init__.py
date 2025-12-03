@@ -11,6 +11,7 @@ from .cline import MacOSClineDetector
 from .gemini_cli import MacOSGeminiCliDetector
 from .codex import MacOSCodexDetector
 from .replit import MacOSReplitDetector
+from .opencode import MacOSOpenCodeDetector
 
 __all__ = [
     'MacOSDeviceIdExtractor',
@@ -22,5 +23,6 @@ __all__ = [
     'MacOSGeminiCliDetector',
     'MacOSCodexDetector',
     'MacOSReplitDetector',
+    'MacOSOpenCodeDetector',
 ]
 

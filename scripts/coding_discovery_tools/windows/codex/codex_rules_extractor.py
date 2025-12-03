@@ -18,6 +18,8 @@ from ...windows_extraction_helpers import (
     build_project_list,
     extract_single_rule_file,
     should_skip_path,
+    is_running_as_admin,
+    get_windows_system_directories,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,7 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
                     logger.debug(f"Error extracting global Codex rules for {user_home}: {e}")
         
         # When running as administrator, scan all user directories
-        if self._is_running_as_admin():
+        if is_running_as_admin():
             users_dir = Path("C:\\Users")
             if users_dir.exists():
                 for user_dir in users_dir.iterdir():
@@ -135,7 +137,7 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
         """
         # Process top-level directories in parallel for better performance
         try:
-            system_dirs = self._get_system_directories()
+            system_dirs = get_windows_system_directories()
             top_level_dirs = [item for item in root_path.iterdir() 
                             if item.is_dir() and not should_skip_path(item, system_dirs)]
             
@@ -179,7 +181,7 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
             for item in current_dir.iterdir():
                 try:
                     # Check if we should skip this path
-                    system_dirs = self._get_system_directories()
+                    system_dirs = get_windows_system_directories()
                     if should_skip_path(item, system_dirs):
                         continue
                     
@@ -232,36 +234,3 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
                     add_rule_to_project(rule_info, project_root, projects_by_root)
         except Exception as e:
             logger.debug(f"Error extracting AGENTS.md from {agents_file}: {e}")
-
-    def _is_running_as_admin(self) -> bool:
-        """
-        Check if the current process is running as administrator.
-        
-        Returns:
-            True if running as administrator, False otherwise
-        """
-        try:
-            import ctypes
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except Exception:
-            # Fallback: check if current user is Administrator or SYSTEM
-            try:
-                import getpass
-                current_user = getpass.getuser().lower()
-                return current_user in ["administrator", "system"]
-            except Exception:
-                return False
-
-    def _get_system_directories(self) -> set:
-        """
-        Get Windows system directories to skip.
-        
-        Returns:
-            Set of system directory names
-        """
-        return {
-            'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
-            'System Volume Information', '$Recycle.Bin', 'Recovery',
-            'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
-            'Config.Msi', 'Documents and Settings', 'MSOCache'
-        }

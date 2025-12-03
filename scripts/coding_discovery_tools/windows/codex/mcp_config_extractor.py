@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import transform_mcp_servers_to_array
+from ...windows_extraction_helpers import is_running_as_admin
 
 logger = logging.getLogger(__name__)
 
@@ -290,21 +291,9 @@ def _is_admin_user() -> Tuple[bool, Optional[Path]]:
     Returns:
         Tuple of (is_admin, users_dir) where users_dir is None if not admin
     """
-    try:
-        import ctypes
-        is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
-        users_dir = Path("C:\\Users") if is_admin else None
-        return is_admin, users_dir
-    except Exception:
-        # Fallback: check if current user is Administrator or SYSTEM
-        try:
-            import getpass
-            current_user = getpass.getuser().lower()
-            is_admin = current_user in ["administrator", "system"]
-            users_dir = Path("C:\\Users") if is_admin else None
-            return is_admin, users_dir
-        except Exception:
-            return False, None
+    is_admin = is_running_as_admin()
+    users_dir = Path("C:\\Users") if is_admin else None
+    return is_admin, users_dir
 
 
 def _extract_config_from_user_directories(

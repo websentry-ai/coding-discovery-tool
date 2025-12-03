@@ -321,8 +321,8 @@ class AIToolsDetector:
         tool: Dict,
         rules_extractor: Optional[object],
         mcp_extractor: Optional[BaseMCPConfigExtractor],
-        extract_rules_func: callable,
-        merge_mcp_func: Optional[Callable] = None
+        extract_rules_func: Callable[[], List[Dict]],
+        merge_mcp_func: Optional[Callable[[List[Dict], Dict[str, Dict]], None]] = None
     ) -> Dict[str, Dict]:
         """
         Helper method to process a tool that has both rules and MCP config extraction.

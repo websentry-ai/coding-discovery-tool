@@ -224,6 +224,27 @@ class BaseCodexRulesExtractor(ABC):
         pass
 
 
+class BaseOpenCodeRulesExtractor(ABC):
+    """Abstract base class for extracting OpenCode rules from all projects."""
+
+    @abstractmethod
+    def extract_all_opencode_rules(self) -> List[Dict]:
+        """
+        Extract all OpenCode rules from all projects on the machine.
+        
+        Searches for:
+        - Global rules: ~/.config/opencode/agent/*.md
+        - Project-level rules: **/.opencode/agent/*.md (recursive)
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

@@ -12,9 +12,10 @@ import platform
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 
 try:
+    from .coding_tool_base import BaseMCPConfigExtractor
     from .coding_tool_factory import (
         DeviceIdExtractorFactory,
         ToolDetectorFactory,
@@ -42,6 +43,7 @@ try:
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from scripts.coding_discovery_tools.coding_tool_base import BaseMCPConfigExtractor
     from scripts.coding_discovery_tools.coding_tool_factory import (
         DeviceIdExtractorFactory,
         ToolDetectorFactory,
@@ -314,6 +316,143 @@ class AIToolsDetector:
             logger.error(f"Error extracting OpenCode rules: {e}", exc_info=True)
             return []
 
+    def _process_tool_with_rules_and_mcp(
+        self,
+        tool: Dict,
+        rules_extractor: Optional[object],
+        mcp_extractor: Optional[BaseMCPConfigExtractor],
+        extract_rules_func: callable,
+        merge_mcp_func: Optional[Callable] = None
+    ) -> Dict[str, Dict]:
+        """
+        Helper method to process a tool that has both rules and MCP config extraction.
+        
+        This method handles the common pattern of:
+        1. Logging processing header
+        2. Extracting rules (if extractor exists)
+        3. Building projects_dict from rules
+        4. Logging rules details
+        5. Extracting MCP configs (if extractor exists)
+        6. Merging MCP configs into projects (using custom merge function if provided)
+        7. Logging MCP details
+        
+        Args:
+            tool: Tool info dict from detection
+            rules_extractor: Rules extractor instance (can be None)
+            mcp_extractor: MCP config extractor instance (can be None)
+            extract_rules_func: Callable that extracts rules and returns List[Dict]
+            merge_mcp_func: Optional custom merge function for MCP configs.
+                          Defaults to _merge_mcp_configs_into_projects.
+                          Should have signature: (mcp_projects: List[Dict], projects_dict: Dict[str, Dict]) -> None
+            
+        Returns:
+            Dictionary mapping project_root to project dict
+        """
+        tool_name = tool.get("name", "")
+        projects_dict = {}
+        
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info(f"Processing: {tool_name}")
+        logger.info("=" * 70)
+        
+        # Extract rules
+        logger.info(f"  Extracting {tool_name} rules...")
+        if rules_extractor:
+            try:
+                rules_projects = extract_rules_func()
+                num_projects_with_rules = len(rules_projects)
+                total_rules = sum(len(project.get("rules", [])) for project in rules_projects)
+                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
+                
+                projects_dict = {
+                    project["project_root"]: {
+                        "path": project["project_root"],
+                        "rules": project.get("rules", [])
+                    }
+                    for project in rules_projects
+                }
+                
+                # Log rules details
+                if total_rules > 0:
+                    self._log_rules_details(projects_dict, tool_name)
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+                projects_dict = {}
+        else:
+            logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
+            projects_dict = {}
+        
+        # Extract and merge MCP configs
+        logger.info(f"  Extracting {tool_name} MCP configs...")
+        if mcp_extractor:
+            try:
+                mcp_config = mcp_extractor.extract_mcp_config()
+                if mcp_config and "projects" in mcp_config:
+                    num_mcp_projects = len(mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    
+                    # Use custom merge function if provided, otherwise use default
+                    merge_func = merge_mcp_func or self._merge_mcp_configs_into_projects
+                    merge_func(mcp_config["projects"], projects_dict)
+                    
+                    # Log MCP details
+                    self._log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info("  ℹ No MCP configs found")
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+        else:
+            logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
+        
+        return projects_dict
+
+    def _process_tool_with_mcp_only(
+        self,
+        tool: Dict,
+        mcp_extractor: Optional[BaseMCPConfigExtractor]
+    ) -> Dict[str, Dict]:
+        """
+        Helper method to process a tool that only has MCP config extraction (no rules).
+        
+        Args:
+            tool: Tool info dict from detection
+            mcp_extractor: MCP config extractor instance (can be None)
+            
+        Returns:
+            Dictionary mapping project_root to project dict
+        """
+        tool_name = tool.get("name", "")
+        projects_dict = {}
+        
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info(f"Processing: {tool_name}")
+        logger.info("=" * 70)
+        
+        # Extract and merge MCP configs
+        logger.info(f"  Extracting {tool_name} MCP configs...")
+        if mcp_extractor:
+            try:
+                mcp_config = mcp_extractor.extract_mcp_config()
+                if mcp_config and "projects" in mcp_config:
+                    num_mcp_projects = len(mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    self._merge_mcp_configs_into_projects(
+                        mcp_config["projects"],
+                        projects_dict
+                    )
+                    # Log MCP details
+                    self._log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info("  ⚠ No MCP configs found")
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+        else:
+            logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
+        
+        return projects_dict
+
     def _merge_mcp_configs_into_projects(
         self,
         mcp_projects: List[Dict],
@@ -516,429 +655,85 @@ class AIToolsDetector:
         tool_name = tool.get("name", "").lower()
         projects_dict = {}
         
-        # Extract rules for the tool
+        # Process tools using helper methods to reduce duplication
         if tool_name == "cursor":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            cursor_projects = self.extract_all_cursor_rules()
-            num_projects_with_rules = len(cursor_projects)
-            total_rules = sum(len(project.get("rules", [])) for project in cursor_projects)
-            logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-            
-            projects_dict = {
-                project["project_root"]: {
-                    "path": project["project_root"],
-                    "rules": project.get("rules", [])
-                }
-                for project in cursor_projects
-            }
-            
-            # Log rules details
-            if total_rules > 0:
-                self._log_rules_details(projects_dict, tool.get('name'))
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            cursor_mcp_config = self._cursor_mcp_extractor.extract_mcp_config()
-            if cursor_mcp_config and "projects" in cursor_mcp_config:
-                num_mcp_projects = len(cursor_mcp_config["projects"])
-                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                self._merge_mcp_configs_into_projects(
-                    cursor_mcp_config["projects"],
-                    projects_dict
-                )
-                # Log MCP details
-                self._log_mcp_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ No MCP configs found")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._cursor_rules_extractor,
+                self._cursor_mcp_extractor,
+                self.extract_all_cursor_rules
+            )
         
         elif tool_name == "claude code":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            claude_projects = self.extract_all_claude_rules()
-            num_projects_with_rules = len(claude_projects)
-            total_rules = sum(len(project.get("rules", [])) for project in claude_projects)
-            logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-            
-            projects_dict = {
-                project["project_root"]: {
-                    "path": project["project_root"],
-                    "rules": project.get("rules", [])
-                }
-                for project in claude_projects
-            }
-            
-            # Log rules details
-            if total_rules > 0:
-                self._log_rules_details(projects_dict, tool.get('name'))
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            claude_mcp_config = self._claude_mcp_extractor.extract_mcp_config()
-            if claude_mcp_config and "projects" in claude_mcp_config:
-                num_mcp_projects = len(claude_mcp_config["projects"])
-                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                self._merge_claude_mcp_configs_into_projects(
-                    claude_mcp_config["projects"],
-                    projects_dict
-                )
-                # Log MCP details
-                self._log_mcp_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ No MCP configs found")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._claude_rules_extractor,
+                self._claude_mcp_extractor,
+                self.extract_all_claude_rules,
+                merge_mcp_func=self._merge_claude_mcp_configs_into_projects
+            )
         
         elif tool_name == "windsurf":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            windsurf_projects = self.extract_all_windsurf_rules()
-            num_projects_with_rules = len(windsurf_projects)
-            total_rules = sum(len(project.get("rules", [])) for project in windsurf_projects)
-            logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-            
-            projects_dict = {
-                project["project_root"]: {
-                    "path": project["project_root"],
-                    "rules": project.get("rules", [])
-                }
-                for project in windsurf_projects
-            }
-            
-            # Log rules details
-            if total_rules > 0:
-                self._log_rules_details(projects_dict, tool.get('name'))
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            windsurf_mcp_config = self._windsurf_mcp_extractor.extract_mcp_config()
-            if windsurf_mcp_config and "projects" in windsurf_mcp_config:
-                num_mcp_projects = len(windsurf_mcp_config["projects"])
-                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                self._merge_mcp_configs_into_projects(
-                    windsurf_mcp_config["projects"],
-                    projects_dict
-                )
-                # Log MCP details
-                self._log_mcp_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ No MCP configs found")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._windsurf_rules_extractor,
+                self._windsurf_mcp_extractor,
+                self.extract_all_windsurf_rules
+            )
         
         elif tool_name == "roo code":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            # Roo Code doesn't have rules, only MCP configs
-            projects_dict = {}
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            roo_mcp_config = self._roo_mcp_extractor.extract_mcp_config()
-            if roo_mcp_config and "projects" in roo_mcp_config:
-                num_mcp_projects = len(roo_mcp_config["projects"])
-                logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                self._merge_mcp_configs_into_projects(
-                    roo_mcp_config["projects"],
-                    projects_dict
-                )
-                # Log MCP details
-                self._log_mcp_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ No MCP configs found")
+            projects_dict = self._process_tool_with_mcp_only(
+                tool,
+                self._roo_mcp_extractor
+            )
         
         elif tool_name == "cline":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            # Extract rules
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            if self._cline_rules_extractor:
-                cline_projects = self._cline_rules_extractor.extract_all_cline_rules()
-                num_projects_with_rules = len(cline_projects)
-                total_rules = sum(len(project.get("rules", [])) for project in cline_projects)
-                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-                
-                projects_dict = {
-                    project["project_root"]: {
-                        "path": project["project_root"],
-                        "rules": project.get("rules", [])
-                    }
-                    for project in cline_projects
-                }
-                
-                # Log rules details
-                if total_rules > 0:
-                    self._log_rules_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ Cline rules extractor not available for this OS")
-                projects_dict = {}
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            if self._cline_mcp_extractor:
-                cline_mcp_config = self._cline_mcp_extractor.extract_mcp_config()
-                if cline_mcp_config and "projects" in cline_mcp_config:
-                    num_mcp_projects = len(cline_mcp_config["projects"])
-                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                    self._merge_mcp_configs_into_projects(
-                        cline_mcp_config["projects"],
-                        projects_dict
-                    )
-                    # Log MCP details
-                    self._log_mcp_details(projects_dict, tool.get('name'))
-                else:
-                    logger.info("  ⚠ No MCP configs found")
-            else:
-                logger.info("  ⚠ Cline MCP extractor not available for this OS")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._cline_rules_extractor,
+                self._cline_mcp_extractor,
+                lambda: self._cline_rules_extractor.extract_all_cline_rules() if self._cline_rules_extractor else []
+            )
         
         elif tool_name == "antigravity":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            # Extract rules
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            if self._antigravity_rules_extractor:
-                antigravity_projects = self._antigravity_rules_extractor.extract_all_antigravity_rules()
-                num_projects_with_rules = len(antigravity_projects)
-                total_rules = sum(len(project.get("rules", [])) for project in antigravity_projects)
-                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-                
-                projects_dict = {
-                    project["project_root"]: {
-                        "path": project["project_root"],
-                        "rules": project.get("rules", [])
-                    }
-                    for project in antigravity_projects
-                }
-                
-                # Log rules details
-                if total_rules > 0:
-                    self._log_rules_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ Antigravity rules extractor not available for this OS")
-                projects_dict = {}
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            if self._antigravity_mcp_extractor:
-                antigravity_mcp_config = self._antigravity_mcp_extractor.extract_mcp_config()
-                if antigravity_mcp_config and "projects" in antigravity_mcp_config:
-                    num_mcp_projects = len(antigravity_mcp_config["projects"])
-                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                    self._merge_mcp_configs_into_projects(
-                        antigravity_mcp_config["projects"],
-                        projects_dict
-                    )
-                    # Log MCP details
-                    self._log_mcp_details(projects_dict, tool.get('name'))
-                else:
-                    logger.info("  ⚠ No MCP configs found")
-            else:
-                logger.info("  ⚠ Antigravity MCP extractor not available for this OS")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._antigravity_rules_extractor,
+                self._antigravity_mcp_extractor,
+                self.extract_all_antigravity_rules
+            )
         
         elif tool_name.replace(" ", "").lower() == "kilocode":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            # Extract rules
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            if self._kilocode_rules_extractor:
-                kilocode_projects = self._kilocode_rules_extractor.extract_all_kilocode_rules()
-                num_projects_with_rules = len(kilocode_projects)
-                total_rules = sum(len(project.get("rules", [])) for project in kilocode_projects)
-                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-                
-                projects_dict = {
-                    project["project_root"]: {
-                        "path": project["project_root"],
-                        "rules": project.get("rules", [])
-                    }
-                    for project in kilocode_projects
-                }
-                
-                # Log rules details
-                if total_rules > 0:
-                    self._log_rules_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ Kilo Code rules extractor not available for this OS")
-                projects_dict = {}
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            if self._kilocode_mcp_extractor:
-                kilocode_mcp_config = self._kilocode_mcp_extractor.extract_mcp_config()
-                if kilocode_mcp_config and "projects" in kilocode_mcp_config:
-                    num_mcp_projects = len(kilocode_mcp_config["projects"])
-                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                    self._merge_mcp_configs_into_projects(
-                        kilocode_mcp_config["projects"],
-                        projects_dict
-                    )
-                    # Log MCP details
-                    self._log_mcp_details(projects_dict, tool.get('name'))
-                else:
-                    logger.info("  ℹ No MCP configs found")
-            else:
-                logger.info("  ⚠ Kilo Code MCP extractor not available for this OS")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._kilocode_rules_extractor,
+                self._kilocode_mcp_extractor,
+                self.extract_all_kilocode_rules
+            )
         
         elif tool_name.replace(" ", "").lower() == "geminicli":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            # Extract rules
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            if self._gemini_cli_rules_extractor:
-                gemini_cli_projects = self._gemini_cli_rules_extractor.extract_all_gemini_cli_rules()
-                num_projects_with_rules = len(gemini_cli_projects)
-                total_rules = sum(len(project.get("rules", [])) for project in gemini_cli_projects)
-                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-                
-                projects_dict = {
-                    project["project_root"]: {
-                        "path": project["project_root"],
-                        "rules": project.get("rules", [])
-                    }
-                    for project in gemini_cli_projects
-                }
-                
-                # Log rules details
-                if total_rules > 0:
-                    self._log_rules_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ Gemini CLI rules extractor not available for this OS")
-                projects_dict = {}
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            if self._gemini_cli_mcp_extractor:
-                gemini_cli_mcp_config = self._gemini_cli_mcp_extractor.extract_mcp_config()
-                if gemini_cli_mcp_config and "projects" in gemini_cli_mcp_config:
-                    num_mcp_projects = len(gemini_cli_mcp_config["projects"])
-                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                    self._merge_mcp_configs_into_projects(
-                        gemini_cli_mcp_config["projects"],
-                        projects_dict
-                    )
-                    # Log MCP details
-                    self._log_mcp_details(projects_dict, tool.get('name'))
-                else:
-                    logger.info("  ℹ No MCP configs found")
-            else:
-                logger.info("  ⚠ Gemini CLI MCP extractor not available for this OS")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._gemini_cli_rules_extractor,
+                self._gemini_cli_mcp_extractor,
+                self.extract_all_gemini_cli_rules
+            )
         
         elif tool_name.replace(" ", "").lower() == "codex":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            # Extract rules
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            if self._codex_rules_extractor:
-                codex_projects = self._codex_rules_extractor.extract_all_codex_rules()
-                num_projects_with_rules = len(codex_projects)
-                total_rules = sum(len(project.get("rules", [])) for project in codex_projects)
-                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-                
-                projects_dict = {
-                    project["project_root"]: {
-                        "path": project["project_root"],
-                        "rules": project.get("rules", [])
-                    }
-                    for project in codex_projects
-                }
-                
-                # Log rules details
-                if total_rules > 0:
-                    self._log_rules_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ Codex rules extractor not available for this OS")
-                projects_dict = {}
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            if self._codex_mcp_extractor:
-                codex_mcp_config = self._codex_mcp_extractor.extract_mcp_config()
-                if codex_mcp_config and "projects" in codex_mcp_config:
-                    num_mcp_projects = len(codex_mcp_config["projects"])
-                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                    self._merge_mcp_configs_into_projects(
-                        codex_mcp_config["projects"],
-                        projects_dict
-                    )
-                    # Log MCP details
-                    self._log_mcp_details(projects_dict, tool.get('name'))
-                else:
-                    logger.info("  ℹ No MCP configs found")
-            else:
-                logger.info("  ⚠ Codex MCP extractor not available for this OS")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._codex_rules_extractor,
+                self._codex_mcp_extractor,
+                self.extract_all_codex_rules
+            )
         
         elif tool_name.replace(" ", "").lower() == "opencode":
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(f"Processing: {tool.get('name')}")
-            logger.info("=" * 70)
-            
-            # Extract rules
-            logger.info(f"  Extracting {tool.get('name')} rules...")
-            if self._opencode_rules_extractor:
-                opencode_projects = self.extract_all_opencode_rules()
-                num_projects_with_rules = len(opencode_projects)
-                total_rules = sum(len(project.get("rules", [])) for project in opencode_projects)
-                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
-                
-                projects_dict = {
-                    project["project_root"]: {
-                        "path": project["project_root"],
-                        "rules": project.get("rules", [])
-                    }
-                    for project in opencode_projects
-                }
-                
-                # Log rules details
-                if total_rules > 0:
-                    self._log_rules_details(projects_dict, tool.get('name'))
-            else:
-                logger.info("  ⚠ OpenCode rules extractor not available for this OS")
-                projects_dict = {}
-            
-            # Extract and merge MCP configs
-            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
-            if self._opencode_mcp_extractor:
-                opencode_mcp_config = self._opencode_mcp_extractor.extract_mcp_config()
-                if opencode_mcp_config and "projects" in opencode_mcp_config:
-                    num_mcp_projects = len(opencode_mcp_config["projects"])
-                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
-                    self._merge_mcp_configs_into_projects(
-                        opencode_mcp_config["projects"],
-                        projects_dict
-                    )
-                    # Log MCP details
-                    self._log_mcp_details(projects_dict, tool.get('name'))
-                else:
-                    logger.info("  ℹ No MCP configs found")
-            else:
-                logger.info("  ⚠ OpenCode MCP extractor not available for this OS")
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._opencode_rules_extractor,
+                self._opencode_mcp_extractor,
+                self.extract_all_opencode_rules
+            )
         
         # Filter out empty projects (no mcpServers and no rules)
         total_projects_before_filter = len(projects_dict)

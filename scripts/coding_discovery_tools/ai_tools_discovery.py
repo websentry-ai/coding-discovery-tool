@@ -25,6 +25,7 @@ try:
         AntigravityRulesExtractorFactory,
         KiloCodeRulesExtractorFactory,
         GeminiCliRulesExtractorFactory,
+        CodexRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
@@ -33,6 +34,7 @@ try:
         AntigravityMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
+        CodexMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
 except ImportError:
@@ -48,6 +50,7 @@ except ImportError:
         AntigravityRulesExtractorFactory,
         KiloCodeRulesExtractorFactory,
         GeminiCliRulesExtractorFactory,
+        CodexRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
@@ -56,6 +59,7 @@ except ImportError:
         AntigravityMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
+        CodexMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
 
@@ -119,6 +123,10 @@ class AIToolsDetector:
             # Initialize Gemini CLI extractors (macOS only, returns None for unsupported OS)
             self._gemini_cli_rules_extractor = GeminiCliRulesExtractorFactory.create(self.system)
             self._gemini_cli_mcp_extractor = GeminiCliMCPConfigExtractorFactory.create(self.system)
+            
+            # Initialize Codex extractors (macOS only, returns None for unsupported OS)
+            self._codex_rules_extractor = CodexRulesExtractorFactory.create(self.system)
+            self._codex_mcp_extractor = CodexMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -262,6 +270,23 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Gemini CLI rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_codex_rules(self) -> List[Dict]:
+        """
+        Extract all Codex rules from all projects.
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._codex_rules_extractor:
+                return self._codex_rules_extractor.extract_all_codex_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Codex rules: {e}", exc_info=True)
             return []
 
     def _merge_mcp_configs_into_projects(
@@ -795,6 +820,53 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             else:
                 logger.info("  ⚠ Gemini CLI MCP extractor not available for this OS")
+        
+        elif tool_name.replace(" ", "").lower() == "codex":
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name')}")
+            logger.info("=" * 70)
+            
+            # Extract rules
+            logger.info(f"  Extracting {tool.get('name')} rules...")
+            if self._codex_rules_extractor:
+                codex_projects = self._codex_rules_extractor.extract_all_codex_rules()
+                num_projects_with_rules = len(codex_projects)
+                total_rules = sum(len(project.get("rules", [])) for project in codex_projects)
+                logger.info(f"  ✓ Found {num_projects_with_rules} project(s) with {total_rules} total rule file(s)")
+                
+                projects_dict = {
+                    project["project_root"]: {
+                        "path": project["project_root"],
+                        "rules": project.get("rules", [])
+                    }
+                    for project in codex_projects
+                }
+                
+                # Log rules details
+                if total_rules > 0:
+                    self._log_rules_details(projects_dict, tool.get('name'))
+            else:
+                logger.info("  ⚠ Codex rules extractor not available for this OS")
+                projects_dict = {}
+            
+            # Extract and merge MCP configs
+            logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+            if self._codex_mcp_extractor:
+                codex_mcp_config = self._codex_mcp_extractor.extract_mcp_config()
+                if codex_mcp_config and "projects" in codex_mcp_config:
+                    num_mcp_projects = len(codex_mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    self._merge_mcp_configs_into_projects(
+                        codex_mcp_config["projects"],
+                        projects_dict
+                    )
+                    # Log MCP details
+                    self._log_mcp_details(projects_dict, tool.get('name'))
+                else:
+                    logger.info("  ℹ No MCP configs found")
+            else:
+                logger.info("  ⚠ Codex MCP extractor not available for this OS")
         
         # Filter out empty projects (no mcpServers and no rules)
         total_projects_before_filter = len(projects_dict)

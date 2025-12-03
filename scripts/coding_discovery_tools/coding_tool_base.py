@@ -204,6 +204,26 @@ class BaseGeminiCliRulesExtractor(ABC):
         pass
 
 
+class BaseCodexRulesExtractor(ABC):
+    """Abstract base class for extracting Codex rules from all projects."""
+
+    @abstractmethod
+    def extract_all_codex_rules(self) -> List[Dict]:
+        """
+        Extract all Codex rules from all projects on the machine.
+        
+        Searches for:
+        - Global config: ~/.codex/config.toml (contains rules/execpolicy configuration)
+        
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

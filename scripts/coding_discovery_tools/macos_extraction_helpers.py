@@ -237,6 +237,34 @@ def find_windsurf_project_root(rule_file: Path) -> Path:
     return parent
 
 
+def find_gemini_cli_project_root(rule_file: Path) -> Path:
+    """
+    Find the project root directory for a Gemini CLI rule file.
+    
+    For Gemini CLI rules:
+    - Global rules in ~/.gemini/GEMINI.md -> home directory
+    - Project rules: GEMINI.md in current directory or parent -> directory containing GEMINI.md
+    - Sub-directory rules: GEMINI.md in subdirectories -> directory containing GEMINI.md
+    
+    Args:
+        rule_file: Path to the rule file (GEMINI.md)
+        
+    Returns:
+        Project root path
+    """
+    parent = rule_file.parent
+    
+    # Case 1: Global rules in ~/.gemini/GEMINI.md
+    # Return the .gemini directory's parent (which would be home directory)
+    if parent.name == ".gemini" and rule_file.name.upper() == "GEMINI.MD":
+        return parent.parent  # Home directory
+    
+    # Case 2: Project or sub-directory rules
+    # For Gemini CLI, the directory containing GEMINI.md is the project root
+    # (could be actual project root or a subdirectory)
+    return parent
+
+
 def get_file_metadata(rule_file: Path) -> Dict[str, str]:
     """
     Get file metadata (size and last modified timestamp).

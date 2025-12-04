@@ -73,6 +73,16 @@ from .macos.codex.codex import MacOSCodexDetector
 from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
 from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
 
+# macOS - Replit
+from .macos.replit.replit import MacOSReplitDetector
+
+# Windows - Replit
+from .windows.replit.replit import WindowsReplitDetector
+# Windows - Codex
+from .windows.codex.codex import WindowsCodexDetector
+from .windows.codex.codex_rules_extractor import WindowsCodexRulesExtractor
+from .windows.codex.mcp_config_extractor import WindowsCodexMCPConfigExtractor
+
 # macOS - OpenCode
 from .macos.opencode.opencode import MacOSOpenCodeDetector
 from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
@@ -345,8 +355,28 @@ class ToolDetectorFactory:
         if os_name == "Darwin":
             return MacOSCodexDetector()
         elif os_name == "Windows":
-            # Windows support can be added later
+            return WindowsCodexDetector()
+        else:
             return None
+
+    @staticmethod
+    def create_replit_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Replit detector for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSReplitDetector()
+        elif os_name == "Windows":
+            return WindowsReplitDetector()
         else:
             return None
 
@@ -417,6 +447,10 @@ class ToolDetectorFactory:
         if codex_detector is not None:
             detectors.append(codex_detector)
         
+        # Add Replit detector for macOS
+        replit_detector = ToolDetectorFactory.create_replit_detector(os_name)
+        if replit_detector is not None:
+            detectors.append(replit_detector)
         # Add OpenCode detector for macOS
         opencode_detector = ToolDetectorFactory.create_opencode_detector(os_name)
         if opencode_detector is not None:
@@ -839,8 +873,7 @@ class CodexRulesExtractorFactory:
         if os_name == "Darwin":
             return MacOSCodexRulesExtractor()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsCodexRulesExtractor()
         else:
             return None
 
@@ -865,8 +898,7 @@ class CodexMCPConfigExtractorFactory:
         if os_name == "Darwin":
             return MacOSCodexMCPConfigExtractor()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsCodexMCPConfigExtractor()
         else:
             return None
 

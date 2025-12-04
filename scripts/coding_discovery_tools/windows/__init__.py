@@ -10,6 +10,8 @@ from .cline import WindowsClineDetector
 from .kilocode import WindowsKiloCodeDetector
 from .roo_code import WindowsRooDetector
 from .opencode import WindowsOpenCodeDetector
+from .replit import WindowsReplitDetector
+from .codex import WindowsCodexDetector
 
 __all__ = [
     'WindowsDeviceIdExtractor',
@@ -20,5 +22,7 @@ __all__ = [
     'WindowsKiloCodeDetector',
     'WindowsRooDetector',
     'WindowsOpenCodeDetector',
+    'WindowsReplitDetector',
+    'WindowsCodexDetector',
 ]
 

@@ -10,6 +10,7 @@ from .roo_code import MacOSRooDetector
 from .cline import MacOSClineDetector
 from .gemini_cli import MacOSGeminiCliDetector
 from .codex import MacOSCodexDetector
+from .replit import MacOSReplitDetector
 from .opencode import MacOSOpenCodeDetector
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     'MacOSClineDetector',
     'MacOSGeminiCliDetector',
     'MacOSCodexDetector',
+    'MacOSReplitDetector',
     'MacOSOpenCodeDetector',
 ]
 

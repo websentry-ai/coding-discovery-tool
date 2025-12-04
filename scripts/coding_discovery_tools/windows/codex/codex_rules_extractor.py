@@ -96,7 +96,7 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
             if global_agents_path.exists() and global_agents_path.is_file():
                 try:
                     # Check if file should be processed (not in skip directories)
-                    if not should_skip_path(global_agents_path):
+                    if not should_skip_path(global_agents_path, set()):
                         rule_info = extract_single_rule_file(
                             global_agents_path, 
                             find_codex_project_root

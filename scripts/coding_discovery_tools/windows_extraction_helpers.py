@@ -255,3 +255,80 @@ def read_truncated_file(file_path: Path) -> str:
         logger.warning(f"Error reading truncated file {file_path}: {e}")
         return ""
 
+
+def is_running_as_admin() -> bool:
+    """
+    Check if the current process is running as administrator.
+    
+    Returns:
+        True if running as administrator, False otherwise
+    """
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        # Fallback: check if current user is Administrator or SYSTEM
+        try:
+            import getpass
+            current_user = getpass.getuser().lower()
+            return current_user in ["administrator", "system"]
+        except Exception:
+            return False
+
+
+def get_windows_system_directories() -> set:
+    """
+    Get Windows system directories to skip during file searches.
+    
+    Returns:
+        Set of system directory names
+    """
+    return {
+        'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
+        'System Volume Information', '$Recycle.Bin', 'Recovery',
+        'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
+        'Config.Msi', 'Documents and Settings', 'MSOCache'
+    }
+
+
+def scan_user_directories_for_file(
+    file_path_func: Callable[[Path], Path],
+    extract_func: Callable[[Path], Optional[Dict]],
+    users_dir: Optional[Path] = None
+) -> Optional[Dict]:
+    """
+    Scan all user directories for a file when running as administrator.
+    
+    Args:
+        file_path_func: Function that takes user_home Path and returns file path to check
+        extract_func: Function that extracts data from the file path
+        users_dir: Optional users directory path (defaults to C:\\Users)
+        
+    Returns:
+        Extracted data dict or None if not found
+    """
+    if not is_running_as_admin():
+        return None
+    
+    if users_dir is None:
+        users_dir = Path("C:\\Users")
+    
+    if not users_dir.exists():
+        return None
+    
+    for user_dir in users_dir.iterdir():
+        if user_dir.is_dir() and not user_dir.name.startswith('.'):
+            try:
+                file_path = file_path_func(user_dir)
+                if file_path.exists():
+                    result = extract_func(file_path)
+                    if result:
+                        return result
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping user directory {user_dir}: {e}")
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing user directory {user_dir}: {e}")
+                continue
+    
+    return None

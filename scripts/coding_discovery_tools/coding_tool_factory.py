@@ -88,6 +88,11 @@ from .macos.opencode.opencode import MacOSOpenCodeDetector
 from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
 from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
 
+# Windows - OpenCode
+from .windows.opencode.opencode import WindowsOpenCodeDetector
+from .windows.opencode.opencode_rules_extractor import WindowsOpenCodeRulesExtractor
+from .windows.opencode.mcp_config_extractor import WindowsOpenCodeMCPConfigExtractor
+
 # Windows - Gemini CLI
 from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
 from .windows.gemini_cli.gemini_cli_rules_extractor import WindowsGeminiCliRulesExtractor
@@ -392,8 +397,7 @@ class ToolDetectorFactory:
         if os_name == "Darwin":
             return MacOSOpenCodeDetector()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsOpenCodeDetector()
         else:
             return None
 
@@ -919,8 +923,7 @@ class OpenCodeRulesExtractorFactory:
         if os_name == "Darwin":
             return MacOSOpenCodeRulesExtractor()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsOpenCodeRulesExtractor()
         else:
             return None
 
@@ -945,7 +948,6 @@ class OpenCodeMCPConfigExtractorFactory:
         if os_name == "Darwin":
             return MacOSOpenCodeMCPConfigExtractor()
         elif os_name == "Windows":
-            # Windows support can be added later
-            return None
+            return WindowsOpenCodeMCPConfigExtractor()
         else:
             return None

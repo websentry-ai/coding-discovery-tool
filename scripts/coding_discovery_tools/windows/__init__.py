@@ -9,6 +9,7 @@ from .windsurf import WindowsWindsurfDetector
 from .cline import WindowsClineDetector
 from .kilocode import WindowsKiloCodeDetector
 from .roo_code import WindowsRooDetector
+from .opencode import WindowsOpenCodeDetector
 from .replit import WindowsReplitDetector
 from .codex import WindowsCodexDetector
 
@@ -20,6 +21,7 @@ __all__ = [
     'WindowsClineDetector',
     'WindowsKiloCodeDetector',
     'WindowsRooDetector',
+    'WindowsOpenCodeDetector',
     'WindowsReplitDetector',
     'WindowsCodexDetector',
 ]

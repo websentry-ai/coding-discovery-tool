@@ -22,6 +22,7 @@ from .coding_tool_base import (
     BaseCodexRulesExtractor,
     BaseOpenCodeRulesExtractor,
     BaseMCPConfigExtractor,
+    BaseClaudeSettingsExtractor,
 )
 
 # macOS - Shared
@@ -34,6 +35,7 @@ from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
 # macOS - Claude Code
 from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
 from .macos.claude_code.mcp_config_extractor import MacOSClaudeMCPConfigExtractor
+from .macos.claude_code.settings_extractor import MacOSClaudeSettingsExtractor
 
 # macOS - Windsurf
 from .macos.windsurf.windsurf import MacOSWindsurfDetector
@@ -108,6 +110,7 @@ from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
 # Windows - Claude Code
 from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
 from .windows.claude_code.mcp_config_extractor import WindowsClaudeMCPConfigExtractor
+from .windows.claude_code.settings_extractor import WindowsClaudeSettingsExtractor
 
 # Windows - Windsurf
 from .windows.windsurf.windsurf import WindowsWindsurfDetector
@@ -568,6 +571,34 @@ class ClaudeMCPConfigExtractorFactory:
             return MacOSClaudeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsClaudeMCPConfigExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class ClaudeSettingsExtractorFactory:
+    """Factory for creating OS-specific Claude Code settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseClaudeSettingsExtractor:
+        """
+        Create appropriate Claude Code settings extractor for the OS.
+        
+        Args:
+            os_name: Operating system name (defaults to current OS)
+            
+        Returns:
+            BaseClaudeSettingsExtractor instance
+            
+        Raises:
+            ValueError: If OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSClaudeSettingsExtractor()
+        elif os_name == "Windows":
+            return WindowsClaudeSettingsExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 

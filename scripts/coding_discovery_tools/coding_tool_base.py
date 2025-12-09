@@ -259,3 +259,29 @@ class BaseMCPConfigExtractor(ABC):
         """
         pass
 
+
+class BaseClaudeSettingsExtractor(ABC):
+    """Abstract base class for extracting Claude Code settings (permissions)."""
+
+    @abstractmethod
+    def extract_settings(self) -> Optional[List[Dict]]:
+        """
+        Extract Claude Code permission settings from all sources.
+        
+        Searches for:
+        - User Settings (global): ~/.claude/settings.json
+        - Project Settings: **/.claude/settings.json and **/.claude/settings.local.json
+        - Enterprise Managed: /Library/Application Support/ClaudeCode/managed-settings.json (macOS)
+          or C:\\Program Files\\ClaudeCode\\managed-settings.json (Windows)
+        
+        Returns:
+            List of settings dicts, each containing:
+            - tool_name: "Claude Code"
+            - settings_source: "user|project|managed"
+            - settings_path: Path to the settings file
+            - permissions: Dict with defaultMode, allow, deny, additionalDirectories
+            - sandbox: Dict with enabled, autoAllowBashIfSandboxed
+            Or None if no settings found
+        """
+        pass
+

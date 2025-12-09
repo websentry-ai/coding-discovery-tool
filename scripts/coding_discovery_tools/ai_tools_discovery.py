@@ -30,6 +30,7 @@ try:
         OpenCodeRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
+        ClaudeSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
@@ -40,6 +41,8 @@ try:
         OpenCodeMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info
+    from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
+    from .settings_transformers import transform_settings_to_backend_format
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -58,6 +61,7 @@ except ImportError:
         OpenCodeRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
+        ClaudeSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
@@ -68,13 +72,12 @@ except ImportError:
         OpenCodeMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
+    from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
+    from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
 
 # Set up logger
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+configure_logger()
 
 
 class AIToolsDetector:
@@ -106,6 +109,7 @@ class AIToolsDetector:
             # Initialize Claude Code extractors
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
+            self._claude_settings_extractor = ClaudeSettingsExtractorFactory.create(self.system)
             
             # Initialize Windsurf extractors
             self._windsurf_rules_extractor = WindsurfRulesExtractorFactory.create(self.system)
@@ -375,7 +379,7 @@ class AIToolsDetector:
                 
                 # Log rules details
                 if total_rules > 0:
-                    self._log_rules_details(projects_dict, tool_name)
+                    log_rules_details(projects_dict, tool_name)
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
                 projects_dict = {}
@@ -397,7 +401,7 @@ class AIToolsDetector:
                     merge_func(mcp_config["projects"], projects_dict)
                     
                     # Log MCP details
-                    self._log_mcp_details(projects_dict, tool_name)
+                    log_mcp_details(projects_dict, tool_name)
                 else:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
@@ -443,7 +447,7 @@ class AIToolsDetector:
                         projects_dict
                     )
                     # Log MCP details
-                    self._log_mcp_details(projects_dict, tool_name)
+                    log_mcp_details(projects_dict, tool_name)
                 else:
                     logger.info("  ⚠ No MCP configs found")
             except Exception as e:
@@ -561,87 +565,6 @@ class AIToolsDetector:
         rules = project.get("rules", [])
         return len(mcp_servers) == 0 and len(rules) == 0
 
-    def _log_rules_details(self, projects_dict: Dict[str, Dict], tool_name: str) -> None:
-        """
-        Log detailed information about rules found.
-        
-        Args:
-            projects_dict: Dictionary mapping project paths to project configs
-            tool_name: Name of the tool
-        """
-        total_rules = 0
-        projects_with_rules = []
-        
-        for project_path, project_data in projects_dict.items():
-            rules = project_data.get("rules", [])
-            if rules:
-                total_rules += len(rules)
-                projects_with_rules.append((project_path, rules))
-        
-        if total_rules == 0:
-            logger.info("    No rules found")
-            return
-        
-        logger.info("")
-        logger.info("    ┌─ Rules Summary ─────────────────────────────────────────────")
-        for idx, (project_path, rules) in enumerate(projects_with_rules, 1):
-            logger.info(f"    │ Project #{idx}: {project_path}")
-            logger.info(f"    │   Rules: {len(rules)}")
-            for rule_idx, rule in enumerate(rules, 1):
-                rule_file = rule.get("file_name") or rule.get("file_path", "Unknown")
-                rule_size = rule.get("size", 0)
-                size_str = f"{rule_size:,} bytes" if rule_size > 0 else "size unknown"
-                logger.info(f"    │     {rule_idx}. {rule_file} ({size_str})")
-            if idx < len(projects_with_rules):
-                logger.info("    │")
-        
-        logger.info(f"    └─ Total: {total_rules} rule file(s) across {len(projects_with_rules)} project(s)")
-        logger.info("")
-
-    def _log_mcp_details(self, projects_dict: Dict[str, Dict], tool_name: str) -> None:
-        """
-        Log detailed information about MCP servers found.
-        
-        Args:
-            projects_dict: Dictionary mapping project paths to project configs
-            tool_name: Name of the tool
-        """
-        total_mcp_servers = 0
-        projects_with_mcp = []
-        
-        for project_path, project_data in projects_dict.items():
-            mcp_servers = project_data.get("mcpServers", [])
-            if mcp_servers:
-                total_mcp_servers += len(mcp_servers)
-                projects_with_mcp.append((project_path, mcp_servers))
-        
-        if total_mcp_servers == 0:
-            logger.info("    No MCP servers found")
-            return
-        
-        logger.info("")
-        logger.info("    ┌─ MCP Servers Summary ───────────────────────────────────────")
-        for idx, (project_path, mcp_servers) in enumerate(projects_with_mcp, 1):
-            logger.info(f"    │ Project #{idx}: {project_path}")
-            logger.info(f"    │   MCP Servers: {len(mcp_servers)}")
-            for server_idx, server in enumerate(mcp_servers, 1):
-                server_name = server.get("name", "Unknown")
-                server_command = server.get("command", "")
-                server_args = server.get("args", [])
-                
-                logger.info(f"    │     {server_idx}. {server_name}")
-                if server_command:
-                    args_str = " ".join(str(arg) for arg in server_args) if server_args else ""
-                    full_command = f"{server_command} {args_str}".strip()
-                    logger.info(f"    │        Command: {full_command}")
-                elif server_args:
-                    logger.info(f"    │        Args: {' '.join(str(arg) for arg in server_args)}")
-            if idx < len(projects_with_mcp):
-                logger.info("    │")
-        
-        logger.info(f"    └─ Total: {total_mcp_servers} MCP server(s) across {len(projects_with_mcp)} project(s)")
-        logger.info("")
-
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
@@ -672,6 +595,27 @@ class AIToolsDetector:
                 self.extract_all_claude_rules,
                 merge_mcp_func=self._merge_claude_mcp_configs_into_projects
             )
+            
+            # Extract settings
+            logger.info(f"  Extracting {tool_name} settings...")
+            if self._claude_settings_extractor:
+                try:
+                    settings = self._claude_settings_extractor.extract_settings()
+                    logger.info(f"  Settings extraction returned: {settings is not None}, count: {len(settings) if settings else 0}")
+                    if settings:
+                        num_settings = len(settings)
+                        logger.info(f"  ✓ Found {num_settings} settings file(s)")
+                        # Store settings to be included in tool dict
+                        tool["_settings"] = settings
+                        logger.info(f"  ✓ Stored _settings in tool dict (keys: {list(tool.keys())})")
+                        # Log settings details
+                        log_settings_details(settings, tool_name)
+                    else:
+                        logger.warning("  ⚠ No settings found - extract_settings() returned None or empty list")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+            else:
+                logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
         
         elif tool_name == "windsurf":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -747,12 +691,35 @@ class AIToolsDetector:
         logger.info(f"  ✓ Final project count: {len(filtered_projects)} project(s)")
         logger.info("=" * 70)
         
-        return {
+        tool_dict = {
             "name": tool.get("name"),
             "version": tool.get("version"),
             "install_path": tool.get("install_path"),
             "projects": filtered_projects
         }
+        
+        # Transform and add permissions if present (for Claude Code)
+        logger.info(f"  Checking for settings in tool dict for {tool_name}...")
+        logger.info(f"  Tool dict keys: {list(tool.keys())}")
+        
+        if "_settings" in tool:
+            logger.info(f"  ✓ Found _settings in tool dict, count: {len(tool['_settings']) if tool['_settings'] else 0}")
+            try:
+                permissions = transform_settings_to_backend_format(tool["_settings"])
+                if permissions:
+                    tool_dict["permissions"] = permissions
+                    logger.info(f"  ✓ Added permissions to {tool_name} report")
+                    logger.info(f"  Permissions keys: {list(permissions.keys())}")
+                else:
+                    logger.warning(f"  ⚠ Permissions transformation returned None for {tool_name}")
+                    logger.warning(f"  Settings that were passed: {tool['_settings']}")
+            except Exception as e:
+                logger.error(f"Error transforming permissions for {tool_name}: {e}", exc_info=True)
+        else:
+            logger.warning(f"  ✗ No _settings found in tool dict for {tool_name}")
+            logger.warning(f"  Available keys in tool: {list(tool.keys())}")
+        
+        return tool_dict
 
     def generate_single_tool_report(self, tool: Dict, device_id: str, user_info: str) -> Dict:
         """
@@ -875,6 +842,48 @@ def main():
                 
                 # Send report immediately after processing
                 logger.info(f"Sending {tool_name} report to backend...")
+                
+                # Log detailed summary of what's being sent
+                logger.info("")
+                logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
+                logger.info(f"  │ Tool: {tool_name}")
+                logger.info(f"  │ Version: {tool_with_projects.get('version', 'Unknown')}")
+                logger.info(f"  │ Install Path: {tool_with_projects.get('install_path', 'Unknown')}")
+                logger.info(f"  │ Projects: {len(projects)}")
+                logger.info(f"  │ Total Rules: {num_rules}")
+                logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
+                
+                # Log permissions details if present
+                if "permissions" in tool_with_projects:
+                    perms = tool_with_projects.get("permissions", {})
+                    logger.info(f"  │ Permissions: ✓ Present")
+                    logger.info(f"  │   Source: {perms.get('settings_source', 'unknown')}")
+                    logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
+                    logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
+                    logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
+                    logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
+                    logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
+                else:
+                    logger.info(f"  │ Permissions: ✗ Not present")
+                
+                logger.info("  └──────────────────────────────────────────────────────────────────")
+                logger.info("")
+                
+                # Log the complete JSON being sent to backend
+                logger.info("  Complete JSON payload being sent to backend:")
+                logger.info("  " + "=" * 70)
+                try:
+                    import json
+                    report_json = json.dumps(single_tool_report, indent=2)
+                    # Split into lines and add indentation for readability
+                    for line in report_json.split('\n'):
+                        logger.info(f"  {line}")
+                except Exception as e:
+                    logger.warning(f"  Could not serialize report to JSON for logging: {e}")
+                    logger.info(f"  Report structure: {single_tool_report}")
+                logger.info("  " + "=" * 70)
+                logger.info("")
+                
                 if send_report_to_backend(args.domain, args.api_key, single_tool_report):
                     logger.info(f"{tool_name} report sent successfully")
                 else:

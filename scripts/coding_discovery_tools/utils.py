@@ -221,6 +221,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     req = urllib.request.Request(url, data=data, method='POST')
     req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "AI-Tools-Discovery/1.0")
     
     try:
         with urllib.request.urlopen(req) as response:
@@ -237,10 +238,20 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         
         # Provide specific guidance for 403 errors (authentication issues)
         if e.code == 403:
-            logger.error("403 Forbidden - Authentication failed. Possible causes:")
-            logger.error("  - API key is invalid or expired")
-            logger.error("  - API key does not have required permissions")
-            logger.error("  - API key format is incorrect")
+            # Check for Cloudflare/WAF error code 1010
+            if error_body and "1010" in error_body:
+                logger.error("403 Forbidden - Cloudflare/WAF blocked the request (Error 1010)")
+                logger.error("  This typically means:")
+                logger.error("  - The request was blocked by Cloudflare security rules")
+                logger.error("  - IP address may be flagged or rate-limited")
+                logger.error("  - Request signature doesn't match expected pattern")
+                logger.error("  - Missing or invalid User-Agent header")
+                logger.error("  Solution: Contact backend team to whitelist the IP or adjust WAF rules")
+            else:
+                logger.error("403 Forbidden - Authentication failed. Possible causes:")
+                logger.error("  - API key is invalid or expired")
+                logger.error("  - API key does not have required permissions")
+                logger.error("  - API key format is incorrect")
             if error_body:
                 logger.error(f"  Backend message: {error_body}")
         

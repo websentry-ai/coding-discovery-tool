@@ -208,6 +208,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     """
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
 
+    # Validate API key
+    if not api_key or not api_key.strip():
+        logger.error("API key is empty or missing. Please provide a valid API key.")
+        return False
+
     if app_name:
         report["app_name"] = app_name
     
@@ -221,7 +226,28 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         with urllib.request.urlopen(req) as response:
             return response.getcode() in (200, 201)
     except urllib.error.HTTPError as e:
+        # Read response body for detailed error message
+        error_body = None
+        try:
+            error_body = e.read().decode('utf-8')
+        except Exception:
+            pass
+        
         logger.error(f"Failed to send report: {e.code} - {e.reason}")
+        
+        # Provide specific guidance for 403 errors (authentication issues)
+        if e.code == 403:
+            logger.error("403 Forbidden - Authentication failed. Possible causes:")
+            logger.error("  - API key is invalid or expired")
+            logger.error("  - API key does not have required permissions")
+            logger.error("  - API key format is incorrect")
+            if error_body:
+                logger.error(f"  Backend message: {error_body}")
+        
+        # Log response body for other errors too
+        elif error_body:
+            logger.error(f"Backend response: {error_body}")
+        
         return False
     except Exception as e:
         logger.error(f"Error sending report: {e}")

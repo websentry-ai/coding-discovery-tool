@@ -208,11 +208,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     """
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     
-    # Add app_name to the report if provided
+    # Create payload with app_name if provided
+    payload = report.copy()
     if app_name:
-        report = {**report, "app_name": app_name}
+        payload["app_name"] = app_name
     
-    data = json.dumps(report).encode('utf-8')
+    data = json.dumps(payload).encode('utf-8')
     
     req = urllib.request.Request(url, data=data, method='POST')
     req.add_header("Authorization", f"Bearer {api_key}")

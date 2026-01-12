@@ -6,9 +6,9 @@
 # Can be executed directly or via curl pipe (similar to Cursor installation).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh | bash -s -- --api-key YOUR_API_KEY --domain YOUR_DOMAIN
+#   curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh | bash -s -- --api-key YOUR_API_KEY --domain YOUR_DOMAIN --app_name APP_NAME
 #   OR
-#   ./install.sh --api-key YOUR_API_KEY --domain YOUR_DOMAIN
+#   ./install.sh --api-key YOUR_API_KEY --domain YOUR_DOMAIN --app_name APP_NAME
 ################################################################################
 
 set -e  # Exit on any error
@@ -158,10 +158,10 @@ if [ $# -eq 0 ]; then
     print_error "Missing required arguments"
     echo ""
     echo "Usage:"
-    echo "  $0 --api-key YOUR_API_KEY --domain YOUR_DOMAIN"
+    echo "  $0 --api-key YOUR_API_KEY --domain YOUR_DOMAIN [--app_name APP_NAME]"
     echo ""
     echo "Or run via curl:"
-    echo "  curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/$BRANCH/install.sh | bash -s -- --api-key YOUR_API_KEY --domain YOUR_DOMAIN"
+    echo "  curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/$BRANCH/install.sh | bash -s -- --api-key YOUR_API_KEY --domain YOUR_DOMAIN --app_name APP_NAME"
     echo ""
     exit 1
 fi

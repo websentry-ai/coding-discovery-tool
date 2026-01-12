@@ -193,7 +193,7 @@ def normalize_url(domain: str) -> str:
     
     return url.rstrip('/')
 
-def send_report_to_backend(backend_url: str, api_key: str, report: Dict) -> bool:
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None) -> bool:
     """
     Send discovery report to backend endpoint.
     
@@ -201,11 +201,17 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict) -> bool
         backend_url: Backend URL to send the report to
         api_key: API key for authentication
         report: Report dictionary to send
+        app_name: Optional application name (e.g., JumpCloud) to include in request body
         
     Returns:
         True if successful, False otherwise
     """
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+    
+    # Add app_name to the report if provided
+    if app_name:
+        report = {**report, "app_name": app_name}
+    
     data = json.dumps(report).encode('utf-8')
     
     req = urllib.request.Request(url, data=data, method='POST')

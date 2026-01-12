@@ -768,6 +768,7 @@ def main():
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
     parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
+    parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
     args = parser.parse_args()
     
     # Check for API key and domain
@@ -884,7 +885,7 @@ def main():
                 logger.info("  " + "=" * 70)
                 logger.info("")
                 
-                if send_report_to_backend(args.domain, args.api_key, single_tool_report):
+                if send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name):
                     logger.info(f"{tool_name} report sent successfully")
                 else:
                     logger.error(f"Failed to send {tool_name} report to backend")

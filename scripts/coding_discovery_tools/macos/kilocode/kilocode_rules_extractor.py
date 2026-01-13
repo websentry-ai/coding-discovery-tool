@@ -18,6 +18,8 @@ from ...macos_extraction_helpers import (
     extract_project_level_rules_with_fallback,
     should_process_file,
     walk_for_tool_directories,
+    is_running_as_root,
+    scan_user_directories,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,10 +84,13 @@ class MacOSKiloCodeRulesExtractor(BaseKiloCodeRulesExtractor):
         """
         Extract global Kilo Code rules from ~/.kilocode/rules/.
         
+        When running as root, scans all user directories.
+        
         Args:
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        user_home = Path.home()
+        def extract_for_user(user_home: Path) -> None:
+            """Extract global rules for a specific user."""
         global_rules_path = user_home / ".kilocode" / "rules"
         
         if global_rules_path.exists() and global_rules_path.is_dir():
@@ -99,7 +104,14 @@ class MacOSKiloCodeRulesExtractor(BaseKiloCodeRulesExtractor):
                             if project_root:
                                 add_rule_to_project(rule_info, project_root, projects_by_root)
             except Exception as e:
-                logger.debug(f"Error extracting global Kilo Code rules: {e}")
+                    logger.debug(f"Error extracting global Kilo Code rules for {user_home}: {e}")
+        
+        # When running as root, scan all user directories
+        if is_running_as_root():
+            scan_user_directories(extract_for_user)
+        else:
+            # Check current user
+            extract_for_user(Path.home())
 
     def _extract_project_level_rules(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """

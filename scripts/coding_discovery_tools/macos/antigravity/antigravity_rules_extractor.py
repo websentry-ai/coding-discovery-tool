@@ -19,6 +19,8 @@ from ...macos_extraction_helpers import (
     extract_project_level_rules_with_fallback,
     should_process_file,
     walk_for_tool_directories,
+    is_running_as_root,
+    scan_user_directories,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,38 +89,31 @@ class MacOSAntigravityRulesExtractor(BaseAntigravityRulesExtractor):
         """
         Extract global Antigravity rules from ~/.gemini/GEMINI.md.
         
+        When running as root, scans all user directories.
+        
         Args:
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        # Check current user's home directory
-        global_rules_path = Path.home() / ".gemini" / "GEMINI.md"
-        if global_rules_path.exists() and global_rules_path.is_file():
-            try:
-                rule_info = extract_single_rule_file(global_rules_path, find_antigravity_project_root)
-                if rule_info:
-                    project_root = rule_info.get('project_root')
-                    if project_root:
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
-            except Exception as e:
-                logger.debug(f"Error extracting global Antigravity rules: {e}")
+        def extract_for_user(user_home: Path) -> None:
+            """Extract global rules for a specific user."""
+            global_rules_path = user_home / ".gemini" / "GEMINI.md"
+            if global_rules_path.exists() and global_rules_path.is_file():
+                try:
+                    if should_process_file(global_rules_path, user_home):
+                        rule_info = extract_single_rule_file(global_rules_path, find_antigravity_project_root)
+                        if rule_info:
+                            project_root = rule_info.get('project_root')
+                            if project_root:
+                                add_rule_to_project(rule_info, project_root, projects_by_root)
+                except Exception as e:
+                    logger.debug(f"Error extracting global Antigravity rules for {user_home}: {e}")
         
-        # When running as root, also check all user directories
-        from ...macos_extraction_helpers import is_running_as_root
+        # When running as root, scan all user directories
         if is_running_as_root():
-            users_dir = Path("/Users")
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        user_global_rules = user_dir / ".gemini" / "GEMINI.md"
-                        if user_global_rules.exists() and user_global_rules.is_file():
-                            try:
-                                rule_info = extract_single_rule_file(user_global_rules, find_antigravity_project_root)
-                                if rule_info:
-                                    project_root = rule_info.get('project_root')
-                                    if project_root:
-                                        add_rule_to_project(rule_info, project_root, projects_by_root)
-                            except Exception as e:
-                                logger.debug(f"Error extracting global Antigravity rules for {user_dir}: {e}")
+            scan_user_directories(extract_for_user)
+        else:
+            # Check current user
+            extract_for_user(Path.home())
 
     def _extract_project_level_rules(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """

@@ -91,19 +91,19 @@ class MacOSKiloCodeRulesExtractor(BaseKiloCodeRulesExtractor):
         """
         def extract_for_user(user_home: Path) -> None:
             """Extract global rules for a specific user."""
-        global_rules_path = user_home / ".kilocode" / "rules"
-        
-        if global_rules_path.exists() and global_rules_path.is_dir():
-            try:
-                # Extract all .md files from global rules directory
-                for rule_file in global_rules_path.glob("*.md"):
-                    if rule_file.is_file() and should_process_file(rule_file, global_rules_path):
-                        rule_info = extract_single_rule_file(rule_file, find_kilocode_project_root)
-                        if rule_info:
-                            project_root = rule_info.get('project_root')
-                            if project_root:
-                                add_rule_to_project(rule_info, project_root, projects_by_root)
-            except Exception as e:
+            global_rules_path = user_home / ".kilocode" / "rules"
+            
+            if global_rules_path.exists() and global_rules_path.is_dir():
+                try:
+                    # Extract all .md files from global rules directory
+                    for rule_file in global_rules_path.glob("*.md"):
+                        if rule_file.is_file() and should_process_file(rule_file, global_rules_path):
+                            rule_info = extract_single_rule_file(rule_file, find_kilocode_project_root)
+                            if rule_info:
+                                project_root = rule_info.get('project_root')
+                                if project_root:
+                                    add_rule_to_project(rule_info, project_root, projects_by_root)
+                except Exception as e:
                     logger.debug(f"Error extracting global Kilo Code rules for {user_home}: {e}")
         
         # When running as root, scan all user directories

@@ -76,7 +76,6 @@ except ImportError:
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
-    from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
 
 # Set up logger
 logger = logging.getLogger(__name__)

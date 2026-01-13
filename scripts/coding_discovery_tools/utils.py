@@ -10,7 +10,7 @@ import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .constants import COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
@@ -88,6 +88,32 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()
+
+
+def get_all_users_macos() -> List[str]:
+    """
+    Get all user directories from /Users on macOS.
+    
+    Returns:
+        List of usernames (directory names in /Users)
+    """
+    users = []
+    if platform.system() != "Darwin":
+        return users
+    
+    users_dir = Path("/Users")
+    if not users_dir.exists():
+        return users
+    
+    try:
+        for user_dir in users_dir.iterdir():
+            # Skip hidden directories and Shared directory
+            if user_dir.is_dir() and not user_dir.name.startswith('.') and user_dir.name != "Shared":
+                users.append(user_dir.name)
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Could not list users from /Users: {e}")
+    
+    return users
 
 
 def get_user_info() -> str:

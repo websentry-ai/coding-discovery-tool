@@ -40,9 +40,10 @@ try:
         CodexMCPConfigExtractorFactory,
         OpenCodeMCPConfigExtractorFactory,
     )
-    from .utils import send_report_to_backend, get_user_info
+    from .utils import send_report_to_backend, get_user_info, get_all_users_macos
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
+    from .user_tool_detector import detect_tool_for_user
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -71,9 +72,10 @@ except ImportError:
         CodexMCPConfigExtractorFactory,
         OpenCodeMCPConfigExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
+    from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -154,9 +156,14 @@ class AIToolsDetector:
         """
         return self._device_id_extractor.extract_device_id()
 
-    def detect_all_tools(self) -> List[Dict]:
+    def detect_all_tools(self, user_home: Optional[Path] = None) -> List[Dict]:
         """
         Detect all supported AI tools.
+        
+        Args:
+            user_home: Optional user home directory path. If provided, detects tools
+                      for that specific user by checking their paths directly.
+                      If None, uses current user's context.
         
         Returns:
             List of detected tools with their info
@@ -165,13 +172,19 @@ class AIToolsDetector:
 
         for detector in self._tool_detectors:
             try:
-                tool_info = detector.detect()
+                # If user_home is provided, check user-specific paths first
+                if user_home:
+                    tool_info = detect_tool_for_user(detector, user_home)
+                else:
+                    tool_info = detector.detect()
+                
                 if tool_info:
                     tools.append(tool_info)
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
 
         return tools
+
 
     def detect_tool(self, tool_name: str) -> Optional[Dict]:
         """
@@ -565,6 +578,37 @@ class AIToolsDetector:
         rules = project.get("rules", [])
         return len(mcp_servers) == 0 and len(rules) == 0
 
+    def filter_tool_projects_by_user(self, tool: Dict, user_home: Path) -> Dict:
+        """
+        Filter tool projects and permissions to only include those belonging to a specific user.
+        
+        Args:
+            tool: Tool dict with projects populated
+            user_home: Path to the user's home directory (e.g., Path("/Users/gowshik"))
+            
+        Returns:
+            Tool dict with filtered projects and permissions
+        """
+        user_home_str = str(user_home)
+        filtered_projects = []
+        
+        for project in tool.get('projects', []):
+            project_path = project.get('path', '')
+            # Checking if project path is under the user's home directory
+            if project_path.startswith(user_home_str):
+                filtered_projects.append(project)
+
+        filtered_tool = tool.copy()
+        filtered_tool['projects'] = filtered_projects
+        
+        if 'permissions' in filtered_tool:
+            perms = filtered_tool['permissions']
+            settings_path = perms.get('settings_path', '')
+            if settings_path and not settings_path.startswith(user_home_str):
+                del filtered_tool['permissions']
+        
+        return filtered_tool
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
@@ -721,20 +765,22 @@ class AIToolsDetector:
         
         return tool_dict
 
-    def generate_single_tool_report(self, tool: Dict, device_id: str, user_info: str) -> Dict:
+    def generate_single_tool_report(self, tool: Dict, device_id: str, home_user: str, system_user: Optional[str] = None) -> Dict:
         """
         Generate a report for a single tool with user and device info.
         
         Args:
             tool: Tool dict with projects populated
             device_id: Device identifier
-            user_info: User information
+            home_user: Home directory username (the user whose data is being processed)
+            system_user: Optional system user (the user running the script). If None, uses home_user.
             
         Returns:
             Report dictionary with single tool
         """
         return {
-            "system_user": user_info,
+            "home_user": home_user,
+            "system_user": system_user or home_user,
             "device_id": device_id,
             "tools": [tool]
         }
@@ -771,7 +817,7 @@ def main():
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
     args = parser.parse_args()
     
-    # Check for API key and domain
+    # Checking for API key and domain
     if not args.api_key or not args.domain:
         print("Error: --api-key and --domain arguments are required")
         print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
@@ -780,131 +826,201 @@ def main():
     try:
         detector = AIToolsDetector()
         
-        # Get device and user info once (shared across all tool reports)
+        # Get device ID once (shared across all user reports)
         device_id = detector.get_device_id()
-        user_info = get_user_info()
         
-        # Detect all tools first
-        logger.info("Detecting AI tools...")
-        tools = detector.detect_all_tools()
-        logger.info(f"Detection complete: {len(tools)} tool(s) found")
-        if tools:
-            for tool in tools:
-                logger.info(f"  - {tool.get('name', 'Unknown')}: {tool.get('version', 'Unknown version')} at {tool.get('install_path', 'Unknown path')}")
-        logger.info("")
+        # Get all users for macOS, or use current user for other platforms
+        all_users = get_all_users_macos() if platform.system() == "Darwin" else []
+        
+        # If no users found or not macOS, fall back to current user behavior
+        if not all_users:
+            all_users = [get_user_info()]
         
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
         logger.info("=" * 60)
-        logger.info(f"System User: {user_info}")
         logger.info(f"Device ID: {device_id}")
         logger.info("")
-        logger.info(f"Tools Detected: {len(tools)}")
+        
+        # Initial detection message
+        logger.info("Detecting AI tools in this device.")
         logger.info("")
         
-        # Process and send each tool immediately after processing
-        total_projects = 0
-        total_rules = 0
-        all_tools_summary = []
+        # Log users to explore
+        logger.info(f"Users to process: {len(all_users)}")
+        logger.info("Exploring tool detection for each user:")
+        for user in all_users:
+            logger.info(f"  - {user}")
+        logger.info("")
         
+        # Get system_user once (who is running the script) for audit purposes
+        system_user = get_user_info()
+        
+        # Detect all unique tools across all users first (to know which tools to process)
+        logger.info("Detecting AI tools...")
+        all_tools = []  # Store all unique tools across all users
+        tools_by_user = {}  # Track which tools belong to which user
+        
+        for user in all_users:
+            user_home = Path(f"/Users/{user}") if platform.system() == "Darwin" else Path.home()
+            logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
+            user_tools = detector.detect_all_tools(user_home=user_home)
+            
+            if user_tools:
+                logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
+                for tool in user_tools:
+                    tool_name = tool.get('name', 'Unknown')
+                    tool_version = tool.get('version', 'Unknown version')
+                    tool_path = tool.get('install_path', 'Unknown path')
+                    logger.info(f"      - {tool_name}: {tool_version} at {tool_path}")
+                    
+                    # Track which user this tool belongs to
+                    tool_key = f"{tool_name}:{tool_path}"
+                    if tool_key not in tools_by_user:
+                        tools_by_user[tool_key] = tool
+                        all_tools.append(tool)
+            else:
+                logger.info(f"    No tools found for {user}")
+            logger.info("")
+        
+        # Use the aggregated tools list
+        tools = all_tools
+        logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
+        logger.info("")
+        
+        # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
             
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info(f"Processing tool: {tool_name}")
+            logger.info("=" * 60)
+            logger.info("")
+            
             try:
-                # Process the tool (extract rules and MCP configs)
+                # Process this tool once (extract all rules and MCP configs for all users)
+                logger.info(f"  Extracting rules and MCP configs for {tool_name}...")
                 tool_with_projects = detector.process_single_tool(tool)
-                
-                # Generate report for this single tool
-                single_tool_report = detector.generate_single_tool_report(
-                    tool_with_projects, device_id, user_info
-                )
-                
-                # Log tool summary
-                projects = tool_with_projects.get('projects', [])
-                num_projects = len(projects)
-                num_rules = sum(len(p.get('rules', [])) for p in projects)
-                num_mcp_servers = sum(len(p.get('mcpServers', [])) for p in projects)
-                total_projects += num_projects
-                total_rules += num_rules
-                
-                tool_version = tool_with_projects.get('version', 'Unknown version')
-                tool_path = tool_with_projects.get('install_path', 'Unknown path')
-                
-                logger.info(f"  - {tool_name}: {tool_version} at {tool_path}")
-                logger.info(f"    Projects: {num_projects}, Rules: {num_rules}, MCP Servers: {num_mcp_servers}")
-                
-                all_tools_summary.append({
-                    'name': tool_name,
-                    'version': tool_version,
-                    'path': tool_path,
-                    'projects': num_projects,
-                    'rules': num_rules
-                })
-                
-                # Send report immediately after processing
-                logger.info(f"Sending {tool_name} report to backend...")
-                
-                # Log detailed summary of what's being sent
-                logger.info("")
-                logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
-                logger.info(f"  │ Tool: {tool_name}")
-                logger.info(f"  │ Version: {tool_with_projects.get('version', 'Unknown')}")
-                logger.info(f"  │ Install Path: {tool_with_projects.get('install_path', 'Unknown')}")
-                logger.info(f"  │ Projects: {len(projects)}")
-                logger.info(f"  │ Total Rules: {num_rules}")
-                logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
-                
-                # Log permissions details if present
-                if "permissions" in tool_with_projects:
-                    perms = tool_with_projects.get("permissions", {})
-                    logger.info(f"  │ Permissions: ✓ Present")
-                    logger.info(f"  │   Source: {perms.get('settings_source', 'unknown')}")
-                    logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
-                    logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
-                    logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
-                    logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
-                    logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
-                else:
-                    logger.info(f"  │ Permissions: ✗ Not present")
-                
-                logger.info("  └──────────────────────────────────────────────────────────────────")
+                logger.info(f"  ✓ Processing complete for {tool_name}")
                 logger.info("")
                 
-                # Log the complete JSON being sent to backend
-                logger.info("  Complete JSON payload being sent to backend:")
-                logger.info("  " + "=" * 70)
-                try:
-                    import json
-                    report_json = json.dumps(single_tool_report, indent=2)
-                    # Split into lines and add indentation for readability
-                    for line in report_json.split('\n'):
-                        logger.info(f"  {line}")
-                except Exception as e:
-                    logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                    logger.info(f"  Report structure: {single_tool_report}")
-                logger.info("  " + "=" * 70)
+                # Now explore all users for this tool and send reports
+                tool_total_projects = 0
+                tool_total_rules = 0
+                tool_users_summary = []
+                
+                for user_name in all_users:
+                    user_home = Path(f"/Users/{user_name}") if platform.system() == "Darwin" else Path.home()
+                    
+                    try:
+                        # Filter projects to only include this user's projects
+                        tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+                        
+                        # Skip if no projects for this user
+                        if not tool_filtered.get('projects'):
+                            logger.debug(f"    User {user_name}: No projects found for {tool_name}, skipping")
+                            continue
+                        
+                        # Generate report for this single tool with this user's data
+                        # user_name is the home_user (from /Users directory)
+                        single_tool_report = detector.generate_single_tool_report(
+                            tool_filtered, device_id, user_name, system_user
+                        )
+                    
+                        # Log tool summary for this user
+                        projects = tool_filtered.get('projects', [])
+                        num_projects = len(projects)
+                        num_rules = sum(len(p.get('rules', [])) for p in projects)
+                        num_mcp_servers = sum(len(p.get('mcpServers', [])) for p in projects)
+                        tool_total_projects += num_projects
+                        tool_total_rules += num_rules
+                        
+                        tool_version = tool_filtered.get('version', 'Unknown version')
+                        tool_path = tool_filtered.get('install_path', 'Unknown path')
+                        
+                        logger.info(f"  User: {user_name}")
+                        logger.info(f"    Projects: {num_projects}, Rules: {num_rules}, MCP Servers: {num_mcp_servers}")
+                        
+                        tool_users_summary.append({
+                            'user': user_name,
+                            'projects': num_projects,
+                            'rules': num_rules
+                        })
+                        
+                        # Log detailed summary of what's being sent
+                        logger.info("")
+                        logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
+                        logger.info(f"  │ User: {user_name}")
+                        logger.info(f"  │ Tool: {tool_name}")
+                        logger.info(f"  │ Version: {tool_filtered.get('version', 'Unknown')}")
+                        logger.info(f"  │ Install Path: {tool_filtered.get('install_path', 'Unknown')}")
+                        logger.info(f"  │ Projects: {len(projects)}")
+                        logger.info(f"  │ Total Rules: {num_rules}")
+                        logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
+                        
+                        # Log permissions details if present
+                        if "permissions" in tool_filtered:
+                            perms = tool_filtered.get("permissions", {})
+                            logger.info(f"  │ Permissions: ✓ Present")
+                            logger.info(f"  │   Source: {perms.get('settings_source', 'unknown')}")
+                            logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
+                            logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
+                            logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
+                            logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
+                            logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
+                        else:
+                            logger.info(f"  │ Permissions: ✗ Not present")
+                        
+                        logger.info("  └──────────────────────────────────────────────────────────────────")
+                        logger.info("")
+                        
+                        # Log the complete JSON being sent to backend
+                        logger.info("  Complete JSON payload being sent to backend:")
+                        logger.info("  " + "=" * 70)
+                        try:
+                            import json
+                            report_json = json.dumps(single_tool_report, indent=2)
+                            # Split into lines and add indentation for readability
+                            for line in report_json.split('\n'):
+                                logger.info(f"  {line}")
+                        except Exception as e:
+                            logger.warning(f"  Could not serialize report to JSON for logging: {e}")
+                            logger.info(f"  Report structure: {single_tool_report}")
+                        logger.info("  " + "=" * 70)
+                        logger.info("")
+                        
+                        # Send report to backend
+                        logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
+                        
+                        if args.api_key and args.domain:
+                            if send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name):
+                                logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                            else:
+                                logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
+                        else:
+                            logger.warning(f"  ⚠ Skipping backend send - API key or domain not provided")
+                        
+                        logger.info("")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing {tool_name} for user {user_name}: {e}", exc_info=True)
+                        logger.info("")
+                
+                # Print summary for this tool
                 logger.info("")
-                
-                if send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name):
-                    logger.info(f"{tool_name} report sent successfully")
-                else:
-                    logger.error(f"Failed to send {tool_name} report to backend")
-                
+                logger.info("=" * 60)
+                logger.info(f"Summary for tool: {tool_name}")
+                logger.info("=" * 60)
+                for user_summary in tool_users_summary:
+                    logger.info(f"  - User {user_summary['user']}: {user_summary['projects']} projects, {user_summary['rules']} rule files")
+                logger.info(f"Total: {tool_total_projects} projects, {tool_total_rules} rule files across {len(tool_users_summary)} user(s)")
+                logger.info("=" * 60)
                 logger.info("")
                 
             except Exception as e:
-                logger.error(f"Error processing {tool_name}: {e}", exc_info=True)
+                logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
                 logger.info("")
-        
-        # Print final summary
-        logger.info("=" * 60)
-        logger.info("Summary")
-        logger.info("=" * 60)
-        for tool_summary in all_tools_summary:
-            logger.info(f"  - {tool_summary['name']}: {tool_summary['projects']} projects, {tool_summary['rules']} rule files")
-        logger.info(f"Total: {total_projects} projects, {total_rules} rule files")
-        logger.info("=" * 60)
-        logger.info("")
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)

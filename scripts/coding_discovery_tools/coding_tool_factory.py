@@ -90,6 +90,11 @@ from .macos.opencode.opencode import MacOSOpenCodeDetector
 from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
 from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
 
+# macOS - JetBrains
+from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
+from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
+from .macos.jetbrains.plugin_extractor import MacOSJetBrainsPluginExtractor
+
 # Windows - OpenCode
 from .windows.opencode.opencode import WindowsOpenCodeDetector
 from .windows.opencode.opencode_rules_extractor import WindowsOpenCodeRulesExtractor
@@ -387,10 +392,10 @@ class ToolDetectorFactory:
     def create_opencode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate OpenCode detector for the OS.
-        
+
         Args:
             os_name: Operating system name (defaults to current OS)
-            
+
         Returns:
             BaseToolDetector instance or None if OS is not supported
         """
@@ -401,6 +406,25 @@ class ToolDetectorFactory:
             return MacOSOpenCodeDetector()
         elif os_name == "Windows":
             return WindowsOpenCodeDetector()
+        else:
+            return None
+
+    @staticmethod
+    def create_jetbrains_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate JetBrains IDEs detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJetBrainsDetector()
         else:
             return None
 
@@ -458,7 +482,12 @@ class ToolDetectorFactory:
         opencode_detector = ToolDetectorFactory.create_opencode_detector(os_name)
         if opencode_detector is not None:
             detectors.append(opencode_detector)
-        
+
+        # Add JetBrains detector for macOS
+        jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
+        if jetbrains_detector is not None:
+            detectors.append(jetbrains_detector)
+
         # Filter out None values
         return [detector for detector in detectors if detector is not None]
 
@@ -966,10 +995,10 @@ class OpenCodeMCPConfigExtractorFactory:
     def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
         """
         Create appropriate OpenCode MCP config extractor for the OS.
-        
+
         Args:
             os_name: Operating system name (defaults to current OS)
-            
+
         Returns:
             BaseMCPConfigExtractor instance or None if OS is not supported
         """
@@ -980,5 +1009,28 @@ class OpenCodeMCPConfigExtractorFactory:
             return MacOSOpenCodeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsOpenCodeMCPConfigExtractor()
+        else:
+            return None
+
+
+class JetBrainsMCPConfigExtractorFactory:
+    """Factory for creating OS-specific JetBrains MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate JetBrains MCP config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJetBrainsMCPConfigExtractor()
         else:
             return None

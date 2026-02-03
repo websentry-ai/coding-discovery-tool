@@ -39,6 +39,7 @@ try:
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
         OpenCodeMCPConfigExtractorFactory,
+        JetBrainsMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info, get_all_users_macos
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -71,6 +72,7 @@ except ImportError:
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
         OpenCodeMCPConfigExtractorFactory,
+        JetBrainsMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -143,6 +145,9 @@ class AIToolsDetector:
             # Initialize OpenCode extractors (macOS only, returns None for unsupported OS)
             self._opencode_rules_extractor = OpenCodeRulesExtractorFactory.create(self.system)
             self._opencode_mcp_extractor = OpenCodeMCPConfigExtractorFactory.create(self.system)
+
+            # Initialize JetBrains extractors (macOS only, returns None for unsupported OS)
+            self._jetbrains_mcp_extractor = JetBrainsMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -179,7 +184,11 @@ class AIToolsDetector:
                     tool_info = detector.detect()
                 
                 if tool_info:
-                    tools.append(tool_info)
+                    # Handle detectors that return a list (like JetBrains)
+                    if isinstance(tool_info, list):
+                        tools.extend(tool_info)
+                    else:
+                        tools.append(tool_info)
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
 
@@ -578,6 +587,58 @@ class AIToolsDetector:
         rules = project.get("rules", [])
         return len(mcp_servers) == 0 and len(rules) == 0
 
+    def _process_jetbrains_tool(self, tool: Dict) -> Dict[str, Dict]:
+        """
+        Process a JetBrains IDE tool: extract MCP configs for this specific IDE.
+
+        Args:
+            tool: Tool info dict from detection (contains _config_path)
+
+        Returns:
+            Dictionary mapping project_root to project dict
+        """
+        tool_name = tool.get("name", "")
+        config_path = tool.get("_config_path", "")
+        projects_dict = {}
+
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info(f"Processing: {tool_name}")
+        logger.info("=" * 70)
+
+        # Extract MCP configs for this specific IDE
+        logger.info(f"  Extracting {tool_name} MCP configs...")
+        if self._jetbrains_mcp_extractor and config_path:
+            try:
+                # Call the extractor's method for a single IDE
+                ide_projects = self._jetbrains_mcp_extractor._extract_ide_projects(
+                    Path(config_path),
+                    tool.get("_ide_folder", tool_name)
+                )
+
+                if ide_projects:
+                    logger.info(f"  ✓ Found {len(ide_projects)} project(s) with MCP/rules")
+
+                    # Convert to projects_dict format
+                    for project in ide_projects:
+                        project_path = project["path"]
+
+                        projects_dict[project_path] = {
+                            "path": project_path,
+                            "mcpServers": project.get("mcpServers", []),
+                            "rules": project.get("rules", [])
+                        }
+
+                    log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info("  ℹ No MCP configs found")
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+        else:
+            logger.info(f"  ⚠ {tool_name} MCP extractor not available or config path missing")
+
+        return projects_dict
+
     def filter_tool_projects_by_user(self, tool: Dict, user_home: Path) -> Dict:
         """
         Filter tool projects and permissions to only include those belonging to a specific user.
@@ -722,7 +783,11 @@ class AIToolsDetector:
                 self._opencode_mcp_extractor,
                 self.extract_all_opencode_rules
             )
-        
+
+        # Check if this is a JetBrains IDE (has _ide_folder or _config_path)
+        elif "_ide_folder" in tool or "_config_path" in tool:
+            projects_dict = self._process_jetbrains_tool(tool)
+
         # Filter out empty projects (no mcpServers and no rules)
         total_projects_before_filter = len(projects_dict)
         filtered_projects = [
@@ -741,7 +806,10 @@ class AIToolsDetector:
             "install_path": tool.get("install_path"),
             "projects": filtered_projects
         }
-        
+
+        if "plan" in tool:
+            tool_dict["plan"] = tool["plan"]
+
         # Transform and add permissions if present (for Claude Code)
         logger.info(f"  Checking for settings in tool dict for {tool_name}...")
         logger.info(f"  Tool dict keys: {list(tool.keys())}")

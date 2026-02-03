@@ -8,9 +8,6 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseToolDetector
-from .plugin_extractor import MacOSJetBrainsPluginExtractor
-
-MAX_LOG_LINES = 1000
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +16,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for macOS systems."""
 
     JETBRAINS_CONFIG_DIR = Path.home() / "Library" / "Application Support" / "JetBrains"
-    JETBRAINS_LOGS_DIR = Path.home() / "Library" / "Logs" / "JetBrains"
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
@@ -61,22 +57,9 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         if not detected_ides:
             return None
 
-        plugin_extractor = MacOSJetBrainsPluginExtractor()
-
-        # Output format: "{IDE Name} {Version} ({Plan})" or "{IDE Name} {Version}" if plan is Unknown
         tools = []
         for ide in detected_ides:
-            config_path = Path(ide['config_path'])
-
-            # Extract plugins for this IDE
-            plugins = plugin_extractor.extract_plugins_for_ide(config_path)
-            logger.info(f"Found {len(plugins)} plugins for {ide['display_name']}")
-
-            plan = ide['plan']
-            if plan and plan != "Unknown":
-                name = f"{ide['display_name']} {ide['version']} ({plan})"
-            else:
-                name = f"{ide['display_name']} {ide['version']}"
+            name = f"{ide['display_name']} {ide['version']} ({ide['plan']})"
 
             tools.append({
                 "name": name,
@@ -84,7 +67,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                 "install_path": ide['config_path'],
                 "_ide_folder": ide['folder_name'],  # Store for MCP extractor
                 "_config_path": ide['config_path'],  # Store for MCP extractor
-                "extensions": plugins  # Include plugins/extensions
             })
 
         return tools
@@ -101,13 +83,10 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         if not detected_ides:
             return None
 
-        def format_ide(ide):
-            plan = ide['plan']
-            if plan and plan != "Unknown":
-                return f"{ide['display_name']} {ide['version']} ({plan})"
-            return f"{ide['display_name']} {ide['version']}"
-
-        return ", ".join([format_ide(ide) for ide in detected_ides])
+        return ", ".join(
+            f"{ide['display_name']} {ide['version']} ({ide['plan']})"
+            for ide in detected_ides
+        )
 
     def _scan_for_ides(self) -> List[Dict]:
         """
@@ -134,8 +113,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                     continue
 
                 display_name, version = self._parse_ide_name_and_version(folder)
-
-                # Detect plan type for this IDE (using Logs directory)
                 plan = self._detect_plan(folder)
 
                 detected_ides.append({
@@ -150,7 +127,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         except Exception as e:
             logger.warning(f"Error scanning {self.JETBRAINS_CONFIG_DIR}: {e}")
 
-        return detected_ides
+        return self._filter_old_versions(detected_ides)
 
     def _parse_ide_name_and_version(self, folder_name: str) -> tuple:
         """
@@ -171,65 +148,21 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
         return folder_name, "Unknown"
 
-    def _detect_plan(self, folder_name: str) -> str:
-        """
-        Detect the plan type (Paid, Free, Trial) by scanning idea.log.
-
-        The idea.log file is located in ~/Library/Logs/JetBrains/<Folder_Name>/
-        rather than in the Application Support config directory.
-
-        Args:
-            folder_name: Name of the IDE folder (e.g., "IntelliJIdea2024.1")
-
-        Returns:
-            Plan type string (never None, defaults to "Unknown")
-        """
+    @staticmethod
+    def _detect_plan(folder_name: str) -> str:
+        """Return 'Free' for Community editions, 'Licensed' otherwise."""
         if "IdeaIC" in folder_name or "PyCharmCE" in folder_name:
             return "Free"
+        return "Licensed"
 
-        # Build the path to idea.log in the Logs directory
-        logs_dir = self.JETBRAINS_LOGS_DIR / folder_name
-
-        if not logs_dir.exists():
-            logger.debug(f"Logs directory not found: {logs_dir}")
-            return "Unknown"
-
-        # Find the most recent idea.log file
-        idea_log = None
-        try:
-            log_files = list(logs_dir.glob("idea.log*"))
-            if log_files:
-                # Sort by modification time, get the most recent
-                idea_log = max(log_files, key=lambda p: p.stat().st_mtime)
-        except Exception as e:
-            logger.debug(f"Error finding idea.log: {e}")
-            return "Unknown"
-
-        if not idea_log or not idea_log.exists():
-            logger.debug(f"No idea.log found at {logs_dir}")
-            return "Unknown"
-
-        # Scan the log file line by line for plan indicators
-        try:
-            with open(idea_log, 'r', encoding='utf-8', errors='ignore') as f:
-                for i, line in enumerate(f):
-                    if i > MAX_LOG_LINES:
-                        break
-
-                    # Check for plan indicators
-                    if "Licensed to" in line:
-                        logger.debug(f"Found 'Licensed to' in {idea_log}")
-                        return "Paid"
-                    elif "Evaluation" in line or "evaluation license" in line.lower():
-                        logger.debug(f"Found 'Evaluation' in {idea_log}")
-                        return "Trial"
-                    elif "Community" in line or "CommunityEdition" in line or "IdeaIC" in line:
-                        logger.debug(f"Found 'Community/CommunityEdition/IdeaIC' in {idea_log}")
-                        return "Free"
-
-                logger.debug(f"No plan indicators found in {idea_log}")
-                return "Unknown"
-
-        except Exception as e:
-            logger.warning(f"Error reading idea.log at {idea_log}: {e}")
-            return "Unknown"
+    @staticmethod
+    def _filter_old_versions(ide_list: List[Dict]) -> List[Dict]:
+        """Group IDEs by display_name and keep only the newest version of each."""
+        latest = {}
+        for ide in ide_list:
+            name = ide['display_name']
+            parts = [int(x) for x in ide['version'].split('.') if x.isdigit()]
+            ver = tuple(parts) if parts else (0,)
+            if name not in latest or ver > latest[name][1]:
+                latest[name] = (ide, ver)
+        return [entry[0] for entry in latest.values()]

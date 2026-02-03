@@ -617,17 +617,16 @@ class AIToolsDetector:
                 )
 
                 if ide_projects:
-                    logger.info(f"  ✓ Found {len(ide_projects)} project(s) with MCP config(s)")
+                    logger.info(f"  ✓ Found {len(ide_projects)} project(s) with MCP/rules")
 
                     # Convert to projects_dict format
                     for project in ide_projects:
                         project_path = project["path"]
-                        mcp_servers = project.get("mcpServers", [])
 
                         projects_dict[project_path] = {
                             "path": project_path,
-                            "mcpServers": mcp_servers,
-                            "rules": []
+                            "mcpServers": project.get("mcpServers", []),
+                            "rules": project.get("rules", [])
                         }
 
                     log_mcp_details(projects_dict, tool_name)
@@ -808,10 +807,6 @@ class AIToolsDetector:
             "projects": filtered_projects
         }
 
-        if "extensions" in tool:
-            tool_dict["extensions"] = tool["extensions"]
-            logger.info(f"  ✓ Added {len(tool['extensions'])} extension(s) to {tool.get('name', 'Unknown')} report")
-        
         # Transform and add permissions if present (for Claude Code)
         logger.info(f"  Checking for settings in tool dict for {tool_name}...")
         logger.info(f"  Tool dict keys: {list(tool.keys())}")

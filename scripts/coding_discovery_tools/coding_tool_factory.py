@@ -93,7 +93,6 @@ from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
 # macOS - JetBrains
 from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
-from .macos.jetbrains.plugin_extractor import MacOSJetBrainsPluginExtractor
 
 # Windows - OpenCode
 from .windows.opencode.opencode import WindowsOpenCodeDetector

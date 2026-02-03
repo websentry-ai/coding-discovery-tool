@@ -2,6 +2,5 @@
 
 from .jetbrains import MacOSJetBrainsDetector
 from .mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
-from .plugin_extractor import MacOSJetBrainsPluginExtractor
 
-__all__ = ['MacOSJetBrainsDetector', 'MacOSJetBrainsMCPConfigExtractor', 'MacOSJetBrainsPluginExtractor']
+__all__ = ['MacOSJetBrainsDetector', 'MacOSJetBrainsMCPConfigExtractor']

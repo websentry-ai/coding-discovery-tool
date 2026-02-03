@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...macos_extraction_helpers import get_file_metadata, read_file_content
 
 MAX_PROJECTS = 50
 
@@ -100,7 +101,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
         logger.info(f"Found {len(project_paths)} projects in {ide_name}")
 
-        # Check each project for MCP config
+        # Check each project for MCP config and rules
         for project_path_str in project_paths[:MAX_PROJECTS]:
             # Expand $USER_HOME$ placeholder
             project_path_str = project_path_str.replace("$USER_HOME$", str(Path.home()))
@@ -112,13 +113,16 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 continue
 
             mcp_servers = self._detect_project_mcp(project_path)
+            rules = self._detect_project_rules(project_path)
 
-            if mcp_servers:
+            # Include project if it has either MCP servers or rules
+            if mcp_servers or rules:
                 projects.append({
                     "path": str(project_path),
-                    "mcpServers": mcp_servers
+                    "mcpServers": mcp_servers,
+                    "rules": rules
                 })
-                logger.info(f"Found MCP config in {project_path} with {len(mcp_servers)} server(s)")
+                logger.info(f"Found data in {project_path}: {len(mcp_servers)} MCP server(s), {len(rules)} rule(s)")
 
         return projects
 
@@ -214,3 +218,90 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 logger.warning(f"Error reading {config_file}: {e}")
 
         return mcp_servers
+
+    def _read_rule_file(self, path: Path) -> Optional[Dict]:
+        """
+        Read a rule file and return a rich object matching the backend schema.
+
+        Uses shared helpers (get_file_metadata, read_file_content) for consistency
+        with how other tools produce rule objects.
+
+        Args:
+            path: Path to the rule file
+
+        Returns:
+            Dict with file_path, file_name, content, size, last_modified, truncated
+            or None if reading fails
+        """
+        try:
+            if not path.exists() or not path.is_file():
+                return None
+
+            metadata = get_file_metadata(path)
+            content, truncated = read_file_content(path, metadata['size'])
+
+            return {
+                "file_path": str(path),
+                "file_name": path.name,
+                "content": content,
+                "size": metadata['size'],
+                "last_modified": metadata['last_modified'],
+                "truncated": truncated
+            }
+        except Exception as e:
+            logger.warning(f"Error reading rule file {path}: {e}")
+            return None
+
+    def _detect_project_rules(self, project_path: Path) -> List[Dict]:
+        """
+        Scan a project folder for AI rule files and return rich rule objects.
+
+        Scans for:
+            - Exact file matches: .cursorrules, .windsurfrules, .prompts, GEMINI.md
+            - Directory scans: *.md files inside .cline/rules/ and .aiassistant/rules/
+            - Wildcard: all *.mdc files in the project root
+
+        Args:
+            project_path: Path to the project directory
+
+        Returns:
+            List of rule dicts matching the backend schema
+        """
+        rules = []
+
+        # Exact file candidates
+        exact_files = [
+            ".cursorrules",
+            ".windsurfrules",
+            ".prompts",
+            "GEMINI.md",
+        ]
+
+        for candidate in exact_files:
+            rule_file = project_path / candidate
+            if rule_file.is_file():
+                rule_obj = self._read_rule_file(rule_file)
+                if rule_obj:
+                    rules.append(rule_obj)
+
+        # Directory candidates — scan for *.md files inside each
+        rule_dirs = [
+            ".cline/rules",
+            ".aiassistant/rules",
+        ]
+
+        for dir_candidate in rule_dirs:
+            rule_dir = project_path / dir_candidate
+            if rule_dir.is_dir():
+                for md_file in rule_dir.glob("*.md"):
+                    rule_obj = self._read_rule_file(md_file)
+                    if rule_obj:
+                        rules.append(rule_obj)
+
+        # Wildcard: all *.mdc files in the project root
+        for mdc_file in project_path.glob("*.mdc"):
+            rule_obj = self._read_rule_file(mdc_file)
+            if rule_obj:
+                rules.append(rule_obj)
+
+        return rules

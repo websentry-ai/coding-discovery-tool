@@ -807,6 +807,9 @@ class AIToolsDetector:
             "projects": filtered_projects
         }
 
+        if "plan" in tool:
+            tool_dict["plan"] = tool["plan"]
+
         # Transform and add permissions if present (for Claude Code)
         logger.info(f"  Checking for settings in tool dict for {tool_name}...")
         logger.info(f"  Tool dict keys: {list(tool.keys())}")

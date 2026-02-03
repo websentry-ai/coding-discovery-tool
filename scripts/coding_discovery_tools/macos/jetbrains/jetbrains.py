@@ -59,11 +59,10 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
         tools = []
         for ide in detected_ides:
-            name = f"{ide['display_name']} {ide['version']} ({ide['plan']})"
-
             tools.append({
-                "name": name,
+                "name": ide['display_name'],
                 "version": ide['version'],
+                "plan": ide['plan'],
                 "install_path": ide['config_path'],
                 "_ide_folder": ide['folder_name'],  # Store for MCP extractor
                 "_config_path": ide['config_path'],  # Store for MCP extractor

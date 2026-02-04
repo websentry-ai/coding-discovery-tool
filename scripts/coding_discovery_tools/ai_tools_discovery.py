@@ -810,6 +810,10 @@ class AIToolsDetector:
         if "plan" in tool:
             tool_dict["plan"] = tool["plan"]
 
+        if "plugins" in tool:
+            tool_dict["plugins"] = tool["plugins"]
+            logger.info(f"  ✓ Added {len(tool['plugins'])} plugin(s) to {tool_name} report")
+
         # Transform and add permissions if present (for Claude Code)
         logger.info(f"  Checking for settings in tool dict for {tool_name}...")
         logger.info(f"  Tool dict keys: {list(tool.keys())}")

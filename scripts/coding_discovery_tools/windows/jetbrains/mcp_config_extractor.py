@@ -18,22 +18,7 @@ logger = logging.getLogger(__name__)
 class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for JetBrains IDEs MCP config on Windows systems."""
 
-    @property
-    def jetbrains_config_dir(self) -> Path:
-        """
-        Dynamically determine config dir based on target user.
-
-        Uses self.user_home if available (for multi-user scans),
-        otherwise falls back to environment variables or Path.home().
-        """
-        if hasattr(self, 'user_home') and self.user_home:
-            return self.user_home / "AppData" / "Roaming" / "JetBrains"
-
-        # Fallback to environment variable
-        appdata = os.path.expandvars(r"%APPDATA%")
-        if appdata and appdata != r"%APPDATA%":
-            return Path(appdata) / "JetBrains"
-        return Path.home() / "AppData" / "Roaming" / "JetBrains"
+    JETBRAINS_CONFIG_DIR = Path.home() / "AppData" / "Roaming" / "JetBrains"
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
@@ -57,13 +42,13 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         all_projects = []
 
-        if not self.jetbrains_config_dir.exists():
-            logger.debug(f"JetBrains config directory not found: {self.jetbrains_config_dir}")
+        if not self.JETBRAINS_CONFIG_DIR.exists():
+            logger.debug(f"JetBrains config directory not found: {self.JETBRAINS_CONFIG_DIR}")
             return None
 
         try:
-            for folder in os.listdir(self.jetbrains_config_dir):
-                folder_path = self.jetbrains_config_dir / folder
+            for folder in os.listdir(self.JETBRAINS_CONFIG_DIR):
+                folder_path = self.JETBRAINS_CONFIG_DIR / folder
 
                 # Skip hidden files and non-directories
                 if folder.startswith('.') or not folder_path.is_dir():
@@ -82,7 +67,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 all_projects.extend(ide_projects)
 
         except Exception as e:
-            logger.warning(f"Error scanning {self.jetbrains_config_dir}: {e}")
+            logger.warning(f"Error scanning {self.JETBRAINS_CONFIG_DIR}: {e}")
 
         # Return None if no projects found
         if not all_projects:

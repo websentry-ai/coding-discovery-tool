@@ -21,18 +21,27 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     JETBRAINS_CONFIG_DIR = Path.home() / "Library" / "Application Support" / "JetBrains"
 
     IDE_PATTERNS = [
-        "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
-        "Rider", "CLion", "RustRover", "RubyMine", "DataGrip", "DataSpell"
+        "IntelliJIdea", "IntelliJ", "PyCharm", "WebStorm", "PhpStorm",
+        "GoLand", "Rider", "CLion", "RustRover", "RubyMine", "DataGrip",
+        "DataSpell", "Fleet"
     ]
 
-    MCP_CONFIG_FILES = ["mcp.json", "claude_mcp_config.json"]
+    # MCP config file candidates (project-level)
+    MCP_CONFIG_FILES = [
+        "mcp.json",
+        ".mcp/config.json",
+        ".mcp.json",
+        "claude_mcp_config.json",
+        ".cursor/mcp.json",
+        ".vscode/mcp.json",
+    ]
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract MCP configuration from JetBrains IDEs on macOS.
 
         Scans all detected JetBrains IDEs, extracts their recent projects,
-        and checks each project for MCP configuration files.
+        global MCP servers, and checks each project for MCP configuration files.
 
         Returns:
             Dict with projects array containing MCP configs, or None if no configs found
@@ -83,48 +92,64 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         projects = []
 
-        # Parse recentProjects.xml
-        recent_projects_file = config_path / "options" / "recentProjects.xml"
+        # Extract global MCP servers from IDE-level configuration
+        ide_mcp_servers = self._extract_ide_mcp_servers(config_path)
 
-        if not recent_projects_file.exists():
-            logger.debug(f"No recentProjects.xml found for {ide_name}")
-            return projects
+        # Find recent projects XML files
+        recent_files = [
+            config_path / "options" / "recentProjects.xml",
+            config_path / "options" / "recentSolutions.xml",  # Rider
+            config_path / "options" / "recentProjectDirectories.xml",
+        ]
 
-        # Extract project paths from XML
-        project_paths = self._parse_recent_projects_xml(recent_projects_file)
+        project_paths = set()
+
+        for recent_file in recent_files:
+            if recent_file.exists():
+                project_paths.update(self._parse_recent_projects_xml(recent_file))
+
+        # Also check workspace.xml for open projects
+        workspace = config_path / "workspace.xml"
+        if workspace.exists():
+            project_paths.update(self._extract_project_paths_from_xml(workspace))
 
         if not project_paths:
-            logger.debug(f"No project paths found in {recent_projects_file}")
+            logger.debug(f"No project paths found for {ide_name}")
             return projects
 
         logger.info(f"Found {len(project_paths)} projects in {ide_name}")
 
         # Check each project for MCP config and rules
         for project_path_str in project_paths:
-            # Expand $USER_HOME$ placeholder
-            project_path_str = project_path_str.replace("$USER_HOME$", str(Path.home()))
-
+            # Normalize path
+            project_path_str = self._normalize_path(project_path_str)
             project_path = Path(project_path_str)
 
-            if not project_path.exists():
+            if not project_path.exists() or not project_path.is_dir():
                 logger.debug(f"Project path does not exist: {project_path}")
                 continue
 
             mcp_servers = self._detect_project_mcp(project_path)
             rules = self._detect_project_rules(project_path)
 
+            # Combine IDE-level MCP servers with project-level servers
+            combined_mcp_servers = ide_mcp_servers + mcp_servers
+
             # Include project if it has either MCP servers or rules
-            if mcp_servers or rules:
+            if combined_mcp_servers or rules:
                 projects.append({
                     "path": str(project_path),
-                    "mcpServers": mcp_servers,
+                    "mcpServers": combined_mcp_servers,
                     "rules": rules
                 })
-                logger.info(f"Found data in {project_path}: {len(mcp_servers)} MCP server(s), {len(rules)} rule(s)")
+                logger.info(
+                    f"Found data in {project_path}: "
+                    f"{len(combined_mcp_servers)} MCP server(s), {len(rules)} rule(s)"
+                )
 
         return projects
 
-    def _parse_recent_projects_xml(self, xml_file: Path) -> List[str]:
+    def _parse_recent_projects_xml(self, xml_file: Path) -> set:
         """
         Parse recentProjects.xml to extract project paths.
 
@@ -136,41 +161,197 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             xml_file: Path to recentProjects.xml
 
         Returns:
-            List of project path strings
+            Set of project path strings
         """
-        paths = []
+        return self._extract_project_paths_from_xml(xml_file)
+
+    def _extract_project_paths_from_xml(self, xml_path: Path) -> set:
+        """
+        Extract project paths from JetBrains XML file.
+
+        Args:
+            xml_path: Path to the XML file
+
+        Returns:
+            Set of project path strings
+        """
+        paths = set()
 
         try:
-            tree = ET.parse(xml_file)
+            tree = ET.parse(xml_path)
             root = tree.getroot()
 
-            # format 1: standard JetBrains IDEs style
-            for option in root.findall(".//option"):
-                val = option.get("value")
-                if val and ("$USER_HOME$" in val or "/" in val):
-                    paths.append(val)
+            # Various path formats used by JetBrains
+            for el in root.iter():
+                for attr in ["value", "key", "path", "projectPath"]:
+                    val = el.get(attr)
+                    if val and self._looks_like_path(val):
+                        paths.add(val)
 
-            # format 2: newer JetBrains IDEs style
-            for entry in root.findall(".//entry"):
-                key = entry.get("key")
-                if key and ("$USER_HOME$" in key or "/" in key):
-                    paths.append(key)
-
-            # Remove duplicates while preserving order
-            seen = set()
-            unique_paths = []
-            for path in paths:
-                if path not in seen:
-                    seen.add(path)
-                    unique_paths.append(path)
-
-            return unique_paths
+                # Check text content
+                if el.text and self._looks_like_path(el.text):
+                    paths.add(el.text)
 
         except Exception as e:
-            logger.warning(f"Error parsing {xml_file}: {e}")
+            logger.warning(f"Error parsing {xml_path}: {e}")
+
+        return paths
+
+    def _looks_like_path(self, val: str) -> bool:
+        """Check if string looks like a file path."""
+        if not val or len(val) < 3:
+            return False
+        indicators = ["$USER_HOME$", "/Users/", "/home/", "~/"]
+        return any(ind in val for ind in indicators) or val.startswith("/")
+
+    def _normalize_path(self, path: str) -> str:
+        """Normalize JetBrains path variables to actual paths."""
+        home = str(Path.home())
+        path = path.replace("$USER_HOME$", home)
+        path = path.replace("$HOME$", home)
+        path = path.replace("~", home)
+        return path
+
+    def _extract_ide_mcp_servers(self, config_path: Path) -> List[Dict]:
+        """
+        Extract MCP server configurations from IDE-level XML files.
+
+        Parses global MCP configuration files (llm.mcpServers.xml, aiAssistant.xml, etc.)
+        Handles multiple JetBrains XML formats (2024.x and 2025.x).
+
+        Args:
+            config_path: Path to the IDE config directory
+
+        Returns:
+            List of MCP server dicts with comprehensive configuration
+        """
+        servers = []
+
+        # Primary locations for MCP config
+        xml_paths = [
+            config_path / "options" / "llm.mcpServers.xml",
+            config_path / "options" / "aiAssistant.xml",
+            config_path / "options" / "mcp.xml",
+        ]
+
+        for xml_path in xml_paths:
+            if not xml_path.exists():
+                continue
+
+            try:
+                parsed_servers = self._parse_mcp_xml(xml_path)
+                servers.extend(parsed_servers)
+            except ET.ParseError as e:
+                logger.warning(f"XML parse error in {xml_path.name}: {e}")
+            except Exception as e:
+                logger.warning(f"Error reading {xml_path.name}: {e}")
+
+        return servers
+
+    def _parse_mcp_xml(self, xml_path: Path) -> List[Dict]:
+        """Parse JetBrains MCP XML configuration file."""
+        servers = []
+
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+
+            # Strategy 1: McpServerConfigurationProperties (2025.x format)
+            for server_node in root.findall(".//McpServerConfigurationProperties"):
+                server = self._parse_mcp_server_node(server_node)
+                if server:
+                    servers.append(server)
+
+            # Strategy 2: Direct list items (older format)
+            for item in root.findall(".//item"):
+                if item.find(".//option[@name='command']") is not None or \
+                   item.find(".//option[@name='url']") is not None:
+                    server = self._parse_mcp_server_node(item)
+                    if server:
+                        servers.append(server)
+
+            # Strategy 3: Map entries
+            for entry in root.findall(".//entry"):
+                key = entry.get("key")
+                value_node = entry.find("value")
+                if key and value_node is not None:
+                    server = self._parse_mcp_server_node(value_node)
+                    if server:
+                        if server.get("name") == "Unknown":
+                            server["name"] = key
+                        servers.append(server)
+
+        except Exception as e:
+            logger.warning(f"Error parsing {xml_path}: {e}")
+
+        return servers
+
+    def _parse_mcp_server_node(self, node: ET.Element) -> Optional[Dict]:
+        """Parse a single MCP server configuration node."""
+        # Helper to get option value
+        def get_opt(name: str, default: str = "") -> str:
+            el = node.find(f".//option[@name='{name}']")
+            return el.get("value", default) if el is not None else default
+
+        # Get name
+        name = get_opt("name", "Unknown")
+
+        # Check for nested transport properties (2025.3+ format)
+        local_props = node.find(".//McpLocalServerProperties")
+
+        if local_props is not None:
+            command = self._get_nested_opt(local_props, "command")
+            args = self._parse_args(self._get_nested_opt(local_props, "args"))
+        else:
+            # Fallback: top-level attributes (older versions)
+            command = get_opt("command")
+            args = self._parse_args(get_opt("args"))
+
+        # Skip empty/invalid entries (must have name and command)
+        if name == "Unknown" or not command:
+            return None
+
+        return {
+            "name": name,
+            "command": command,
+            "args": args
+        }
+
+    def _get_nested_opt(self, node: ET.Element, name: str) -> Optional[str]:
+        """Get option value from nested element."""
+        el = node.find(f"option[@name='{name}']")
+        return el.get("value") if el is not None else None
+
+    def _parse_args(self, args_str: Optional[str]) -> List[str]:
+        """Parse JetBrains stringified argument list."""
+        if not args_str:
             return []
 
-    def _detect_project_mcp(self, project_path: Path) -> List[str]:
+        args_str = args_str.strip()
+
+        # Handle JSON-like arrays: ['arg1', 'arg2'] or ["arg1", "arg2"]
+        if args_str.startswith("[") and args_str.endswith("]"):
+            try:
+                return json.loads(args_str)
+            except json.JSONDecodeError:
+                try:
+                    # Replace single quotes with double quotes
+                    cleaned = args_str.replace("'", '"')
+                    return json.loads(cleaned)
+                except json.JSONDecodeError:
+                    pass
+
+        # Handle comma-separated
+        if "," in args_str and not args_str.startswith("-"):
+            return [a.strip().strip("'\"") for a in args_str.split(",")]
+
+        if " " in args_str and not any(c in args_str for c in ["/", "\\", ":"]):
+            return args_str.split()
+
+        return [args_str] if args_str else []
+
+
+    def _detect_project_mcp(self, project_path: Path) -> List[Dict]:
         """
         Scan a project folder for MCP configuration files.
 
@@ -178,42 +359,37 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             project_path: Path to the project directory
 
         Returns:
-            List of MCP server names found in the project
+            List of MCP server dicts found in the project
         """
         mcp_servers = []
 
-        candidates = [
-            project_path / "mcp.json",
-            project_path / ".mcp" / "config.json",
-            project_path / "claude_mcp_config.json"
-        ]
-
-        for config_file in candidates:
-            if not config_file.exists():
+        for config_file in self.MCP_CONFIG_FILES:
+            config_path = project_path / config_file
+            if not config_path.exists():
                 continue
 
             try:
-                with open(config_file, 'r', encoding='utf-8') as f:
+                with open(config_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
 
-                    servers = data.get("mcpServers", {})
+                # Standard mcpServers format
+                mcp_servers_dict = data.get("mcpServers", data.get("servers", {}))
 
-                    for name, details in servers.items():
-                        cmd = details.get("command", "unknown")
-                        args = details.get("args", [])
-
+                for name, config in mcp_servers_dict.items():
+                    # Only extract stdio servers (with command)
+                    if "command" in config:
                         mcp_servers.append({
                             "name": name,
-                            "command": cmd,
-                            "args": args
+                            "command": config["command"],
+                            "args": config.get("args", [])
                         })
 
-                logger.info(f"Found MCP config at {config_file} with {len(servers)} server(s)")
+                logger.info(f"Found MCP config at {config_path} with {len(mcp_servers_dict)} server(s)")
 
             except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON in {config_file}: {e}")
+                logger.warning(f"Invalid JSON in {config_path}: {e}")
             except Exception as e:
-                logger.warning(f"Error reading {config_file}: {e}")
+                logger.warning(f"Error reading {config_path}: {e}")
 
         return mcp_servers
 

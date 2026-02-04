@@ -587,6 +587,10 @@ class AIToolsDetector:
         rules = project.get("rules", [])
         return len(mcp_servers) == 0 and len(rules) == 0
 
+    def _is_jetbrains_tool(self, tool: Dict) -> bool:
+        """Check if a tool is a JetBrains IDE based on its properties."""
+        return "_ide_folder" in tool or "_config_path" in tool
+
     def _process_jetbrains_tool(self, tool: Dict) -> Dict[str, Dict]:
         """
         Process a JetBrains IDE tool: extract MCP configs for this specific IDE.
@@ -814,6 +818,11 @@ class AIToolsDetector:
             tool_dict["plugins"] = tool["plugins"]
             logger.info(f"  ✓ Added {len(tool['plugins'])} plugin(s) to {tool_name} report")
 
+        if "_ide_folder" in tool:
+            tool_dict["_ide_folder"] = tool["_ide_folder"]
+        if "_config_path" in tool:
+            tool_dict["_config_path"] = tool["_config_path"]
+
         # Transform and add permissions if present (for Claude Code)
         logger.info(f"  Checking for settings in tool dict for {tool_name}...")
         logger.info(f"  Tool dict keys: {list(tool.keys())}")
@@ -840,21 +849,24 @@ class AIToolsDetector:
     def generate_single_tool_report(self, tool: Dict, device_id: str, home_user: str, system_user: Optional[str] = None) -> Dict:
         """
         Generate a report for a single tool with user and device info.
-        
+
         Args:
             tool: Tool dict with projects populated
             device_id: Device identifier
             home_user: Home directory username (the user whose data is being processed)
             system_user: Optional system user (the user running the script). If None, uses home_user.
-            
+
         Returns:
             Report dictionary with single tool
         """
+        # Filter out internal keys (starting with _) before sending to backend
+        tool_for_report = {k: v for k, v in tool.items() if not k.startswith('_')}
+
         return {
             "home_user": home_user,
             "system_user": system_user or home_user,
             "device_id": device_id,
-            "tools": [tool]
+            "tools": [tool_for_report]
         }
 
     def generate_report(self) -> Dict:
@@ -989,8 +1001,9 @@ def main():
                         # Filter projects to only include this user's projects
                         tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
                         
-                        # Skip if no projects for this user
-                        if not tool_filtered.get('projects'):
+                        # Skip if no projects for this user (but always send JetBrains tools)
+                        is_jetbrains = detector._is_jetbrains_tool(tool_with_projects)
+                        if not tool_filtered.get('projects') and not is_jetbrains:
                             logger.debug(f"    User {user_name}: No projects found for {tool_name}, skipping")
                             continue
                         

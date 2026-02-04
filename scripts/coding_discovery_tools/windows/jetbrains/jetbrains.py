@@ -112,9 +112,13 @@ class WindowsJetBrainsDetector(BaseToolDetector):
                 "_config_path": ide['config_path'],
             }
 
+            logger.info(f"Detecting plugins for {ide['display_name']}...")
             plugins = self._get_plugins(ide['config_path'])
             if plugins:
                 tool_info["plugins"] = plugins
+                logger.info(f"  ✓ Added {len(plugins)} plugin(s) to {ide['display_name']}")
+            else:
+                logger.info(f"  ℹ No plugins found for {ide['display_name']}")
 
             tools.append(tool_info)
 

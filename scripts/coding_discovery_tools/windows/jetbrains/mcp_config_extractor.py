@@ -19,7 +19,17 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for JetBrains IDEs MCP config on Windows systems."""
 
     # Windows uses AppData\Roaming for JetBrains config
-    JETBRAINS_CONFIG_DIR = Path.home() / "AppData" / "Roaming" / "JetBrains"
+    @classmethod
+    def _get_config_dir(cls):
+        """Get JetBrains config directory using %APPDATA% environment variable."""
+        appdata_roaming = os.path.expandvars(r"%APPDATA%")
+        if appdata_roaming and appdata_roaming != r"%APPDATA%":
+            return Path(appdata_roaming) / "JetBrains"
+        return Path.home() / "AppData" / "Roaming" / "JetBrains"
+
+    @property
+    def JETBRAINS_CONFIG_DIR(self):
+        return type(self)._get_config_dir()
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",

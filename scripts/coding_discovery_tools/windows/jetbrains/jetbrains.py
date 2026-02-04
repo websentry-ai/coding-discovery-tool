@@ -22,8 +22,29 @@ class WindowsJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for Windows systems."""
 
     # Windows uses AppData\Roaming for JetBrains config
-    JETBRAINS_CONFIG_DIR = Path.home() / "AppData" / "Roaming" / "JetBrains"
-    JETBRAINS_LOCAL_DIR = Path.home() / "AppData" / "Local" / "JetBrains"
+    @classmethod
+    def _get_config_dir(cls):
+        """Get JetBrains config directory using %APPDATA% environment variable."""
+        appdata_roaming = os.path.expandvars(r"%APPDATA%")
+        if appdata_roaming and appdata_roaming != r"%APPDATA%":
+            return Path(appdata_roaming) / "JetBrains"
+        return Path.home() / "AppData" / "Roaming" / "JetBrains"
+
+    @classmethod
+    def _get_local_dir(cls):
+        """Get JetBrains local directory using %LOCALAPPDATA% environment variable."""
+        appdata_local = os.path.expandvars(r"%LOCALAPPDATA%")
+        if appdata_local and appdata_local != r"%LOCALAPPDATA%":
+            return Path(appdata_local) / "JetBrains"
+        return Path.home() / "AppData" / "Local" / "JetBrains"
+
+    @property
+    def JETBRAINS_CONFIG_DIR(self):
+        return type(self)._get_config_dir()
+
+    @property
+    def JETBRAINS_LOCAL_DIR(self):
+        return type(self)._get_local_dir()
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
@@ -67,7 +88,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         """
         Detect JetBrains IDE installations on Windows.
 
-        Scans %APPDATA%\\JetBrains directory for installed IDEs.
+        Scans %APPDATA%\JetBrains directory for installed IDEs.
 
         Returns:
             List of dicts, each containing info for one IDE, or None if not found

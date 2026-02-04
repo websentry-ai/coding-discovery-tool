@@ -4,8 +4,11 @@ JetBrains IDE detection for Windows
 
 import os
 import logging
+import re
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 
@@ -45,7 +48,15 @@ class WindowsJetBrainsDetector(BaseToolDetector):
     }
 
     # Folders to skip when scanning JetBrains directory
-    SKIP_FOLDERS = {"consent", "DeviceId", "JetBrainsClient"}
+    SKIP_FOLDERS = {
+        "consent", "DeviceId", "JetBrainsClient",
+        "consentOptions", "PrivacyPolicy", "Toolbox",
+    }
+
+    PLUGIN_NAME_OVERRIDES = {
+        "ml-llm": "JetBrains AI Assistant",
+        "ej": "JProfiler Support",
+    }
 
     @property
     def tool_name(self) -> str:
@@ -71,14 +82,20 @@ class WindowsJetBrainsDetector(BaseToolDetector):
 
         tools = []
         for ide in detected_ides:
-            tools.append({
+            tool_info = {
                 "name": ide['display_name'],
                 "version": ide['version'],
                 "plan": ide['plan'],
                 "install_path": ide['config_path'],
                 "_ide_folder": ide['folder_name'],
                 "_config_path": ide['config_path'],
-            })
+            }
+
+            plugins = self._get_plugins(ide['config_path'])
+            if plugins:
+                tool_info["plugins"] = plugins
+
+            tools.append(tool_info)
 
         return tools
 
@@ -131,8 +148,10 @@ class WindowsJetBrainsDetector(BaseToolDetector):
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
-                # Skip system folders
-                if any(skip in folder for skip in self.SKIP_FOLDERS):
+                if folder in self.SKIP_FOLDERS:
+                    continue
+
+                if folder[0].islower():
                     continue
 
                 if not any(pattern in folder for pattern in self.IDE_PATTERNS):
@@ -212,3 +231,202 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             if name not in latest or ver > latest[name][1]:
                 latest[name] = (ide, ver)
         return [entry[0] for entry in latest.values()]
+
+    def _get_disabled_plugins(self, config_path: str) -> Set[str]:
+        """
+        Load the set of disabled plugin IDs from disabled_plugins.txt.
+
+        Args:
+            config_path: Path to the IDE's config directory
+
+        Returns:
+            Set of disabled plugin IDs
+        """
+        disabled_file = Path(config_path) / "disabled_plugins.txt"
+        disabled = set()
+
+        if not disabled_file.exists():
+            return disabled
+
+        try:
+            with open(disabled_file, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        disabled.add(line)
+            logger.debug(f"Found {len(disabled)} disabled plugins in {disabled_file}")
+        except Exception as e:
+            logger.warning(f"Error reading disabled_plugins.txt: {e}")
+
+        return disabled
+
+    def _parse_plugin_xml(self, xml_content: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Parse plugin.xml content to extract plugin ID and name.
+
+        Uses namespace-agnostic parsing to handle XML with or without namespaces.
+
+        Args:
+            xml_content: The XML content as a string
+
+        Returns:
+            Tuple of (plugin_id, plugin_name), either may be None if not found
+        """
+        plugin_id = None
+        plugin_name = None
+
+        try:
+            # Remove XML namespace declarations for simpler parsing
+            xml_content_clean = re.sub(r'\sxmlns[^"]*"[^"]*"', '', xml_content)
+            # Remove elements with namespace prefixes (e.g., <xi:include .../>)
+            xml_content_clean = re.sub(r'<\w+:[^>]*/?>', '', xml_content_clean)
+            # Remove closing tags with namespace prefixes (e.g., </xi:include>)
+            xml_content_clean = re.sub(r'</\w+:[^>]*>', '', xml_content_clean)
+            root = ET.fromstring(xml_content_clean)
+
+            # Try to find <id> tag, can be at root level or nested
+            id_elem = root.find('.//id')
+            if id_elem is not None and id_elem.text:
+                plugin_id = id_elem.text.strip()
+
+            # Try to find <name> tag
+            name_elem = root.find('.//name')
+            if name_elem is not None and name_elem.text:
+                plugin_name = name_elem.text.strip()
+
+            # If no <id> found, check the root element's id attribute
+            if not plugin_id:
+                plugin_id = root.get('id')
+
+        except ET.ParseError as e:
+            logger.debug(f"Failed to parse plugin.xml: {e}")
+        except Exception as e:
+            logger.debug(f"Error parsing plugin.xml: {e}")
+
+        return plugin_id, plugin_name
+
+    def _extract_plugin_info_from_dir(self, plugin_dir: Path) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract plugin ID and name from a plugin directory.
+
+        Args:
+            plugin_dir: Path to the plugin directory
+
+        Returns:
+            Tuple of (plugin_id, plugin_name)
+        """
+        # Check for META-INF/plugin.xml
+        plugin_xml = plugin_dir / "META-INF" / "plugin.xml"
+
+        # Also check in lib/*.jar files if META-INF not found at root
+        if not plugin_xml.exists():
+            lib_dir = plugin_dir / "lib"
+            if lib_dir.exists():
+                for jar_file in lib_dir.glob("*.jar"):
+                    result = self._extract_plugin_info_from_jar(jar_file)
+                    if result[0] or result[1]:
+                        return result
+
+            return None, None
+
+        try:
+            xml_content = plugin_xml.read_text(encoding='utf-8', errors='ignore')
+            return self._parse_plugin_xml(xml_content)
+        except Exception as e:
+            logger.debug(f"Error reading plugin.xml from {plugin_dir}: {e}")
+            return None, None
+
+    def _extract_plugin_info_from_jar(self, jar_path: Path) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract plugin ID and name from a JAR file.
+
+        Args:
+            jar_path: Path to the JAR file
+
+        Returns:
+            Tuple of (plugin_id, plugin_name)
+        """
+        try:
+            with zipfile.ZipFile(jar_path, 'r') as zf:
+                if 'META-INF/plugin.xml' in zf.namelist():
+                    xml_content = zf.read('META-INF/plugin.xml').decode('utf-8', errors='ignore')
+                    return self._parse_plugin_xml(xml_content)
+        except zipfile.BadZipFile:
+            logger.debug(f"Invalid JAR file: {jar_path}")
+        except Exception as e:
+            logger.debug(f"Error reading plugin.xml from JAR {jar_path}: {e}")
+
+        return None, None
+
+    def _transform_plugin_name(self, plugin_id: Optional[str], plugin_name: Optional[str]) -> Optional[str]:
+        """
+        Apply metadata transformations to plugin name.
+
+        Args:
+            plugin_id: The plugin ID
+            plugin_name: The original plugin name
+
+        Returns:
+            Transformed plugin name, or None if plugin should be skipped
+        """
+        # Check for plugin ID overrides
+        if plugin_id and plugin_id in self.PLUGIN_NAME_OVERRIDES:
+            return self.PLUGIN_NAME_OVERRIDES[plugin_id]
+
+        return plugin_name
+
+    def _get_plugins(self, config_path: str) -> List[str]:
+        """
+        Get list of installed and enabled plugins for a JetBrains IDE.
+
+        Parses META-INF/plugin.xml from each plugin to extract the plugin name.
+        Filters out disabled plugins and applies metadata transformations.
+
+        Args:
+            config_path: Path to the IDE's config directory
+
+        Returns:
+            List of plugin names (cleaned and transformed)
+        """
+        plugins_dir = Path(config_path) / "plugins"
+        plugins = []
+
+        if not plugins_dir.exists():
+            logger.debug(f"Plugins directory not found: {plugins_dir}")
+            return plugins
+
+        disabled_plugins = self._get_disabled_plugins(config_path)
+
+        try:
+            for item in os.listdir(plugins_dir):
+                item_path = plugins_dir / item
+
+                if item.startswith('.'):
+                    continue
+
+                plugin_id = None
+                plugin_name = None
+
+                if item_path.is_dir():
+                    plugin_id, plugin_name = self._extract_plugin_info_from_dir(item_path)
+                elif item.endswith('.jar'):
+                    plugin_id, plugin_name = self._extract_plugin_info_from_jar(item_path)
+                else:
+                    continue
+
+                if plugin_id and plugin_id in disabled_plugins:
+                    logger.debug(f"Skipping disabled plugin: {plugin_id}")
+                    continue
+
+                final_name = self._transform_plugin_name(plugin_id, plugin_name)
+
+                if not final_name:
+                    final_name = item[:-4] if item.endswith('.jar') else item
+
+                plugins.append(final_name)
+                logger.debug(f"Found plugin: {final_name} (id: {plugin_id})")
+
+        except Exception as e:
+            logger.warning(f"Error scanning plugins directory {plugins_dir}: {e}")
+
+        return sorted(plugins)

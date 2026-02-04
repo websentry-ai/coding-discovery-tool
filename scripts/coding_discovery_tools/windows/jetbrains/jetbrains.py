@@ -166,24 +166,33 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             return detected_ides
 
         try:
-            for folder in os.listdir(config_dir):
+            items = os.listdir(config_dir)
+        except Exception as e:
+            logger.warning(f"Error listing directory {config_dir}: {e}")
+            return []
+
+        for folder in items:
+            try:
                 folder_path = config_dir / folder
 
-                # Skip hidden files and non-directories
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
                 if folder in self.SKIP_FOLDERS:
                     continue
 
-                if folder[0].islower():
-                    continue
+                matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
+                has_structure = (folder_path / "plugins").exists() or (folder_path / "options").exists()
 
-                if not any(pattern in folder for pattern in self.IDE_PATTERNS):
+                if not (matches_name or has_structure):
                     continue
 
                 display_name, version = self._parse_ide_name_and_version(folder)
-                plan = self._detect_plan(folder, local_dir)
+
+                try:
+                    plan = self._detect_plan(folder, local_dir)
+                except Exception:
+                    plan = "Licensed"  # Fallback if log is locked
 
                 detected_ides.append({
                     "folder_name": folder,
@@ -194,8 +203,9 @@ class WindowsJetBrainsDetector(BaseToolDetector):
                 })
                 logger.info(f"Detected JetBrains IDE: {display_name} {version} ({plan})")
 
-        except Exception as e:
-            logger.warning(f"Error scanning {config_dir}: {e}")
+            except Exception as e:
+                # Log warning but continue to next folder
+                logger.warning(f"Skipping potential IDE folder '{folder}' due to error: {e}")
 
         return self._filter_old_versions(detected_ides)
 

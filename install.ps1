@@ -1,30 +1,3 @@
-<#
-.SYNOPSIS
-    AI Tools Discovery - Installation and Execution Script for Windows
-
-.DESCRIPTION
-    Cross-platform script that downloads and runs the coding discovery tool.
-    Can be executed directly or via web download (similar to Cursor installation).
-
-.PARAMETER ApiKey
-    Required. Your API key for authentication.
-
-.PARAMETER Domain
-    Required. The domain/backend URL.
-
-.PARAMETER AppName
-    Optional. The application name.
-
-.EXAMPLE
-    # Download and run:
-    Invoke-WebRequest https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1 -OutFile install.ps1
-    powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ApiKey "YOUR_API_KEY" -Domain "YOUR_DOMAIN"
-
-.EXAMPLE
-    # Run directly:
-    .\install.ps1 -ApiKey "YOUR_API_KEY" -Domain "YOUR_DOMAIN" -AppName "APP_NAME"
-#>
-
 param(
     [Parameter(Mandatory=$false)]
     [string]$ApiKey,

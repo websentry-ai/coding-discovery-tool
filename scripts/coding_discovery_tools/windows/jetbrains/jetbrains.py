@@ -299,10 +299,6 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         try:
             # Remove XML namespace declarations for simpler parsing
             xml_content_clean = re.sub(r'\sxmlns[^"]*"[^"]*"', '', xml_content)
-            # Remove elements with namespace prefixes (e.g., <xi:include .../>)
-            xml_content_clean = re.sub(r'<\w+:[^>]*/?>', '', xml_content_clean)
-            # Remove closing tags with namespace prefixes (e.g., </xi:include>)
-            xml_content_clean = re.sub(r'</\w+:[^>]*>', '', xml_content_clean)
             root = ET.fromstring(xml_content_clean)
 
             # Try to find <id> tag, can be at root level or nested

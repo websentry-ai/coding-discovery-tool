@@ -123,11 +123,42 @@ function Main {
         Write-Host "Usage:"
         Write-Host "  .\install.ps1 -ApiKey YOUR_API_KEY -Domain YOUR_DOMAIN [-AppName APP_NAME]"
         Write-Host ""
-        Write-Host "Or download and run via PowerShell:"
-        Write-Host "  Invoke-WebRequest https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/$BRANCH/install.ps1 -OutFile install.ps1"
-        Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ApiKey YOUR_API_KEY -Domain YOUR_DOMAIN"
-        Write-Host ""
         exit 1
+    }
+
+    $CurrentID = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    
+    # If running as SYSTEM (common in MDM), try to find the real user
+    if ($CurrentID -match "SYSTEM" -or $CurrentID -match "\$") {
+        Write-Info "Running as SYSTEM (MDM detected). Attempting to target logged-in user..."
+        
+        try {
+            # Get the logged-in user via WMI
+            $SysInfo = Get-WmiObject -Class Win32_ComputerSystem
+            $LoggedOnUser = $SysInfo.UserName
+            
+            if ($LoggedOnUser) {
+                # $LoggedOnUser format is usually DOMAIN\Username
+                $CleanUser = $LoggedOnUser.Split('\')[-1]
+                $UserDir = "C:\Users\$CleanUser"
+                
+                if (Test-Path $UserDir) {
+                    Write-Success "Targeting user profile: $CleanUser"
+                    
+                    # Override environment variables so Python looks in the USER folder, not SYSTEM folder
+                    $env:USERPROFILE = $UserDir
+                    $env:APPDATA = "$UserDir\AppData\Roaming"
+                    $env:LOCALAPPDATA = "$UserDir\AppData\Local"
+                    $env:HOMEPATH = "\Users\$CleanUser"
+                } else {
+                    Write-Warning "Detected user $CleanUser but folder $UserDir does not exist."
+                }
+            } else {
+                Write-Warning "No active user found logged in. Tool discovery may return 0 results."
+            }
+        } catch {
+            Write-Warning "Failed to detect user context: $_"
+        }
     }
 
     # Check Python
@@ -135,7 +166,6 @@ function Main {
     if (-not $pythonCmd) {
         Write-ErrorMessage "Python 3 is required but not found."
         Write-Info "Please install Python 3 and try again."
-        Write-Info "Download from: https://www.python.org/downloads/"
         exit 1
     }
 
@@ -149,7 +179,6 @@ function Main {
     Push-Location $TEMP_DIR
 
     try {
-        # Build arguments for Python script
         $pythonArgs = @(
             "-m", "scripts.coding_discovery_tools.ai_tools_discovery",
             "--api-key", $ApiKey,
@@ -159,6 +188,8 @@ function Main {
         if ($AppName) {
             $pythonArgs += @("--app_name", $AppName)
         }
+
+        $env:PYTHONWARNINGS = "ignore"
 
         # Execute the discovery script
         if ($pythonCmd -eq "py -3") {

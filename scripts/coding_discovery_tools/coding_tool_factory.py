@@ -94,6 +94,10 @@ from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
 from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
 
+# Windows - JetBrains
+from .windows.jetbrains.jetbrains import WindowsJetBrainsDetector
+from .windows.jetbrains.mcp_config_extractor import WindowsJetBrainsMCPConfigExtractor
+
 # Windows - OpenCode
 from .windows.opencode.opencode import WindowsOpenCodeDetector
 from .windows.opencode.opencode_rules_extractor import WindowsOpenCodeRulesExtractor
@@ -424,6 +428,8 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSJetBrainsDetector()
+        elif os_name == "Windows":
+            return WindowsJetBrainsDetector()
         else:
             return None
 
@@ -1031,5 +1037,7 @@ class JetBrainsMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSJetBrainsMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsJetBrainsMCPConfigExtractor()
         else:
             return None

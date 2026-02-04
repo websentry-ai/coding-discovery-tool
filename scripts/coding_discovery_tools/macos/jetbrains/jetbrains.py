@@ -124,10 +124,15 @@ class MacOSJetBrainsDetector(BaseToolDetector):
             return detected_ides
 
         try:
-            for folder in os.listdir(self.JETBRAINS_CONFIG_DIR):
+            items = os.listdir(self.JETBRAINS_CONFIG_DIR)
+        except Exception as e:
+            logger.warning(f"Error listing directory {self.JETBRAINS_CONFIG_DIR}: {e}")
+            return []
+
+        for folder in items:
+            try:
                 folder_path = self.JETBRAINS_CONFIG_DIR / folder
 
-                # Skip hidden files and non-directories
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
@@ -135,10 +140,10 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                 if folder in self.SKIP_FOLDERS:
                     continue
 
-                if folder[0].islower():
-                    continue
+                matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
+                has_structure = (folder_path / "plugins").exists() or (folder_path / "options").exists()
 
-                if not any(pattern in folder for pattern in self.IDE_PATTERNS):
+                if not (matches_name or has_structure):
                     continue
 
                 display_name, version = self._parse_ide_name_and_version(folder)
@@ -153,8 +158,9 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                 })
                 logger.info(f"Detected JetBrains IDE: {display_name} {version} ({plan})")
 
-        except Exception as e:
-            logger.warning(f"Error scanning {self.JETBRAINS_CONFIG_DIR}: {e}")
+            except Exception as e:
+                # Log warning but continue to next folder
+                logger.warning(f"Skipping potential IDE folder '{folder}' due to error: {e}")
 
         return self._filter_old_versions(detected_ides)
 

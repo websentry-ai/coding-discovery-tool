@@ -25,10 +25,9 @@ class WindowsJetBrainsDetector(BaseToolDetector):
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
         "Rider", "CLion", "RustRover", "RubyMine", "DataGrip",
-        "DataSpell", "Android"
+        "DataSpell"
     ]
 
-    # Maps folder prefixes to display names
     IDE_NAME_MAPPING = {
         "IntelliJIdea": "IntelliJ IDEA",
         "IdeaIC": "IntelliJ IDEA Community",
@@ -43,7 +42,6 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         "RubyMine": "RubyMine",
         "DataGrip": "DataGrip",
         "DataSpell": "DataSpell",
-        "AndroidStudio": "Android Studio",
     }
 
     # Folders to skip when scanning JetBrains directory

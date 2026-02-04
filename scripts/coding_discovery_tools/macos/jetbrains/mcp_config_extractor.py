@@ -18,7 +18,17 @@ logger = logging.getLogger(__name__)
 class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for JetBrains IDEs MCP config on macOS systems."""
 
-    JETBRAINS_CONFIG_DIR = Path.home() / "Library" / "Application Support" / "JetBrains"
+    @property
+    def jetbrains_config_dir(self) -> Path:
+        """
+        Dynamically determine config dir based on target user.
+
+        Uses self.user_home if available (for multi-user scans),
+        otherwise falls back to Path.home() (single-user mode).
+        """
+        if hasattr(self, 'user_home') and self.user_home:
+            return self.user_home / "Library" / "Application Support" / "JetBrains"
+        return Path.home() / "Library" / "Application Support" / "JetBrains"
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
@@ -39,13 +49,13 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         all_projects = []
 
-        if not self.JETBRAINS_CONFIG_DIR.exists():
-            logger.debug(f"JetBrains config directory not found: {self.JETBRAINS_CONFIG_DIR}")
+        if not self.jetbrains_config_dir.exists():
+            logger.debug(f"JetBrains config directory not found: {self.jetbrains_config_dir}")
             return None
 
         try:
-            for folder in os.listdir(self.JETBRAINS_CONFIG_DIR):
-                folder_path = self.JETBRAINS_CONFIG_DIR / folder
+            for folder in os.listdir(self.jetbrains_config_dir):
+                folder_path = self.jetbrains_config_dir / folder
 
                 # Skip hidden files and non-directories
                 if folder.startswith('.') or not folder_path.is_dir():
@@ -60,7 +70,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 all_projects.extend(ide_projects)
 
         except Exception as e:
-            logger.warning(f"Error scanning {self.JETBRAINS_CONFIG_DIR}: {e}")
+            logger.warning(f"Error scanning {self.jetbrains_config_dir}: {e}")
 
         # Return None if no projects found
         if not all_projects:

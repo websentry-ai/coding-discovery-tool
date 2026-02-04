@@ -14,21 +14,23 @@ from .coding_tool_base import BaseToolDetector
 def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
     """
     Detect a specific tool for a user by checking their paths directly.
-    
+
     This function handles user-specific tool installations that may not be
     in the system PATH, such as:
     - npm/nvm installations in ~/.nvm/versions
     - Bun global binaries in ~/.bun/bin
     - User configuration directories like ~/.claude, ~/.gemini
-    
+
     Args:
         detector: Tool detector instance
         user_home: Path to the user's home directory
-        
+
     Returns:
         Tool info dict with keys: name, version, install_path
         Returns None if tool is not found
     """
+    detector.user_home = user_home
+
     tool_name = detector.tool_name.lower()
     
     # System-wide tools (same for all users) - detect normally

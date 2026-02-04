@@ -21,30 +21,39 @@ MAX_LOG_LINES = 2000
 class WindowsJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for Windows systems."""
 
-    # Windows uses AppData\Roaming for JetBrains config
-    @classmethod
-    def _get_config_dir(cls):
-        """Get JetBrains config directory using %APPDATA% environment variable."""
-        appdata_roaming = os.path.expandvars(r"%APPDATA%")
-        if appdata_roaming and appdata_roaming != r"%APPDATA%":
-            return Path(appdata_roaming) / "JetBrains"
+    @property
+    def jetbrains_config_dir(self) -> Path:
+        """
+        Dynamic Config Directory (Roaming).
+
+        Uses self.user_home if available (for scanning other users),
+        otherwise falls back to environment variables or Path.home().
+        """
+        if hasattr(self, 'user_home') and self.user_home:
+            return self.user_home / "AppData" / "Roaming" / "JetBrains"
+
+        # Fallback to environment variable
+        appdata = os.path.expandvars(r"%APPDATA%")
+        if appdata and appdata != r"%APPDATA%":
+            return Path(appdata) / "JetBrains"
         return Path.home() / "AppData" / "Roaming" / "JetBrains"
 
-    @classmethod
-    def _get_local_dir(cls):
-        """Get JetBrains local directory using %LOCALAPPDATA% environment variable."""
-        appdata_local = os.path.expandvars(r"%LOCALAPPDATA%")
-        if appdata_local and appdata_local != r"%LOCALAPPDATA%":
-            return Path(appdata_local) / "JetBrains"
+    @property
+    def jetbrains_local_dir(self) -> Path:
+        """
+        Dynamic Local Directory (Local - for logs).
+
+        Uses self.user_home if available (for scanning other users),
+        otherwise falls back to environment variables or Path.home().
+        """
+        if hasattr(self, 'user_home') and self.user_home:
+            return self.user_home / "AppData" / "Local" / "JetBrains"
+
+        # Fallback to environment variable
+        local = os.path.expandvars(r"%LOCALAPPDATA%")
+        if local and local != r"%LOCALAPPDATA%":
+            return Path(local) / "JetBrains"
         return Path.home() / "AppData" / "Local" / "JetBrains"
-
-    @property
-    def JETBRAINS_CONFIG_DIR(self):
-        return type(self)._get_config_dir()
-
-    @property
-    def JETBRAINS_LOCAL_DIR(self):
-        return type(self)._get_local_dir()
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
@@ -94,8 +103,8 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             List of dicts, each containing info for one IDE, or None if not found
         """
         detected_ides = self._scan_for_ides(
-            self.JETBRAINS_CONFIG_DIR,
-            self.JETBRAINS_LOCAL_DIR
+            self.jetbrains_config_dir,
+            self.jetbrains_local_dir
         )
 
         if not detected_ides:
@@ -132,8 +141,8 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             Comma-separated list of detected IDEs with their plans
         """
         detected_ides = self._scan_for_ides(
-            self.JETBRAINS_CONFIG_DIR,
-            self.JETBRAINS_LOCAL_DIR
+            self.jetbrains_config_dir,
+            self.jetbrains_local_dir
         )
 
         if not detected_ides:

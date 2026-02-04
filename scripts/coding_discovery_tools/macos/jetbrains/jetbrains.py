@@ -18,7 +18,17 @@ logger = logging.getLogger(__name__)
 class MacOSJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for macOS systems."""
 
-    JETBRAINS_CONFIG_DIR = Path.home() / "Library" / "Application Support" / "JetBrains"
+    @property
+    def jetbrains_config_dir(self) -> Path:
+        """
+        Dynamically determine config dir based on target user.
+
+        Uses self.user_home if available (for multi-user scans),
+        otherwise falls back to Path.home() (single-user mode).
+        """
+        if hasattr(self, 'user_home') and self.user_home:
+            return self.user_home / "Library" / "Application Support" / "JetBrains"
+        return Path.home() / "Library" / "Application Support" / "JetBrains"
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
@@ -119,19 +129,19 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         """
         detected_ides = []
 
-        if not self.JETBRAINS_CONFIG_DIR.exists():
-            logger.debug(f"JetBrains config directory not found: {self.JETBRAINS_CONFIG_DIR}")
+        if not self.jetbrains_config_dir.exists():
+            logger.debug(f"JetBrains config directory not found: {self.jetbrains_config_dir}")
             return detected_ides
 
         try:
-            items = os.listdir(self.JETBRAINS_CONFIG_DIR)
+            items = os.listdir(self.jetbrains_config_dir)
         except Exception as e:
-            logger.warning(f"Error listing directory {self.JETBRAINS_CONFIG_DIR}: {e}")
+            logger.warning(f"Error listing directory {self.jetbrains_config_dir}: {e}")
             return []
 
         for folder in items:
             try:
-                folder_path = self.JETBRAINS_CONFIG_DIR / folder
+                folder_path = self.jetbrains_config_dir / folder
 
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue

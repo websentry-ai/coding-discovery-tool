@@ -12,8 +12,6 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
 
-MAX_PROJECTS = 50
-
 logger = logging.getLogger(__name__)
 
 
@@ -102,7 +100,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         logger.info(f"Found {len(project_paths)} projects in {ide_name}")
 
         # Check each project for MCP config and rules
-        for project_path_str in project_paths[:MAX_PROJECTS]:
+        for project_path_str in project_paths:
             # Expand $USER_HOME$ placeholder
             project_path_str = project_path_str.replace("$USER_HOME$", str(Path.home()))
 

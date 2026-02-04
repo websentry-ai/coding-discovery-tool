@@ -12,8 +12,6 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...windows_extraction_helpers import get_file_metadata, read_file_content
 
-MAX_PROJECTS = 50
-
 logger = logging.getLogger(__name__)
 
 
@@ -113,7 +111,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         ide_mcp_servers = self._extract_ide_mcp_servers(config_path)
 
         # Check each project for MCP config and rules
-        for project_path_str in project_paths[:MAX_PROJECTS]:
+        for project_path_str in project_paths:
             # Expand $USER_HOME$ placeholder for Windows paths
             project_path_str = project_path_str.replace(
                 "$USER_HOME$",

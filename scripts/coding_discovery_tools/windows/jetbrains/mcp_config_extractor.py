@@ -31,19 +31,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     MCP_CONFIG_FILES = ["mcp.json", "claude_mcp_config.json"]
 
-    # Default MCP server configurations for JetBrains 2025.3+ internal servers
-    MCP_DEFAULTS = {
-        "everything": {
-            "command": "npx.cmd",
-            "args": ["-y", "@modelcontextprotocol/server-everything"]
-        },
-        "fetch": {
-            "command": "npx.cmd",
-            "args": ["-y", "@modelcontextprotocol/server-fetch"]
-        }
-    }
-
-    # Folders to skip when scanning JetBrains directory
     SKIP_FOLDERS = {"consent", "DeviceId", "JetBrainsClient"}
 
     def extract_mcp_config(self) -> Optional[Dict]:
@@ -165,8 +152,8 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract MCP server configurations from llm.mcpServers.xml.
 
-        Parses the IDE-level MCP configuration file and applies defaults
-        for standard servers when command/args are missing.
+        Parses the IDE-level MCP configuration file. Only includes servers
+        that have both a name and command specified.
 
         Args:
             config_path: Path to the IDE config directory
@@ -195,16 +182,18 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 if not name:
                     continue
 
-                # Get command and args, applying defaults if missing
+                # Get command and args - skip if command is missing
                 cmd_opt = props.find("option[@name='command']")
+                if cmd_opt is None:
+                    logger.debug(f"Skipping MCP server '{name}' in llm.mcpServers.xml: missing command")
+                    continue
+
+                cmd = cmd_opt.get("value", "")
+                if not cmd:
+                    logger.debug(f"Skipping MCP server '{name}' in llm.mcpServers.xml: empty command")
+                    continue
+
                 args_opt = props.find("option[@name='args']")
-
-                if cmd_opt is not None:
-                    cmd = cmd_opt.get("value", "")
-                else:
-                    # Apply default if available
-                    cmd = self.MCP_DEFAULTS.get(name, {}).get("command", "custom")
-
                 if args_opt is not None:
                     args_value = args_opt.get("value", "")
                     # Parse args - could be space-separated or JSON array
@@ -216,8 +205,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                     else:
                         args = args_value.split() if args_value else []
                 else:
-                    # Apply default if available
-                    args = self.MCP_DEFAULTS.get(name, {}).get("args", [])
+                    args = []
 
                 mcp_servers.append({
                     "name": name,
@@ -328,10 +316,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _read_rule_file(self, path: Path) -> Optional[Dict]:
         """
-        Read a rule file and return a rich object matching the backend schema.
-
-        Uses shared helpers for consistency with how other tools produce rule objects.
-
         Args:
             path: Path to the rule file
 
@@ -360,8 +344,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _detect_project_rules(self, project_path: Path) -> List[Dict]:
         """
-        Scan a project folder for AI rule files and return rich rule objects.
-
         Scans for:
             - Exact file matches: .cursorrules, .windsurfrules, .prompts, GEMINI.md
             - Directory scans: *.md files inside .cline/rules/ and .aiassistant/rules/

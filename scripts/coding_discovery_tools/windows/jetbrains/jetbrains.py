@@ -54,22 +54,19 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         """Return the name of the tool being detected."""
         return "JetBrains IDEs"
 
-    def detect(self, user_home: Optional[Path] = None) -> Optional[List[Dict]]:
+    def detect(self) -> Optional[List[Dict]]:
         """
         Detect JetBrains IDE installations on Windows.
 
         Scans %APPDATA%\\JetBrains directory for installed IDEs.
 
-        Args:
-            user_home: Optional user home path for multi-user support
-
         Returns:
             List of dicts, each containing info for one IDE, or None if not found
         """
-        config_dir = self._get_config_dir(user_home)
-        local_dir = self._get_local_dir(user_home)
-
-        detected_ides = self._scan_for_ides(config_dir, local_dir)
+        detected_ides = self._scan_for_ides(
+            self.JETBRAINS_CONFIG_DIR,
+            self.JETBRAINS_LOCAL_DIR
+        )
 
         if not detected_ides:
             return None
@@ -106,18 +103,6 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             f"{ide['display_name']} {ide['version']} ({ide['plan']})"
             for ide in detected_ides
         )
-
-    def _get_config_dir(self, user_home: Optional[Path] = None) -> Path:
-        """Get JetBrains config directory for a user."""
-        if user_home:
-            return user_home / "AppData" / "Roaming" / "JetBrains"
-        return self.JETBRAINS_CONFIG_DIR
-
-    def _get_local_dir(self, user_home: Optional[Path] = None) -> Path:
-        """Get JetBrains local directory for a user (contains logs)."""
-        if user_home:
-            return user_home / "AppData" / "Local" / "JetBrains"
-        return self.JETBRAINS_LOCAL_DIR
 
     def _scan_for_ides(
         self,
@@ -194,16 +179,6 @@ class WindowsJetBrainsDetector(BaseToolDetector):
     def _detect_plan(self, folder_name: str, local_dir: Path) -> str:
         """
         Detect plan type by checking folder name and idea.log.
-
-        Checks for "Licensed to" string in idea.log to detect paid plans.
-        Falls back to folder name patterns for Community editions.
-
-        Args:
-            folder_name: IDE folder name
-            local_dir: Path to JetBrains local directory
-
-        Returns:
-            Plan type: "Professional", "Community", or "Licensed"
         """
         # Check folder name for community edition markers
         if "IdeaIC" in folder_name or "PyCharmCE" in folder_name:

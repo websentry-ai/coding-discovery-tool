@@ -12,6 +12,7 @@ from .roo_code import WindowsRooDetector
 from .opencode import WindowsOpenCodeDetector
 from .replit import WindowsReplitDetector
 from .codex import WindowsCodexDetector
+from .jetbrains import WindowsJetBrainsDetector
 
 __all__ = [
     'WindowsDeviceIdExtractor',
@@ -24,5 +25,6 @@ __all__ = [
     'WindowsOpenCodeDetector',
     'WindowsReplitDetector',
     'WindowsCodexDetector',
+    'WindowsJetBrainsDetector',
 ]
 

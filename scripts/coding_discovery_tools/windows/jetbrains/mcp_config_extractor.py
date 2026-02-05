@@ -41,12 +41,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract MCP configuration from JetBrains IDEs on Windows.
-
-        Scans all detected JetBrains IDEs, extracts their recent projects,
-        and checks each project for MCP configuration files.
-
-        Returns:
-            Dict with projects array containing MCP configs, or None if no configs found
         """
         all_projects = []
 
@@ -88,13 +82,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _extract_ide_projects(self, config_path: Path, ide_name: str) -> List[Dict]:
         """
         Extract recent projects from a specific JetBrains IDE configuration.
-
-        Args:
-            config_path: Path to the IDE config directory
-            ide_name: Name of the IDE
-
-        Returns:
-            List of project dicts with MCP server info
         """
         projects = []
 
@@ -157,16 +144,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_ide_mcp_servers(self, config_path: Path) -> List[Dict]:
         """
-        Extract MCP server configurations from IDE-level XML files.
-
-        Parses global MCP configuration files (llm.mcpServers.xml, aiAssistant.xml, etc.)
-        Handles multiple JetBrains XML formats (2024.x and 2025.x).
-
-        Args:
-            config_path: Path to the IDE config directory
-
-        Returns:
-            List of MCP server dicts with name, command, and args
+        Extract Global MCP Servers
         """
         servers = []
 
@@ -247,13 +225,12 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             command = get_opt("command")
             args = self._parse_args(get_opt("args"))
 
-        # Skip empty/invalid entries (must have name and command)
-        if name == "Unknown" or not command:
+        if name == "Unknown":
             return None
 
         return {
             "name": name,
-            "command": command,
+            "command": command if command else "",
             "args": args
         }
 
@@ -291,16 +268,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _parse_recent_projects_xml(self, xml_file: Path) -> set:
         """
         Parse recentProjects.xml to extract project paths.
-
-        Handles both formats used by modern JetBrains IDEs:
-        - Standard: <option value="$USER_HOME$/..." />
-        - Newer: <entry key="$USER_HOME$/..." />
-
-        Args:
-            xml_file: Path to recentProjects.xml
-
-        Returns:
-            Set of project path strings
         """
         return self._extract_project_paths_from_xml(xml_file)
 
@@ -356,12 +323,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _detect_project_mcp(self, project_path: Path) -> List[Dict]:
         """
         Scan a project folder for MCP configuration files.
-
-        Args:
-            project_path: Path to the project directory
-
-        Returns:
-            List of MCP server dicts found in the project
         """
         mcp_servers = []
 
@@ -378,7 +339,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 mcp_servers_dict = data.get("mcpServers", data.get("servers", {}))
 
                 for name, config in mcp_servers_dict.items():
-                    # Only extract stdio servers (with command)
                     if "command" in config:
                         mcp_servers.append({
                             "name": name,
@@ -397,12 +357,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _read_rule_file(self, path: Path) -> Optional[Dict]:
         """
-        Args:
-            path: Path to the rule file
-
-        Returns:
-            Dict with file_path, file_name, content, size, last_modified, truncated
-            or None if reading fails
+        Read a rule file
         """
         try:
             if not path.exists() or not path.is_file():
@@ -429,12 +384,6 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             - Exact file matches: .cursorrules, .windsurfrules, .prompts, GEMINI.md
             - Directory scans: *.md files inside .cline/rules/ and .aiassistant/rules/
             - Wildcard: all *.mdc files in the project root
-
-        Args:
-            project_path: Path to the project directory
-
-        Returns:
-            List of rule dicts matching the backend schema
         """
         rules = []
 

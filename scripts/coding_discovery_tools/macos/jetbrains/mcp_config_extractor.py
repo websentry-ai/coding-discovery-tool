@@ -1,5 +1,6 @@
 """
 MCP config extraction for JetBrains IDEs on macOS systems.
+Fixed for MDM/root execution contexts.
 """
 
 import json
@@ -7,8 +8,9 @@ import logging
 import os
 import subprocess
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
@@ -25,7 +27,6 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         "DataSpell", "Fleet"
     ]
 
-    # MCP config file candidates (project-level)
     MCP_CONFIG_FILES = [
         "mcp.json",
         ".mcp/config.json",
@@ -35,36 +36,94 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         ".vscode/mcp.json",
     ]
 
-    def _get_active_user_info(self):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Cache user info once at init — avoids repeated subprocess calls
+        self._username, self._user_home = self._resolve_active_user()
+
+    def _resolve_active_user(self) -> Tuple[str, Path]:
         """
-        Finds the real human user sitting at the Mac.
-        This is critical for MDM/Root execution.
+        Reliably find the real GUI user, even when running as root via MDM.
+
+        Uses a cascade of methods because no single approach works in all
+        MDM scenarios (pre-login, remote, DEP enrollment, etc.).
         """
+        candidates: List[str] = []
+
         try:
-            # stat -f%Su /dev/console returns the GUI owner
-            user = subprocess.check_output(['stat', '-f%Su', '/dev/console']).decode().strip()
-            
-            if user == 'root' or not user:
-                real_users = [u for u in os.listdir('/Users') if u not in ['Shared', '.localized', 'root', 'Guest']]
-                user = real_users[0] if real_users else 'root'
-                
-            home = Path(f"/Users/{user}")
-            return user, home
-        except Exception as e:
-            logger.warning(f"Error getting active user info: {e}")
-            return os.environ.get('USER', 'root'), Path.home()
+            result = subprocess.check_output(
+                ['python3', '-c',
+                 'from SystemConfiguration import SCDynamicStoreCopyConsoleUser; '
+                 'u = SCDynamicStoreCopyConsoleUser(None, None, None); '
+                 'print(u[0] if u[0] else "")'],
+                stderr=subprocess.DEVNULL,
+                timeout=5
+            ).decode().strip()
+            if result and result not in ('root', 'loginwindow', ''):
+                candidates.append(result)
+        except Exception:
+            pass
+
+        try:
+            result = subprocess.check_output(
+                ['stat', '-f%Su', '/dev/console'],
+                stderr=subprocess.DEVNULL,
+                timeout=5
+            ).decode().strip()
+            if result and result not in ('root', ''):
+                candidates.append(result)
+        except Exception:
+            pass
+
+        try:
+            result = subprocess.check_output(
+                ['who'], stderr=subprocess.DEVNULL, timeout=5
+            ).decode()
+            for line in result.splitlines():
+                if 'console' in line:
+                    user = line.split()[0]
+                    if user and user != 'root':
+                        candidates.append(user)
+                        break
+        except Exception:
+            pass
+
+        try:
+            skip = {'Shared', '.localized', 'root', 'Guest', '.Trashes'}
+            user_dirs = [
+                d for d in Path('/Users').iterdir()
+                if d.is_dir() and d.name not in skip and not d.name.startswith('.')
+            ]
+            user_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for d in user_dirs:
+                candidates.append(d.name)
+        except Exception:
+            pass
+
+        for username in candidates:
+            home = Path(f"/Users/{username}")
+            jb_dir = home / "Library" / "Application Support" / "JetBrains"
+            if jb_dir.exists():
+                logger.info(f"Resolved active user: {username} (has JetBrains config)")
+                return username, home
+
+        for username in candidates:
+            home = Path(f"/Users/{username}")
+            if home.exists():
+                logger.info(f"Resolved active user: {username} (fallback)")
+                return username, home
+
+        fallback_user = os.environ.get('USER', 'root')
+        logger.warning(f"Could not detect GUI user, falling back to: {fallback_user}")
+        return fallback_user, Path(f"/Users/{fallback_user}")
 
     def extract_mcp_config(self) -> Optional[Dict]:
-        """
-        Extract MCP configuration from JetBrains IDEs.
-        """
+        """Extract MCP configuration from JetBrains IDEs."""
         all_projects = []
 
-        # Find the actual user home (ignoring the 'root' home)
-        username, user_home = self._get_active_user_info()
-        jetbrains_root = user_home / "Library" / "Application Support" / "JetBrains"
+        jetbrains_root = self._user_home / "Library" / "Application Support" / "JetBrains"
 
-        logger.info(f"Scanning JetBrains configs for user: {username} at {jetbrains_root}")
+        logger.info(f"Scanning JetBrains configs for user: {self._username} at {jetbrains_root}")
 
         if not jetbrains_root.exists():
             logger.debug(f"JetBrains config directory not found: {jetbrains_root}")
@@ -74,39 +133,35 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             for folder in os.listdir(jetbrains_root):
                 folder_path = jetbrains_root / folder
 
-                # Skip hidden files and non-directories
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
-                # Check if folder matches any IDE pattern
                 if not any(pattern in folder for pattern in self.IDE_PATTERNS):
                     continue
 
-                # Extract projects from this IDE's configuration
                 ide_projects = self._extract_ide_projects(folder_path, folder)
                 all_projects.extend(ide_projects)
 
+        except PermissionError as e:
+            logger.error(
+                f"Permission denied reading {jetbrains_root}. "
+                f"If running via MDM, ensure the agent has Full Disk Access "
+                f"(System Settings > Privacy & Security > Full Disk Access). Error: {e}"
+            )
         except Exception as e:
             logger.warning(f"Error scanning {jetbrains_root}: {e}")
 
-        # Return None if no projects found
         if not all_projects:
             return None
 
-        return {
-            "projects": all_projects
-        }
+        return {"projects": all_projects}
 
     def _extract_ide_projects(self, config_path: Path, ide_name: str) -> List[Dict]:
-        """
-        Extract recent projects from a specific JetBrains IDE configuration.
-        """
+        """Extract recent projects from a specific JetBrains IDE configuration."""
         projects = []
 
-        # Extract global MCP servers from IDE-level configuration
         ide_mcp_servers = self._extract_ide_mcp_servers(config_path)
 
-        # Find recent projects XML files
         recent_files = [
             config_path / "options" / "recentProjects.xml",
             config_path / "options" / "recentSolutions.xml",
@@ -125,7 +180,12 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             project_path_str = self._normalize_path(project_path_str)
             project_path = Path(project_path_str)
 
-            if not project_path.exists() or not project_path.is_dir():
+            # Gracefully handle permission issues on individual project dirs
+            try:
+                if not project_path.exists() or not project_path.is_dir():
+                    continue
+            except PermissionError:
+                logger.debug(f"Permission denied checking project path: {project_path}")
                 continue
 
             mcp_servers = self._detect_project_mcp(project_path)
@@ -155,6 +215,8 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                         paths.add(val)
                 if el.text and self._looks_like_path(el.text):
                     paths.add(el.text)
+        except PermissionError:
+            logger.debug(f"Permission denied reading {xml_path}")
         except Exception as e:
             logger.warning(f"Error parsing {xml_path}: {e}")
         return paths
@@ -164,13 +226,15 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         return any(ind in val for ind in indicators) or val.startswith("/")
 
     def _normalize_path(self, path: str) -> str:
-        """Normalize paths using the ACTUAL user's home directory."""
-        _, user_home = self._get_active_user_info()
-        home_str = str(user_home)
-        
+        """Normalize paths using the cached user's home directory."""
+        home_str = str(self._user_home)
+
         path = path.replace("$USER_HOME$", home_str)
         path = path.replace("$HOME$", home_str)
-        path = path.replace("~", home_str)
+        # Only replace ~ at the start of the path to avoid corrupting paths
+        # that contain ~ in directory names
+        if path.startswith("~"):
+            path = home_str + path[1:]
         return path
 
     def _extract_ide_mcp_servers(self, config_path: Path) -> List[Dict]:
@@ -187,6 +251,8 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 try:
                     parsed_servers = self._parse_mcp_xml(xml_path)
                     servers.extend(parsed_servers)
+                except PermissionError:
+                    logger.debug(f"Permission denied reading {xml_path}")
                 except Exception as e:
                     logger.warning(f"Error reading {xml_path.name}: {e}")
         return servers
@@ -197,14 +263,16 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         try:
             tree = ET.parse(xml_path)
             for node in tree.findall(".//McpServerConfigurationProperties"):
-                
+
                 def get_opt(n, name):
-                    if n is None: return None
+                    if n is None:
+                        return None
                     el = n.find(f"option[@name='{name}']")
                     return el.get("value") if el is not None else None
 
                 name = get_opt(node, "name")
-                if not name: continue
+                if not name:
+                    continue
 
                 local_props = node.find(".//McpLocalServerProperties")
                 if local_props is not None:
@@ -225,20 +293,22 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         return servers
 
     def _parse_args(self, args_str: Optional[str]) -> List[str]:
-        if not args_str: return []
+        if not args_str:
+            return []
         args_str = args_str.strip()
         if args_str.startswith("[") and args_str.endswith("]"):
             try:
                 return json.loads(args_str.replace("'", '"'))
-            except: pass
+            except Exception:
+                pass
         return [args_str] if args_str else []
 
     def _detect_project_mcp(self, project_path: Path) -> List[Dict]:
         mcp_servers = []
         for config_file in self.MCP_CONFIG_FILES:
             path = project_path / config_file
-            if path.exists():
-                try:
+            try:
+                if path.exists():
                     data = json.loads(path.read_text())
                     mcp_dict = data.get("mcpServers", data.get("servers", {}))
                     for name, config in mcp_dict.items():
@@ -248,7 +318,10 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                                 "command": config["command"],
                                 "args": config.get("args", [])
                             })
-                except: pass
+            except PermissionError:
+                logger.debug(f"Permission denied reading {path}")
+            except Exception:
+                pass
         return mcp_servers
 
     def _detect_project_rules(self, project_path: Path) -> List[Dict]:
@@ -256,18 +329,25 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         candidates = [".cursorrules", ".windsurfrules", ".prompts", "GEMINI.md"]
         for c in candidates:
             p = project_path / c
-            if p.is_file():
-                rule = self._read_rule_file(p)
-                if rule: rules.append(rule)
-        
-        # Scan specialized rule directories
+            try:
+                if p.is_file():
+                    rule = self._read_rule_file(p)
+                    if rule:
+                        rules.append(rule)
+            except PermissionError:
+                logger.debug(f"Permission denied reading {p}")
+
         for d in [".cline/rules", ".aiassistant/rules"]:
             dir_path = project_path / d
-            if dir_path.is_dir():
-                for f in dir_path.glob("*.md"):
-                    rule = self._read_rule_file(f)
-                    if rule: rules.append(rule)
-        
+            try:
+                if dir_path.is_dir():
+                    for f in dir_path.glob("*.md"):
+                        rule = self._read_rule_file(f)
+                        if rule:
+                            rules.append(rule)
+            except PermissionError:
+                logger.debug(f"Permission denied reading {dir_path}")
+
         return rules
 
     def _read_rule_file(self, path: Path) -> Optional[Dict]:
@@ -282,4 +362,8 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 "last_modified": metadata['last_modified'],
                 "truncated": truncated
             }
-        except: return None
+        except PermissionError:
+            logger.debug(f"Permission denied reading rule file: {path}")
+            return None
+        except Exception:
+            return None

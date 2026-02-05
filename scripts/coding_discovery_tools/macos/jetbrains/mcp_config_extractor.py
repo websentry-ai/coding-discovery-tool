@@ -1,16 +1,13 @@
 """
 MCP config extraction for JetBrains IDEs on macOS systems.
-Fixed for MDM/root execution contexts.
 """
 
 import json
 import logging
 import os
-import subprocess
 import xml.etree.ElementTree as ET
-from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
@@ -36,94 +33,35 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         ".vscode/mcp.json",
     ]
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Cache user info once at init — avoids repeated subprocess calls
-        self._username, self._user_home = self._resolve_active_user()
-
-    def _resolve_active_user(self) -> Tuple[str, Path]:
+    @property
+    def _user_home(self) -> Path:
         """
-        Reliably find the real GUI user, even when running as root via MDM.
+        Dynamically determine user home directory.
 
-        Uses a cascade of methods because no single approach works in all
-        MDM scenarios (pre-login, remote, DEP enrollment, etc.).
+        Uses self.user_home if available (for multi-user scans),
+        otherwise falls back to Path.home() (single-user mode).
         """
-        candidates: List[str] = []
+        if hasattr(self, 'user_home') and self.user_home:
+            return self.user_home
+        return Path.home()
 
-        try:
-            result = subprocess.check_output(
-                ['python3', '-c',
-                 'from SystemConfiguration import SCDynamicStoreCopyConsoleUser; '
-                 'u = SCDynamicStoreCopyConsoleUser(None, None, None); '
-                 'print(u[0] if u[0] else "")'],
-                stderr=subprocess.DEVNULL,
-                timeout=5
-            ).decode().strip()
-            if result and result not in ('root', 'loginwindow', ''):
-                candidates.append(result)
-        except Exception:
-            pass
+    @property
+    def jetbrains_config_dir(self) -> Path:
+        """
+        Dynamically determine JetBrains config directory based on target user.
 
-        try:
-            result = subprocess.check_output(
-                ['stat', '-f%Su', '/dev/console'],
-                stderr=subprocess.DEVNULL,
-                timeout=5
-            ).decode().strip()
-            if result and result not in ('root', ''):
-                candidates.append(result)
-        except Exception:
-            pass
-
-        try:
-            result = subprocess.check_output(
-                ['who'], stderr=subprocess.DEVNULL, timeout=5
-            ).decode()
-            for line in result.splitlines():
-                if 'console' in line:
-                    user = line.split()[0]
-                    if user and user != 'root':
-                        candidates.append(user)
-                        break
-        except Exception:
-            pass
-
-        try:
-            skip = {'Shared', '.localized', 'root', 'Guest', '.Trashes'}
-            user_dirs = [
-                d for d in Path('/Users').iterdir()
-                if d.is_dir() and d.name not in skip and not d.name.startswith('.')
-            ]
-            user_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            for d in user_dirs:
-                candidates.append(d.name)
-        except Exception:
-            pass
-
-        for username in candidates:
-            home = Path(f"/Users/{username}")
-            jb_dir = home / "Library" / "Application Support" / "JetBrains"
-            if jb_dir.exists():
-                logger.info(f"Resolved active user: {username} (has JetBrains config)")
-                return username, home
-
-        for username in candidates:
-            home = Path(f"/Users/{username}")
-            if home.exists():
-                logger.info(f"Resolved active user: {username} (fallback)")
-                return username, home
-
-        fallback_user = os.environ.get('USER', 'root')
-        logger.warning(f"Could not detect GUI user, falling back to: {fallback_user}")
-        return fallback_user, Path(f"/Users/{fallback_user}")
+        Uses self.user_home if available (for multi-user scans),
+        otherwise falls back to Path.home() (single-user mode).
+        """
+        return self._user_home / "Library" / "Application Support" / "JetBrains"
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """Extract MCP configuration from JetBrains IDEs."""
         all_projects = []
 
-        jetbrains_root = self._user_home / "Library" / "Application Support" / "JetBrains"
+        jetbrains_root = self.jetbrains_config_dir
 
-        logger.info(f"Scanning JetBrains configs for user: {self._username} at {jetbrains_root}")
+        logger.info(f"Scanning JetBrains configs at {jetbrains_root}")
 
         if not jetbrains_root.exists():
             logger.debug(f"JetBrains config directory not found: {jetbrains_root}")
@@ -226,7 +164,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         return any(ind in val for ind in indicators) or val.startswith("/")
 
     def _normalize_path(self, path: str) -> str:
-        """Normalize paths using the cached user's home directory."""
+        """Normalize paths using the target user's home directory."""
         home_str = str(self._user_home)
 
         path = path.replace("$USER_HOME$", home_str)

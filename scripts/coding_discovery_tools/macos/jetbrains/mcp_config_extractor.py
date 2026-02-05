@@ -5,6 +5,7 @@ MCP config extraction for JetBrains IDEs on macOS systems.
 import json
 import logging
 import os
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -17,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for JetBrains IDEs MCP config on macOS systems."""
-
-    JETBRAINS_CONFIG_DIR = Path.home() / "Library" / "Application Support" / "JetBrains"
 
     IDE_PATTERNS = [
         "IntelliJIdea", "IntelliJ", "PyCharm", "WebStorm", "PhpStorm",
@@ -36,19 +35,44 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         ".vscode/mcp.json",
     ]
 
+    def _get_active_user_info(self):
+        """
+        Finds the real human user sitting at the Mac.
+        This is critical for MDM/Root execution.
+        """
+        try:
+            # stat -f%Su /dev/console returns the GUI owner
+            user = subprocess.check_output(['stat', '-f%Su', '/dev/console']).decode().strip()
+            
+            if user == 'root' or not user:
+                real_users = [u for u in os.listdir('/Users') if u not in ['Shared', '.localized', 'root', 'Guest']]
+                user = real_users[0] if real_users else 'root'
+                
+            home = Path(f"/Users/{user}")
+            return user, home
+        except Exception as e:
+            logger.warning(f"Error getting active user info: {e}")
+            return os.environ.get('USER', 'root'), Path.home()
+
     def extract_mcp_config(self) -> Optional[Dict]:
         """
-        Extract MCP configuration from JetBrains IDEs on macOS.
+        Extract MCP configuration from JetBrains IDEs.
         """
         all_projects = []
 
-        if not self.JETBRAINS_CONFIG_DIR.exists():
-            logger.debug(f"JetBrains config directory not found: {self.JETBRAINS_CONFIG_DIR}")
+        # Find the actual user home (ignoring the 'root' home)
+        username, user_home = self._get_active_user_info()
+        jetbrains_root = user_home / "Library" / "Application Support" / "JetBrains"
+
+        logger.info(f"Scanning JetBrains configs for user: {username} at {jetbrains_root}")
+
+        if not jetbrains_root.exists():
+            logger.debug(f"JetBrains config directory not found: {jetbrains_root}")
             return None
 
         try:
-            for folder in os.listdir(self.JETBRAINS_CONFIG_DIR):
-                folder_path = self.JETBRAINS_CONFIG_DIR / folder
+            for folder in os.listdir(jetbrains_root):
+                folder_path = jetbrains_root / folder
 
                 # Skip hidden files and non-directories
                 if folder.startswith('.') or not folder_path.is_dir():
@@ -63,7 +87,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 all_projects.extend(ide_projects)
 
         except Exception as e:
-            logger.warning(f"Error scanning {self.JETBRAINS_CONFIG_DIR}: {e}")
+            logger.warning(f"Error scanning {jetbrains_root}: {e}")
 
         # Return None if no projects found
         if not all_projects:
@@ -85,111 +109,73 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         # Find recent projects XML files
         recent_files = [
             config_path / "options" / "recentProjects.xml",
-            config_path / "options" / "recentSolutions.xml",  # Rider
+            config_path / "options" / "recentSolutions.xml",
             config_path / "options" / "recentProjectDirectories.xml",
         ]
 
         project_paths = set()
-
         for recent_file in recent_files:
             if recent_file.exists():
-                project_paths.update(self._parse_recent_projects_xml(recent_file))
-
-        # Also check workspace.xml for open projects
-        workspace = config_path / "workspace.xml"
-        if workspace.exists():
-            project_paths.update(self._extract_project_paths_from_xml(workspace))
+                project_paths.update(self._extract_project_paths_from_xml(recent_file))
 
         if not project_paths:
-            logger.debug(f"No project paths found for {ide_name}")
             return projects
 
-        logger.info(f"Found {len(project_paths)} projects in {ide_name}")
-
-        # Check each project for MCP config and rules
         for project_path_str in project_paths:
-            # Normalize path
             project_path_str = self._normalize_path(project_path_str)
             project_path = Path(project_path_str)
 
             if not project_path.exists() or not project_path.is_dir():
-                logger.debug(f"Project path does not exist: {project_path}")
                 continue
 
             mcp_servers = self._detect_project_mcp(project_path)
             rules = self._detect_project_rules(project_path)
 
-            # Combine IDE-level MCP servers with project-level servers
             combined_mcp_servers = ide_mcp_servers + mcp_servers
 
-            # Include project if it has either MCP servers or rules
             if combined_mcp_servers or rules:
                 projects.append({
                     "path": str(project_path),
                     "mcpServers": combined_mcp_servers,
                     "rules": rules
                 })
-                logger.info(
-                    f"Found data in {project_path}: "
-                    f"{len(combined_mcp_servers)} MCP server(s), {len(rules)} rule(s)"
-                )
 
         return projects
 
-    def _parse_recent_projects_xml(self, xml_file: Path) -> set:
-        """
-        Parse recentProjects.xml to extract project paths.
-        """
-        return self._extract_project_paths_from_xml(xml_file)
-
     def _extract_project_paths_from_xml(self, xml_path: Path) -> set:
-        """
-        Extract project paths from JetBrains XML file.
-        """
+        """Extract project paths from JetBrains XML file."""
         paths = set()
-
         try:
             tree = ET.parse(xml_path)
             root = tree.getroot()
-
-            # Various path formats used by JetBrains
             for el in root.iter():
                 for attr in ["value", "key", "path", "projectPath"]:
                     val = el.get(attr)
                     if val and self._looks_like_path(val):
                         paths.add(val)
-
-                # Check text content
                 if el.text and self._looks_like_path(el.text):
                     paths.add(el.text)
-
         except Exception as e:
             logger.warning(f"Error parsing {xml_path}: {e}")
-
         return paths
 
     def _looks_like_path(self, val: str) -> bool:
-        """Check if string looks like a file path."""
-        if not val or len(val) < 3:
-            return False
         indicators = ["$USER_HOME$", "/Users/", "/home/", "~/"]
         return any(ind in val for ind in indicators) or val.startswith("/")
 
     def _normalize_path(self, path: str) -> str:
-        """Normalize JetBrains path variables to actual paths."""
-        home = str(Path.home())
-        path = path.replace("$USER_HOME$", home)
-        path = path.replace("$HOME$", home)
-        path = path.replace("~", home)
+        """Normalize paths using the ACTUAL user's home directory."""
+        _, user_home = self._get_active_user_info()
+        home_str = str(user_home)
+        
+        path = path.replace("$USER_HOME$", home_str)
+        path = path.replace("$HOME$", home_str)
+        path = path.replace("~", home_str)
         return path
 
     def _extract_ide_mcp_servers(self, config_path: Path) -> List[Dict]:
-        """
-        Extract Global MCP Servers
-        """
+        """Extract Global MCP Servers."""
         servers = []
-
-        # Primary locations for MCP config
         xml_paths = [
             config_path / "options" / "llm.mcpServers.xml",
             config_path / "options" / "aiAssistant.xml",
@@ -197,168 +183,97 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         ]
 
         for xml_path in xml_paths:
-            if not xml_path.exists():
-                continue
-
-            try:
-                parsed_servers = self._parse_mcp_xml(xml_path)
-                servers.extend(parsed_servers)
-            except ET.ParseError as e:
-                logger.warning(f"XML parse error in {xml_path.name}: {e}")
-            except Exception as e:
-                logger.warning(f"Error reading {xml_path.name}: {e}")
-
+            if xml_path.exists():
+                try:
+                    parsed_servers = self._parse_mcp_xml(xml_path)
+                    servers.extend(parsed_servers)
+                except Exception as e:
+                    logger.warning(f"Error reading {xml_path.name}: {e}")
         return servers
 
     def _parse_mcp_xml(self, xml_path: Path) -> List[Dict]:
-        """Parse JetBrains MCP XML configuration file."""
+        """Simplified 2025.x MCP XML parser."""
         servers = []
-
         try:
             tree = ET.parse(xml_path)
-            root = tree.getroot()
+            for node in tree.findall(".//McpServerConfigurationProperties"):
+                
+                def get_opt(n, name):
+                    if n is None: return None
+                    el = n.find(f"option[@name='{name}']")
+                    return el.get("value") if el is not None else None
 
-            # Strategy 1: McpServerConfigurationProperties (2025.x format)
-            for server_node in root.findall(".//McpServerConfigurationProperties"):
-                server = self._parse_mcp_server_node(server_node)
-                if server:
-                    servers.append(server)
+                name = get_opt(node, "name")
+                if not name: continue
 
-            # Strategy 2: Direct list items (older format)
-            for item in root.findall(".//item"):
-                if item.find(".//option[@name='command']") is not None or \
-                   item.find(".//option[@name='url']") is not None:
-                    server = self._parse_mcp_server_node(item)
-                    if server:
-                        servers.append(server)
+                local_props = node.find(".//McpLocalServerProperties")
+                if local_props is not None:
+                    command = get_opt(local_props, "command") or "builtin"
+                    args = self._parse_args(get_opt(local_props, "args"))
+                else:
+                    command = "builtin"
+                    args = []
 
-            # Strategy 3: Map entries
-            for entry in root.findall(".//entry"):
-                key = entry.get("key")
-                value_node = entry.find("value")
-                if key and value_node is not None:
-                    server = self._parse_mcp_server_node(value_node)
-                    if server:
-                        if server.get("name") == "Unknown":
-                            server["name"] = key
-                        servers.append(server)
-
+                servers.append({
+                    "name": name,
+                    "command": command,
+                    "args": args,
+                    "enabled": get_opt(node, "enabled") != "false"
+                })
         except Exception as e:
             logger.warning(f"Error parsing {xml_path}: {e}")
-
         return servers
 
-    def _parse_mcp_server_node(self, node: ET.Element) -> Optional[Dict]:
-        """Parse a single MCP server configuration node."""
-        # Helper to get option value
-        def get_opt(name: str, default: str = "") -> str:
-            el = node.find(f".//option[@name='{name}']")
-            return el.get("value", default) if el is not None else default
-
-        # Get name
-        name = get_opt("name", "Unknown")
-
-        # Check for nested transport properties (2025.3+ format)
-        local_props = node.find(".//McpLocalServerProperties")
-
-        if local_props is not None:
-            command = self._get_nested_opt(local_props, "command")
-            args = self._parse_args(self._get_nested_opt(local_props, "args"))
-        else:
-            # Fallback: top-level attributes (older versions)
-            command = get_opt("command")
-            args = self._parse_args(get_opt("args"))
-
-        if name == "Unknown":
-            return None
-
-        return {
-            "name": name,
-            "command": command if command else "",
-            "args": args
-        }
-
-    def _get_nested_opt(self, node: ET.Element, name: str) -> Optional[str]:
-        """Get option value from nested element."""
-        el = node.find(f"option[@name='{name}']")
-        return el.get("value") if el is not None else None
-
     def _parse_args(self, args_str: Optional[str]) -> List[str]:
-        """Parse JetBrains stringified argument list."""
-        if not args_str:
-            return []
-
+        if not args_str: return []
         args_str = args_str.strip()
-
-        # Handle JSON-like arrays: ['arg1', 'arg2'] or ["arg1", "arg2"]
         if args_str.startswith("[") and args_str.endswith("]"):
             try:
-                return json.loads(args_str)
-            except json.JSONDecodeError:
-                try:
-                    # Replace single quotes with double quotes
-                    cleaned = args_str.replace("'", '"')
-                    return json.loads(cleaned)
-                except json.JSONDecodeError:
-                    pass
-
-        # Handle comma-separated
-        if "," in args_str and not args_str.startswith("-"):
-            return [a.strip().strip("'\"") for a in args_str.split(",")]
-
-        if " " in args_str and not any(c in args_str for c in ["/", "\\", ":"]):
-            return args_str.split()
-
+                return json.loads(args_str.replace("'", '"'))
+            except: pass
         return [args_str] if args_str else []
 
-
     def _detect_project_mcp(self, project_path: Path) -> List[Dict]:
-        """
-        Scan a project folder for MCP configuration files.
-        """
         mcp_servers = []
-
         for config_file in self.MCP_CONFIG_FILES:
-            config_path = project_path / config_file
-            if not config_path.exists():
-                continue
-
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-
-                # Standard mcpServers format
-                mcp_servers_dict = data.get("mcpServers", data.get("servers", {}))
-
-                for name, config in mcp_servers_dict.items():
-                    # Only extract stdio servers (with command)
-                    if "command" in config:
-                        mcp_servers.append({
-                            "name": name,
-                            "command": config["command"],
-                            "args": config.get("args", [])
-                        })
-
-                logger.info(f"Found MCP config at {config_path} with {len(mcp_servers_dict)} server(s)")
-
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON in {config_path}: {e}")
-            except Exception as e:
-                logger.warning(f"Error reading {config_path}: {e}")
-
+            path = project_path / config_file
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text())
+                    mcp_dict = data.get("mcpServers", data.get("servers", {}))
+                    for name, config in mcp_dict.items():
+                        if "command" in config:
+                            mcp_servers.append({
+                                "name": name,
+                                "command": config["command"],
+                                "args": config.get("args", [])
+                            })
+                except: pass
         return mcp_servers
 
-    def _read_rule_file(self, path: Path) -> Optional[Dict]:
-        """
-        Read a rule file
-        """
-        try:
-            if not path.exists() or not path.is_file():
-                return None
+    def _detect_project_rules(self, project_path: Path) -> List[Dict]:
+        rules = []
+        candidates = [".cursorrules", ".windsurfrules", ".prompts", "GEMINI.md"]
+        for c in candidates:
+            p = project_path / c
+            if p.is_file():
+                rule = self._read_rule_file(p)
+                if rule: rules.append(rule)
+        
+        # Scan specialized rule directories
+        for d in [".cline/rules", ".aiassistant/rules"]:
+            dir_path = project_path / d
+            if dir_path.is_dir():
+                for f in dir_path.glob("*.md"):
+                    rule = self._read_rule_file(f)
+                    if rule: rules.append(rule)
+        
+        return rules
 
+    def _read_rule_file(self, path: Path) -> Optional[Dict]:
+        try:
             metadata = get_file_metadata(path)
             content, truncated = read_file_content(path, metadata['size'])
-
             return {
                 "file_path": str(path),
                 "file_name": path.name,
@@ -367,49 +282,4 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 "last_modified": metadata['last_modified'],
                 "truncated": truncated
             }
-        except Exception as e:
-            logger.warning(f"Error reading rule file {path}: {e}")
-            return None
-
-    def _detect_project_rules(self, project_path: Path) -> List[Dict]:
-        """
-        Scan a project folder for AI rule files
-        """
-        rules = []
-
-        # Exact file candidates
-        exact_files = [
-            ".cursorrules",
-            ".windsurfrules",
-            ".prompts",
-            "GEMINI.md",
-        ]
-
-        for candidate in exact_files:
-            rule_file = project_path / candidate
-            if rule_file.is_file():
-                rule_obj = self._read_rule_file(rule_file)
-                if rule_obj:
-                    rules.append(rule_obj)
-
-        # Directory candidates — scan for *.md files inside each
-        rule_dirs = [
-            ".cline/rules",
-            ".aiassistant/rules",
-        ]
-
-        for dir_candidate in rule_dirs:
-            rule_dir = project_path / dir_candidate
-            if rule_dir.is_dir():
-                for md_file in rule_dir.glob("*.md"):
-                    rule_obj = self._read_rule_file(md_file)
-                    if rule_obj:
-                        rules.append(rule_obj)
-
-        # Wildcard: all *.mdc files in the project root
-        for mdc_file in project_path.glob("*.mdc"):
-            rule_obj = self._read_rule_file(mdc_file)
-            if rule_obj:
-                rules.append(rule_obj)
-
-        return rules
+        except: return None

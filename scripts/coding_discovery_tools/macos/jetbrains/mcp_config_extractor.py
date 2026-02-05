@@ -39,12 +39,6 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract MCP configuration from JetBrains IDEs on macOS.
-
-        Scans all detected JetBrains IDEs, extracts their recent projects,
-        global MCP servers, and checks each project for MCP configuration files.
-
-        Returns:
-            Dict with projects array containing MCP configs, or None if no configs found
         """
         all_projects = []
 
@@ -82,13 +76,6 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _extract_ide_projects(self, config_path: Path, ide_name: str) -> List[Dict]:
         """
         Extract recent projects from a specific JetBrains IDE configuration.
-
-        Args:
-            config_path: Path to the IDE config directory
-            ide_name: Name of the IDE
-
-        Returns:
-            List of project dicts with MCP server info
         """
         projects = []
 
@@ -152,28 +139,12 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _parse_recent_projects_xml(self, xml_file: Path) -> set:
         """
         Parse recentProjects.xml to extract project paths.
-
-        Handles both formats used by modern JetBrains IDEs:
-        - Standard: <option value="$USER_HOME$/..." />
-        - Newer: <entry key="$USER_HOME$/..." />
-
-        Args:
-            xml_file: Path to recentProjects.xml
-
-        Returns:
-            Set of project path strings
         """
         return self._extract_project_paths_from_xml(xml_file)
 
     def _extract_project_paths_from_xml(self, xml_path: Path) -> set:
         """
         Extract project paths from JetBrains XML file.
-
-        Args:
-            xml_path: Path to the XML file
-
-        Returns:
-            Set of project path strings
         """
         paths = set()
 
@@ -214,16 +185,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_ide_mcp_servers(self, config_path: Path) -> List[Dict]:
         """
-        Extract MCP server configurations from IDE-level XML files.
-
-        Parses global MCP configuration files (llm.mcpServers.xml, aiAssistant.xml, etc.)
-        Handles multiple JetBrains XML formats (2024.x and 2025.x).
-
-        Args:
-            config_path: Path to the IDE config directory
-
-        Returns:
-            List of MCP server dicts with comprehensive configuration
+        Extract Global MCP Servers
         """
         servers = []
 
@@ -307,13 +269,12 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             command = get_opt("command")
             args = self._parse_args(get_opt("args"))
 
-        # Skip empty/invalid entries (must have name and command)
-        if name == "Unknown" or not command:
+        if name == "Unknown":
             return None
 
         return {
             "name": name,
-            "command": command,
+            "command": command if command else "",
             "args": args
         }
 
@@ -354,12 +315,6 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _detect_project_mcp(self, project_path: Path) -> List[Dict]:
         """
         Scan a project folder for MCP configuration files.
-
-        Args:
-            project_path: Path to the project directory
-
-        Returns:
-            List of MCP server dicts found in the project
         """
         mcp_servers = []
 
@@ -395,17 +350,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _read_rule_file(self, path: Path) -> Optional[Dict]:
         """
-        Read a rule file and return a rich object matching the backend schema.
-
-        Uses shared helpers (get_file_metadata, read_file_content) for consistency
-        with how other tools produce rule objects.
-
-        Args:
-            path: Path to the rule file
-
-        Returns:
-            Dict with file_path, file_name, content, size, last_modified, truncated
-            or None if reading fails
+        Read a rule file
         """
         try:
             if not path.exists() or not path.is_file():
@@ -428,18 +373,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _detect_project_rules(self, project_path: Path) -> List[Dict]:
         """
-        Scan a project folder for AI rule files and return rich rule objects.
-
-        Scans for:
-            - Exact file matches: .cursorrules, .windsurfrules, .prompts, GEMINI.md
-            - Directory scans: *.md files inside .cline/rules/ and .aiassistant/rules/
-            - Wildcard: all *.mdc files in the project root
-
-        Args:
-            project_path: Path to the project directory
-
-        Returns:
-            List of rule dicts matching the backend schema
+        Scan a project folder for AI rule files
         """
         rules = []
 

@@ -686,7 +686,22 @@ class AIToolsDetector:
         """
         tool_name = tool.get("name", "").lower()
         projects_dict = {}
-        
+
+        if tool_name == "openclaw":
+
+            tool_dict = {
+                "name": tool.get("name"),
+                "version": tool.get("version"),
+                "install_path": tool.get("install_path"),
+                "projects": [],
+            }
+
+            for key in ("platform", "is_installed", "detection_method", "is_running", "is_service"):
+                if key in tool:
+                    tool_dict[key] = tool[key]
+
+            return tool_dict
+
         # Process tools using helper methods to reduce duplication
         if tool_name == "cursor":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -1001,9 +1016,11 @@ def main():
                         # Filter projects to only include this user's projects
                         tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
                         
-                        # Skip if no projects for this user (but always send JetBrains tools)
+                        # Skip if no projects for this user (but always send JetBrains tools
+                        # and tools like OpenClaw)
                         is_jetbrains = detector._is_jetbrains_tool(tool_with_projects)
-                        if not tool_filtered.get('projects') and not is_jetbrains:
+                        is_openclaw = tool_name.lower() == "openclaw"
+                        if not tool_filtered.get('projects') and not is_jetbrains and not is_openclaw:
                             logger.debug(f"    User {user_name}: No projects found for {tool_name}, skipping")
                             continue
                         

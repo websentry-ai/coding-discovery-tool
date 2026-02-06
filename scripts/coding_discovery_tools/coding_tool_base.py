@@ -285,3 +285,27 @@ class BaseClaudeSettingsExtractor(ABC):
         """
         pass
 
+
+class BaseOpenClawDetector(BaseToolDetector):
+    """
+    Base class for detectors that only report OpenClaw presence/absence.
+    """
+
+    @property
+    def tool_name(self) -> str:
+        """Return the fixed tool name for all OpenClaw detectors."""
+        return "OpenClaw"
+
+    @abstractmethod
+    def detect_openclaw(self) -> Optional[Dict]:
+        """
+        Detect OpenClaw on the current platform.
+        """
+        pass
+
+    def detect(self) -> Optional[Dict]:
+        """
+        Adapter to satisfy the generic `BaseToolDetector` interface.
+        """
+        return self.detect_openclaw()
+

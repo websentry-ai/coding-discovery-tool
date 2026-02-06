@@ -23,6 +23,7 @@ from .coding_tool_base import (
     BaseOpenCodeRulesExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
+    BaseOpenClawDetector,
 )
 
 # macOS - Shared
@@ -77,6 +78,9 @@ from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
 
 # macOS - Replit
 from .macos.replit.replit import MacOSReplitDetector
+
+# macOS - OpenClaw
+from .macos.openclaw.detect_openclaw import MacOSOpenClawDetector
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -413,6 +417,19 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_openclaw_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate OpenClaw detector for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSOpenClawDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_jetbrains_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate JetBrains IDEs detector for the OS.
@@ -487,6 +504,10 @@ class ToolDetectorFactory:
         opencode_detector = ToolDetectorFactory.create_opencode_detector(os_name)
         if opencode_detector is not None:
             detectors.append(opencode_detector)
+
+        openclaw_detector = ToolDetectorFactory.create_openclaw_detector(os_name)
+        if openclaw_detector is not None:
+            detectors.append(openclaw_detector)
 
         # Add JetBrains detector for macOS
         jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)

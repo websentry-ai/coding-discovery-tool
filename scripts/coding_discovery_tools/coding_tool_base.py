@@ -343,5 +343,8 @@ class BaseCopilotDetector(BaseToolDetector):
         """
         Extract the version of the installed Copilot.
         """
-        return self.detect_copilot().get('version', 'unknown')
+        result = self.detect_copilot()
+        if isinstance(result, dict):
+            return result.get('version', 'unknown')
+        return 'unknown'
 

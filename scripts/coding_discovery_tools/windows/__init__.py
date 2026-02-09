@@ -13,6 +13,11 @@ from .opencode import WindowsOpenCodeDetector
 from .replit import WindowsReplitDetector
 from .codex import WindowsCodexDetector
 from .jetbrains import WindowsJetBrainsDetector
+from .github_copilot import (
+    WindowsGitHubCopilotDetector,
+    WindowsGitHubCopilotMCPConfigExtractor,
+    WindowsGitHubCopilotRulesExtractor,
+)
 
 __all__ = [
     'WindowsDeviceIdExtractor',
@@ -26,5 +31,8 @@ __all__ = [
     'WindowsReplitDetector',
     'WindowsCodexDetector',
     'WindowsJetBrainsDetector',
+    'WindowsGitHubCopilotDetector',
+    'WindowsGitHubCopilotMCPConfigExtractor',
+    'WindowsGitHubCopilotRulesExtractor',
 ]
 

@@ -327,7 +327,7 @@ class BaseCopilotDetector(BaseToolDetector):
         return "Copilot"
 
     @abstractmethod
-    def detect_copilot(self) -> Optional[Dict]:
+    def detect_copilot(self) -> Optional[Dict] | List[Dict]:
         """
         Detect Copilot on the current platform.
         """

@@ -245,6 +245,17 @@ class BaseOpenCodeRulesExtractor(ABC):
         pass
 
 
+class BaseGitHubCopilotRulesExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot rules from all projects."""
+
+    @abstractmethod
+    def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
+        """
+        Extract GitHub Copilot rules from all projects on the machine.
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 
@@ -252,10 +263,6 @@ class BaseMCPConfigExtractor(ABC):
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract MCP configuration for the tool.
-        
-        Returns:
-            Dict with MCP config info (file_path, file_name, content, size,
-            last_modified) or None if not found
         """
         pass
 
@@ -308,4 +315,36 @@ class BaseOpenClawDetector(BaseToolDetector):
         Adapter to satisfy the generic `BaseToolDetector` interface.
         """
         return self.detect_openclaw()
+
+class BaseCopilotDetector(BaseToolDetector):
+    """
+    Base class for detectors that only report Copilot.
+    """
+
+    @property
+    def tool_name(self) -> str:
+        """Return the fixed tool name for all Copilot detectors."""
+        return "Copilot"
+
+    @abstractmethod
+    def detect_copilot(self) -> Optional[Dict] | List[Dict]:
+        """
+        Detect Copilot on the current platform.
+        """
+        pass
+
+    def detect(self) -> Optional[Dict]:
+        """
+        Adapter to satisfy the generic `BaseToolDetector` interface.
+        """
+        return self.detect_copilot()
+
+    def get_version(self) -> Optional[str]:
+        """
+        Extract the version of the installed Copilot.
+        """
+        result = self.detect_copilot()
+        if isinstance(result, dict):
+            return result.get('version', 'unknown')
+        return 'unknown'
 

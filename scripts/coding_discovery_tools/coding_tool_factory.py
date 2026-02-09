@@ -24,6 +24,7 @@ from .coding_tool_base import (
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
     BaseOpenClawDetector,
+    BaseCopilotDetector,
 )
 
 # macOS - Shared
@@ -81,6 +82,11 @@ from .macos.replit.replit import MacOSReplitDetector
 
 # macOS - OpenClaw
 from .macos.openclaw.detect_openclaw import MacOSOpenClawDetector
+
+# macOS - Copilot
+from .macos.github_copilot.detect_copilot import MacOSCopilotDetector
+from .macos.github_copilot.mcp_config_extractor import MacOSGitHubCopilotMCPConfigExtractor
+from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRulesExtractor
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -430,6 +436,18 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_copilot_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Copilot detector for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+        if os_name == "Darwin":
+            return MacOSCopilotDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_jetbrains_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate JetBrains IDEs detector for the OS.
@@ -508,6 +526,10 @@ class ToolDetectorFactory:
         openclaw_detector = ToolDetectorFactory.create_openclaw_detector(os_name)
         if openclaw_detector is not None:
             detectors.append(openclaw_detector)
+
+        copilot_detector = ToolDetectorFactory.create_copilot_detector(os_name)
+        if copilot_detector is not None:
+            detectors.append(copilot_detector)
 
         # Add JetBrains detector for macOS
         jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
@@ -1060,5 +1082,39 @@ class JetBrainsMCPConfigExtractorFactory:
             return MacOSJetBrainsMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsJetBrainsMCPConfigExtractor()
+        else:
+            return None
+
+
+class GitHubCopilotMCPConfigExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create GitHub Copilot MCP config extractor for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSGitHubCopilotMCPConfigExtractor()
+        else:
+            return None
+
+
+class GitHubCopilotRulesExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None):
+        """
+        Create GitHub Copilot rules extractor for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSGitHubCopilotRulesExtractor()
         else:
             return None

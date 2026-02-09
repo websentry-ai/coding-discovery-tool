@@ -40,6 +40,8 @@ try:
         CodexMCPConfigExtractorFactory,
         OpenCodeMCPConfigExtractorFactory,
         JetBrainsMCPConfigExtractorFactory,
+        GitHubCopilotMCPConfigExtractorFactory,
+        GitHubCopilotRulesExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info, get_all_users_macos
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -73,6 +75,8 @@ except ImportError:
         CodexMCPConfigExtractorFactory,
         OpenCodeMCPConfigExtractorFactory,
         JetBrainsMCPConfigExtractorFactory,
+        GitHubCopilotMCPConfigExtractorFactory,
+        GitHubCopilotRulesExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -148,6 +152,9 @@ class AIToolsDetector:
 
             # Initialize JetBrains extractors (macOS only, returns None for unsupported OS)
             self._jetbrains_mcp_extractor = JetBrainsMCPConfigExtractorFactory.create(self.system)
+
+            self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
+            self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -328,7 +335,7 @@ class AIToolsDetector:
     def extract_all_opencode_rules(self) -> List[Dict]:
         """
         Extract all OpenCode rules from all projects.
-        
+
         Returns:
             List of project dicts, each containing:
             - project_root: Path to the project root
@@ -340,6 +347,26 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting OpenCode rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
+        """
+        Extract GitHub Copilot rules from all projects.
+
+        Args:
+            tool_name: Name of the specific tool to extract rules for (e.g., "GitHub Copilot VS Code")
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._github_copilot_rules_extractor:
+                return self._github_copilot_rules_extractor.extract_all_github_copilot_rules(tool_name=tool_name)
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting GitHub Copilot rules: {e}", exc_info=True)
             return []
 
     def _process_tool_with_rules_and_mcp(
@@ -701,6 +728,81 @@ class AIToolsDetector:
                     tool_dict[key] = tool[key]
 
             return tool_dict
+        
+        if "github copilot" in tool_name:
+            logger.info(f"  Extracting {tool_name} rules...")
+            projects_dict = {}
+
+            original_tool_name = tool.get("name", "")
+
+            if self._github_copilot_rules_extractor:
+                try:
+                    rules_projects = self._github_copilot_rules_extractor.extract_all_github_copilot_rules(
+                        tool_name=original_tool_name
+                    )
+
+                    for rules_project in rules_projects:
+                        project_root = rules_project.get("project_root", "")
+                        rules = rules_project.get("rules", [])
+
+                        if project_root:
+                            if project_root not in projects_dict:
+                                projects_dict[project_root] = {
+                                    "mcpServers": [],
+                                    "rules": []
+                                }
+                            projects_dict[project_root]["rules"] = rules
+
+                    if rules_projects:
+                        logger.info(f"  ✓ Found {len(rules_projects)} project(s) with GitHub Copilot rules")
+                        log_rules_details(projects_dict, tool_name)
+                    else:
+                        logger.info(f"  No GitHub Copilot rules found")
+                except Exception as e:
+                    logger.warning(f"  Error extracting {tool_name} rules: {e}")
+
+            # Extract MCP configs for GitHub Copilot
+            logger.info(f"  Extracting {tool_name} MCP configs...")
+            if self._github_copilot_mcp_extractor:
+                try:
+                    mcp_config = self._github_copilot_mcp_extractor.extract_mcp_config()
+                    if mcp_config and "projects" in mcp_config:
+                        # Merge MCP configs into projects_dict
+                        for project in mcp_config["projects"]:
+                            project_path = project.get("path", "")
+                            if project_path:
+                                if project_path not in projects_dict:
+                                    projects_dict[project_path] = {
+                                        "mcpServers": [],
+                                        "rules": []
+                                    }
+                                projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
+
+                        # Log MCP details
+                        log_mcp_details(projects_dict, tool_name)
+                    else:
+                        logger.info(f"  No GitHub Copilot MCP configs found")
+                except Exception as e:
+                    logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
+
+            # Convert projects_dict back to list format for tool_dict
+            projects_list = [
+                {
+                    "path": path,
+                    "mcpServers": data.get("mcpServers", []),
+                    "rules": data.get("rules", [])
+                }
+                for path, data in projects_dict.items()
+            ]
+
+            tool_dict = {
+                "name": tool.get("name"),  # Keep original name (e.g., "GitHub Copilot VS Code")
+                "version": tool.get("version"),
+                "install_path": tool.get("install_path"),
+                "projects": projects_list,
+            }
+
+            return tool_dict
 
         # Process tools using helper methods to reduce duplication
         if tool_name == "cursor":
@@ -1018,9 +1120,10 @@ def main():
                         
                         # Skip if no projects for this user (but always send JetBrains tools
                         # and tools like OpenClaw)
+                        is_copilot = "github copilot" in tool_name.lower()
                         is_jetbrains = detector._is_jetbrains_tool(tool_with_projects)
                         is_openclaw = tool_name.lower() == "openclaw"
-                        if not tool_filtered.get('projects') and not is_jetbrains and not is_openclaw:
+                        if not tool_filtered.get('projects') and not is_jetbrains and not is_openclaw and not is_copilot:
                             logger.debug(f"    User {user_name}: No projects found for {tool_name}, skipping")
                             continue
                         

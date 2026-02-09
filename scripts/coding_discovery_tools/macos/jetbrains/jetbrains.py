@@ -22,10 +22,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     @property
     def jetbrains_config_dir(self) -> Path:
         """
-        Dynamically determine config dir based on target user.
-
-        Uses self.user_home if available (for multi-user scans),
-        otherwise falls back to Path.home() (single-user mode).
+        Return the JetBrains config directory.
         """
         if hasattr(self, 'user_home') and self.user_home:
             return self.user_home / "Library" / "Application Support" / "JetBrains"
@@ -70,11 +67,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def detect(self) -> Optional[List[Dict]]:
         """
         Detect JetBrains IDE installations on macOS.
-
-        Scans ~/Library/Application Support/JetBrains/ directory for installed IDEs.
-
-        Returns:
-            List of dicts, each containing info for one IDE, or None if not found
         """
         detected_ides = self._scan_for_ides()
 
@@ -88,8 +80,8 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                 "version": ide['version'],
                 "plan": ide['plan'],
                 "install_path": ide['config_path'],
-                "_ide_folder": ide['folder_name'],  # Store for MCP extractor
-                "_config_path": ide['config_path'],  # Store for MCP extractor
+                "_ide_folder": ide['folder_name'],
+                "_config_path": ide['config_path'],
             }
 
             logger.info(f"Detecting plugins for {ide['display_name']}...")
@@ -107,9 +99,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def get_version(self) -> Optional[str]:
         """
         Extract JetBrains IDEs version information.
-
-        Returns:
-            Comma-separated list of detected IDEs with their plans (if known)
         """
         detected_ides = self._scan_for_ides()
 
@@ -124,9 +113,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _scan_for_ides(self) -> List[Dict]:
         """
         Scan JetBrains config directory for IDE installations.
-
-        Returns:
-            List of dicts containing IDE info (folder_name, display_name, version, plan, config_path)
         """
         detected_ides = []
 
@@ -178,12 +164,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _parse_ide_name_and_version(self, folder_name: str) -> tuple:
         """
         Parse IDE name and version from folder name.
-
-        Args:
-            folder_name: Folder name like "IntelliJIdea2024.1" or "PyCharm2024.1"
-
-        Returns:
-            Tuple of (display_name, version)
         """
         sorted_prefixes = sorted(self.IDE_NAME_MAPPING.keys(), key=len, reverse=True)
         for prefix in sorted_prefixes:
@@ -216,12 +196,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _get_disabled_plugins(self, config_path: str) -> Set[str]:
         """
         Load the set of disabled plugin IDs from disabled_plugins.txt.
-
-        Args:
-            config_path: Path to the IDE's config directory
-
-        Returns:
-            Set of disabled plugin IDs
         """
         disabled_file = Path(config_path) / "disabled_plugins.txt"
         disabled = set()
@@ -246,12 +220,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         Parse plugin.xml content to extract plugin ID and name.
 
         Uses namespace-agnostic parsing to handle XML with or without namespaces.
-
-        Args:
-            xml_content: The XML content as a string
-
-        Returns:
-            Tuple of (plugin_id, plugin_name)
         """
         plugin_id = None
         plugin_name = None
@@ -285,12 +253,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _extract_plugin_info_from_dir(self, plugin_dir: Path) -> Tuple[Optional[str], Optional[str]]:
         """
         Extract plugin ID and name from a plugin directory.
-
-        Args:
-            plugin_dir: Path to the plugin directory
-
-        Returns:
-            Tuple of (plugin_id, plugin_name)
         """
         # Check for META-INF/plugin.xml
         plugin_xml = plugin_dir / "META-INF" / "plugin.xml"
@@ -321,12 +283,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _extract_plugin_info_from_jar(self, jar_path: Path) -> Tuple[Optional[str], Optional[str]]:
         """
         Extract plugin ID and name from a JAR file.
-
-        Args:
-            jar_path: Path to the JAR file
-
-        Returns:
-            Tuple of (plugin_id, plugin_name)
         """
         try:
             with zipfile.ZipFile(jar_path, 'r') as zf:
@@ -343,13 +299,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _transform_plugin_name(self, plugin_id: Optional[str], plugin_name: Optional[str]) -> Optional[str]:
         """
         Apply metadata transformations to plugin name.
-
-        Args:
-            plugin_id: The plugin ID
-            plugin_name: The original plugin name
-
-        Returns:
-            Transformed plugin name, or None if plugin should be skipped
         """
         if plugin_id and plugin_id in self.PLUGIN_NAME_OVERRIDES:
             return self.PLUGIN_NAME_OVERRIDES[plugin_id]
@@ -359,15 +308,6 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _get_plugins(self, config_path: str) -> List[str]:
         """
         Get list of installed and enabled plugins for a JetBrains IDE.
-
-        Parses META-INF/plugin.xml from each plugin to extract the plugin name.
-        Filters out disabled plugins and applies metadata transformations.
-
-        Args:
-            config_path: Path to the IDE's config directory
-
-        Returns:
-            List of plugin names (cleaned and transformed)
         """
         plugins_dir = Path(config_path) / "plugins"
         plugins = []

@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import xml.etree.ElementTree as ET
-import defusedxml.ElementTree as DefusedET
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -200,7 +199,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """Simplified 2025.x MCP XML parser."""
         servers = []
         try:
-            tree = DefusedET.parse(xml_path)
+            tree = ET.parse(xml_path)
             for node in tree.findall(".//McpServerConfigurationProperties"):
 
                 def get_opt(n, name):

@@ -133,7 +133,7 @@ def log_settings_details(settings: List[Dict], tool_name: str) -> None:
         permissions = setting.get("permissions", {})
         sandbox = setting.get("sandbox", {})
         
-        logger.info(f"    │ Settings #{idx}: {settings_source.upper()}")
+        logger.info(f"    │ Settings #{idx}: {scope.upper()}")
         logger.info(f"    │   Path: {settings_path}")
         
         # Log permissions

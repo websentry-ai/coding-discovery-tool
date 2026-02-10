@@ -163,8 +163,10 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
             raw_settings = _read_raw_settings_from_file(settings_path)
 
     # Build backend format - just map the fields from the selected settings file
+    scope_value = highest_precedence.get("scope", "user")
     backend_permissions = {
-        "scope": highest_precedence.get("scope", "user"),
+        "settings_source": scope_value,
+        "scope": scope_value,
         "settings_path": highest_precedence.get("settings_path", ""),
         "raw_settings": raw_settings,
     }

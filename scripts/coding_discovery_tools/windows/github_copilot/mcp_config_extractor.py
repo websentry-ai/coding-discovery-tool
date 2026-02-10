@@ -13,21 +13,6 @@ from ...mcp_extraction_helpers import (
 
 logger = logging.getLogger(__name__)
 
-
-def clean_json_comments(text: str) -> str:
-    """
-    Remove comments from JSONC content while preserving URLs (http://)
-    """
-    pattern = r'("(?:\\.|[^"\\])*")|(/\*.*?\*/)|(//.*$)'
-
-    def replace(match):
-        if match.group(1):
-            return match.group(1)
-        return ""
-
-    return re.sub(pattern, replace, text, flags=re.DOTALL | re.MULTILINE)
-
-
 class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for GitHub Copilot MCP config on Windows systems."""
 
@@ -135,7 +120,6 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         try:
             content = config_path.read_text(encoding='utf-8', errors='replace')
-            content = clean_json_comments(content)
 
             config_data = json.loads(content)
 

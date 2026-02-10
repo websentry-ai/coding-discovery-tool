@@ -16,17 +16,6 @@ from ...mcp_extraction_helpers import (
 
 logger = logging.getLogger(__name__)
 
-
-def strip_json_comments(content: str) -> str:
-    """
-    Remove single-line and multi-line comments from JSON content.
-    """
-    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-    content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)
-
-    return content
-
-
 class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for GitHub Copilot MCP config on macOS systems."""
 
@@ -112,7 +101,6 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         try:
             content = config_path.read_text(encoding='utf-8', errors='replace')
-            content = strip_json_comments(content)
 
             config_data = json.loads(content)
 

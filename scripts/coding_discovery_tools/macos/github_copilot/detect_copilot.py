@@ -85,7 +85,14 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
 
             if ext_id == "github.copilot":
                 results.append({
-                    "name": "GitHub Copilot VS Code",
+                    "name": "GitHub Copilot (VS Code)",
+                    "version": ext.get('version', 'unknown'),
+                    "publisher": "GitHub",
+                    "install_path": str(vscode_ext_path.parent)
+                })
+            elif ext_id == "github.copilot-chat":
+                results.append({
+                    "name": "GitHub Copilot Chat (VS Code)",
                     "version": ext.get('version', 'unknown'),
                     "publisher": "GitHub",
                     "install_path": str(vscode_ext_path.parent)
@@ -133,7 +140,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
             for plugin_name in plugins:
                 if "copilot" in plugin_name.lower():
                     detected_results.append({
-                        "name": f"GitHub Copilot {ide['name']}",
+                        "name": f"GitHub Copilot ({ide['name']})",
                         "version": ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide['name'],

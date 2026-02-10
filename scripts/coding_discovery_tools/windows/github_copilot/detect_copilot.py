@@ -122,9 +122,9 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                     except IndexError:
                         pass
 
-                ext_name = "GitHub Copilot VS Code"
+                ext_name = "GitHub Copilot (VS Code)"
                 if "copilot-chat" in copilot_dir.name.lower():
-                    ext_name = "GitHub Copilot Chat VS Code"
+                    ext_name = "GitHub Copilot Chat (VS Code)"
 
                 results.append({
                     "name": ext_name,
@@ -183,13 +183,13 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
             for plugin_name in plugins:
                 if "copilot" in plugin_name.lower():
                     detected_results.append({
-                        "name": f"GitHub Copilot {ide['name']}",
+                        "name": f"GitHub Copilot ({ide['name']})",
                         "version": ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide['name'],
                         "install_path": ide.get("_config_path") or ide.get("install_path")
                     })
-                    logger.info(f"Detected: GitHub Copilot for {ide['name']}")
+                    logger.info(f"Detected: GitHub Copilot ({ide['name']})")
 
         return detected_results
 

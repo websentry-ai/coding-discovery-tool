@@ -4,27 +4,43 @@ import os
 from pathlib import Path
 from typing import Optional, Dict, List
 
-from ...coding_tool_base import BaseCopilotDetector as BaseCopilotDetectorBase
-from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
-from ...macos_extraction_helpers import is_running_as_root
+from ...coding_tool_base import BaseCopilotDetector
+from ...windows_extraction_helpers import is_running_as_admin
+from ..jetbrains.jetbrains import WindowsJetBrainsDetector
 
 logger = logging.getLogger(__name__)
 
 
-def _load_extension_json(path: Path) -> List[Dict]:
-    """Helper function to parse the VS Code extensions file."""
-    if not path.exists():
-        return []
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
-
-
-class MacOSCopilotDetector(BaseCopilotDetectorBase):
+def _load_jsonc(file_path: Path) -> Optional[Dict]:
     """
-    Detects GitHub Copilot across VS Code and all JetBrains IDEs on macOS.
+    Load a JSON file that may contain comments (JSONC).
+    """
+    import re
+
+    if not file_path.exists():
+        return None
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw = f.read()
+
+        pattern = r'("(?:\\.|[^"\\])*")|(/\*.*?\*/)|(//.*$)'
+
+        def replace(match):
+            if match.group(1):
+                return match.group(1)
+            return ""
+
+        clean = re.sub(pattern, replace, raw, flags=re.DOTALL | re.MULTILINE)
+        return json.loads(clean)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug(f"Error loading JSONC file {file_path}: {e}")
+        return None
+
+
+class WindowsGitHubCopilotDetector(BaseCopilotDetector):
+    """
+    Detects GitHub Copilot across VS Code and all JetBrains IDEs on Windows.
     """
 
     @property
@@ -35,7 +51,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
     def detect_copilot(self) -> List[Dict]:
         """
         Returns ALL detected Copilot instances with their install paths.
-        When running as root, scans all users in /Users/.
+        When running as administrator, scans all users in C:\\Users.
         """
         all_results = []
 
@@ -49,13 +65,13 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
 
     def _detect_vscode_all_users(self) -> List[Dict]:
         """
-        Detect VS Code Copilot for all users when running as root.
+        Detect VS Code Copilot for all users when running as administrator.
         For regular users, only checks their own directory.
         """
         results = []
 
-        if is_running_as_root():
-            users_dir = Path("/Users")
+        if is_running_as_admin():
+            users_dir = Path("C:\\Users")
             if users_dir.exists():
                 for user_dir in users_dir.iterdir():
                     if user_dir.is_dir() and not user_dir.name.startswith('.'):
@@ -74,40 +90,63 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
     def _detect_vscode_for_user(self, user_home: Path) -> List[Dict]:
         """
         Detect VS Code Copilot for a specific user.
+
+        Scans %USERPROFILE%\\.vscode\\extensions for folders starting with github.copilot*.
         """
         results = []
-        vscode_ext_path = user_home / '.vscode' / 'extensions' / 'extensions.json'
+        vscode_ext_dir = user_home / ".vscode" / "extensions"
 
-        extensions_data = _load_extension_json(vscode_ext_path)
+        if not vscode_ext_dir.exists():
+            logger.debug(f"VS Code extensions directory not found: {vscode_ext_dir}")
+            return results
 
-        for ext in extensions_data:
-            ext_id = ext.get('identifier', {}).get('id', '').lower()
+        try:
+            # Look for github.copilot* directories
+            copilot_dirs = list(vscode_ext_dir.glob("github.copilot*"))
 
-            if ext_id == "github.copilot":
+            for copilot_dir in copilot_dirs:
+                if not copilot_dir.is_dir():
+                    continue
+
+                version = "unknown"
+                pkg_json = copilot_dir / "package.json"
+
+                if pkg_json.exists():
+                    data = _load_jsonc(pkg_json)
+                    if data:
+                        version = data.get('version', 'unknown')
+
+                if version == "unknown" and "-" in copilot_dir.name:
+                    try:
+                        version = copilot_dir.name.rsplit('-', 1)[1]
+                    except IndexError:
+                        pass
+
+                ext_name = "GitHub Copilot (VS Code)"
+                if "copilot-chat" in copilot_dir.name.lower():
+                    ext_name = "GitHub Copilot Chat (VS Code)"
+
                 results.append({
-                    "name": "GitHub Copilot (VS Code)",
-                    "version": ext.get('version', 'unknown'),
+                    "name": ext_name,
+                    "version": version,
                     "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent)
+                    "install_path": str(copilot_dir)
                 })
-            elif ext_id == "github.copilot-chat":
-                results.append({
-                    "name": "GitHub Copilot Chat (VS Code)",
-                    "version": ext.get('version', 'unknown'),
-                    "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent)
-                })
+                logger.info(f"Detected: {ext_name} v{version} at {copilot_dir}")
+
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error scanning VS Code extensions: {e}")
 
         return results
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """
-        Detect JetBrains Copilot for all users when running as root.
+        Detect JetBrains Copilot for all users when running as administrator.
         """
         detected_results = []
 
-        if is_running_as_root():
-            users_dir = Path("/Users")
+        if is_running_as_admin():
+            users_dir = Path("C:\\Users")
             if users_dir.exists():
                 for user_dir in users_dir.iterdir():
                     if user_dir.is_dir() and not user_dir.name.startswith('.'):
@@ -126,10 +165,14 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
     def _detect_jetbrains_for_user(self, user_home: Path) -> List[Dict]:
         """
         Detect JetBrains Copilot for a specific user.
+
+        Checks both standard JetBrains config path (%APPDATA%\\JetBrains)
+        and Toolbox installations (%LOCALAPPDATA%\\JetBrains\\Toolbox).
         """
         detected_results = []
 
-        jetbrains_detector = MacOSJetBrainsDetector()
+        # Use the WindowsJetBrainsDetector to find all IDEs
+        jetbrains_detector = WindowsJetBrainsDetector()
         jetbrains_detector.user_home = user_home
 
         all_ides = jetbrains_detector.detect() or []
@@ -144,8 +187,9 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
                         "version": ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide['name'],
-                        "install_path": ide.get("config_path") or ide.get("install_path")
+                        "install_path": ide.get("_config_path") or ide.get("install_path")
                     })
+                    logger.info(f"Detected: GitHub Copilot ({ide['name']})")
 
         return detected_results
 

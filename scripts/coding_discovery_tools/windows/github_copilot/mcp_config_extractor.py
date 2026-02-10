@@ -1,9 +1,6 @@
-"""
-MCP config extraction for GitHub Copilot on macOS systems.
-"""
-
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -16,12 +13,16 @@ from ...mcp_extraction_helpers import (
 
 logger = logging.getLogger(__name__)
 
-class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
-    """Extractor for GitHub Copilot MCP config on macOS systems."""
+class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
+    """Extractor for GitHub Copilot MCP config on Windows systems."""
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
-        Extract GitHub Copilot MCP configuration on macOS.
+        Extract GitHub Copilot MCP configuration on Windows.
+
+        - VS Code: %APPDATA%\\Code\\User\\mcp.json
+        - VS Code (fallback): %APPDATA%\\Code\\User\\globalStorage\\ms-vscode.vscode-github-copilot\\mcp.json
+        - JetBrains: %LOCALAPPDATA%\\github-copilot\\intellij\\mcp.json
         """
         projects = []
 
@@ -52,9 +53,14 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     def _extract_vscode_configs_for_user(self, user_home: Path) -> List[Dict]:
         """
         Extract VS Code MCP configs for a specific user.
+
+        - %APPDATA%\\Code\\User\\mcp.json
+        - %APPDATA%\\Code\\User\\globalStorage\\ms-vscode.vscode-github-copilot\\mcp.json
         """
         configs = []
-        code_user_base = user_home / "Library" / "Application Support" / "Code" / "User"
+
+        appdata_roaming = user_home / "AppData" / "Roaming"
+        code_user_base = appdata_roaming / "Code" / "User"
 
         primary_path = code_user_base / "mcp.json"
         fallback_path = code_user_base / "globalStorage" / "ms-vscode.vscode-github-copilot" / "mcp.json"
@@ -84,9 +90,13 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     def _extract_jetbrains_configs_for_user(self, user_home: Path) -> List[Dict]:
         """
         Extract JetBrains MCP configs for a specific user.
+
+        Location: %LOCALAPPDATA%\\github-copilot\\intellij\\mcp.json
         """
         configs = []
-        jetbrains_config_path = user_home / ".config" / "github-copilot" / "intellij" / "mcp.json"
+
+        localappdata = user_home / "AppData" / "Local"
+        jetbrains_config_path = localappdata / "github-copilot" / "intellij" / "mcp.json"
 
         if jetbrains_config_path.exists():
             config = self._read_mcp_config(jetbrains_config_path, str(jetbrains_config_path.parent))
@@ -98,6 +108,15 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     def _read_mcp_config(self, config_path: Path, tool_path: str) -> Optional[Dict]:
         """
         Read and parse an MCP config file, stripping JSON comments.
+
+        Uses robust JSONC parser to handle comments without breaking URLs.
+
+        Args:
+            config_path: Path to the mcp.json file
+            tool_path: Path to use as the project/tool path in output
+
+        Returns:
+            Dict with 'path' and 'mcpServers' keys, or None if parsing fails
         """
         try:
             content = config_path.read_text(encoding='utf-8', errors='replace')

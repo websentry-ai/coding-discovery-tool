@@ -6,7 +6,7 @@ and tool detection across different operating systems.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 
 
 class BaseDeviceIdExtractor(ABC):
@@ -327,7 +327,7 @@ class BaseCopilotDetector(BaseToolDetector):
         return "Copilot"
 
     @abstractmethod
-    def detect_copilot(self) -> Optional[Dict] | List[Dict]:
+    def detect_copilot(self) -> Union[Optional[Dict], List[Dict]]:
         """
         Detect Copilot on the current platform.
         """

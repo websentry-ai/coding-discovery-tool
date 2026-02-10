@@ -88,6 +88,11 @@ from .macos.github_copilot.detect_copilot import MacOSCopilotDetector
 from .macos.github_copilot.mcp_config_extractor import MacOSGitHubCopilotMCPConfigExtractor
 from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRulesExtractor
 
+# Windows - Copilot
+from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
+from .windows.github_copilot.mcp_config_extractor import WindowsGitHubCopilotMCPConfigExtractor
+from .windows.github_copilot.copilot_rules_extractor import WindowsGitHubCopilotRulesExtractor
+
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
 # Windows - Codex
@@ -444,6 +449,8 @@ class ToolDetectorFactory:
             os_name = platform.system()
         if os_name == "Darwin":
             return MacOSCopilotDetector()
+        elif os_name == "Windows":
+            return WindowsGitHubCopilotDetector()
         else:
             return None
 
@@ -1099,6 +1106,8 @@ class GitHubCopilotMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSGitHubCopilotMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsGitHubCopilotMCPConfigExtractor()
         else:
             return None
 
@@ -1116,5 +1125,7 @@ class GitHubCopilotRulesExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSGitHubCopilotRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsGitHubCopilotRulesExtractor()
         else:
             return None

@@ -6,7 +6,6 @@ import os
 import logging
 import re
 import xml.etree.ElementTree as ET
-import defusedxml.ElementTree as DefusedET
 import zipfile
 from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple
@@ -227,7 +226,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         try:
             # Remove XML namespace declarations for simpler parsing
             xml_content_clean = re.sub(r'\sxmlns[^"]*"[^"]*"', '', xml_content)
-            root = DefusedET.fromstring(xml_content_clean)
+            root = ET.fromstring(xml_content_clean)
 
             # Try to find <id> tag, can be at root level or nested
             id_elem = root.find('.//id')

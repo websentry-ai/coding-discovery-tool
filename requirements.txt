@@ -1,4 +1,3 @@
 # This project uses only Python standard library modules
 # No external dependencies are required
 # Python 3.9+ is recommended
-defusedxml>=0.7.1

@@ -2,14 +2,14 @@
 Settings transformers for converting extracted settings to backend API format.
 
 This module transforms individual settings files to the expected backend API structure.
-Settings are extracted from multiple scopes, and we send the highest precedence one
+Settings are extracted from multiple sources, and we send the highest precedence one
 to the backend.
 
-Scope precedence order (highest to lowest):
-    1. managed - Enterprise managed settings (highest priority)
-    2. local - Project-local settings (.claude/settings.local.json)
-    3. project - Project settings (.claude/settings.json)
-    4. user - Global user settings (~/.claude/settings.json)
+Precedence order (highest to lowest):
+    1. managed - Enterprise/MDM deployed settings (highest priority)
+    2. local - User's local overrides (not synced)
+    3. project - Project-specific settings
+    4. user - Global user settings (lowest priority)
 """
 
 import json
@@ -19,22 +19,29 @@ from typing import List, Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
 
-# Constants for settings scope precedence
+# Constants for settings source precedence
 # Higher number = higher precedence
 SETTINGS_PRECEDENCE = {
-    "managed": 4,   # Highest priority - enterprise managed settings
-    "local": 3,     # Second priority - project-local settings (not committed)
-    "project": 2,   # Third priority - project settings (committed)
-    "user": 1,      # Fourth priority - user global settings
+    "managed": 4,   # Highest priority - enterprise/MDM settings
+    "local": 3,     # Second priority - local user overrides
+    "project": 2,   # Third priority - project settings
+    "user": 1,      # Lowest priority - global user settings
 }
 
-# Default precedence for unknown scopes
+# Default precedence for unknown sources
 DEFAULT_PRECEDENCE = 0
+
+
+def _get_scope_value(settings_dict: Dict[str, Any]) -> str:
+    """
+    Get scope value from settings dict, checking both 'scope' and 'settings_source'.
+    """
+    return settings_dict.get("scope") or settings_dict.get("settings_source", "user")
 
 
 def _get_precedence(scope: str) -> int:
     """
-    Get precedence value for a settings scope.
+    Get precedence value for a scope/settings_source.
 
     Args:
         scope: Scope type ("managed", "local", "project", or "user")
@@ -60,24 +67,24 @@ def _get_highest_precedence_setting(settings_list: List[Dict[str, Any]]) -> Opti
 
     return max(
         settings_list,
-        key=lambda s: _get_precedence(s.get("scope", "user"))
+        key=lambda s: _get_precedence(_get_scope_value(s))
     )
 
 
 def _read_raw_settings_from_file(settings_path: Path) -> Dict[str, Any]:
     """
     Read and parse raw settings JSON from a file.
-    
+
     Args:
         settings_path: Path to the settings JSON file
-        
+
     Returns:
         Parsed JSON as dict, or empty dict if file cannot be read
     """
     if not settings_path.exists():
         logger.debug(f"Settings file does not exist: {settings_path}")
         return {}
-    
+
     try:
         content = settings_path.read_text(encoding='utf-8', errors='replace')
         return json.loads(content)
@@ -99,27 +106,27 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
 
     Args:
         settings_list: List of settings dicts from extractor. Each dict should contain:
-            - scope: "managed", "local", "project", or "user"
+            - scope: "managed", "local", "project", or "user" (preferred)
+            - settings_source: Legacy field, same values as scope
             - settings_path: Path to the settings file
             - raw_settings: Full settings JSON (optional, will be read from file if missing)
-            - permissions: Dict with permission settings (allow, deny, ask)
-            - mcp_servers: List of MCP server names
-            - mcp_policies: Dict with allowedMcpServers and deniedMcpServers
+            - permissions: Dict with permission settings
             - sandbox: Dict with sandbox settings
 
     Returns:
         Permissions dict in backend format with fields:
-            - scope: Scope type (managed, local, project, or user)
+            - settings_source: Source type
+            - scope: Same as settings_source
             - settings_path: Path to highest precedence file
             - raw_settings: Full settings JSON
             - permission_mode: Mapped from defaultMode
             - allow_rules: Mapped from allow
             - deny_rules: Mapped from deny
             - ask_rules: Mapped from ask
-            - mcp_servers: List of MCP server names
-            - mcp_policies: Dict with allowedMcpServers and deniedMcpServers
             - sandbox_enabled: Mapped from sandbox.enabled
             - additional_directories: Mapped from additionalDirectories
+            - mcp_servers: MCP server configurations (if present)
+            - mcp_policies: MCP policies (if present)
         Returns None if no settings provided
 
     Example:
@@ -132,14 +139,13 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
         ...     },
         ...     {
         ...         "scope": "local",
-        ...         "settings_path": "/project/.claude/settings.local.json",
+        ...         "settings_path": "/Users/john/.claude/settings.local.json",
         ...         "permissions": {"allow": ["Bash(npm *)"]}
         ...     }
         ... ]
         >>> result = transform_settings_to_backend_format(settings)
         >>> result["scope"]  # "local" (higher precedence than user)
-        >>> result["permission_mode"]  # None (not in local settings)
-        >>> result["allow_rules"]  # ["Bash(npm *)"]
+        >>> result["settings_source"]  # "local" (same, for backend compat)
     """
     if not settings_list:
         return None
@@ -152,8 +158,8 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
     # Extract values from the highest precedence setting
     permissions = highest_precedence.get("permissions", {})
     sandbox = highest_precedence.get("sandbox", {})
-    mcp_servers = highest_precedence.get("mcp_servers", [])
-    mcp_policies = highest_precedence.get("mcp_policies", {})
+    mcp_servers = highest_precedence.get("mcp_servers")
+    mcp_policies = highest_precedence.get("mcp_policies")
 
     # Get raw settings: prefer from dict, fallback to reading from file
     raw_settings = highest_precedence.get("raw_settings", {})
@@ -162,10 +168,12 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
         if settings_path:
             raw_settings = _read_raw_settings_from_file(settings_path)
 
-    # Build backend format - just map the fields from the selected settings file
-    scope_value = highest_precedence.get("scope", "user")
+    scope_value = _get_scope_value(highest_precedence)
+
+    settings_source_value = "user" if scope_value == "local" else scope_value
+
     backend_permissions = {
-        "settings_source": scope_value,
+        "settings_source": settings_source_value,
         "scope": scope_value,
         "settings_path": highest_precedence.get("settings_path", ""),
         "raw_settings": raw_settings,
@@ -187,14 +195,15 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
     if permissions.get("additionalDirectories"):
         backend_permissions["additional_directories"] = permissions["additionalDirectories"]
 
+    if sandbox.get("enabled") is not None:
+        backend_permissions["sandbox_enabled"] = sandbox["enabled"]
+
+    # Include MCP servers if present
     if mcp_servers:
         backend_permissions["mcp_servers"] = mcp_servers
 
-    if mcp_policies.get("allowedMcpServers") or mcp_policies.get("deniedMcpServers"):
+    # Include MCP policies if present
+    if mcp_policies:
         backend_permissions["mcp_policies"] = mcp_policies
-
-    # Map sandbox_enabled (only the enabled field, not full sandbox_settings)
-    if sandbox.get("enabled") is not None:
-        backend_permissions["sandbox_enabled"] = sandbox["enabled"]
 
     return backend_permissions

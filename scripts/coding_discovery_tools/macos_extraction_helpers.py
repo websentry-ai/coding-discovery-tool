@@ -104,7 +104,7 @@ def should_skip_system_path(path: Path) -> bool:
     return any(path_str.startswith(skip_dir) for skip_dir in SKIP_SYSTEM_DIRS)
 
 
-def extract_single_rule_file(rule_file: Path, find_project_root_func) -> Optional[Dict]:
+def extract_single_rule_file(rule_file: Path, find_project_root_func, scope: str = None) -> Optional[Dict]:
     """
     Extract a single rule file with metadata.
     
@@ -124,6 +124,9 @@ def extract_single_rule_file(rule_file: Path, find_project_root_func) -> Optiona
         project_root = find_project_root_func(rule_file)
         content, truncated = read_file_content(rule_file, file_metadata['size'])
 
+        if scope is None:
+            scope = _detect_rule_scope(rule_file)
+
         return {
             "file_path": str(rule_file),
             "file_name": rule_file.name,
@@ -131,7 +134,8 @@ def extract_single_rule_file(rule_file: Path, find_project_root_func) -> Optiona
             "content": content,
             "size": file_metadata['size'],
             "last_modified": file_metadata['last_modified'],
-            "truncated": truncated
+            "truncated": truncated,
+            "scope": scope
         }
 
     except PermissionError as e:
@@ -143,6 +147,28 @@ def extract_single_rule_file(rule_file: Path, find_project_root_func) -> Optiona
     except Exception as e:
         logger.warning(f"Error reading rule file {rule_file}: {e}")
         return None
+
+
+def _detect_rule_scope(rule_file: Path) -> str:
+    """
+    Detect the scope of a rule file based on its location.
+    """
+    try:
+        home = Path.home()
+        rule_path = rule_file.resolve()
+
+        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity"]:
+            user_config_dir = home / config_dir_name
+            if user_config_dir.exists():
+                try:
+                    rule_path.relative_to(user_config_dir)
+                    return "user"
+                except ValueError:
+                    pass
+
+        return "project"
+    except Exception:
+        return "project"
 
 
 def find_cursor_project_root(rule_file: Path) -> Path:

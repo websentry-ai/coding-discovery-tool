@@ -356,9 +356,9 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
         return mcp_servers
 
-    def _read_rule_file(self, path: Path) -> Optional[Dict]:
+    def _read_rule_file(self, path: Path, scope: str = "project") -> Optional[Dict]:
         """
-        Read a rule file
+        Return the metadata of a rule file.
         """
         try:
             if not path.exists() or not path.is_file():
@@ -373,7 +373,8 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 "content": content,
                 "size": metadata['size'],
                 "last_modified": metadata['last_modified'],
-                "truncated": truncated
+                "truncated": truncated,
+                "scope": scope
             }
         except Exception as e:
             logger.warning(f"Error reading rule file {path}: {e}")
@@ -399,7 +400,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         for candidate in exact_files:
             rule_file = project_path / candidate
             if rule_file.is_file():
-                rule_obj = self._read_rule_file(rule_file)
+                rule_obj = self._read_rule_file(rule_file, scope="project")
                 if rule_obj:
                     rules.append(rule_obj)
 
@@ -414,7 +415,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             if rule_dir.is_dir():
                 try:
                     for md_file in rule_dir.glob("*.md"):
-                        rule_obj = self._read_rule_file(md_file)
+                        rule_obj = self._read_rule_file(md_file, scope="project")
                         if rule_obj:
                             rules.append(rule_obj)
                 except PermissionError:
@@ -423,7 +424,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         # Wildcard: all *.mdc files in the project root
         try:
             for mdc_file in project_path.glob("*.mdc"):
-                rule_obj = self._read_rule_file(mdc_file)
+                rule_obj = self._read_rule_file(mdc_file, scope="project")
                 if rule_obj:
                     rules.append(rule_obj)
         except PermissionError:

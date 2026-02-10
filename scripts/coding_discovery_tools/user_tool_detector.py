@@ -104,44 +104,17 @@ def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional
 
 
 def _detect_extension_tool(
-    detector: BaseToolDetector, 
-    user_home: Path, 
+    detector: BaseToolDetector,
+    user_home: Path,
     tool_name: str
 ) -> Optional[Dict]:
-    """Detect extension-based tools (Roo Code, Cline, Kilo Code)."""
-    user_lib = user_home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage"
-    if not user_lib.exists():
-        return None
-    
-    try:
-        for ext_dir in user_lib.iterdir():
-            if not ext_dir.is_dir():
-                continue
-                
-            ext_name_lower = ext_dir.name.lower()
-            
-            if tool_name == "roo code" and "roo" in ext_name_lower:
-                return {
-                    "name": detector.tool_name,
-                    "version": "Unknown",
-                    "install_path": str(ext_dir)
-                }
-            elif tool_name == "cline" and "claude-dev" in ext_name_lower:
-                return {
-                    "name": detector.tool_name,
-                    "version": "Unknown",
-                    "install_path": str(ext_dir)
-                }
-            elif tool_name in ["kilocode", "kilo code"] and "kilo" in ext_name_lower:
-                return {
-                    "name": detector.tool_name,
-                    "version": "Unknown",
-                    "install_path": str(ext_dir)
-                }
-    except (PermissionError, OSError):
-        pass
-    
-    return None
+    """
+    Detect extension-based tools (Roo Code, Cline, Kilo Code).
+
+    Delegates to the detector's detect() method to get properly formatted results
+    like "Roo Code (Cursor)", "Roo Code (VS Code)", etc.
+    """
+    return detector.detect()
 
 
 def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:

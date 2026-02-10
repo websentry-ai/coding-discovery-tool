@@ -57,8 +57,9 @@ def log_rules_details(projects_dict: Dict[str, Dict], tool_name: str) -> None:
         for rule_idx, rule in enumerate(rules, 1):
             rule_file = rule.get("file_name") or rule.get("file_path", "Unknown")
             rule_size = rule.get("size", 0)
+            rule_scope = rule.get("scope", "unknown")
             size_str = f"{rule_size:,} bytes" if rule_size > 0 else "size unknown"
-            logger.info(f"    │     {rule_idx}. {rule_file} ({size_str})")
+            logger.info(f"    │     {rule_idx}. {rule_file} (scope={rule_scope}, {size_str})")
         if idx < len(projects_with_rules):
             logger.info("    │")
     
@@ -127,18 +128,19 @@ def log_settings_details(settings: List[Dict], tool_name: str) -> None:
     logger.info("    ┌─ Settings Summary ────────────────────────────────────────────")
     
     for idx, setting in enumerate(settings, 1):
-        settings_source = setting.get("settings_source", "unknown")
+        scope = setting.get("scope") or setting.get("settings_source", "unknown")
         settings_path = setting.get("settings_path", "Unknown")
         permissions = setting.get("permissions", {})
         sandbox = setting.get("sandbox", {})
         
-        logger.info(f"    │ Settings #{idx}: {settings_source.upper()}")
+        logger.info(f"    │ Settings #{idx}: {scope.upper()}")
         logger.info(f"    │   Path: {settings_path}")
         
         # Log permissions
         default_mode = permissions.get("defaultMode")
         allow_list = permissions.get("allow", [])
         deny_list = permissions.get("deny", [])
+        ask_list = permissions.get("ask", [])
         additional_dirs = permissions.get("additionalDirectories", [])
         
         if default_mode:
@@ -155,13 +157,36 @@ def log_settings_details(settings: List[Dict], tool_name: str) -> None:
                 logger.info(f"    │     {deny_idx}. {deny_rule}")
             if len(deny_list) > 5:
                 logger.info(f"    │     ... and {len(deny_list) - 5} more")
+        if ask_list:
+            logger.info(f"    │   Ask Rules: {len(ask_list)}")
+            for ask_idx, ask_rule in enumerate(ask_list[:5], 1):  # Show first 5
+                logger.info(f"    │     {ask_idx}. {ask_rule}")
+            if len(ask_list) > 5:
+                logger.info(f"    │     ... and {len(ask_list) - 5} more")
         if additional_dirs:
             logger.info(f"    │   Additional Directories: {len(additional_dirs)}")
             for dir_idx, add_dir in enumerate(additional_dirs[:3], 1):  # Show first 3
                 logger.info(f"    │     {dir_idx}. {add_dir}")
             if len(additional_dirs) > 3:
                 logger.info(f"    │     ... and {len(additional_dirs) - 3} more")
-        
+
+        mcp_servers = setting.get("mcp_servers", [])
+        if mcp_servers:
+            logger.info(f"    │   MCP Servers: {len(mcp_servers)}")
+            for mcp_idx, mcp_server in enumerate(mcp_servers[:5], 1):  # Show first 5
+                logger.info(f"    │     {mcp_idx}. {mcp_server}")
+            if len(mcp_servers) > 5:
+                logger.info(f"    │     ... and {len(mcp_servers) - 5} more")
+
+        # Log MCP policies
+        mcp_policies = setting.get("mcp_policies", {})
+        allowed_mcp = mcp_policies.get("allowedMcpServers", [])
+        denied_mcp = mcp_policies.get("deniedMcpServers", [])
+        if allowed_mcp:
+            logger.info(f"    │   Allowed MCP Servers: {len(allowed_mcp)}")
+        if denied_mcp:
+            logger.info(f"    │   Denied MCP Servers: {len(denied_mcp)}")
+
         # Log sandbox_enabled only
         sandbox_enabled = sandbox.get("enabled")
         if sandbox_enabled is not None:

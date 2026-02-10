@@ -3,15 +3,24 @@ Roo Code detection for Windows.
 
 Roo Code is an AI-powered coding assistant that operates as a VS Code extension.
 This module detects Roo Code installations by checking for:
-1. IDE installations (VS Code, Cursor, Windsurf)
+1. IDE installations (VS Code, Cursor, Windsurf, Antigravity)
 2. Roo extension settings in IDE global storage directories
+3. Antigravity extensions via %USERPROFILE%\\.antigravity\\extensions\\extensions.json
+
+Returns detections like:
+- Roo Code (VS Code)
+- Roo Code (Cursor)
+- Roo Code (Windsurf)
+- Roo Code (Antigravity)
 """
 
+import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
+from ...windows_extraction_helpers import is_running_as_admin
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +28,21 @@ logger = logging.getLogger(__name__)
 class WindowsRooDetector(BaseToolDetector):
     """
     Detector for Roo Code installations on Windows systems.
-    
+
     Roo Code operates as a VS Code extension, so detection involves:
-    - Checking for compatible IDE installations (VS Code, Cursor, Windsurf)
+    - Checking for compatible IDE installations (VS Code, Cursor, Windsurf, Antigravity)
     - Verifying Roo extension settings exist in IDE global storage
+    - Checking Antigravity's extensions.json for installed extensions
+
+    Returns separate detections for each IDE where Roo Code is installed.
     """
 
-    # Supported IDEs that can host the Roo Code extension
-    SUPPORTED_IDES = ['Code', 'Cursor', 'Windsurf']
-    
+    SUPPORTED_IDES = {
+        'Code': 'VS Code',
+        'Cursor': 'Cursor',
+        'Windsurf': 'Windsurf',
+    }
+
     # Roo Code extension identifier
     ROO_EXTENSION_ID = "rooveterinaryinc.roo-cline"
 
@@ -36,157 +51,201 @@ class WindowsRooDetector(BaseToolDetector):
         """Return the name of the tool being detected."""
         return "Roo Code"
 
-    def detect(self) -> Optional[Dict]:
+    def detect(self) -> Optional[List[Dict]]:
         """
-        Detect Roo Code installation on Windows.
-        
+        Detect all Roo Code installations on Windows.
+
         When running as administrator, scans all user directories to find installations
         across multiple user accounts.
-        
+
         Returns:
-            Dict containing tool info (name, version, install_path) or None if not found
+            List of dicts containing tool info for each IDE with Roo Code installed,
+            or None if not found in any IDE
         """
-        # When running as administrator, scan all user directories first
-        if self._is_running_as_admin():
-            user_roo_info = self._scan_user_directories()
-            if user_roo_info:
-                return user_roo_info
-        
-        # Check current user (works for both admin and regular users)
-        return self._check_user_for_roo(Path.home())
+        all_results = []
+
+        if is_running_as_admin():
+            users_dir = Path("C:\\Users")
+            if users_dir.exists():
+                for user_dir in users_dir.iterdir():
+                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                        # Skip system user directories
+                        if user_dir.name.lower() in ['public', 'default', 'default user', 'all users']:
+                            continue
+                        try:
+                            user_results = self._detect_roo_for_user(user_dir)
+                            all_results.extend(user_results)
+                        except (PermissionError, OSError) as e:
+                            logger.debug(f"Skipping user directory {user_dir}: {e}")
+                            continue
+        else:
+            all_results = self._detect_roo_for_user(Path.home())
+
+        return all_results if all_results else None
 
     def get_version(self) -> Optional[str]:
         """
         Extract Roo Code version.
-        
-        Note: Version extraction is currently not implemented.
-        
+
         Returns:
-            None (version extraction removed per requirements)
+            Version string or None
         """
+        result = self.detect()
+        if result and isinstance(result, list) and len(result) > 0:
+            return result[0].get('version', 'Unknown')
         return None
 
-    def _is_running_as_admin(self) -> bool:
+    def _detect_roo_for_user(self, user_home: Path) -> List[Dict]:
         """
-        Check if the current process is running as administrator.
-        
-        Returns:
-            True if running as administrator, False otherwise
-        """
-        try:
-            import ctypes
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except Exception:
-            # Fallback: check if current user is Administrator or SYSTEM
-            try:
-                import getpass
-                current_user = getpass.getuser().lower()
-                return current_user in ["administrator", "system"]
-            except Exception:
-                return False
+        Detect all Roo Code installations for a specific user.
 
-    def _scan_user_directories(self) -> Optional[Dict]:
-        """
-        Scan all user directories for Roo Code installations when running as admin.
-        
-        Returns:
-            Dict with tool info (name, version, install_path) or None if not found
-        """
-        users_dir = Path("C:\\Users")
-        if not users_dir.exists():
-            return None
-        
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                try:
-                    result = self._check_user_for_roo(user_dir)
-                    if result:
-                        return result
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Skipping user directory {user_dir}: {e}")
-                    continue
-        
-        return None
+        Checks each supported IDE for the Roo extension and returns
+        a separate detection for each IDE where it's found.
 
-    def _check_user_for_roo(self, user_home: Path) -> Optional[Dict]:
-        """
-        Check if Roo Code is installed for a specific user.
-        
-        Since Roo Code is an extension, we first check if the extension exists
-        in any IDE. Only if the extension is found, we proceed with detection.
-        
-        This method:
-        1. First checks for Roo extension in any supported IDE
-        2. If extension found, returns detection result (extension can only exist if IDE is installed)
-        
         Args:
             user_home: User's home directory path
-            
-        Returns:
-            Dict with tool info (name, version, install_path) or None if not found
-        """
-        # First, check if Roo extension exists in any IDE
-        extension_path = None
-        
-        for ide_name in self.SUPPORTED_IDES:
-            extension_path = self._check_roo_extension(user_home, ide_name)
-            if extension_path:
-                logger.debug(f"Found Roo Code extension in {ide_name} at: {extension_path}")
-                break
-        
-        # If no extension found, return None immediately
-        if not extension_path:
-            logger.debug("Roo Code extension not found in any IDE")
-            return None
-        
-        # If extension found, IDE is installed (extension can only exist if IDE is installed)
-        # Use the extension path as install_path
-        return {
-            "name": self.tool_name,
-            "version": "Unknown",
-            "install_path": str(extension_path)
-        }
 
-    def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Path]:
+        Returns:
+            List of dicts with tool info for each IDE with Roo Code installed
         """
-        Check if Roo extension settings exist for a specific IDE.
-        
-        Checks both the settings file and the extension directory to handle
-        cases where settings file might not exist yet but extension is installed.
-        
+        results = []
+
+        # Check globalStorage-based IDEs (VS Code, Cursor, Windsurf)
+        for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
+            extension_info = self._check_roo_extension(user_home, ide_folder)
+
+            if extension_info:
+                extension_path, version = extension_info
+
+                results.append({
+                    "name": f"Roo Code ({ide_display_name})",
+                    "version": version or "Unknown",
+                    "publisher": "Roo Veterinary Inc",
+                    "ide": ide_display_name,
+                    "install_path": str(extension_path)
+                })
+                logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
+
+        antigravity_info = self._check_antigravity_extension(user_home)
+        if antigravity_info:
+            extension_path, version = antigravity_info
+            results.append({
+                "name": "Roo Code (Antigravity)",
+                "version": version or "Unknown",
+                "publisher": "Roo Veterinary Inc",
+                "ide": "Antigravity",
+                "install_path": str(extension_path)
+            })
+            logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
+
+        return results
+
+    def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[Path, Optional[str]]]:
+        """
+        Check if Roo extension exists for a specific IDE and extract version.
+
         Args:
             user_home: User's home directory path
-            ide_name: Name of the IDE to check
-            
+            ide_name: Name of the IDE folder to check
+
         Returns:
-            Path to extension settings or extension directory if found, None otherwise
+            Tuple of (extension_path, version) if found, None otherwise
         """
-        # Windows VS Code/Cursor/Windsurf global storage path
+        # Windows VS Code/Cursor/Windsurf global storage path (%APPDATA%)
         code_base = user_home / "AppData" / "Roaming"
-        settings_path = (
-            code_base / ide_name / "User" / "globalStorage" /
-            self.ROO_EXTENSION_ID / "settings" / "mcp_settings.json"
-        )
-        
+        extension_dir = code_base / ide_name / "User" / "globalStorage" / self.ROO_EXTENSION_ID
+
         try:
-            # Check if settings file exists
-            if settings_path.exists():
-                logger.debug(
-                    f"Found Roo extension settings for {ide_name} at: {settings_path}"
-                )
-                # Return the settings directory path (parent of mcp_settings.json)
-                return settings_path.parent
-            
-            # Also check if extension directory exists (extension installed but no settings yet)
-            extension_dir = settings_path.parent.parent
-            if extension_dir.exists():
-                logger.debug(
-                    f"Found Roo extension directory for {ide_name} at: {extension_dir}"
-                )
-                return extension_dir
-                
+            if not extension_dir.exists():
+                return None
+
+            logger.debug(f"Found Roo extension directory for {ide_name} at: {extension_dir}")
+
+            # Try to get version from package.json in the extension
+            version = self._get_extension_version(user_home, ide_name)
+
+            return extension_dir, version
+
         except (PermissionError, OSError) as e:
             logger.debug(f"Could not check Roo extension path for {ide_name}: {e}")
-        
+
         return None
 
+    def _check_antigravity_extension(self, user_home: Path) -> Optional[Tuple[Path, Optional[str]]]:
+        """
+        Check if Roo Code is installed in Antigravity.
+
+        Antigravity stores extensions in %USERPROFILE%\\.antigravity\\extensions\\extensions.json
+
+        Args:
+            user_home: User's home directory path
+
+        Returns:
+            Tuple of (extension_path, version) if found, None otherwise
+        """
+        extensions_json = user_home / ".antigravity" / "extensions" / "extensions.json"
+
+        try:
+            if not extensions_json.exists():
+                return None
+
+            with open(extensions_json, 'r', encoding='utf-8') as f:
+                extensions = json.load(f)
+
+            for ext in extensions:
+                ext_id = ext.get('identifier', {}).get('id', '').lower()
+                if ext_id == self.ROO_EXTENSION_ID.lower():
+                    version = ext.get('version')
+                    location = ext.get('location', {})
+                    ext_path = location.get('path') or location.get('fsPath')
+                    if ext_path:
+                        return Path(ext_path), version
+                    rel_location = ext.get('relativeLocation')
+                    if rel_location:
+                        ext_path = user_home / ".antigravity" / "extensions" / rel_location
+                        return ext_path, version
+
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug(f"Could not check Antigravity extensions: {e}")
+
+        return None
+
+    def _get_extension_version(self, user_home: Path, ide_name: str) -> Optional[str]:
+        """
+        Try to extract Roo Code version from the extension's package.json.
+
+        Args:
+            user_home: User's home directory path
+            ide_name: Name of the IDE folder
+
+        Returns:
+            Version string if found, None otherwise
+        """
+        # Check extensions directory for the roo-cline extension
+        extensions_dir = user_home / ".vscode" / "extensions"
+        if ide_name == "Cursor":
+            extensions_dir = user_home / ".cursor" / "extensions"
+        elif ide_name == "Windsurf":
+            extensions_dir = user_home / ".windsurf" / "extensions"
+
+        try:
+            if extensions_dir.exists():
+                for ext_dir in extensions_dir.glob("rooveterinaryinc.roo-cline-*"):
+                    package_json = ext_dir / "package.json"
+                    if package_json.exists():
+                        try:
+                            with open(package_json, 'r', encoding='utf-8') as f:
+                                data = json.load(f)
+                                return data.get('version')
+                        except (json.JSONDecodeError, OSError):
+                            pass
+                    # Fallback: extract version from folder name
+                    if "-" in ext_dir.name:
+                        try:
+                            return ext_dir.name.rsplit('-', 1)[1]
+                        except IndexError:
+                            pass
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check extensions directory: {e}")
+
+        return None

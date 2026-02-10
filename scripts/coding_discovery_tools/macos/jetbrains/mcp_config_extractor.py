@@ -264,13 +264,16 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         return mcp_servers
 
     def _detect_project_rules(self, project_path: Path) -> List[Dict]:
+        """
+        Detect project-level rules in a JetBrains project.
+        """
         rules = []
         candidates = [".cursorrules", ".windsurfrules", ".prompts", "GEMINI.md"]
         for c in candidates:
             p = project_path / c
             try:
                 if p.is_file():
-                    rule = self._read_rule_file(p)
+                    rule = self._read_rule_file(p, scope="project")
                     if rule:
                         rules.append(rule)
             except PermissionError:
@@ -281,7 +284,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             try:
                 if dir_path.is_dir():
                     for f in dir_path.glob("*.md"):
-                        rule = self._read_rule_file(f)
+                        rule = self._read_rule_file(f, scope="project")
                         if rule:
                             rules.append(rule)
             except PermissionError:
@@ -289,7 +292,10 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
         return rules
 
-    def _read_rule_file(self, path: Path) -> Optional[Dict]:
+    def _read_rule_file(self, path: Path, scope: str = "project") -> Optional[Dict]:
+        """
+        Return the metadata of a rule file.
+        """
         try:
             metadata = get_file_metadata(path)
             content, truncated = read_file_content(path, metadata['size'])
@@ -299,7 +305,8 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 "content": content,
                 "size": metadata['size'],
                 "last_modified": metadata['last_modified'],
-                "truncated": truncated
+                "truncated": truncated,
+                "scope": scope
             }
         except PermissionError:
             logger.debug(f"Permission denied reading rule file: {path}")

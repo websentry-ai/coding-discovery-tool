@@ -1,10 +1,16 @@
 """
 Claude Code settings extraction for Windows systems.
 
-Extracts permission settings from:
-- User Settings (global): %USERPROFILE%\.claude\settings.json
-- Project Settings: **\.claude\settings.json and **\.claude\settings.local.json
-- Enterprise Managed: C:\Program Files\ClaudeCode\managed-settings.json
+Extracts permission settings from 4 scopes (in priority order, highest to lowest):
+1. Managed Scope: C:\\Program Files\\ClaudeCode\\managed-settings.json
+2. Local Scope: **\\.claude\\settings.local.json (project-specific, not committed)
+3. Project Scope: **\\.claude\\settings.json (project-specific, committed)
+4. User Scope: %USERPROFILE%\\.claude\\settings.json (global user settings)
+
+For each settings file found, extracts:
+- Permissions: allow, deny, ask lists
+- MCP Servers: keys inside mcpServers
+- Policies: allowedMcpServers, deniedMcpServers
 """
 
 import json
@@ -230,12 +236,16 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
     ) -> None:
         """
         Extract settings files from a .claude directory.
-        
+
+        Extracts two types of project-level settings:
+        - settings.json: Project scope (committed to version control)
+        - settings.local.json: Local scope (not committed, user-specific overrides)
+
         Args:
             claude_dir: Path to .claude directory
             settings_list: List to populate with settings
         """
-        # Check for settings.json
+        # Check for settings.json (Project scope)
         settings_file = claude_dir / "settings.json"
         if settings_file.exists() and settings_file.is_file():
             try:
@@ -244,12 +254,12 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
                     settings_list.append(settings_dict)
             except Exception as e:
                 logger.debug(f"Error extracting settings from {settings_file}: {e}")
-        
-        # Check for settings.local.json
+
+        # Check for settings.local.json (Local scope - higher priority than project)
         settings_local_file = claude_dir / "settings.local.json"
         if settings_local_file.exists() and settings_local_file.is_file():
             try:
-                settings_dict = self._parse_settings_file(settings_local_file, "project")
+                settings_dict = self._parse_settings_file(settings_local_file, "local")
                 if settings_dict:
                     settings_list.append(settings_dict)
             except Exception as e:
@@ -277,61 +287,90 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
         
         return settings_list
 
-    def _parse_settings_file(self, settings_path: Path, settings_source: str) -> Optional[Dict]:
+    def _parse_settings_file(self, settings_path: Path, scope: str) -> Optional[Dict]:
         """
         Parse a settings.json file and extract permission settings.
-        
+
         Args:
             settings_path: Path to the settings.json file
-            settings_source: Source type ("user", "project", or "managed")
-            
+            scope: Scope type - one of:
+                   - "managed": Enterprise managed settings (highest priority)
+                   - "local": Project-local settings (.claude/settings.local.json)
+                   - "project": Project settings (.claude/settings.json)
+                   - "user": User global settings (~/.claude/settings.json)
+
         Returns:
             Settings dict or None if parsing fails
         """
         try:
             if not settings_path.exists() or not settings_path.is_file():
                 return None
-            
+
             # Use helper function to read file content (handles size limits)
             file_size = settings_path.stat().st_size
             content, truncated = read_file_content(settings_path, file_size)
-            
+
             # If file was truncated, we still try to parse what we have
             if truncated:
                 logger.warning(
                     f"Settings file {settings_path} was truncated due to size limit"
                 )
-            
+
             # Parse JSON
             try:
                 settings_data = json.loads(content)
             except json.JSONDecodeError as e:
                 logger.warning(f"Invalid JSON in settings file {settings_path}: {e}")
                 return None
-            
+
             # Extract permissions and sandbox settings
             permissions = settings_data.get("permissions", {})
             sandbox = settings_data.get("sandbox", {})
-            
-            # Build settings dict
+
+            # Extract MCP servers (get the keys/names of configured servers)
+            mcp_servers = settings_data.get("mcpServers", {})
+            mcp_server_names = list(mcp_servers.keys()) if isinstance(mcp_servers, dict) else []
+
+            # Extract MCP policies
+            allowed_mcp_servers = settings_data.get("allowedMcpServers", [])
+            denied_mcp_servers = settings_data.get("deniedMcpServers", [])
+
+            logger.debug(f"Parsed settings from {settings_path}:")
+            logger.debug(f"  - Scope: {scope}")
+            logger.debug(f"  - Top-level keys in settings_data: {list(settings_data.keys())}")
+            logger.debug(f"  - Permissions keys: {list(permissions.keys())}")
+            logger.debug(f"  - Allow rules count: {len(permissions.get('allow', []))}")
+            logger.debug(f"  - Deny rules count: {len(permissions.get('deny', []))}")
+            logger.debug(f"  - Ask rules count: {len(permissions.get('ask', []))}")
+            logger.debug(f"  - MCP servers: {mcp_server_names}")
+
+            # Build settings dict with scope information
             settings_dict = {
                 "tool_name": "Claude Code",
-                "settings_source": settings_source,
+                "scope": scope,
                 "settings_path": str(settings_path),
-                "raw_settings": settings_data,  #full settings JSON for backend
+                "raw_settings": settings_data,  # full settings JSON for backend
                 "permissions": {
                     "defaultMode": permissions.get("defaultMode"),
                     "allow": permissions.get("allow", []),
                     "deny": permissions.get("deny", []),
+                    "ask": permissions.get("ask", []),
                     "additionalDirectories": permissions.get("additionalDirectories", [])
+                },
+                "mcp_servers": mcp_server_names,
+                "mcp_policies": {
+                    "allowedMcpServers": allowed_mcp_servers,
+                    "deniedMcpServers": denied_mcp_servers
                 },
                 "sandbox": {
                     "enabled": sandbox.get("enabled")
                 }
             }
-            
+
+            logger.debug(f"Built settings dict with scope={scope}, {len(settings_dict.get('permissions', {}).get('allow', []))} allow rules, {len(settings_dict.get('permissions', {}).get('deny', []))} deny rules, {len(settings_dict.get('permissions', {}).get('ask', []))} ask rules")
+
             return settings_dict
-            
+
         except PermissionError as e:
             logger.warning(f"Permission denied reading settings file {settings_path}: {e}")
             return None

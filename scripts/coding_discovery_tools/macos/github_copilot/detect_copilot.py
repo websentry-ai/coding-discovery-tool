@@ -26,7 +26,11 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
     """
     Detects GitHub Copilot across VS Code and all JetBrains IDEs on macOS.
     """
-    tool_name: str = "GitHub Copilot"
+
+    @property
+    def tool_name(self) -> str:
+        """Return the name of the tool being detected."""
+        return "GitHub Copilot"
 
     def detect_copilot(self) -> List[Dict]:
         """

@@ -1168,11 +1168,18 @@ def main():
                         if "permissions" in tool_filtered:
                             perms = tool_filtered.get("permissions", {})
                             logger.info(f"  │ Permissions: ✓ Present")
-                            logger.info(f"  │   Source: {perms.get('settings_source', 'unknown')}")
+                            logger.info(f"  │   Scope: {perms.get('scope', 'unknown')}")
                             logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
                             logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
                             logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
                             logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
+                            logger.info(f"  │   Ask Rules: {len(perms.get('ask_rules', []))}")
+                            if perms.get('mcp_servers'):
+                                logger.info(f"  │   MCP Servers: {len(perms.get('mcp_servers', []))}")
+                            if perms.get('mcp_policies'):
+                                policies = perms.get('mcp_policies', {})
+                                if policies.get('allowedMcpServers') or policies.get('deniedMcpServers'):
+                                    logger.info(f"  │   MCP Policies: allowed={len(policies.get('allowedMcpServers', []))}, denied={len(policies.get('deniedMcpServers', []))}")
                             logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
                         else:
                             logger.info(f"  │ Permissions: ✗ Not present")

@@ -81,8 +81,9 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
 
 
 def extract_single_rule_file(
-    rule_file: Path, 
-    find_project_root_func: Optional[Callable[[Path], Path]] = None
+    rule_file: Path,
+    find_project_root_func: Optional[Callable[[Path], Path]] = None,
+    scope: str = None
 ) -> Optional[Dict]:
     """
     Extract a single rule file with metadata.
@@ -104,6 +105,9 @@ def extract_single_rule_file(
         project_root = (find_project_root_func or find_project_root)(rule_file)
         content, truncated = read_file_content(rule_file, file_metadata['size'])
 
+        if scope is None:
+            scope = _detect_rule_scope(rule_file)
+
         return {
             "file_path": str(rule_file),
             "file_name": rule_file.name,
@@ -111,7 +115,8 @@ def extract_single_rule_file(
             "content": content,
             "size": file_metadata['size'],
             "last_modified": file_metadata['last_modified'],
-            "truncated": truncated
+            "truncated": truncated,
+            "scope": scope
         }
 
     except PermissionError as e:
@@ -123,6 +128,33 @@ def extract_single_rule_file(
     except Exception as e:
         logger.warning(f"Error reading rule file {rule_file}: {e}")
         return None
+
+
+def _detect_rule_scope(rule_file: Path) -> str:
+    """
+    Detect the scope of a rule file based on its location.
+    """
+    try:
+        home = Path.home()
+        rule_path = rule_file.resolve()
+
+        # Check if the rule file is in the user's home config directory
+        # e.g., ~/.cursor/, ~/.claude/, ~/.windsurf/, etc.
+        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity"]:
+            user_config_dir = home / config_dir_name
+            if user_config_dir.exists():
+                try:
+                    # Check if rule_file is under the user's config directory
+                    rule_path.relative_to(user_config_dir)
+                    return "user"
+                except ValueError:
+                    # Not relative to this config dir, continue checking
+                    pass
+
+        # Default to project scope
+        return "project"
+    except Exception:
+        return "project"
 
 
 def get_file_metadata(rule_file: Path) -> Dict[str, int]:

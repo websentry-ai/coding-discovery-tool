@@ -122,7 +122,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                             rule_info = self._extract_rule_with_scope(
                                 rule_file,
                                 find_github_copilot_project_root,
-                                scope="Global"
+                                scope="user"
                             )
                             if rule_info:
                                 project_root = rule_info.get('project_root')
@@ -158,7 +158,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     rule_info = self._extract_rule_with_scope(
                         jetbrains_rule_path,
                         find_github_copilot_project_root,
-                        scope="Global"
+                        scope="user"
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -241,7 +241,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     rule_info = self._extract_rule_with_scope(
                         copilot_instructions,
                         find_github_copilot_project_root,
-                        scope="Workspace"
+                        scope="project"
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -284,7 +284,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                                 rule_info = self._extract_rule_with_scope(
                                     copilot_instructions,
                                     find_github_copilot_project_root,
-                                    scope="Workspace"
+                                    scope="project"
                                 )
                                 if rule_info:
                                     project_root = rule_info.get('project_root')
@@ -313,7 +313,15 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         scope: str
     ) -> Dict:
         """
-        Extract a single rule file with metadata.
+        Extract a single rule file with metadata including scope.
+
+        Args:
+            rule_file: Path to the rule file
+            find_project_root_func: Function to find project root
+            scope: Scope of the rule ("user" for global rules, "project" for workspace rules)
+
+        Returns:
+            Dict with file info including scope, or None if extraction fails
         """
         try:
             if not rule_file.exists() or not rule_file.is_file():
@@ -330,7 +338,8 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 "content": content,
                 "size": file_metadata['size'],
                 "last_modified": file_metadata['last_modified'],
-                "truncated": truncated
+                "truncated": truncated,
+                "scope": scope
             }
 
         except PermissionError as e:

@@ -641,10 +641,15 @@ class AIToolsDetector:
         logger.info(f"  Extracting {tool_name} MCP configs...")
         if self._jetbrains_mcp_extractor and config_path:
             try:
+
+                config_path_obj = Path(config_path)
+                user_home = config_path_obj.parent.parent.parent.parent
+
                 # Call the extractor's method for a single IDE
                 ide_projects = self._jetbrains_mcp_extractor._extract_ide_projects(
-                    Path(config_path),
-                    tool.get("_ide_folder", tool_name)
+                    config_path_obj,
+                    tool.get("_ide_folder", tool_name),
+                    user_home
                 )
 
                 if ide_projects:

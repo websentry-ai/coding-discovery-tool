@@ -11,6 +11,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
+from ...mcp_extraction_helpers import extract_ide_global_configs_with_root_support
 
 logger = logging.getLogger(__name__)
 
@@ -33,39 +34,34 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         ".vscode/mcp.json",
     ]
 
-    @property
-    def _user_home(self) -> Path:
-        """
-        Dynamically determine user home directory.
-
-        Uses self.user_home if available (for multi-user scans),
-        otherwise falls back to Path.home() (single-user mode).
-        """
-        if hasattr(self, 'user_home') and self.user_home:
-            return self.user_home
-        return Path.home()
-
-    @property
-    def jetbrains_config_dir(self) -> Path:
-        """
-        Dynamically determine JetBrains config directory based on target user.
-
-        Uses self.user_home if available (for multi-user scans),
-        otherwise falls back to Path.home() (single-user mode).
-        """
-        return self._user_home / "Library" / "Application Support" / "JetBrains"
-
     def extract_mcp_config(self) -> Optional[Dict]:
-        """Extract MCP configuration from JetBrains IDEs."""
-        all_projects = []
+        """
+        Extract MCP configuration from JetBrains IDEs.
 
-        jetbrains_root = self.jetbrains_config_dir
+        When running as root, collects configs from ALL user directories.
+        """
+        all_projects = extract_ide_global_configs_with_root_support(
+            self._extract_jetbrains_projects_for_user,
+            tool_name="JetBrains"
+        )
+
+        if not all_projects:
+            return None
+
+        return {"projects": all_projects}
+
+    def _extract_jetbrains_projects_for_user(self, user_home: Path) -> List[Dict]:
+        """
+        Extract JetBrains MCP projects for a specific user.
+        """
+        all_projects = []
+        jetbrains_root = user_home / "Library" / "Application Support" / "JetBrains"
 
         logger.info(f"Scanning JetBrains configs at {jetbrains_root}")
 
         if not jetbrains_root.exists():
             logger.debug(f"JetBrains config directory not found: {jetbrains_root}")
-            return None
+            return all_projects
 
         try:
             for folder in os.listdir(jetbrains_root):
@@ -77,7 +73,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 if not any(pattern in folder for pattern in self.IDE_PATTERNS):
                     continue
 
-                ide_projects = self._extract_ide_projects(folder_path, folder)
+                ide_projects = self._extract_ide_projects(folder_path, folder, user_home)
                 all_projects.extend(ide_projects)
 
         except PermissionError as e:
@@ -89,13 +85,14 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         except Exception as e:
             logger.warning(f"Error scanning {jetbrains_root}: {e}")
 
-        if not all_projects:
-            return None
+        return all_projects
 
-        return {"projects": all_projects}
-
-    def _extract_ide_projects(self, config_path: Path, ide_name: str) -> List[Dict]:
-        """Extract recent projects from a specific JetBrains IDE configuration."""
+    def _extract_ide_projects(
+        self, config_path: Path, ide_name: str, user_home: Path
+    ) -> List[Dict]:
+        """
+        Extract recent projects from a specific JetBrains IDE configuration.
+        """
         projects = []
 
         ide_mcp_servers = self._extract_ide_mcp_servers(config_path)
@@ -115,7 +112,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             return projects
 
         for project_path_str in project_paths:
-            project_path_str = self._normalize_path(project_path_str)
+            project_path_str = self._normalize_path(project_path_str, user_home)
             project_path = Path(project_path_str)
 
             # Gracefully handle permission issues on individual project dirs
@@ -163,9 +160,11 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         indicators = ["$USER_HOME$", "/Users/", "/home/", "~/"]
         return any(ind in val for ind in indicators) or val.startswith("/")
 
-    def _normalize_path(self, path: str) -> str:
-        """Normalize paths using the target user's home directory."""
-        home_str = str(self._user_home)
+    def _normalize_path(self, path: str, user_home: Path) -> str:
+        """
+        Normalize paths using the target user's home directory.
+        """
+        home_str = str(user_home)
 
         path = path.replace("$USER_HOME$", home_str)
         path = path.replace("$HOME$", home_str)

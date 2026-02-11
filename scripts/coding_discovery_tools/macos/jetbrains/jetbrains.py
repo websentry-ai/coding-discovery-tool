@@ -11,21 +11,13 @@ from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
+from ...macos_extraction_helpers import is_running_as_root
 
 logger = logging.getLogger(__name__)
 
 
 class MacOSJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for macOS systems."""
-
-    @property
-    def jetbrains_config_dir(self) -> Path:
-        """
-        Return the JetBrains config directory.
-        """
-        if hasattr(self, 'user_home') and self.user_home:
-            return self.user_home / "Library" / "Application Support" / "JetBrains"
-        return Path.home() / "Library" / "Application Support" / "JetBrains"
 
     IDE_PATTERNS = [
         "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
@@ -112,22 +104,48 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     def _scan_for_ides(self) -> List[Dict]:
         """
         Scan JetBrains config directory for IDE installations.
+
+        When running as root, scans all user directories in /Users.
+        """
+        all_detected_ides = []
+
+        if is_running_as_root():
+            users_dir = Path("/Users")
+            if users_dir.exists():
+                for user_dir in users_dir.iterdir():
+                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                        try:
+                            user_ides = self._scan_jetbrains_config_dir(user_dir)
+                            all_detected_ides.extend(user_ides)
+                        except (PermissionError, OSError) as e:
+                            logger.debug(f"Skipping user directory {user_dir}: {e}")
+                            continue
+
+        home_ides = self._scan_jetbrains_config_dir(Path.home())
+        all_detected_ides.extend(home_ides)
+
+        return self._filter_old_versions(all_detected_ides)
+
+    def _scan_jetbrains_config_dir(self, user_home: Path) -> List[Dict]:
+        """
+        Scan JetBrains config directory for a specific user.
         """
         detected_ides = []
+        jetbrains_config_dir = user_home / "Library" / "Application Support" / "JetBrains"
 
-        if not self.jetbrains_config_dir.exists():
-            logger.debug(f"JetBrains config directory not found: {self.jetbrains_config_dir}")
+        if not jetbrains_config_dir.exists():
+            logger.debug(f"JetBrains config directory not found: {jetbrains_config_dir}")
             return detected_ides
 
         try:
-            items = os.listdir(self.jetbrains_config_dir)
+            items = os.listdir(jetbrains_config_dir)
         except Exception as e:
-            logger.warning(f"Error listing directory {self.jetbrains_config_dir}: {e}")
+            logger.warning(f"Error listing directory {jetbrains_config_dir}: {e}")
             return []
 
         for folder in items:
             try:
-                folder_path = self.jetbrains_config_dir / folder
+                folder_path = jetbrains_config_dir / folder
 
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
@@ -158,7 +176,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                 # Log warning but continue to next folder
                 logger.warning(f"Skipping potential IDE folder '{folder}' due to error: {e}")
 
-        return self._filter_old_versions(detected_ides)
+        return detected_ides
 
     def _parse_ide_name_and_version(self, folder_name: str) -> tuple:
         """

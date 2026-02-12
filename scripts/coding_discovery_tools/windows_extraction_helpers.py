@@ -133,14 +133,17 @@ def extract_single_rule_file(
 def _detect_rule_scope(rule_file: Path) -> str:
     """
     Detect the scope of a rule file based on its location.
+
+    Returns "user" for rules in the user's home directory config folders,
+    "project" for rules in project directories.
     """
     try:
         home = Path.home()
         rule_path = rule_file.resolve()
 
         # Check if the rule file is in the user's home config directory
-        # e.g., ~/.cursor/, ~/.claude/, ~/.windsurf/, etc.
-        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity"]:
+        # e.g., ~/.cursor/, ~/.claude/, ~/.windsurf/, ~/.roo/, ~/.gemini/, etc.
+        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"]:
             user_config_dir = home / config_dir_name
             if user_config_dir.exists():
                 try:

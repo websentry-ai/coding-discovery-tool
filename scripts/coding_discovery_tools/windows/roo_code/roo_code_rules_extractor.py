@@ -67,46 +67,13 @@ class WindowsRooRulesExtractor(BaseRooRulesExtractor):
             try:
                 for rule_file in global_rules_path.glob("*.md"):
                     if rule_file.is_file():
-                        rule_info = self._extract_single_rule_file_with_root(rule_file)
+                        rule_info = extract_single_rule_file(rule_file, find_roo_project_root)
                         if rule_info:
                             project_root = rule_info.get('project_root')
                             if project_root:
                                 add_rule_to_project(rule_info, project_root, projects_by_root)
             except Exception as e:
                 logger.debug(f"Error extracting global Roo Code rules: {e}")
-
-    def _extract_single_rule_file_with_root(self, rule_file: Path) -> Dict:
-        """
-        Extract a single rule file with metadata using Roo-specific project root finder.
-        """
-        try:
-            if not rule_file.exists() or not rule_file.is_file():
-                return None
-
-            from ...windows_extraction_helpers import get_file_metadata, read_file_content
-            file_metadata = get_file_metadata(rule_file)
-            project_root = find_roo_project_root(rule_file)
-            content, truncated = read_file_content(rule_file, file_metadata['size'])
-
-            return {
-                "file_path": str(rule_file),
-                "file_name": rule_file.name,
-                "project_root": str(project_root) if project_root else None,
-                "content": content,
-                "size": file_metadata['size'],
-                "last_modified": file_metadata['last_modified'],
-                "truncated": truncated
-            }
-
-        except PermissionError as e:
-            logger.warning(f"Permission denied reading {rule_file}: {e}")
-            return None
-        except UnicodeDecodeError as e:
-            logger.warning(f"Unable to decode {rule_file} as text: {e}")
-            return None
-        except Exception as e:
-            logger.warning(f"Error reading rule file {rule_file}: {e}")
-            return None
 
     def _extract_project_level_rules(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
@@ -195,7 +162,7 @@ class WindowsRooRulesExtractor(BaseRooRulesExtractor):
                 if item.is_dir() and (item.name == "rules" or item.name.startswith("rules-")):
                     for rule_file in item.glob("*.md"):
                         if rule_file.is_file():
-                            rule_info = self._extract_single_rule_file_with_root(rule_file)
+                            rule_info = extract_single_rule_file(rule_file, find_roo_project_root)
                             if rule_info:
                                 project_root = rule_info.get('project_root')
                                 if project_root:

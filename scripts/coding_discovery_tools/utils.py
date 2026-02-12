@@ -4,13 +4,17 @@ Utility functions shared across the AI tools discovery system
 
 import json
 import logging
+import os
 import platform
 import re
 import subprocess
+import time
+import traceback
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .constants import COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
@@ -219,73 +223,289 @@ def normalize_url(domain: str) -> str:
     
     return url.rstrip('/')
 
-def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None) -> bool:
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
-    Send discovery report to backend endpoint.
-    
+    Send discovery report to backend endpoint with retry logic.
+
+    Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
+    Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
+
     Args:
         backend_url: Backend URL to send the report to
         api_key: API key for authentication
         report: Report dictionary to send
         app_name: Optional application name (e.g., JumpCloud) to include in request body
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+        sentry_context: Optional context dict forwarded to Sentry on failure
 
-    # Validate API key
+    Returns:
+        Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
+    """
+    NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
+    MAX_ATTEMPTS = 3
+    BACKOFF_SECONDS = [2, 4]
+
+    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+    ctx = sentry_context or {}
+
     if not api_key or not api_key.strip():
         logger.error("API key is empty or missing. Please provide a valid API key.")
-        return False
+        return (False, False)
 
+    payload = dict(report)
     if app_name:
-        report["app_name"] = app_name
-    
-    data = json.dumps(report).encode('utf-8')
-    
-    req = urllib.request.Request(url, data=data, method='POST')
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "AI-Tools-Discovery/1.0")
-    
-    try:
-        with urllib.request.urlopen(req) as response:
-            return response.getcode() in (200, 201)
-    except urllib.error.HTTPError as e:
-        # Read response body for detailed error message
-        error_body = None
+        payload["app_name"] = app_name
+
+    data = json.dumps(payload).encode('utf-8')
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        req = urllib.request.Request(url, data=data, method='POST')
+        req.add_header("Authorization", f"Bearer {api_key}")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", "AI-Tools-Discovery/1.0")
+
         try:
-            error_body = e.read().decode('utf-8')
-        except Exception:
-            pass
-        
-        logger.error(f"Failed to send report: {e.code} - {e.reason}")
-        
-        # Provide specific guidance for 403 errors (authentication issues)
-        if e.code == 403:
-            # Check for Cloudflare/WAF error code 1010
-            if error_body and "1010" in error_body:
-                logger.error("403 Forbidden - Cloudflare/WAF blocked the request (Error 1010)")
-                logger.error("  This typically means:")
-                logger.error("  - The request was blocked by Cloudflare security rules")
-                logger.error("  - IP address may be flagged or rate-limited")
-                logger.error("  - Request signature doesn't match expected pattern")
-                logger.error("  - Missing or invalid User-Agent header")
-                logger.error("  Solution: Contact backend team to whitelist the IP or adjust WAF rules")
+            with urllib.request.urlopen(req) as response:
+                if 200 <= response.getcode() < 300:
+                    return (True, False)
+        except urllib.error.HTTPError as e:
+            error_body = _read_error_body(e)
+            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {e.code} - {e.reason}")
+            _log_http_error_details(e.code, error_body)
+
+            if e.code in NON_RETRYABLE_CODES:
+                report_to_sentry(
+                    e,
+                    {**ctx, "phase": "send_report", "http_code": e.code, "attempt": attempt},
+                    level="warning",
+                )
+                return (False, False)
+
+            if attempt < MAX_ATTEMPTS:
+                _backoff(attempt, BACKOFF_SECONDS)
             else:
-                logger.error("403 Forbidden - Authentication failed. Possible causes:")
-                logger.error("  - API key is invalid or expired")
-                logger.error("  - API key does not have required permissions")
-                logger.error("  - API key format is incorrect")
-            if error_body:
-                logger.error(f"  Backend message: {error_body}")
-        
-        # Log response body for other errors too
-        elif error_body:
-            logger.error(f"Backend response: {error_body}")
-        
-        return False
+                report_to_sentry(
+                    e,
+                    {**ctx, "phase": "send_report", "http_code": e.code, "attempt": attempt},
+                    level="warning",
+                )
+                return (False, True)
+
+        except Exception as e:
+            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
+
+            if attempt < MAX_ATTEMPTS:
+                _backoff(attempt, BACKOFF_SECONDS)
+            else:
+                report_to_sentry(
+                    e,
+                    {**ctx, "phase": "send_report", "attempt": attempt},
+                    level="warning",
+                )
+                return (False, True)
+
+    return (False, True)
+
+
+def _read_error_body(error: urllib.error.HTTPError) -> Optional[str]:
+    """Read and decode the response body from an HTTPError."""
+    try:
+        return error.read().decode('utf-8')
+    except Exception:
+        return None
+
+
+def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
+    """Log contextual details for specific HTTP error codes."""
+    if code == 403:
+        if error_body and "1010" in error_body:
+            logger.error("403 Forbidden - Cloudflare/WAF blocked the request (Error 1010)")
+        else:
+            logger.error("403 Forbidden - Authentication failed. Check API key.")
+        if error_body:
+            logger.error(f"  Backend message: {error_body}")
+    elif error_body:
+        logger.error(f"Backend response: {error_body}")
+
+
+def _backoff(attempt: int, delays: List[int]) -> None:
+    """Sleep for the backoff duration corresponding to the given attempt."""
+    wait = delays[attempt - 1]
+    logger.info(f"  Retrying in {wait}s...")
+    time.sleep(wait)
+
+
+# ---------------------------------------------------------------------------
+# Persistence: queue failed reports for the next run
+# ---------------------------------------------------------------------------
+
+QUEUE_FILE = Path("/var/tmp/ai-discovery-queue.json")
+QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
+
+
+def save_failed_reports(reports: List[Dict]) -> None:
+    """Write failed report envelopes to the queue file, merging with any existing entries."""
+    try:
+        existing = _load_queue_file_safe()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        envelopes = existing + [
+            {"report": r, "queued_at": now_iso} for r in reports
+        ]
+        _write_file_secure(QUEUE_FILE, json.dumps(envelopes).encode())
+        logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
     except Exception as e:
-        logger.error(f"Error sending report: {e}")
-        return False
+        logger.warning(f"Could not save failed reports: {e}")
+
+
+def load_pending_reports() -> List[Dict]:
+    """Load pending reports from the queue file and return the list.
+
+    Reports older than 24 hours are silently discarded.
+    """
+    if not QUEUE_FILE.exists():
+        return []
+
+    try:
+        envelopes = json.loads(QUEUE_FILE.read_text())
+    except Exception as e:
+        logger.warning(f"Could not load pending reports: {e}")
+        return []
+
+    now = datetime.now(timezone.utc)
+    valid: List[Dict] = []
+    for envelope in envelopes:
+        try:
+            queued_at = datetime.fromisoformat(envelope["queued_at"])
+            if (now - queued_at).total_seconds() > QUEUE_MAX_AGE_SECONDS:
+                logger.debug("Discarding stale queued report (older than 24h)")
+                continue
+            valid.append(envelope["report"])
+        except Exception:
+            # Malformed envelope -- keep the report data if present
+            valid.append(envelope.get("report", envelope))
+
+    expired_count = len(envelopes) - len(valid)
+    logger.info(f"Loaded {len(valid)} pending report(s) from queue ({expired_count} expired)")
+    return valid
+
+
+def _load_queue_file_safe() -> List[Dict]:
+    """Load existing queue file contents, returning an empty list on any error."""
+    if not QUEUE_FILE.exists():
+        return []
+    try:
+        return json.loads(QUEUE_FILE.read_text())
+    except Exception:
+        return []
+
+
+def _write_file_secure(path: Path, data: bytes) -> None:
+    """Write data to a file with restrictive permissions (0o600)."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Sentry error reporting via raw HTTP (no SDK dependency)
+# ---------------------------------------------------------------------------
+
+_SENTRY_DSN = "https://62a73a0043568547cb63a35394b63906@o4509196569149440.ingest.us.sentry.io/4510874666663936"
+
+
+def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
+    """Parse a Sentry DSN into its components."""
+    try:
+        # https://<key>@<host>/<project_id>
+        scheme_rest = dsn.split("://", 1)
+        scheme = scheme_rest[0]
+        key_host_project = scheme_rest[1]
+        key, host_project = key_host_project.split("@", 1)
+        host, project_id = host_project.rsplit("/", 1)
+        return {
+            "key": key,
+            "host": host,
+            "project_id": project_id,
+            "store_url": f"{scheme}://{host}/api/{project_id}/store/",
+        }
+    except Exception:
+        return None
+
+
+_SENTRY_TAG_KEYS = (
+    "device_id", "app_name", "api_key_suffix", "system_user",
+    "tool_name", "domain", "phase", "http_code",
+)
+
+
+def report_to_sentry(
+    exception: Exception,
+    context: Optional[Dict] = None,
+    level: str = "error",
+) -> None:
+    """Send an event to Sentry using the raw HTTP store endpoint.
+
+    Args:
+        exception: The exception to report.
+        context: Extra tags/context (e.g. phase, tool_name, http_code).
+        level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+    """
+    try:
+        dsn = _parse_sentry_dsn(_SENTRY_DSN)
+        if not dsn:
+            return
+
+        ctx = context or {}
+
+        tags = {
+            "os": platform.system(),
+            "hostname": platform.node(),
+            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
+        }
+
+        payload = {
+            "event_id": os.urandom(16).hex(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "platform": "python",
+            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
+            "tags": tags,
+            "exception": {
+                "values": [
+                    {
+                        "type": type(exception).__name__,
+                        "value": str(exception),
+                        "stacktrace": {"frames": _extract_frames(exception)},
+                    }
+                ]
+            },
+            "extra": ctx,
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(dsn["store_url"], data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header(
+            "X-Sentry-Auth",
+            f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            logger.debug(f"Sentry event sent ({resp.getcode()})")
+    except Exception:
+        # Sentry failures must never crash the script
+        pass
+
+
+def _extract_frames(exception: Exception) -> List[Dict]:
+    """Convert exception traceback into Sentry-style frame dicts."""
+    if not exception.__traceback__:
+        return []
+    return [
+        {
+            "filename": frame.filename,
+            "lineno": frame.lineno,
+            "function": frame.name,
+        }
+        for frame in traceback.extract_tb(exception.__traceback__)
+    ]

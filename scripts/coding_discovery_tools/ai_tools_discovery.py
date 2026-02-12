@@ -856,13 +856,13 @@ class AIToolsDetector:
                 self.extract_all_windsurf_rules
             )
         
-        elif tool_name == "roo code":
+        elif tool_name.startswith("roo code"):
             projects_dict = self._process_tool_with_mcp_only(
                 tool,
                 self._roo_mcp_extractor
             )
         
-        elif tool_name == "cline":
+        elif tool_name.startswith("cline"):
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
                 self._cline_rules_extractor,

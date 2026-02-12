@@ -272,7 +272,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {e.code} - {e.reason}")
             _log_http_error_details(e.code, error_body)
 
-            if e.code in NON_RETRYABLE_CODES:
+            # Cloudflare 403s with error 1010 are transient rate limits — allow retry
+            is_cloudflare_block = e.code == 403 and error_body and "1010" in error_body
+            if e.code in NON_RETRYABLE_CODES and not is_cloudflare_block:
                 report_to_sentry(
                     e,
                     {**ctx, "phase": "send_report", "http_code": e.code, "attempt": attempt},
@@ -340,6 +342,7 @@ def _backoff(attempt: int, delays: List[int]) -> None:
 
 QUEUE_FILE = Path("/var/tmp/ai-discovery-queue.json")
 QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
+MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
 
 def save_failed_reports(reports: List[Dict]) -> None:
@@ -350,6 +353,8 @@ def save_failed_reports(reports: List[Dict]) -> None:
         envelopes = existing + [
             {"report": r, "queued_at": now_iso} for r in reports
         ]
+        # Keep only the most recent entries to prevent unbounded growth
+        envelopes = envelopes[-MAX_QUEUE_SIZE:]
         _write_file_secure(QUEUE_FILE, json.dumps(envelopes).encode())
         logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
     except Exception as e:
@@ -399,12 +404,14 @@ def _load_queue_file_safe() -> List[Dict]:
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
-    """Write data to a file with restrictive permissions (0o600)."""
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Write data atomically to a file with restrictive permissions (0o600)."""
+    tmp_path = path.with_suffix(".tmp")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, data)
     finally:
         os.close(fd)
+    os.rename(str(tmp_path), str(path))
 
 
 # ---------------------------------------------------------------------------

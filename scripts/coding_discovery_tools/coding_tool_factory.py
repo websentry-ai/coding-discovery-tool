@@ -16,6 +16,7 @@ from .coding_tool_base import (
     BaseClaudeRulesExtractor,
     BaseWindsurfRulesExtractor,
     BaseClineRulesExtractor,
+    BaseRooRulesExtractor,
     BaseAntigravityRulesExtractor,
     BaseKiloCodeRulesExtractor,
     BaseGeminiCliRulesExtractor,
@@ -47,10 +48,12 @@ from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
 # macOS - Roo Code
 from .macos.roo_code.roo_code import MacOSRooDetector
 from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
+from .macos.roo_code.roo_code_rules_extractor import MacOSRooRulesExtractor
 
 # Windows - Roo Code
 from .windows.roo_code.roo_code import WindowsRooDetector
 from .windows.roo_code.mcp_config_extractor import WindowsRooMCPConfigExtractor
+from .windows.roo_code.roo_code_rules_extractor import WindowsRooRulesExtractor
 
 # macOS - Cline
 from .macos.cline.cline import MacOSClineDetector
@@ -769,6 +772,25 @@ class RooMCPConfigExtractorFactory:
             return MacOSRooMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsRooMCPConfigExtractor()
+        else:
+            return None
+
+
+class RooRulesExtractorFactory:
+    """Factory for creating OS-specific Roo Code rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseRooRulesExtractor]:
+        """
+        Create Roo Code rules extractor for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSRooRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsRooRulesExtractor()
         else:
             return None
 

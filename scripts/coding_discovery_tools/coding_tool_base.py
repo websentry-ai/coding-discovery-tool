@@ -140,6 +140,22 @@ class BaseClineRulesExtractor(ABC):
         pass
 
 
+class BaseRooRulesExtractor(ABC):
+    """Abstract base class for extracting Roo Code rules from all projects."""
+
+    @abstractmethod
+    def extract_all_roo_rules(self) -> List[Dict]:
+        """
+        Extract all Roo Code rules from all projects on the machine.
+
+        Searches for:
+        - Workspace-level rules: **/.roo/rules/*.md (recursive)
+        - Mode-specific rules: **/.roo/rules-{mode}/*.md (e.g., rules-architect/)
+        - Global rules: ~/Documents/Roo/Rules/*.md or ~/Roo/Rules/*.md
+        """
+        pass
+
+
 class BaseAntigravityRulesExtractor(ABC):
     """Abstract base class for extracting Antigravity rules from all projects."""
 

@@ -157,7 +157,7 @@ def _detect_rule_scope(rule_file: Path) -> str:
         home = Path.home()
         rule_path = rule_file.resolve()
 
-        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity"]:
+        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"]:
             user_config_dir = home / config_dir_name
             if user_config_dir.exists():
                 try:

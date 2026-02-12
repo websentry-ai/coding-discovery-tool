@@ -23,6 +23,7 @@ try:
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
         ClineRulesExtractorFactory,
+        RooRulesExtractorFactory,
         AntigravityRulesExtractorFactory,
         KiloCodeRulesExtractorFactory,
         GeminiCliRulesExtractorFactory,
@@ -58,6 +59,7 @@ except ImportError:
         ClaudeRulesExtractorFactory,
         WindsurfRulesExtractorFactory,
         ClineRulesExtractorFactory,
+        RooRulesExtractorFactory,
         AntigravityRulesExtractorFactory,
         KiloCodeRulesExtractorFactory,
         GeminiCliRulesExtractorFactory,
@@ -123,7 +125,7 @@ class AIToolsDetector:
             self._windsurf_rules_extractor = WindsurfRulesExtractorFactory.create(self.system)
             self._windsurf_mcp_extractor = WindsurfMCPConfigExtractorFactory.create(self.system)
             
-            # Initialize Roo Code extractors (MCP only)
+            self._roo_rules_extractor = RooRulesExtractorFactory.create(self.system)
             self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
             
             # Initialize Cline extractors (macOS only, returns None for unsupported OS)
@@ -262,6 +264,18 @@ class AIToolsDetector:
             return self._windsurf_rules_extractor.extract_all_windsurf_rules()
         except Exception as e:
             logger.error(f"Error extracting Windsurf rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_roo_rules(self) -> List[Dict]:
+        """
+        Extract all Roo Code rules from all projects.
+        """
+        try:
+            if self._roo_rules_extractor:
+                return self._roo_rules_extractor.extract_all_roo_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Roo Code rules: {e}", exc_info=True)
             return []
 
     def extract_all_antigravity_rules(self) -> List[Dict]:
@@ -857,9 +871,11 @@ class AIToolsDetector:
             )
         
         elif tool_name.startswith("roo code"):
-            projects_dict = self._process_tool_with_mcp_only(
+            projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
-                self._roo_mcp_extractor
+                self._roo_rules_extractor,
+                self._roo_mcp_extractor,
+                self.extract_all_roo_rules
             )
         
         elif tool_name.startswith("cline"):

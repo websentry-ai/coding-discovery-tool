@@ -83,6 +83,9 @@ from .macos.replit.replit import MacOSReplitDetector
 # macOS - OpenClaw
 from .macos.openclaw.detect_openclaw import MacOSOpenClawDetector
 
+# Windows - OpenClaw
+from .windows.openclaw.detect_openclaw import WindowsOpenClawDetector
+
 # macOS - Copilot
 from .macos.github_copilot.detect_copilot import MacOSCopilotDetector
 from .macos.github_copilot.mcp_config_extractor import MacOSGitHubCopilotMCPConfigExtractor
@@ -437,6 +440,8 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSOpenClawDetector()
+        elif os_name == "Windows":
+            return WindowsOpenClawDetector()
         else:
             return None
 

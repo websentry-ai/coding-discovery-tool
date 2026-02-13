@@ -7,6 +7,7 @@ Only mocks: time.sleep (speed), QUEUE_FILE path (isolation), _SENTRY_DSN (no rea
 
 import json
 import os
+import platform
 import shutil
 import stat
 import tempfile
@@ -195,10 +196,11 @@ class TestPersistence(unittest.TestCase):
 
         save_failed_reports(reports)
 
-        # Queue file should exist with correct permissions
+        # Queue file should exist with correct permissions (Unix only)
         self.assertTrue(self._queue_path.exists())
-        file_mode = oct(self._queue_path.stat().st_mode & 0o777)
-        self.assertEqual(file_mode, oct(0o600))
+        if platform.system() != "Windows":
+            file_mode = oct(self._queue_path.stat().st_mode & 0o777)
+            self.assertEqual(file_mode, oct(0o600))
 
         # Load and verify round-trip
         loaded = load_pending_reports()

@@ -137,6 +137,7 @@ class TestMainCLI(unittest.TestCase):
         result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
+    @unittest.skipIf(platform.system() == "Windows", "/var/tmp not available on Windows")
     def test_main_cli_with_queue_drain(self):
         # Pre-populate queue with a distinctive report
         queued_report = {
@@ -163,6 +164,7 @@ class TestMainCLI(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(queued_bodies), 1, "Queued report was not drained")
 
+    @unittest.skipIf(platform.system() == "Windows", "/var/tmp not available on Windows")
     def test_main_cli_persists_failures(self):
         self.server.default_code = 500
 
@@ -281,35 +283,40 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
     def test_filters_by_user_home(self):
         detector = AIToolsDetector()
+        # Use OS-agnostic paths so str(Path(...)) matches the project path strings
+        alice_home = str(Path(tempfile.gettempdir()) / "alice")
+        bob_home = str(Path(tempfile.gettempdir()) / "bob")
         tool = {
             "name": "TestTool",
             "version": "1.0",
-            "install_path": "/usr/local/bin/test",
+            "install_path": str(Path(tempfile.gettempdir()) / "bin" / "test"),
             "projects": [
-                {"path": "/Users/alice/project-a", "rules": [], "mcpServers": []},
-                {"path": "/Users/bob/project-b", "rules": [], "mcpServers": []},
-                {"path": "/Users/alice/project-c", "rules": [], "mcpServers": []},
+                {"path": os.path.join(alice_home, "project-a"), "rules": [], "mcpServers": []},
+                {"path": os.path.join(bob_home, "project-b"), "rules": [], "mcpServers": []},
+                {"path": os.path.join(alice_home, "project-c"), "rules": [], "mcpServers": []},
             ],
         }
 
-        filtered = detector.filter_tool_projects_by_user(tool, Path("/Users/alice"))
+        filtered = detector.filter_tool_projects_by_user(tool, Path(alice_home))
 
         self.assertEqual(len(filtered["projects"]), 2)
         paths = [p["path"] for p in filtered["projects"]]
-        self.assertIn("/Users/alice/project-a", paths)
-        self.assertIn("/Users/alice/project-c", paths)
-        self.assertNotIn("/Users/bob/project-b", paths)
+        self.assertIn(os.path.join(alice_home, "project-a"), paths)
+        self.assertIn(os.path.join(alice_home, "project-c"), paths)
+        self.assertNotIn(os.path.join(bob_home, "project-b"), paths)
 
     def test_no_matching_projects(self):
         detector = AIToolsDetector()
+        alice_home = str(Path(tempfile.gettempdir()) / "alice")
+        bob_home = str(Path(tempfile.gettempdir()) / "bob")
         tool = {
             "name": "TestTool",
             "projects": [
-                {"path": "/Users/bob/proj", "rules": []},
+                {"path": os.path.join(bob_home, "proj"), "rules": []},
             ],
         }
 
-        filtered = detector.filter_tool_projects_by_user(tool, Path("/Users/alice"))
+        filtered = detector.filter_tool_projects_by_user(tool, Path(alice_home))
         self.assertEqual(filtered["projects"], [])
 
 

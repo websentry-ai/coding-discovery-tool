@@ -23,8 +23,6 @@ from ...macos_extraction_helpers import (
 
 logger = logging.getLogger(__name__)
 
-# Junie rule file names
-GUIDELINES_MD = "guidelines.md"
 JUNIE_DIR_NAME = ".junie"
 
 
@@ -136,7 +134,7 @@ class MacOSJunieRulesExtractor(BaseJunieRulesExtractor):
                     if item.is_dir():
                         # Check if this is a .junie directory
                         if item.name == JUNIE_DIR_NAME:
-                            if item.parent.name in ('~', '') or str(item.parent).startswith('/Users/') and item.parent.parent == Path('/Users'):
+                            if item.parent.name in ('~', '') or (str(item.parent).startswith('/Users/') and item.parent.parent == Path('/Users')):
                                 continue
 
                             # Extract all .md files from this .junie directory

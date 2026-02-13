@@ -287,20 +287,6 @@ class BaseJunieRulesExtractor(ABC):
         pass
 
 
-class BaseJunieRulesExtractor(ABC):
-    """Abstract base class for extracting Junie rules from all projects."""
-
-    @abstractmethod
-    def extract_all_junie_rules(self) -> List[Dict]:
-        """
-        Extract all Junie rules from all projects on the machine.
-
-        Searches for:
-        - Global rules: ~/.junie/guidelines.md or any .md file in ~/.junie/
-        """
-        pass
-
-
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

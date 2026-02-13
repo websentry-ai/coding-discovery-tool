@@ -1047,7 +1047,6 @@ def main():
     # Build Sentry context that persists for the whole run
     sentry_ctx = {
         "domain": args.domain,
-        "api_key_suffix": args.api_key[-6:] if len(args.api_key) >= 6 else "",
         "app_name": args.app_name or "",
     }
 

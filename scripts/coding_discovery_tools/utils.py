@@ -264,7 +264,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         req.add_header("User-Agent", "AI-Tools-Discovery/1.0")
 
         try:
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=60) as response:
                 if 200 <= response.getcode() < 300:
                     return (True, False)
         except urllib.error.HTTPError as e:
@@ -411,7 +411,7 @@ def _write_file_secure(path: Path, data: bytes) -> None:
         os.write(fd, data)
     finally:
         os.close(fd)
-    os.rename(str(tmp_path), str(path))
+    os.replace(str(tmp_path), str(path))
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +441,7 @@ def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
 
 
 _SENTRY_TAG_KEYS = (
-    "device_id", "app_name", "api_key_suffix", "system_user",
+    "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
 )
 

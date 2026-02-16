@@ -44,7 +44,7 @@ try:
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
     )
-    from .utils import send_report_to_backend, get_user_info, get_all_users_macos
+    from .utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user
@@ -80,7 +80,7 @@ except ImportError:
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
@@ -1227,7 +1227,7 @@ def main():
                         logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
                         
                         if args.api_key and args.domain:
-                            if send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name):
+                            if send_report_to_backend_using_curl(args.domain, args.api_key, single_tool_report, args.app_name):
                                 logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                             else:
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")

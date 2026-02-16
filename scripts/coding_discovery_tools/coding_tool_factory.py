@@ -26,6 +26,7 @@ from .coding_tool_base import (
     BaseClaudeSettingsExtractor,
     BaseOpenClawDetector,
     BaseCopilotDetector,
+    BaseJunieRulesExtractor,
 )
 
 # macOS - Shared
@@ -114,6 +115,11 @@ from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
 # macOS - JetBrains
 from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
+
+# macOS - Junie
+from .macos.junie.junie import MacOSJunieDetector
+from .macos.junie.mcp_config_extractor import MacOSJunieMCPConfigExtractor
+from .macos.junie.junie_rules_extractor import MacOSJunieRulesExtractor
 
 # Windows - JetBrains
 from .windows.jetbrains.jetbrains import WindowsJetBrainsDetector
@@ -484,6 +490,19 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_junie_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Junie detector for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJunieDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -550,6 +569,10 @@ class ToolDetectorFactory:
         jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
         if jetbrains_detector is not None:
             detectors.append(jetbrains_detector)
+
+        junie_detector = ToolDetectorFactory.create_junie_detector(os_name)
+        if junie_detector is not None:
+            detectors.append(junie_detector)
 
         # Filter out None values
         return [detector for detector in detectors if detector is not None]
@@ -1154,5 +1177,51 @@ class GitHubCopilotRulesExtractorFactory:
             return MacOSGitHubCopilotRulesExtractor()
         elif os_name == "Windows":
             return WindowsGitHubCopilotRulesExtractor()
+        else:
+            return None
+
+
+class JunieMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Junie MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate Junie MCP config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJunieMCPConfigExtractor()
+        else:
+            return None
+
+
+class JunieRulesExtractorFactory:
+    """Factory for creating OS-specific Junie rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseJunieRulesExtractor]:
+        """
+        Create appropriate Junie rules extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseJunieRulesExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJunieRulesExtractor()
         else:
             return None

@@ -43,6 +43,8 @@ try:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        JunieMCPConfigExtractorFactory,
+        JunieRulesExtractorFactory,
     )
     from .utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -79,6 +81,8 @@ except ImportError:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        JunieMCPConfigExtractorFactory,
+        JunieRulesExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -157,6 +161,9 @@ class AIToolsDetector:
 
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
+
+            self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
+            self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -381,6 +388,18 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting GitHub Copilot rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_junie_rules(self) -> List[Dict]:
+        """
+        Extract all Junie rules from all projects.
+        """
+        try:
+            if self._junie_rules_extractor:
+                return self._junie_rules_extractor.extract_all_junie_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Junie rules: {e}", exc_info=True)
             return []
 
     def _process_tool_with_rules_and_mcp(
@@ -924,6 +943,14 @@ class AIToolsDetector:
                 self._opencode_rules_extractor,
                 self._opencode_mcp_extractor,
                 self.extract_all_opencode_rules
+            )
+
+        elif tool_name.lower() == "junie":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._junie_rules_extractor,
+                self._junie_mcp_extractor,
+                self.extract_all_junie_rules
             )
 
         # Check if this is a JetBrains IDE (has _ide_folder or _config_path)

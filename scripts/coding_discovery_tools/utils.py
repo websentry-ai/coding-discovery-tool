@@ -307,7 +307,7 @@ def send_report_to_backend_using_curl(backend_url: str, api_key: str, report: Di
     try:
         result = subprocess.run(
             [
-                "/usr/bin/curl",
+                "curl",
                 "-s", "-f",
                 "-X", "POST",
                 "-H", f"Authorization: Bearer {api_key}",

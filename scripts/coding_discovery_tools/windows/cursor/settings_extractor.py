@@ -104,15 +104,12 @@ class WindowsCursorSettingsExtractor(BaseCursorSettingsExtractor):
 
             shutil.copy2(db_path, temp_db_path)
 
-            # Connect and query
-            conn = sqlite3.connect(temp_db_path)
-            cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT value FROM ItemTable WHERE key = ?", (self.STORAGE_KEY,)
-            )
-            row = cursor.fetchone()
-            conn.close()
+            with sqlite3.connect(temp_db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT value FROM ItemTable WHERE key = ?", (self.STORAGE_KEY,)
+                )
+                row = cursor.fetchone()
 
             if not row:
                 logger.debug(f"No settings found in database at: {db_path}")

@@ -48,7 +48,7 @@ try:
         JunieRulesExtractorFactory,
     )
     from .utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
-    from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
+    from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details, log_cursor_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user
 except ImportError:
@@ -87,7 +87,7 @@ except ImportError:
         JunieRulesExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
-    from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
+    from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details, log_cursor_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
 
@@ -861,7 +861,7 @@ class AIToolsDetector:
                     if settings:
                         logger.info(f"  ✓ Found Cursor settings")
                         tool["_settings"] = settings
-                        log_settings_details([settings], tool_name)
+                        log_cursor_settings_details(settings, tool_name)
                     else:
                         logger.info("  ℹ No Cursor settings found")
                 except Exception as e:

@@ -198,3 +198,78 @@ def log_settings_details(settings: List[Dict], tool_name: str) -> None:
     logger.info(f"    └─ Total: {len(settings)} settings file(s)")
     logger.info("")
 
+
+def log_cursor_settings_details(settings: Dict, tool_name: str) -> None:
+    """
+    Log detailed information about Cursor IDE settings.
+
+    Cursor uses a flat structure with native field names, different from
+    Claude Code's nested permissions structure.
+
+    Args:
+        settings: Cursor settings dict (flat structure)
+        tool_name: Name of the tool (should be "Cursor")
+    """
+    if not settings:
+        logger.info("    No Cursor settings found")
+        return
+
+    logger.info("")
+    logger.info("    ┌─ Cursor Settings Summary ─────────────────────────────────────")
+
+    scope = settings.get("scope", "user")
+    settings_path = settings.get("settings_path", "Unknown")
+
+    logger.info(f"    │ Scope: {scope.upper()}")
+    logger.info(f"    │ Path: {settings_path}")
+
+    # YOLO Mode settings
+    yolo_enabled = settings.get("yolo_mode_enabled", False)
+    yolo_run_everything = settings.get("yolo_run_everything", False)
+    logger.info(f"    │")
+    logger.info(f"    │ YOLO Mode: {'ENABLED' if yolo_enabled else 'DISABLED'}")
+    if yolo_enabled:
+        logger.info(f"    │   Run Everything: {'Yes' if yolo_run_everything else 'No'}")
+
+    # Allowlist/Denylist
+    yolo_allowlist = settings.get("yolo_allowlist", [])
+    yolo_denylist = settings.get("yolo_denylist", [])
+    if yolo_allowlist:
+        logger.info(f"    │   Allowlist: {len(yolo_allowlist)} command(s)")
+        for idx, cmd in enumerate(yolo_allowlist[:5], 1):
+            logger.info(f"    │     {idx}. {cmd}")
+        if len(yolo_allowlist) > 5:
+            logger.info(f"    │     ... and {len(yolo_allowlist) - 5} more")
+    if yolo_denylist:
+        logger.info(f"    │   Denylist: {len(yolo_denylist)} command(s)")
+        for idx, cmd in enumerate(yolo_denylist[:5], 1):
+            logger.info(f"    │     {idx}. {cmd}")
+        if len(yolo_denylist) > 5:
+            logger.info(f"    │     ... and {len(yolo_denylist) - 5} more")
+
+    # Protection flags
+    logger.info(f"    │")
+    logger.info(f"    │ Protection Flags:")
+    dotfiles = settings.get("dotfiles_protection", True)
+    delete_file = settings.get("delete_file_protection", True)
+    outside_workspace = settings.get("outside_workspace_protection", True)
+    mcp_tools = settings.get("mcp_tools_protection", True)
+
+    logger.info(f"    │   Dotfiles Protection: {'ON' if dotfiles else 'OFF'}")
+    logger.info(f"    │   Delete File Protection: {'ON' if delete_file else 'OFF'}")
+    logger.info(f"    │   Outside Workspace Protection: {'ON' if outside_workspace else 'OFF'}")
+    logger.info(f"    │   MCP Tools Protection: {'ON' if mcp_tools else 'OFF'}")
+
+    # MCP Servers
+    mcp_servers = settings.get("mcp_servers", [])
+    if mcp_servers:
+        logger.info(f"    │")
+        logger.info(f"    │ MCP Allowed Tools: {len(mcp_servers)}")
+        for idx, server in enumerate(mcp_servers[:5], 1):
+            logger.info(f"    │   {idx}. {server}")
+        if len(mcp_servers) > 5:
+            logger.info(f"    │   ... and {len(mcp_servers) - 5} more")
+
+    logger.info(f"    └─────────────────────────────────────────────────────────────────")
+    logger.info("")
+

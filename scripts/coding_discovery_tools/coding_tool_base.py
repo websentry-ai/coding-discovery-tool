@@ -324,6 +324,17 @@ class BaseClaudeSettingsExtractor(ABC):
         pass
 
 
+class BaseCursorSettingsExtractor(ABC):
+    """Abstract base class for extracting Cursor IDE settings (permissions)."""
+
+    @abstractmethod
+    def extract_settings(self) -> Optional[Dict]:
+        """
+        Extract Cursor IDE permission settings from the SQLite database.
+        """
+        pass
+
+
 class BaseOpenClawDetector(BaseToolDetector):
     """
     Base class for detectors that only report OpenClaw presence/absence.

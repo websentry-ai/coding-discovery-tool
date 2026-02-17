@@ -24,6 +24,7 @@ from .coding_tool_base import (
     BaseOpenCodeRulesExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
+    BaseCursorSettingsExtractor,
     BaseOpenClawDetector,
     BaseCopilotDetector,
     BaseJunieRulesExtractor,
@@ -35,6 +36,7 @@ from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetec
 # macOS - Cursor
 from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
 from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
+from .macos.cursor.settings_extractor import MacOSCursorSettingsExtractor
 
 # macOS - Claude Code
 from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
@@ -141,6 +143,7 @@ from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsCla
 # Windows - Cursor
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
 from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
+from .windows.cursor.settings_extractor import WindowsCursorSettingsExtractor
 
 # Windows - Claude Code
 from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
@@ -714,6 +717,25 @@ class ClaudeSettingsExtractorFactory:
             return MacOSClaudeSettingsExtractor()
         elif os_name == "Windows":
             return WindowsClaudeSettingsExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class CursorSettingsExtractorFactory:
+    """Factory for creating OS-specific Cursor IDE settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseCursorSettingsExtractor:
+        """
+        Create appropriate Cursor IDE settings extractor for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCursorSettingsExtractor()
+        elif os_name == "Windows":
+            return WindowsCursorSettingsExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 

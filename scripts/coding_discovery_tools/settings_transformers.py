@@ -52,9 +52,23 @@ def _get_precedence(scope: str) -> int:
     return SETTINGS_PRECEDENCE.get(scope, DEFAULT_PRECEDENCE)
 
 
+def _has_permissions(settings_dict: Dict[str, Any]) -> bool:
+    """Check if settings dict has actual permission rules defined."""
+    permissions = settings_dict.get("permissions", {})
+    return bool(
+        permissions.get("defaultMode") or
+        permissions.get("allow") or
+        permissions.get("deny") or
+        permissions.get("ask")
+    )
+
+
 def _get_highest_precedence_setting(settings_list: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
-    Get the settings dict with the highest precedence.
+    Get the settings dict with the highest precedence that has permissions.
+
+    Prioritizes settings with actual permissions defined. Falls back to
+    highest precedence overall if no settings have permissions.
 
     Args:
         settings_list: List of settings dicts
@@ -64,6 +78,13 @@ def _get_highest_precedence_setting(settings_list: List[Dict[str, Any]]) -> Opti
     """
     if not settings_list:
         return None
+
+    settings_with_permissions = [s for s in settings_list if _has_permissions(s)]
+    if settings_with_permissions:
+        return max(
+            settings_with_permissions,
+            key=lambda s: _get_precedence(_get_scope_value(s))
+        )
 
     return max(
         settings_list,

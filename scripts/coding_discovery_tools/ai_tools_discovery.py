@@ -32,6 +32,7 @@ try:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
+        CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
@@ -70,6 +71,7 @@ except ImportError:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
+        CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
@@ -119,7 +121,8 @@ class AIToolsDetector:
             # Initialize Cursor extractors
             self._cursor_rules_extractor = CursorRulesExtractorFactory.create(self.system)
             self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
-            
+            self._cursor_settings_extractor = CursorSettingsExtractorFactory.create(self.system)
+
             # Initialize Claude Code extractors
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
@@ -733,8 +736,9 @@ class AIToolsDetector:
         
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
+            settings_source = perms.get('settings_source', '')
             settings_path = perms.get('settings_path', '')
-            if settings_path and not settings_path.startswith(user_home_str):
+            if settings_source != 'managed' and settings_path and not settings_path.startswith(user_home_str):
                 del filtered_tool['permissions']
         
         return filtered_tool
@@ -850,7 +854,21 @@ class AIToolsDetector:
                 self._cursor_mcp_extractor,
                 self.extract_all_cursor_rules
             )
-        
+
+            logger.info(f"  Extracting {tool_name} settings...")
+            if self._cursor_settings_extractor:
+                try:
+                    settings = self._cursor_settings_extractor.extract_settings()
+                    if settings:
+                        logger.info(f"  ✓ Found Cursor settings")
+                        tool["_settings"] = settings
+                    else:
+                        logger.info("  ℹ No Cursor settings found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+            else:
+                logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
+
         elif tool_name == "claude code":
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
@@ -988,14 +1006,19 @@ class AIToolsDetector:
         if "_config_path" in tool:
             tool_dict["_config_path"] = tool["_config_path"]
 
-        # Transform and add permissions if present (for Claude Code)
         logger.info(f"  Checking for settings in tool dict for {tool_name}...")
         logger.info(f"  Tool dict keys: {list(tool.keys())}")
-        
+
         if "_settings" in tool:
-            logger.info(f"  ✓ Found _settings in tool dict, count: {len(tool['_settings']) if tool['_settings'] else 0}")
             try:
-                permissions = transform_settings_to_backend_format(tool["_settings"])
+                if tool_name == "cursor":
+                    permissions = tool["_settings"]
+                    logger.info(f"  ✓ Found Cursor settings (backend-ready format)")
+                else:
+                    settings_list = tool["_settings"]
+                    logger.info(f"  ✓ Found _settings in tool dict, count: {len(settings_list) if settings_list else 0}")
+                    permissions = transform_settings_to_backend_format(settings_list)
+
                 if permissions:
                     tool_dict["permissions"] = permissions
                     logger.info(f"  ✓ Added permissions to {tool_name} report")
@@ -1006,8 +1029,7 @@ class AIToolsDetector:
             except Exception as e:
                 logger.error(f"Error transforming permissions for {tool_name}: {e}", exc_info=True)
         else:
-            logger.warning(f"  ✗ No _settings found in tool dict for {tool_name}")
-            logger.warning(f"  Available keys in tool: {list(tool.keys())}")
+            logger.debug(f"  ℹ No _settings found in tool dict for {tool_name}")
         
         return tool_dict
 

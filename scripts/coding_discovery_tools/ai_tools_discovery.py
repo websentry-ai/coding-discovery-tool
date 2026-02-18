@@ -1188,15 +1188,6 @@ def main():
                         # Filter projects to only include this user's projects
                         tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
                         
-                        # Skip if no projects for this user (but always send JetBrains tools
-                        # and tools like OpenClaw)
-                        is_copilot = "github copilot" in tool_name.lower()
-                        is_jetbrains = detector._is_jetbrains_tool(tool_with_projects)
-                        is_openclaw = tool_name.lower() == "openclaw"
-                        if not tool_filtered.get('projects') and not is_jetbrains and not is_openclaw and not is_copilot:
-                            logger.debug(f"    User {user_name}: No projects found for {tool_name}, skipping")
-                            continue
-                        
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
                         single_tool_report = detector.generate_single_tool_report(

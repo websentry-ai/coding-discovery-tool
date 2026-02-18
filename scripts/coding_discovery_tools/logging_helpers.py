@@ -197,4 +197,3 @@ def log_settings_details(settings: List[Dict], tool_name: str) -> None:
     
     logger.info(f"    └─ Total: {len(settings)} settings file(s)")
     logger.info("")
-

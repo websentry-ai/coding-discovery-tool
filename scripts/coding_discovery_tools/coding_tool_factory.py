@@ -24,8 +24,10 @@ from .coding_tool_base import (
     BaseOpenCodeRulesExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
+    BaseCursorSettingsExtractor,
     BaseOpenClawDetector,
     BaseCopilotDetector,
+    BaseJunieRulesExtractor,
 )
 
 # macOS - Shared
@@ -34,6 +36,7 @@ from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetec
 # macOS - Cursor
 from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
 from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
+from .macos.cursor.settings_extractor import MacOSCursorSettingsExtractor
 
 # macOS - Claude Code
 from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
@@ -115,6 +118,11 @@ from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
 from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
 
+# macOS - Junie
+from .macos.junie.junie import MacOSJunieDetector
+from .macos.junie.mcp_config_extractor import MacOSJunieMCPConfigExtractor
+from .macos.junie.junie_rules_extractor import MacOSJunieRulesExtractor
+
 # Windows - JetBrains
 from .windows.jetbrains.jetbrains import WindowsJetBrainsDetector
 from .windows.jetbrains.mcp_config_extractor import WindowsJetBrainsMCPConfigExtractor
@@ -135,6 +143,7 @@ from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsCla
 # Windows - Cursor
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
 from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
+from .windows.cursor.settings_extractor import WindowsCursorSettingsExtractor
 
 # Windows - Claude Code
 from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
@@ -484,6 +493,19 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_junie_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Junie detector for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJunieDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_all_tool_detectors(os_name: Optional[str] = None) -> list:
         """
         Create all supported tool detectors for the OS.
@@ -550,6 +572,10 @@ class ToolDetectorFactory:
         jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
         if jetbrains_detector is not None:
             detectors.append(jetbrains_detector)
+
+        junie_detector = ToolDetectorFactory.create_junie_detector(os_name)
+        if junie_detector is not None:
+            detectors.append(junie_detector)
 
         # Filter out None values
         return [detector for detector in detectors if detector is not None]
@@ -691,6 +717,25 @@ class ClaudeSettingsExtractorFactory:
             return MacOSClaudeSettingsExtractor()
         elif os_name == "Windows":
             return WindowsClaudeSettingsExtractor()
+        else:
+            raise ValueError(f"Unsupported operating system: {os_name}")
+
+
+class CursorSettingsExtractorFactory:
+    """Factory for creating OS-specific Cursor IDE settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> BaseCursorSettingsExtractor:
+        """
+        Create appropriate Cursor IDE settings extractor for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCursorSettingsExtractor()
+        elif os_name == "Windows":
+            return WindowsCursorSettingsExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -1154,5 +1199,51 @@ class GitHubCopilotRulesExtractorFactory:
             return MacOSGitHubCopilotRulesExtractor()
         elif os_name == "Windows":
             return WindowsGitHubCopilotRulesExtractor()
+        else:
+            return None
+
+
+class JunieMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Junie MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate Junie MCP config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJunieMCPConfigExtractor()
+        else:
+            return None
+
+
+class JunieRulesExtractorFactory:
+    """Factory for creating OS-specific Junie rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseJunieRulesExtractor]:
+        """
+        Create appropriate Junie rules extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseJunieRulesExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJunieRulesExtractor()
         else:
             return None

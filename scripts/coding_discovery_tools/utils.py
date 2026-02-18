@@ -414,6 +414,52 @@ def _write_file_secure(path: Path, data: bytes) -> None:
     os.replace(str(tmp_path), str(path))
 
 
+def send_report_to_backend_using_curl(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None) -> bool:
+    """
+    Send discovery report to backend endpoint using curl.
+    """
+    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+
+    if not api_key or not api_key.strip():
+        logger.error("API key is empty or missing.")
+        return False
+
+    if app_name:
+        report["app_name"] = app_name
+
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "-s", "-f",
+                "-X", "POST",
+                "-H", f"Authorization: Bearer {api_key}",
+                "-H", "Content-Type: application/json",
+                "-H", "User-Agent: AI-Tools-Discovery/1.0",
+                "-d", json.dumps(report),
+                "--max-time", "30",
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=35,
+        )
+
+        if result.returncode == 0:
+            return True
+
+        error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
+        logger.error(f"Failed to send report to {url}: {error_msg}")
+        return False
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"Request timed out sending report to {url}")
+        return False
+    except Exception as e:
+        logger.error(f"Error sending report: {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Sentry error reporting via raw HTTP (no SDK dependency)
 # ---------------------------------------------------------------------------

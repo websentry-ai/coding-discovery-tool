@@ -4,6 +4,7 @@ Windows-specific implementations for AI tools discovery
 
 from .device_id import WindowsDeviceIdExtractor
 from .cursor import WindowsCursorDetector
+from .cursor_cli import WindowsCursorCliDetector
 from .claude_code import WindowsClaudeDetector
 from .windsurf import WindowsWindsurfDetector
 from .cline import WindowsClineDetector
@@ -23,6 +24,7 @@ from .github_copilot import (
 __all__ = [
     'WindowsDeviceIdExtractor',
     'WindowsCursorDetector',
+    'WindowsCursorCliDetector',
     'WindowsClaudeDetector',
     'WindowsWindsurfDetector',
     'WindowsClineDetector',

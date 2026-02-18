@@ -78,6 +78,10 @@ from .macos.gemini_cli.gemini_cli import MacOSGeminiCliDetector
 from .macos.gemini_cli.gemini_cli_rules_extractor import MacOSGeminiCliRulesExtractor
 from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtractor
 
+# macOS - Cursor CLI
+from .macos.cursor_cli.cursor_cli import MacOSCursorCliDetector
+from .macos.cursor_cli.settings_extractor import MacOSCursorCliSettingsExtractor
+
 # macOS - Codex
 from .macos.codex.codex import MacOSCodexDetector
 from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
@@ -136,6 +140,10 @@ from .windows.opencode.mcp_config_extractor import WindowsOpenCodeMCPConfigExtra
 from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
 from .windows.gemini_cli.gemini_cli_rules_extractor import WindowsGeminiCliRulesExtractor
 from .windows.gemini_cli.mcp_config_extractor import WindowsGeminiCliMCPConfigExtractor
+
+# Windows - Cursor CLI
+from .windows.cursor_cli.cursor_cli import WindowsCursorCliDetector
+from .windows.cursor_cli.settings_extractor import WindowsCursorCliSettingsExtractor
 
 # Windows - Shared
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
@@ -380,6 +388,27 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_cursor_cli_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Cursor CLI detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCursorCliDetector()
+        elif os_name == "Windows":
+            return WindowsCursorCliDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_codex_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate Codex detector for the OS.
@@ -545,7 +574,12 @@ class ToolDetectorFactory:
         gemini_cli_detector = ToolDetectorFactory.create_gemini_cli_detector(os_name)
         if gemini_cli_detector is not None:
             detectors.append(gemini_cli_detector)
-        
+
+        # Add Cursor CLI detector for macOS and Windows
+        cursor_cli_detector = ToolDetectorFactory.create_cursor_cli_detector(os_name)
+        if cursor_cli_detector is not None:
+            detectors.append(cursor_cli_detector)
+
         # Add Codex detector for macOS
         codex_detector = ToolDetectorFactory.create_codex_detector(os_name)
         if codex_detector is not None:
@@ -1245,5 +1279,30 @@ class JunieRulesExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSJunieRulesExtractor()
+        else:
+            return None
+
+
+class CursorCliSettingsExtractorFactory:
+    """Factory for creating OS-specific Cursor CLI settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None):
+        """
+        Create appropriate Cursor CLI settings extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            Cursor CLI settings extractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCursorCliSettingsExtractor()
+        elif os_name == "Windows":
+            return WindowsCursorCliSettingsExtractor()
         else:
             return None

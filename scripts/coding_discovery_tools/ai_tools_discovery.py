@@ -1125,9 +1125,6 @@ def main():
                 else:
                     logger.warning("  ✗ Queued report discarded (non-retryable error)")
             logger.info("")
-        # Clean up queue file regardless of outcome
-        if QUEUE_FILE.exists():
-            QUEUE_FILE.unlink(missing_ok=True)
 
         # Get all users for macOS, or use current user for other platforms
         all_users = get_all_users_macos() if platform.system() == "Darwin" else []
@@ -1334,6 +1331,9 @@ def main():
         # --- Persist any failed reports for the next run ---
         if failed_reports:
             save_failed_reports(failed_reports)
+        elif QUEUE_FILE.exists():
+            # All queued reports succeeded and no new failures — clean up
+            QUEUE_FILE.unlink(missing_ok=True)
 
     except Exception as e:
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})

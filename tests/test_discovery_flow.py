@@ -104,7 +104,7 @@ class TestMainCLI(unittest.TestCase):
     def setUp(self):
         self.server.requests.clear()
         self.server.default_code = 200
-        self._queue_file = Path("/var/tmp/ai-discovery-queue.json")
+        self._queue_file = utils_mod.QUEUE_FILE
         # Ensure clean state
         if self._queue_file.exists():
             self._queue_file.unlink()
@@ -137,7 +137,7 @@ class TestMainCLI(unittest.TestCase):
         result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
-    @unittest.skipIf(platform.system() == "Windows", "/var/tmp not available on Windows")
+
     def test_main_cli_with_queue_drain(self):
         # Pre-populate queue with a distinctive report
         queued_report = {
@@ -164,7 +164,7 @@ class TestMainCLI(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(queued_bodies), 1, "Queued report was not drained")
 
-    @unittest.skipIf(platform.system() == "Windows", "/var/tmp not available on Windows")
+
     def test_main_cli_persists_failures(self):
         self.server.default_code = 500
 

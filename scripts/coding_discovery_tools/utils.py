@@ -340,17 +340,42 @@ def _backoff(attempt: int, delays: List[int]) -> None:
 # Persistence: queue failed reports for the next run
 # ---------------------------------------------------------------------------
 
-QUEUE_FILE = Path("/var/tmp/ai-discovery-queue.json")
+def _get_queue_file_path() -> Path:
+    """Return platform-appropriate queue file path.
+
+    On Unix, /var/tmp persists across reboots (unlike /tmp).
+    On Windows, fall back to the standard temp directory.
+    """
+    if platform.system() == "Windows":
+        import tempfile
+        return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
+    return Path("/var/tmp/ai-discovery-queue.json")
+
+
+QUEUE_FILE = _get_queue_file_path()
 QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
 
 def save_failed_reports(reports: List[Dict]) -> None:
-    """Write failed report envelopes to the queue file, merging with any existing entries."""
+    """Write failed report envelopes to the queue file, merging with any existing entries.
+
+    Expired entries (older than 24h) in the existing queue are discarded during merge.
+    """
     try:
         existing = _load_queue_file_safe()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        envelopes = existing + [
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        # Filter out expired entries from existing queue before merging
+        fresh = []
+        for env in existing:
+            try:
+                queued_at = datetime.fromisoformat(env["queued_at"])
+                if (now - queued_at).total_seconds() <= QUEUE_MAX_AGE_SECONDS:
+                    fresh.append(env)
+            except Exception:
+                fresh.append(env)  # Keep malformed envelopes
+        envelopes = fresh + [
             {"report": r, "queued_at": now_iso} for r in reports
         ]
         # Keep only the most recent entries to prevent unbounded growth
@@ -464,7 +489,7 @@ def send_report_to_backend_using_curl(backend_url: str, api_key: str, report: Di
 # Sentry error reporting via raw HTTP (no SDK dependency)
 # ---------------------------------------------------------------------------
 
-_SENTRY_DSN = "https://62a73a0043568547cb63a35394b63906@o4509196569149440.ingest.us.sentry.io/4510874666663936"
+_SENTRY_DSN = os.environ.get("AI_DISCOVERY_SENTRY_DSN", "")
 
 
 def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:

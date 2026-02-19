@@ -10,8 +10,6 @@ import re
 import subprocess
 import time
 import traceback
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -225,8 +223,9 @@ def normalize_url(domain: str) -> str:
 
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
-    Send discovery report to backend endpoint with retry logic.
+    Send discovery report to backend endpoint using curl with retry logic.
 
+    Uses curl subprocess to avoid Zscaler certificate issues with urllib.
     Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
     Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
 
@@ -255,65 +254,83 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     if app_name:
         payload["app_name"] = app_name
 
-    data = json.dumps(payload).encode('utf-8')
+    payload_json = json.dumps(payload)
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        req = urllib.request.Request(url, data=data, method='POST')
-        req.add_header("Authorization", f"Bearer {api_key}")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("User-Agent", "AI-Tools-Discovery/1.0")
-
         try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                if 200 <= response.getcode() < 300:
-                    return (True, False)
-        except urllib.error.HTTPError as e:
-            error_body = _read_error_body(e)
-            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {e.code} - {e.reason}")
-            _log_http_error_details(e.code, error_body)
+            result = subprocess.run(
+                [
+                    "curl", "-s",
+                    "-X", "POST",
+                    "-H", f"Authorization: Bearer {api_key}",
+                    "-H", "Content-Type: application/json",
+                    "-H", "User-Agent: AI-Tools-Discovery/1.0",
+                    "-d", payload_json,
+                    "--max-time", "60",
+                    "-w", "\n%{http_code}",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=65,
+            )
+
+            # Parse response: stdout = body + "\n" + http_code
+            lines = result.stdout.rsplit("\n", 1)
+            status_str = lines[-1].strip() if lines else ""
+            response_body = lines[0] if len(lines) > 1 else ""
+
+            if result.returncode != 0 or not status_str.isdigit():
+                # Connection/DNS failure — retryable
+                error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
+                logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
+                if attempt < MAX_ATTEMPTS:
+                    _backoff(attempt, BACKOFF_SECONDS)
+                    continue
+                exc = RuntimeError(error_msg)
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
+
+            http_code = int(status_str)
+
+            if 200 <= http_code < 300:
+                return (True, False)
+
+            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
+            _log_http_error_details(http_code, response_body or None)
 
             # Cloudflare 403s with error 1010 are transient rate limits — allow retry
-            is_cloudflare_block = e.code == 403 and error_body and "1010" in error_body
-            if e.code in NON_RETRYABLE_CODES and not is_cloudflare_block:
-                report_to_sentry(
-                    e,
-                    {**ctx, "phase": "send_report", "http_code": e.code, "attempt": attempt},
-                    level="warning",
-                )
+            is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body
+            if http_code in NON_RETRYABLE_CODES and not is_cloudflare_block:
+                exc = RuntimeError(f"HTTP {http_code}")
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
                 return (False, False)
 
             if attempt < MAX_ATTEMPTS:
                 _backoff(attempt, BACKOFF_SECONDS)
             else:
-                report_to_sentry(
-                    e,
-                    {**ctx, "phase": "send_report", "http_code": e.code, "attempt": attempt},
-                    level="warning",
-                )
+                exc = RuntimeError(f"HTTP {http_code}")
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                return (False, True)
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
+            if attempt < MAX_ATTEMPTS:
+                _backoff(attempt, BACKOFF_SECONDS)
+            else:
+                exc = RuntimeError("curl timeout")
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                 return (False, True)
 
         except Exception as e:
             logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
-
             if attempt < MAX_ATTEMPTS:
                 _backoff(attempt, BACKOFF_SECONDS)
             else:
-                report_to_sentry(
-                    e,
-                    {**ctx, "phase": "send_report", "attempt": attempt},
-                    level="warning",
-                )
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                 return (False, True)
 
     return (False, True)
-
-
-def _read_error_body(error: urllib.error.HTTPError) -> Optional[str]:
-    """Read and decode the response body from an HTTPError."""
-    try:
-        return error.read().decode('utf-8')
-    except Exception:
-        return None
 
 
 def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
@@ -358,24 +375,11 @@ MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
 
 def save_failed_reports(reports: List[Dict]) -> None:
-    """Write failed report envelopes to the queue file, merging with any existing entries.
-
-    Expired entries (older than 24h) in the existing queue are discarded during merge.
-    """
+    """Write failed report envelopes to the queue file, merging with any existing entries."""
     try:
         existing = _load_queue_file_safe()
-        now = datetime.now(timezone.utc)
-        now_iso = now.isoformat()
-        # Filter out expired entries from existing queue before merging
-        fresh = []
-        for env in existing:
-            try:
-                queued_at = datetime.fromisoformat(env["queued_at"])
-                if (now - queued_at).total_seconds() <= QUEUE_MAX_AGE_SECONDS:
-                    fresh.append(env)
-            except Exception:
-                fresh.append(env)  # Keep malformed envelopes
-        envelopes = fresh + [
+        now_iso = datetime.now(timezone.utc).isoformat()
+        envelopes = existing + [
             {"report": r, "queued_at": now_iso} for r in reports
         ]
         # Keep only the most recent entries to prevent unbounded growth
@@ -429,60 +433,8 @@ def _load_queue_file_safe() -> List[Dict]:
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
-    """Write data atomically to a file with restrictive permissions (0o600)."""
-    tmp_path = path.with_suffix(".tmp")
-    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
-    os.replace(str(tmp_path), str(path))
-
-
-def send_report_to_backend_using_curl(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None) -> bool:
-    """
-    Send discovery report to backend endpoint using curl.
-    """
-    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
-
-    if not api_key or not api_key.strip():
-        logger.error("API key is empty or missing.")
-        return False
-
-    if app_name:
-        report["app_name"] = app_name
-
-    try:
-        result = subprocess.run(
-            [
-                "curl",
-                "-s", "-f",
-                "-X", "POST",
-                "-H", f"Authorization: Bearer {api_key}",
-                "-H", "Content-Type: application/json",
-                "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                "-d", json.dumps(report),
-                "--max-time", "30",
-                url,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=35,
-        )
-
-        if result.returncode == 0:
-            return True
-
-        error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
-        logger.error(f"Failed to send report to {url}: {error_msg}")
-        return False
-
-    except subprocess.TimeoutExpired:
-        logger.error(f"Request timed out sending report to {url}")
-        return False
-    except Exception as e:
-        logger.error(f"Error sending report: {e}")
-        return False
+    """Write data to a file."""
+    path.write_bytes(data)
 
 
 # ---------------------------------------------------------------------------
@@ -561,15 +513,24 @@ def report_to_sentry(
             "extra": ctx,
         }
 
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(dsn["store_url"], data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header(
-            "X-Sentry-Auth",
-            f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0",
+        sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
+        result = subprocess.run(
+            [
+                "curl", "-s", "-o", "/dev/null",
+                "-w", "%{http_code}",
+                "-X", "POST",
+                "-H", "Content-Type: application/json",
+                "-H", f"X-Sentry-Auth: {sentry_auth}",
+                "-d", json.dumps(payload),
+                "--max-time", "5",
+                dsn["store_url"],
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            logger.debug(f"Sentry event sent ({resp.getcode()})")
+        if result.returncode == 0:
+            logger.debug(f"Sentry event sent ({result.stdout.strip()})")
     except Exception:
         # Sentry failures must never crash the script
         pass

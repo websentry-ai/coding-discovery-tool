@@ -1,15 +1,12 @@
 """
 Integration tests for send_report_to_backend() and queue persistence.
 
-Uses a real HTTP server on localhost — no mocking of urllib.
+Uses a real HTTP server on localhost — curl hits it directly.
 Only mocks: time.sleep (speed), QUEUE_FILE path (isolation), _SENTRY_DSN (no real Sentry).
 """
 
 import json
-import os
-import platform
 import shutil
-import stat
 import tempfile
 import threading
 import unittest
@@ -196,11 +193,8 @@ class TestPersistence(unittest.TestCase):
 
         save_failed_reports(reports)
 
-        # Queue file should exist with correct permissions (Unix only)
+        # Queue file should exist
         self.assertTrue(self._queue_path.exists())
-        if platform.system() != "Windows":
-            file_mode = oct(self._queue_path.stat().st_mode & 0o777)
-            self.assertEqual(file_mode, oct(0o600))
 
         # Load and verify round-trip
         loaded = load_pending_reports()

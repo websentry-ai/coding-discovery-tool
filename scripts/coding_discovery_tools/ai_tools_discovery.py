@@ -47,7 +47,7 @@ try:
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
+    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user
@@ -86,7 +86,7 @@ except ImportError:
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user

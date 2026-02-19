@@ -17,7 +17,6 @@ set -e  # Exit on any error
 # CONFIGURATION
 # ==============================================================================
 
-REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
 BRANCH="main"
 TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'coding-discovery-tool')
 
@@ -110,23 +109,36 @@ check_python() {
 # REPOSITORY DOWNLOAD
 # ==============================================================================
 
-# Download the repository using git or curl fallback
+# Download the repository using curl + tar
 download_repo() {
-    # Try using git first (preferred method)
-    if command -v git &> /dev/null; then
-        # Attempt sparse checkout for efficiency (only download scripts directory)
-        if git clone --depth 1 --branch "$BRANCH" --filter=blob:none --sparse "$REPO_URL" "$TEMP_DIR" 2>/dev/null; then
-            cd "$TEMP_DIR"
-            git sparse-checkout set scripts/ 2>/dev/null || true
-        else
-            # Fallback to full clone if sparse checkout fails
-            git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$TEMP_DIR" 2>/dev/null
-        fi
+    # Use GitHub's archive download
+    local ARCHIVE_URL="https://github.com/websentry-ai/coding-discovery-tool/archive/refs/heads/${BRANCH}.tar.gz"
+
+    print_info "Downloading repository..."
+
+    # Check if curl is available
+    if ! command -v curl &> /dev/null; then
+        print_error "curl is not installed."
+        print_info "Please install curl and try again."
+        exit 1
+    fi
+
+    # Check if tar is available
+    if ! command -v tar &> /dev/null; then
+        print_error "tar is not installed."
+        print_info "Please install tar and try again."
+        exit 1
+    fi
+
+    # Download and extract the archive
+    local download_error
+    if download_error=$(curl -fsSL "$ARCHIVE_URL" 2>&1 | tar -xz -C "$TEMP_DIR" --strip-components=1 2>&1); then
+        print_success "Repository downloaded successfully"
     else
-        # Fallback: git not available
-        print_error "Git is not installed."
-        print_info "This script requires git to download the full package structure."
-        print_info "Please install git and try again, or clone the repository manually."
+        print_error "Failed to download repository."
+        echo ""
+        print_info "Error: $download_error"
+        print_info "Please check your internet connection and try again."
         exit 1
     fi
 }

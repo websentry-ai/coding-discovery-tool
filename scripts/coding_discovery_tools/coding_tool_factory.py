@@ -22,6 +22,7 @@ from .coding_tool_base import (
     BaseGeminiCliRulesExtractor,
     BaseCodexRulesExtractor,
     BaseOpenCodeRulesExtractor,
+    BaseCursorCliRulesExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
     BaseCursorSettingsExtractor,
@@ -80,6 +81,7 @@ from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtrac
 
 # macOS - Cursor CLI
 from .macos.cursor_cli.cursor_cli import MacOSCursorCliDetector
+from .macos.cursor_cli.cursor_cli_rules_extractor import MacOSCursorCliRulesExtractor
 from .macos.cursor_cli.settings_extractor import MacOSCursorCliSettingsExtractor
 from .macos.cursor_cli.mcp_config_extractor import MacOSCursorCliMCPConfigExtractor
 
@@ -144,6 +146,7 @@ from .windows.gemini_cli.mcp_config_extractor import WindowsGeminiCliMCPConfigEx
 
 # Windows - Cursor CLI
 from .windows.cursor_cli.cursor_cli import WindowsCursorCliDetector
+from .windows.cursor_cli.cursor_cli_rules_extractor import WindowsCursorCliRulesExtractor
 from .windows.cursor_cli.settings_extractor import WindowsCursorCliSettingsExtractor
 from .windows.cursor_cli.mcp_config_extractor import WindowsCursorCliMCPConfigExtractor
 
@@ -1331,5 +1334,24 @@ class CursorCliMCPConfigExtractorFactory:
             return MacOSCursorCliMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCursorCliMCPConfigExtractor()
+        else:
+            return None
+
+
+class CursorCliRulesExtractorFactory:
+    """Factory for creating OS-specific Cursor CLI rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCursorCliRulesExtractor]:
+        """
+        Create appropriate Cursor CLI rules extractor for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCursorCliRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsCursorCliRulesExtractor()
         else:
             return None

@@ -48,6 +48,7 @@ try:
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
         CursorCliMCPConfigExtractorFactory,
+        CursorCliRulesExtractorFactory,
     )
     from .utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -89,6 +90,7 @@ except ImportError:
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
         CursorCliMCPConfigExtractorFactory,
+        CursorCliRulesExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -173,6 +175,7 @@ class AIToolsDetector:
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
 
             # Initialize Cursor CLI extractors
+            self._cursor_cli_rules_extractor = CursorCliRulesExtractorFactory.create(self.system)
             self._cursor_cli_settings_extractor = CursorCliSettingsExtractorFactory.create(self.system)
             self._cursor_cli_mcp_extractor = CursorCliMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
@@ -411,6 +414,18 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Junie rules: {e}", exc_info=True)
+            return []
+
+    def extract_all_cursor_cli_rules(self) -> List[Dict]:
+        """
+        Extract all Cursor CLI rules from all projects.
+        """
+        try:
+            if self._cursor_cli_rules_extractor:
+                return self._cursor_cli_rules_extractor.extract_all_cursor_cli_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Cursor CLI rules: {e}", exc_info=True)
             return []
 
     def _process_tool_with_rules_and_mcp(
@@ -980,13 +995,13 @@ class AIToolsDetector:
             )
 
         elif tool_name.lower() == "cursor cli":
-            # Cursor CLI uses settings + MCP config (no rules extractor)
-            projects_dict = self._process_tool_with_mcp_only(
+            projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
-                self._cursor_cli_mcp_extractor
+                self._cursor_cli_rules_extractor,
+                self._cursor_cli_mcp_extractor,
+                self.extract_all_cursor_cli_rules
             )
 
-            # Extract settings
             logger.info(f"  Extracting {tool_name} settings...")
             if self._cursor_cli_settings_extractor:
                 try:

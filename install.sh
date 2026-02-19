@@ -104,6 +104,11 @@ check_python() {
         print_info "Please install Python 3 and try again."
         exit 1
     fi
+
+    if ! $PYTHON_CMD -c "import sys; print('ok')" &> /dev/null; then
+        print_error "Python 3 is installed but fails to execute."
+        exit 1
+    fi
 }
 
 # ==============================================================================

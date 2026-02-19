@@ -46,6 +46,8 @@ try:
         GitHubCopilotRulesExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
+        CursorCliSettingsExtractorFactory,
+        CursorCliMCPConfigExtractorFactory,
     )
     from .utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -85,6 +87,8 @@ except ImportError:
         GitHubCopilotRulesExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
+        CursorCliSettingsExtractorFactory,
+        CursorCliMCPConfigExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -167,6 +171,10 @@ class AIToolsDetector:
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
+
+            # Initialize Cursor CLI extractors
+            self._cursor_cli_settings_extractor = CursorCliSettingsExtractorFactory.create(self.system)
+            self._cursor_cli_mcp_extractor = CursorCliMCPConfigExtractorFactory.create(self.system)
         except ValueError as e:
             logger.error(f"Failed to initialize detectors: {e}")
             raise
@@ -971,6 +979,29 @@ class AIToolsDetector:
                 self.extract_all_junie_rules
             )
 
+        elif tool_name.lower() == "cursor cli":
+            # Cursor CLI uses settings + MCP config (no rules extractor)
+            projects_dict = self._process_tool_with_mcp_only(
+                tool,
+                self._cursor_cli_mcp_extractor
+            )
+
+            # Extract settings
+            logger.info(f"  Extracting {tool_name} settings...")
+            if self._cursor_cli_settings_extractor:
+                try:
+                    settings = self._cursor_cli_settings_extractor.extract_settings()
+                    if settings:
+                        logger.info(f"  ✓ Found {len(settings)} Cursor CLI settings file(s)")
+                        tool["_settings"] = settings
+                        log_settings_details(settings, tool_name)
+                    else:
+                        logger.info("  ℹ No Cursor CLI settings found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+            else:
+                logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
+
         # Check if this is a JetBrains IDE (has _ide_folder or _config_path)
         elif "_ide_folder" in tool or "_config_path" in tool:
             projects_dict = self._process_jetbrains_tool(tool)
@@ -1014,6 +1045,15 @@ class AIToolsDetector:
                 if tool_name == "cursor":
                     permissions = tool["_settings"]
                     logger.info(f"  ✓ Found Cursor settings (backend-ready format)")
+                elif tool_name == "cursor cli":
+                    # Cursor CLI settings are already in backend format (allow_rules, deny_rules at top level)
+                    settings_list = tool["_settings"]
+                    if settings_list:
+                        # Use the first (highest precedence) settings file
+                        permissions = settings_list[0] if isinstance(settings_list, list) else settings_list
+                        logger.info(f"  ✓ Found Cursor CLI settings (backend-ready format)")
+                    else:
+                        permissions = None
                 else:
                     settings_list = tool["_settings"]
                     logger.info(f"  ✓ Found _settings in tool dict, count: {len(settings_list) if settings_list else 0}")

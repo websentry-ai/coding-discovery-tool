@@ -81,6 +81,7 @@ from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtrac
 # macOS - Cursor CLI
 from .macos.cursor_cli.cursor_cli import MacOSCursorCliDetector
 from .macos.cursor_cli.settings_extractor import MacOSCursorCliSettingsExtractor
+from .macos.cursor_cli.mcp_config_extractor import MacOSCursorCliMCPConfigExtractor
 
 # macOS - Codex
 from .macos.codex.codex import MacOSCodexDetector
@@ -144,6 +145,7 @@ from .windows.gemini_cli.mcp_config_extractor import WindowsGeminiCliMCPConfigEx
 # Windows - Cursor CLI
 from .windows.cursor_cli.cursor_cli import WindowsCursorCliDetector
 from .windows.cursor_cli.settings_extractor import WindowsCursorCliSettingsExtractor
+from .windows.cursor_cli.mcp_config_extractor import WindowsCursorCliMCPConfigExtractor
 
 # Windows - Shared
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
@@ -1304,5 +1306,30 @@ class CursorCliSettingsExtractorFactory:
             return MacOSCursorCliSettingsExtractor()
         elif os_name == "Windows":
             return WindowsCursorCliSettingsExtractor()
+        else:
+            return None
+
+
+class CursorCliMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Cursor CLI MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate Cursor CLI MCP config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCursorCliMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsCursorCliMCPConfigExtractor()
         else:
             return None

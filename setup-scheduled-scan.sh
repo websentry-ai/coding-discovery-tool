@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-LABEL="ai.getunbound.websentry"
+LABEL="ai.getunbound.discovery"
 PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
-LOG_DIR="$HOME/Library/Logs/websentry"
+LOG_DIR="$HOME/Library/Logs/unbound"
 SCAN_SCRIPT="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
 INTERVAL=43200 # 12 hours in seconds
 
@@ -14,7 +14,7 @@ usage() {
 }
 
 uninstall() {
-    echo "Uninstalling WebSentry scheduled scan..."
+    echo "Uninstalling Unbound scheduled scan..."
     if launchctl list "$LABEL" &>/dev/null; then
         launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || launchctl unload "$PLIST_PATH" 2>/dev/null || true
         echo "  Stopped scheduled job."
@@ -82,7 +82,7 @@ EOF
 launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || launchctl load "$PLIST_PATH"
 
 echo ""
-echo "WebSentry scan scheduled successfully."
+echo "Unbound scan scheduled successfully."
 echo "  Schedule:  Every 12 hours (runs immediately on install)"
 echo "  Logs:      ${LOG_DIR}/scan.log"
 echo "  Errors:    ${LOG_DIR}/scan.err"

@@ -72,6 +72,7 @@ SAFE_DOMAIN=$(xml_escape "$DOMAIN")
 
 # Create log directory
 mkdir -p "$LOG_DIR"
+mkdir -p "$HOME/Library/LaunchAgents"
 
 # Unload existing job if present
 if launchctl list "$LABEL" &>/dev/null; then

@@ -172,7 +172,7 @@ def walk_for_mcp_configs_generic(
         logger.debug(f"Error walking {current_dir}: {e}")
 
 
-def extract_claude_mcp_fields(config_data: Dict) -> List[Dict]:
+def extract_claude_mcp_fields(config_data: Dict, config_path: Path) -> List[Dict]:
     """
     Extract MCP-related fields from Claude Code configuration.
     
@@ -183,8 +183,20 @@ def extract_claude_mcp_fields(config_data: Dict) -> List[Dict]:
         List of project dicts with MCP configuration
     """
     projects = []
-    
-    # Extract MCP fields from projects
+
+    # Extract user-level (global) mcpServers from root of config
+    if "mcpServers" in config_data and isinstance(config_data["mcpServers"], dict):
+        user_mcp_servers_obj = config_data["mcpServers"]
+        user_mcp_servers_array = transform_mcp_servers_to_array(user_mcp_servers_obj)
+
+        if user_mcp_servers_array:
+            projects.append({
+                "path": str(config_path),
+                "mcpServers": user_mcp_servers_array,
+                "scope": "user"
+            })
+
+    # Extract project-level mcpServers from projects
     if "projects" in config_data and isinstance(config_data["projects"], dict):
         for project_path, project_data in config_data["projects"].items():
             if not isinstance(project_data, dict):
@@ -199,7 +211,8 @@ def extract_claude_mcp_fields(config_data: Dict) -> List[Dict]:
                 "mcpServers": mcp_servers_array,
                 "mcpContextUris": project_data.get("mcpContextUris", []),
                 "enabledMcpjsonServers": project_data.get("enabledMcpjsonServers", []),
-                "disabledMcpjsonServers": project_data.get("disabledMcpjsonServers", [])
+                "disabledMcpjsonServers": project_data.get("disabledMcpjsonServers", []),
+                "scope": "project"
             }
             
             projects.append(project_mcp)

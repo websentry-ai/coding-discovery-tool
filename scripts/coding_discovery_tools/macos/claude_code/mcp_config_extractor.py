@@ -81,7 +81,7 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
                 return []
             
             # Extract only MCP-related configuration
-            projects = extract_claude_mcp_fields(config_data)
+            projects = extract_claude_mcp_fields(config_data, config_path)
             return projects
         except PermissionError as e:
             logger.warning(f"Permission denied reading MCP config {config_path}: {e}")

@@ -172,7 +172,7 @@ def walk_for_mcp_configs_generic(
         logger.debug(f"Error walking {current_dir}: {e}")
 
 
-def extract_claude_mcp_fields(config_data: Dict, config_path: Optional[Path] = None) -> List[Dict]:
+def extract_claude_mcp_fields(config_data: Dict, config_path: Path) -> List[Dict]:
     """
     Extract MCP-related fields from Claude Code configuration.
     
@@ -190,12 +190,8 @@ def extract_claude_mcp_fields(config_data: Dict, config_path: Optional[Path] = N
         user_mcp_servers_array = transform_mcp_servers_to_array(user_mcp_servers_obj)
 
         if user_mcp_servers_array:
-            if config_path:
-                user_config_path = config_path
-            else:
-                user_config_path = Path.home() / ".claude.json"
             projects.append({
-                "path": str(user_config_path),
+                "path": str(config_path),
                 "mcpServers": user_mcp_servers_array,
                 "scope": "user"
             })

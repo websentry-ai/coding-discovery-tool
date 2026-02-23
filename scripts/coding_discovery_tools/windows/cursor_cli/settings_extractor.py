@@ -26,7 +26,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from ...constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
 from ...windows_extraction_helpers import (
     is_running_as_admin,
     read_file_content,

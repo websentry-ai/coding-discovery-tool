@@ -26,7 +26,6 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from ...constants import MAX_CONFIG_FILE_SIZE
 from ...macos_extraction_helpers import (
     is_running_as_root,
     scan_user_directories,
@@ -120,37 +119,28 @@ class MacOSCursorCliSettingsExtractor:
             if global_cursor.exists():
                 global_cursor_dirs.add(global_cursor)
 
-        projects_by_root = {}
-
-        def extract_from_cursor_dir(cursor_dir: Path, projects_by_root: Dict) -> None:
+        def extract_from_cursor_dir(cursor_dir: Path, _: Dict) -> None:
             if cursor_dir in global_cursor_dirs:
                 return
             self._extract_settings_from_cursor_directory(cursor_dir, settings_list)
 
         try:
-            if root_path == Path("/"):
-                top_level_dirs = get_top_level_directories(root_path)
-                for top_dir in top_level_dirs:
-                    try:
-                        walk_for_tool_directories(
-                            root_path, top_dir, self.CURSOR_DIR_NAME, extract_from_cursor_dir,
-                            projects_by_root, current_depth=1
-                        )
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Skipping {top_dir}: {e}")
-                        continue
-            else:
-                walk_for_tool_directories(
-                    root_path, root_path, self.CURSOR_DIR_NAME, extract_from_cursor_dir,
-                    projects_by_root, current_depth=0
-                )
+            top_level_dirs = get_top_level_directories(root_path)
+            for top_dir in top_level_dirs:
+                try:
+                    walk_for_tool_directories(
+                        root_path, top_dir, self.CURSOR_DIR_NAME, extract_from_cursor_dir,
+                        {}, current_depth=1
+                    )
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Skipping {top_dir}: {e}")
         except (PermissionError, OSError) as e:
             logger.warning(f"Error accessing root directory: {e}")
             logger.info("Falling back to home directory search for project settings")
             home_path = Path.home()
             walk_for_tool_directories(
                 home_path, home_path, self.CURSOR_DIR_NAME, extract_from_cursor_dir,
-                projects_by_root, current_depth=0
+                {}, current_depth=0
             )
 
         return settings_list

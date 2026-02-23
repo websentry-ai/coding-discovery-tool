@@ -59,7 +59,11 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     # Gemini CLI detection
     elif tool_name == "gemini cli":
         return _detect_gemini_cli(detector, user_home)
-    
+
+    # Cursor CLI detection
+    elif tool_name == "cursor cli":
+        return _detect_cursor_cli(detector, user_home)
+
     # Default: Use detector's standard detection
     return detector.detect()
 
@@ -235,4 +239,18 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
         }
     
     # Final fallback: Use detector's default detection (checks PATH via 'which gemini')
+    return detector.detect()
+
+
+def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect Cursor CLI installation for a user."""
+    cursor_dir = user_home / ".cursor"
+    cli_config = cursor_dir / "cli-config.json"
+    if cli_config.exists():
+        return {
+            "name": detector.tool_name,
+            "version": detector.get_version(),
+            "install_path": str(cursor_dir)
+        }
+
     return detector.detect()

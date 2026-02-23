@@ -295,6 +295,21 @@ class BaseJunieRulesExtractor(ABC):
         pass
 
 
+class BaseCursorCliRulesExtractor(ABC):
+    """Abstract base class for extracting Cursor CLI rules from all projects."""
+
+    @abstractmethod
+    def extract_all_cursor_cli_rules(self) -> List[Dict]:
+        """
+        Extract all Cursor CLI rules from all projects on the machine.
+
+        Searches for:
+        - User-level rules: ~/.cursor/rules/*.mdc, ~/.cursor/*.mdc
+        - Project-level rules: **/.cursor/rules/*.mdc, **/.cursor/*.mdc, **/.cursorrules
+        """
+        pass
+
+
 class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 

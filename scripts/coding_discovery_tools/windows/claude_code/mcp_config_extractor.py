@@ -197,26 +197,17 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         system_dirs: set
     ) -> bool:
         """
-        Check if a path is valid (within depth limit and not in skipped directories).
-
-        Args:
-            file_path: Path to validate
-            root_path: Root path for depth calculation
-            system_dirs: Set of system directory names to skip
-
-        Returns:
-            True if path is valid, False otherwise
+        Check if a path is valid within depth limit
         """
-        # Check depth limit
         try:
             depth = len(file_path.relative_to(root_path).parts)
             if depth > MAX_SEARCH_DEPTH:
                 return False
         except ValueError:
-            # Path not relative to root (different drive)
+            # Path not relative to root
             return False
 
-        # Check if file or any parent should be skipped
+        # Check if file or any parent should be skipped using the system directories
         if should_skip_path(file_path, system_dirs):
             return False
 

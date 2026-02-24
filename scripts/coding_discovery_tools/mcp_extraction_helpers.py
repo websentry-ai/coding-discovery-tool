@@ -759,43 +759,46 @@ def walk_for_claude_project_mcp_configs(
     current_depth: int = 0
 ) -> None:
     """
-    Recursively walk directory tree looking for Claude Code project-scope .mcp.json files.
+    Walk directory tree looking for Claude Code project-scope .mcp.json files.
+
     This looks for .mcp.json files directly at project roots.
     """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-
     try:
-        for item in current_dir.iterdir():
+        for mcp_file in current_dir.rglob(".mcp.json"):
             try:
-                if should_skip_func(item):
-                    continue
-
                 try:
-                    depth = len(item.relative_to(root_path).parts)
+                    depth = len(mcp_file.relative_to(root_path).parts)
                     if depth > MAX_SEARCH_DEPTH:
                         continue
                 except ValueError:
                     continue
 
-                if item.is_file() and item.name == ".mcp.json":
-                    extract_claude_project_mcp_from_file(item, projects)
-                elif item.is_dir():
-                    walk_for_claude_project_mcp_configs(
-                        root_path, item, projects,
-                        should_skip_func, current_depth + 1
-                    )
+                if should_skip_func(mcp_file):
+                    continue
+
+                skip_due_to_parent = False
+                for parent in mcp_file.parents:
+                    if parent == root_path or parent == current_dir:
+                        break
+                    if should_skip_func(parent):
+                        skip_due_to_parent = True
+                        break
+
+                if skip_due_to_parent:
+                    continue
+
+                extract_claude_project_mcp_from_file(mcp_file, projects)
 
             except (PermissionError, OSError):
                 continue
             except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
+                logger.debug(f"Error processing {mcp_file}: {e}")
                 continue
 
     except (PermissionError, OSError):
         pass
     except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+        logger.debug(f"Error scanning {current_dir} for .mcp.json files: {e}")
 
 
 def extract_dual_path_configs_with_root_support(

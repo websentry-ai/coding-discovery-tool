@@ -13,6 +13,8 @@ from ...constants import MAX_SEARCH_DEPTH
 from ...mcp_extraction_helpers import (
     extract_claude_mcp_fields,
     extract_claude_project_mcp_from_file,
+    extract_managed_mcp_config,
+    extract_claude_plugin_mcp_configs_with_root_support,
 )
 from ...windows_extraction_helpers import should_skip_path
 
@@ -30,16 +32,24 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract Claude Code MCP configuration on Windows.
 
-        Extracts both user/local scope configs from .claude.json and .claude/mcp.json
-        and project-scope configs from .mcp.json files at project roots.
+        Checks multiple sources:
+        1. C:\\Program Files\\ClaudeCode\\managed-mcp.json (enterprise managed)
+        2. User/local scope configs from .claude.json and .claude/mcp.json
+        3. Project-scope configs from .mcp.json files at project roots
+        4. Plugin MCP servers from ~/.claude/plugins/*/plugin.json
+
+        Uses parallel processing for filesystem scanning.
 
         Returns:
             Dict with MCP config info (projects array) or None if not found
         """
         all_projects = []
 
-        # Scan entire filesystem from root drive
-        root_drive = Path.home().anchor # Gets the root drive like "C:\"
+        # Extract managed MCP config (enterprise deployment - highest precedence)
+        extract_managed_mcp_config(all_projects)
+
+        # Scan filesystem for user/local/project scope configs
+        root_drive = Path.home().anchor  # Gets the root drive like "C:\"
         root_path = Path(root_drive)
         
         try:
@@ -72,6 +82,9 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             home_path = Path.home()
             home_projects = self._scan_directory_for_claude_configs(home_path, home_path)
             all_projects.extend(home_projects)
+
+        # Extract plugin MCP configs from ~/.claude/plugins/*/plugin.json
+        extract_claude_plugin_mcp_configs_with_root_support(all_projects)
 
         # Return None if no configs found
         if not all_projects:

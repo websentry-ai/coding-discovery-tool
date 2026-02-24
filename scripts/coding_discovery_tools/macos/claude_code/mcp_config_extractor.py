@@ -18,6 +18,8 @@ from ...mcp_extraction_helpers import (
     extract_dual_path_configs_with_root_support,
     extract_claude_project_mcp_from_file,
     walk_for_claude_project_mcp_configs,
+    extract_managed_mcp_config,
+    extract_claude_plugin_mcp_configs_with_root_support,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,9 +37,11 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         Extract Claude Code MCP configuration on macOS.
 
         Checks multiple sources:
-        1. ~/.claude.json (preferred - main Claude Code config file with user/local scope)
-        2. ~/.claude/mcp.json (fallback - separate MCP config file)
-        3. Project-scope .mcp.json files at project roots throughout the filesystem
+        1. /Library/Application Support/ClaudeCode/managed-mcp.json (enterprise managed)
+        2. ~/.claude.json (preferred - main Claude Code config file with user/local scope)
+        3. ~/.claude/mcp.json (fallback - separate MCP config file)
+        4. Project-scope .mcp.json files at project roots throughout the filesystem
+        5. Plugin MCP servers from ~/.claude/plugins/*/plugin.json
 
         When running as root, collects MCP configs from ALL user directories.
 
@@ -47,17 +51,25 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns:
             Dict with MCP config info (projects array) or None if not found
         """
+        all_projects = []
+
+        extract_managed_mcp_config(all_projects)
+
         # Extract user/local scope configs from ~/.claude.json or ~/.claude/mcp.json
-        all_projects = extract_dual_path_configs_with_root_support(
+        user_local_configs = extract_dual_path_configs_with_root_support(
             self.MCP_CONFIG_PATH_PREFERRED,
             self.MCP_CONFIG_PATH_FALLBACK,
             self._extract_from_config_file,
             tool_name="Claude Code"
         )
+        all_projects.extend(user_local_configs)
 
         # Extract project-scope configs from .mcp.json files at project roots
         project_scope_configs = self._extract_project_scope_configs()
         all_projects.extend(project_scope_configs)
+
+        # Extract plugin MCP configs from ~/.claude/plugins/*/plugin.json
+        extract_claude_plugin_mcp_configs_with_root_support(all_projects)
 
         # Return None if no configs found
         if not all_projects:

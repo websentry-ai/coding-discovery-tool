@@ -433,8 +433,13 @@ def _load_queue_file_safe() -> List[Dict]:
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
-    """Write data to a file."""
+    """Write data to a file with restricted permissions (0600 on Unix)."""
     path.write_bytes(data)
+    # Restrict permissions to owner-only (rw-------) on Unix systems
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

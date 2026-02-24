@@ -717,6 +717,87 @@ def extract_project_level_mcp_configs_with_fallback_windows(
     return projects
 
 
+def extract_claude_project_mcp_from_file(
+    mcp_json_path: Path,
+    projects: List[Dict]
+) -> None:
+    """
+    Extract MCP config from a project-scope .mcp.json file.
+    """
+    if not mcp_json_path.exists() or not mcp_json_path.is_file():
+        return
+
+    try:
+        project_root = mcp_json_path.parent
+
+        content = mcp_json_path.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+
+        mcp_servers_obj = config_data.get("mcpServers", {})
+
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+
+        if mcp_servers_array:
+            projects.append({
+                "path": str(project_root),
+                "mcpServers": mcp_servers_array,
+                "scope": "project"
+            })
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in Claude Code project MCP config {mcp_json_path}: {e}")
+    except PermissionError as e:
+        logger.warning(f"Permission denied reading Claude Code project MCP config {mcp_json_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading Claude Code project MCP config {mcp_json_path}: {e}")
+
+
+def walk_for_claude_project_mcp_configs(
+    root_path: Path,
+    current_dir: Path,
+    projects: List[Dict],
+    should_skip_func: Callable[[Path], bool],
+    current_depth: int = 0
+) -> None:
+    """
+    Recursively walk directory tree looking for Claude Code project-scope .mcp.json files.
+    This looks for .mcp.json files directly at project roots.
+    """
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+
+    try:
+        for item in current_dir.iterdir():
+            try:
+                if should_skip_func(item):
+                    continue
+
+                try:
+                    depth = len(item.relative_to(root_path).parts)
+                    if depth > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    continue
+
+                if item.is_file() and item.name == ".mcp.json":
+                    extract_claude_project_mcp_from_file(item, projects)
+                elif item.is_dir():
+                    walk_for_claude_project_mcp_configs(
+                        root_path, item, projects,
+                        should_skip_func, current_depth + 1
+                    )
+
+            except (PermissionError, OSError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing {item}: {e}")
+                continue
+
+    except (PermissionError, OSError):
+        pass
+    except Exception as e:
+        logger.debug(f"Error walking {current_dir}: {e}")
+
+
 def extract_dual_path_configs_with_root_support(
     preferred_path: Path,
     fallback_path: Path,

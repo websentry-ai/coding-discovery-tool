@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...mcp_extraction_helpers import extract_claude_mcp_fields
+from ...mcp_extraction_helpers import (
+    extract_claude_mcp_fields,
+    extract_claude_project_mcp_from_file,
+    walk_for_claude_project_mcp_configs,
+)
 from ...windows_extraction_helpers import should_skip_path
 
 logger = logging.getLogger(__name__)
@@ -24,24 +28,21 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract Claude Code MCP configuration on Windows.
-        
-        Scans entire filesystem from root drive to find all .claude.json and .claude/mcp.json files.
-        
-        Extracts only MCP-related fields (mcpServers, mcpContextUris, 
-        enabledMcpjsonServers, disabledMcpjsonServers) from the config file.
-        
+
+        Extracts both user/local scope configs from .claude.json and .claude/mcp.json
+        and project-scope configs from .mcp.json files at project roots.
+
         Returns:
             Dict with MCP config info (projects array) or None if not found
         """
         all_projects = []
-        
-        # Scan entire filesystem from root drive
-        root_drive = Path.home().anchor  # Gets the root drive like "C:\"
+
+        root_drive = Path.home().anchor
         root_path = Path(root_drive)
         
         try:
             system_dirs = self._get_system_directories()
-            top_level_dirs = [item for item in root_path.iterdir() 
+            top_level_dirs = [item for item in root_path.iterdir()
                             if item.is_dir() and not should_skip_path(item, system_dirs)]
             
             # Scan each top-level directory
@@ -117,12 +118,15 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
                         # Recurse into subdirectories
                         self._walk_for_claude_mcp_configs(root_path, item, projects, current_depth + 1)
                     elif item.is_file():
-                        # Check for .claude.json files
+                        # Check for .claude.json files (user/local scope)
                         if item.name == ".claude.json":
                             config_projects = self._extract_from_config_file(item)
                             if config_projects:
                                 projects.extend(config_projects)
-                    
+                        # Check for .mcp.json files (project scope)
+                        elif item.name == ".mcp.json":
+                            extract_claude_project_mcp_from_file(item, projects)
+
                 except (PermissionError, OSError):
                     continue
                 except Exception as e:
@@ -159,7 +163,6 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             List of project dicts or empty list if extraction fails
         """
         try:
-            stat = config_path.stat()
             content = config_path.read_text(encoding='utf-8', errors='replace')
             
             # Parse JSON

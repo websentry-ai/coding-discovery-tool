@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import MAX_SEARCH_DEPTH
 from ...mcp_extraction_helpers import (
     extract_claude_mcp_fields,
-    extract_claude_project_mcp_from_file,
+    extract_dual_path_configs_with_root_support,
+    walk_for_claude_project_mcp_configs,
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
 )
@@ -48,22 +48,54 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         # Extract managed MCP config (enterprise deployment - highest precedence)
         extract_managed_mcp_config(all_projects)
 
-        # Scan filesystem for user/local/project scope configs
+        # Extract user/local scope configs from ~/.claude.json or ~/.claude/mcp.json
+        user_local_configs = extract_dual_path_configs_with_root_support(
+            self.MCP_CONFIG_PATH_PREFERRED,
+            self.MCP_CONFIG_PATH_FALLBACK,
+            self._extract_from_config_file,
+            tool_name="Claude Code"
+        )
+        all_projects.extend(user_local_configs)
+
+        # Extract project-scope configs from .mcp.json files at project roots
+        project_scope_configs = self._extract_project_scope_configs()
+        all_projects.extend(project_scope_configs)
+
+        # Extract plugin MCP configs from ~/.claude/plugins/*/plugin.json
+        extract_claude_plugin_mcp_configs_with_root_support(all_projects)
+
+        if not all_projects:
+            return None
+        
+        return {
+            "projects": all_projects
+        }
+
+    def _extract_project_scope_configs(self) -> List[Dict]:
+        """
+        Extract project-scope MCP configs from .mcp.json files at project roots.
+
+        Uses parallel processing for filesystem scanning on Windows.
+        """
+        projects = []
         root_drive = Path.home().anchor  # Gets the root drive like "C:\"
         root_path = Path(root_drive)
-        
+        system_dirs = self._get_system_directories()
+
+        def should_skip(item: Path) -> bool:
+            return should_skip_path(item, system_dirs)
+
         try:
-            system_dirs = self._get_system_directories()
             top_level_dirs = [
                 item for item in root_path.iterdir()
-                if item.is_dir() and not should_skip_path(item, system_dirs)
+                if item.is_dir() and not should_skip(item)
             ]
 
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {
                     executor.submit(
-                        self._scan_directory_for_claude_configs,
-                        root_path, dir_path
+                        self._walk_for_project_mcp_configs,
+                        root_path, dir_path, should_skip
                     ): dir_path
                     for dir_path in top_level_dirs
                 }
@@ -71,7 +103,7 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
                 for future in as_completed(futures):
                     try:
                         dir_projects = future.result()
-                        all_projects.extend(dir_projects)
+                        projects.extend(dir_projects)
                     except Exception as e:
                         logger.debug(f"Error in parallel processing: {e}")
 
@@ -80,96 +112,27 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             # Fallback to current user's home directory
             logger.info("Falling back to home directory search")
             home_path = Path.home()
-            home_projects = self._scan_directory_for_claude_configs(home_path, home_path)
-            all_projects.extend(home_projects)
-
-        # Extract plugin MCP configs from ~/.claude/plugins/*/plugin.json
-        extract_claude_plugin_mcp_configs_with_root_support(all_projects)
-
-        # Return None if no configs found
-        if not all_projects:
-            return None
-        
-        return {
-            "projects": all_projects
-        }
-
-    def _scan_directory_for_claude_configs(
-        self,
-        root_path: Path,
-        search_dir: Path
-    ) -> List[Dict]:
-        """
-        Recursively walk directory tree looking for Claude Code MCP config files.
-
-        Uses depth-limited traversal to avoid scanning entire subtrees.
-        """
-        projects = []
-        system_dirs = self._get_system_directories()
-
-        self._walk_for_claude_configs(
-            root_path, search_dir, projects, system_dirs, current_depth=1
-        )
+            home_projects = self._walk_for_project_mcp_configs(
+                home_path, home_path, should_skip
+            )
+            projects.extend(home_projects)
 
         return projects
 
-    def _walk_for_claude_configs(
+    def _walk_for_project_mcp_configs(
         self,
         root_path: Path,
-        current_dir: Path,
-        projects: List[Dict],
-        system_dirs: set,
-        current_depth: int = 0
-    ) -> None:
+        search_dir: Path,
+        should_skip_func
+    ) -> List[Dict]:
         """
-        Walk directory tree with depth limit looking for Claude Code config files.
+        Walk directory tree looking for project-scope .mcp.json files.
         """
-        if current_depth > MAX_SEARCH_DEPTH:
-            return
-
-        try:
-            for entry in current_dir.iterdir():
-                try:
-                    if should_skip_path(entry, system_dirs):
-                        continue
-
-                    if entry.is_dir():
-                        # Check for .claude directory with mcp.json
-                        if entry.name == ".claude":
-                            mcp_config = entry / "mcp.json"
-                            if mcp_config.exists() and mcp_config.is_file():
-                                config_projects = self._extract_from_config_file(
-                                    mcp_config
-                                )
-                                if config_projects:
-                                    projects.extend(config_projects)
-                            continue
-
-                        self._walk_for_claude_configs(
-                            root_path, entry, projects,
-                            system_dirs, current_depth + 1
-                        )
-
-                    elif entry.is_file():
-                        # Check for .claude.json files
-                        if entry.name == ".claude.json":
-                            config_projects = self._extract_from_config_file(entry)
-                            if config_projects:
-                                projects.extend(config_projects)
-
-                        # Check for .mcp.json files (project-scope)
-                        elif entry.name == ".mcp.json":
-                            extract_claude_project_mcp_from_file(entry, projects)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {entry}: {e}")
-
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error walking {current_dir}: {e}")
+        projects = []
+        walk_for_claude_project_mcp_configs(
+            root_path, search_dir, projects, should_skip_func, current_depth=1
+        )
+        return projects
 
     def _get_system_directories(self) -> set:
         """
@@ -196,6 +159,8 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             List of project dicts or empty list if extraction fails
         """
         try:
+            if not config_path.exists():
+                return []
             content = config_path.read_text(encoding='utf-8', errors='replace')
             
             # Parse JSON

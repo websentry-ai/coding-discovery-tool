@@ -50,7 +50,7 @@ try:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
+    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user
@@ -92,7 +92,7 @@ except ImportError:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_report_to_backend_using_curl, get_user_info, get_all_users_macos
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
@@ -1142,56 +1142,83 @@ def main():
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
     args = parser.parse_args()
-    
-    # Checking for API key and domain
+
     if not args.api_key or not args.domain:
         print("Error: --api-key and --domain arguments are required")
         print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
         sys.exit(1)
-    
+
+    # Build Sentry context that persists for the whole run
+    sentry_ctx = {
+        "domain": args.domain,
+        "app_name": args.app_name or "",
+    }
+
     try:
         detector = AIToolsDetector()
-        
+
         # Get device ID once (shared across all user reports)
         device_id = detector.get_device_id()
-        
+        sentry_ctx["device_id"] = device_id
+
+        # Track failed reports for persistence
+        failed_reports = []
+
+        # --- Drain pending reports from previous run ---
+        pending = load_pending_reports()
+        if pending:
+            logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
+            for queued_report in pending:
+                success, retryable = send_report_to_backend(
+                    args.domain, args.api_key, queued_report, args.app_name,
+                    sentry_context=sentry_ctx,
+                )
+                if success:
+                    logger.info("  ✓ Queued report sent successfully")
+                elif retryable:
+                    failed_reports.append(queued_report)
+                else:
+                    logger.warning("  ✗ Queued report discarded (non-retryable error)")
+            logger.info("")
+
         # Get all users for macOS, or use current user for other platforms
         all_users = get_all_users_macos() if platform.system() == "Darwin" else []
-        
+
         # If no users found or not macOS, fall back to current user behavior
         if not all_users:
             all_users = [get_user_info()]
-        
+
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
         logger.info("=" * 60)
         logger.info(f"Device ID: {device_id}")
         logger.info("")
-        
+
         # Initial detection message
         logger.info("Detecting AI tools in this device.")
         logger.info("")
-        
+
         # Log users to explore
         logger.info(f"Users to process: {len(all_users)}")
         logger.info("Exploring tool detection for each user:")
         for user in all_users:
             logger.info(f"  - {user}")
         logger.info("")
-        
+
         # Get system_user once (who is running the script) for audit purposes
         system_user = get_user_info()
-        
+        sentry_ctx["system_user"] = system_user
+
         # Detect all unique tools across all users first (to know which tools to process)
         logger.info("Detecting AI tools...")
         all_tools = []  # Store all unique tools across all users
         tools_by_user = {}  # Track which tools belong to which user
-        
+
         for user in all_users:
             user_home = Path(f"/Users/{user}") if platform.system() == "Darwin" else Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             user_tools = detector.detect_all_tools(user_home=user_home)
-            
+
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
                 for tool in user_tools:
@@ -1199,7 +1226,7 @@ def main():
                     tool_version = tool.get('version', 'Unknown version')
                     tool_path = tool.get('install_path', 'Unknown path')
                     logger.info(f"      - {tool_name}: {tool_version} at {tool_path}")
-                    
+
                     # Track which user this tool belongs to
                     tool_key = f"{tool_name}:{tool_path}"
                     if tool_key not in tools_by_user:
@@ -1208,47 +1235,47 @@ def main():
             else:
                 logger.info(f"    No tools found for {user}")
             logger.info("")
-        
-        # Use the aggregated tools list
+
         tools = all_tools
         logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
         logger.info("")
-        
+
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
-            
+            sentry_ctx["tool_name"] = tool_name
+
             logger.info("")
             logger.info("=" * 60)
             logger.info(f"Processing tool: {tool_name}")
             logger.info("=" * 60)
             logger.info("")
-            
+
             try:
                 # Process this tool once (extract all rules and MCP configs for all users)
                 logger.info(f"  Extracting rules and MCP configs for {tool_name}...")
                 tool_with_projects = detector.process_single_tool(tool)
                 logger.info(f"  ✓ Processing complete for {tool_name}")
                 logger.info("")
-                
+
                 # Now explore all users for this tool and send reports
                 tool_total_projects = 0
                 tool_total_rules = 0
                 tool_users_summary = []
-                
+
                 for user_name in all_users:
                     user_home = Path(f"/Users/{user_name}") if platform.system() == "Darwin" else Path.home()
-                    
+
                     try:
                         # Filter projects to only include this user's projects
                         tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
-                        
+
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
                         single_tool_report = detector.generate_single_tool_report(
                             tool_filtered, device_id, user_name, system_user
                         )
-                    
+
                         # Log tool summary for this user
                         projects = tool_filtered.get('projects', [])
                         num_projects = len(projects)
@@ -1256,19 +1283,16 @@ def main():
                         num_mcp_servers = sum(len(p.get('mcpServers', [])) for p in projects)
                         tool_total_projects += num_projects
                         tool_total_rules += num_rules
-                        
-                        tool_version = tool_filtered.get('version', 'Unknown version')
-                        tool_path = tool_filtered.get('install_path', 'Unknown path')
-                        
+
                         logger.info(f"  User: {user_name}")
                         logger.info(f"    Projects: {num_projects}, Rules: {num_rules}, MCP Servers: {num_mcp_servers}")
-                        
+
                         tool_users_summary.append({
                             'user': user_name,
                             'projects': num_projects,
                             'rules': num_rules
                         })
-                        
+
                         # Log detailed summary of what's being sent
                         logger.info("")
                         logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
@@ -1279,7 +1303,7 @@ def main():
                         logger.info(f"  │ Projects: {len(projects)}")
                         logger.info(f"  │ Total Rules: {num_rules}")
                         logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
-                        
+
                         # Log permissions details if present
                         if "permissions" in tool_filtered:
                             perms = tool_filtered.get("permissions", {})
@@ -1299,17 +1323,15 @@ def main():
                             logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
                         else:
                             logger.info(f"  │ Permissions: ✗ Not present")
-                        
+
                         logger.info("  └──────────────────────────────────────────────────────────────────")
                         logger.info("")
-                        
+
                         # Log the complete JSON being sent to backend
                         logger.info("  Complete JSON payload being sent to backend:")
                         logger.info("  " + "=" * 70)
                         try:
-                            import json
                             report_json = json.dumps(single_tool_report, indent=2)
-                            # Split into lines and add indentation for readability
                             for line in report_json.split('\n'):
                                 logger.info(f"  {line}")
                         except Exception as e:
@@ -1317,24 +1339,25 @@ def main():
                             logger.info(f"  Report structure: {single_tool_report}")
                         logger.info("  " + "=" * 70)
                         logger.info("")
-                        
+
                         # Send report to backend
                         logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
-                        
-                        if args.api_key and args.domain:
-                            if send_report_to_backend_using_curl(args.domain, args.api_key, single_tool_report, args.app_name):
-                                logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
-                            else:
-                                logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
+
+                        success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                        if success:
+                            logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                         else:
-                            logger.warning(f"  ⚠ Skipping backend send - API key or domain not provided")
-                        
+                            logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
+                            if retryable:
+                                failed_reports.append(single_tool_report)
+
                         logger.info("")
-                        
+
                     except Exception as e:
                         logger.error(f"Error processing {tool_name} for user {user_name}: {e}", exc_info=True)
+                        report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name}, level="warning")
                         logger.info("")
-                
+
                 # Print summary for this tool
                 logger.info("")
                 logger.info("=" * 60)
@@ -1345,11 +1368,21 @@ def main():
                 logger.info(f"Total: {tool_total_projects} projects, {tool_total_rules} rule files across {len(tool_users_summary)} user(s)")
                 logger.info("=" * 60)
                 logger.info("")
-                
+
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
+                report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
+
+        # --- Persist any failed reports for the next run ---
+        if failed_reports:
+            save_failed_reports(failed_reports)
+        elif QUEUE_FILE.exists():
+            # All queued reports succeeded and no new failures — clean up
+            QUEUE_FILE.unlink(missing_ok=True)
+
     except Exception as e:
+        report_to_sentry(e, {**sentry_ctx, "phase": "main"})
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
 

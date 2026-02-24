@@ -4,13 +4,15 @@ Utility functions shared across the AI tools discovery system
 
 import json
 import logging
+import os
 import platform
 import re
 import subprocess
-import urllib.error
-import urllib.request
+import time
+import traceback
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .constants import COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
@@ -219,119 +221,335 @@ def normalize_url(domain: str) -> str:
     
     return url.rstrip('/')
 
-def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None) -> bool:
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
-    Send discovery report to backend endpoint.
-    
+    Send discovery report to backend endpoint using curl with retry logic.
+
+    Uses curl subprocess to avoid Zscaler certificate issues with urllib.
+    Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
+    Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
+
     Args:
         backend_url: Backend URL to send the report to
         api_key: API key for authentication
         report: Report dictionary to send
         app_name: Optional application name (e.g., JumpCloud) to include in request body
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+        sentry_context: Optional context dict forwarded to Sentry on failure
 
-    # Validate API key
+    Returns:
+        Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
+    """
+    NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
+    MAX_ATTEMPTS = 3
+    BACKOFF_SECONDS = [2, 4]
+
+    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+    ctx = sentry_context or {}
+
     if not api_key or not api_key.strip():
         logger.error("API key is empty or missing. Please provide a valid API key.")
-        return False
+        return (False, False)
 
+    payload = dict(report)
     if app_name:
-        report["app_name"] = app_name
-    
-    data = json.dumps(report).encode('utf-8')
-    
-    req = urllib.request.Request(url, data=data, method='POST')
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("User-Agent", "AI-Tools-Discovery/1.0")
-    
-    try:
-        with urllib.request.urlopen(req) as response:
-            return response.getcode() in (200, 201)
-    except urllib.error.HTTPError as e:
-        # Read response body for detailed error message
-        error_body = None
+        payload["app_name"] = app_name
+
+    payload_json = json.dumps(payload)
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            error_body = e.read().decode('utf-8')
-        except Exception:
-            pass
-        
-        logger.error(f"Failed to send report: {e.code} - {e.reason}")
-        
-        # Provide specific guidance for 403 errors (authentication issues)
-        if e.code == 403:
-            # Check for Cloudflare/WAF error code 1010
-            if error_body and "1010" in error_body:
-                logger.error("403 Forbidden - Cloudflare/WAF blocked the request (Error 1010)")
-                logger.error("  This typically means:")
-                logger.error("  - The request was blocked by Cloudflare security rules")
-                logger.error("  - IP address may be flagged or rate-limited")
-                logger.error("  - Request signature doesn't match expected pattern")
-                logger.error("  - Missing or invalid User-Agent header")
-                logger.error("  Solution: Contact backend team to whitelist the IP or adjust WAF rules")
+            result = subprocess.run(
+                [
+                    "curl", "-s",
+                    "-X", "POST",
+                    "-H", f"Authorization: Bearer {api_key}",
+                    "-H", "Content-Type: application/json",
+                    "-H", "User-Agent: AI-Tools-Discovery/1.0",
+                    "-d", payload_json,
+                    "--max-time", "60",
+                    "-w", "\n%{http_code}",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=65,
+            )
+
+            # Parse response: stdout = body + "\n" + http_code
+            lines = result.stdout.rsplit("\n", 1)
+            status_str = lines[-1].strip() if lines else ""
+            response_body = lines[0] if len(lines) > 1 else ""
+
+            if result.returncode != 0 or not status_str.isdigit():
+                # Connection/DNS failure — retryable
+                error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
+                logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
+                if attempt < MAX_ATTEMPTS:
+                    _backoff(attempt, BACKOFF_SECONDS)
+                    continue
+                exc = RuntimeError(error_msg)
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
+
+            http_code = int(status_str)
+
+            if 200 <= http_code < 300:
+                return (True, False)
+
+            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
+            _log_http_error_details(http_code, response_body or None)
+
+            # Cloudflare 403s with error 1010 are transient rate limits — allow retry
+            is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body
+            if http_code in NON_RETRYABLE_CODES and not is_cloudflare_block:
+                exc = RuntimeError(f"HTTP {http_code}")
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                return (False, False)
+
+            if attempt < MAX_ATTEMPTS:
+                _backoff(attempt, BACKOFF_SECONDS)
             else:
-                logger.error("403 Forbidden - Authentication failed. Possible causes:")
-                logger.error("  - API key is invalid or expired")
-                logger.error("  - API key does not have required permissions")
-                logger.error("  - API key format is incorrect")
-            if error_body:
-                logger.error(f"  Backend message: {error_body}")
-        
-        # Log response body for other errors too
-        elif error_body:
-            logger.error(f"Backend response: {error_body}")
-        
-        return False
+                exc = RuntimeError(f"HTTP {http_code}")
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                return (False, True)
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
+            if attempt < MAX_ATTEMPTS:
+                _backoff(attempt, BACKOFF_SECONDS)
+            else:
+                exc = RuntimeError("curl timeout")
+                report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
+
+        except Exception as e:
+            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
+            if attempt < MAX_ATTEMPTS:
+                _backoff(attempt, BACKOFF_SECONDS)
+            else:
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
+
+    return (False, True)
+
+
+def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
+    """Log contextual details for specific HTTP error codes."""
+    if code == 403:
+        if error_body and "1010" in error_body:
+            logger.error("403 Forbidden - Cloudflare/WAF blocked the request (Error 1010)")
+        else:
+            logger.error("403 Forbidden - Authentication failed. Check API key.")
+        if error_body:
+            logger.error(f"  Backend message: {error_body}")
+    elif error_body:
+        logger.error(f"Backend response: {error_body}")
+
+
+def _backoff(attempt: int, delays: List[int]) -> None:
+    """Sleep for the backoff duration corresponding to the given attempt."""
+    wait = delays[attempt - 1]
+    logger.info(f"  Retrying in {wait}s...")
+    time.sleep(wait)
+
+
+# ---------------------------------------------------------------------------
+# Persistence: queue failed reports for the next run
+# ---------------------------------------------------------------------------
+
+def _get_queue_file_path() -> Path:
+    """Return platform-appropriate queue file path.
+
+    On Unix, /var/tmp persists across reboots (unlike /tmp).
+    On Windows, fall back to the standard temp directory.
+    """
+    if platform.system() == "Windows":
+        import tempfile
+        return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
+    return Path("/var/tmp/ai-discovery-queue.json")
+
+
+QUEUE_FILE = _get_queue_file_path()
+QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
+MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
+
+
+def save_failed_reports(reports: List[Dict]) -> None:
+    """Write failed report envelopes to the queue file, merging with any existing entries."""
+    try:
+        existing = _load_queue_file_safe()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        envelopes = existing + [
+            {"report": r, "queued_at": now_iso} for r in reports
+        ]
+        # Keep only the most recent entries to prevent unbounded growth
+        envelopes = envelopes[-MAX_QUEUE_SIZE:]
+        _write_file_secure(QUEUE_FILE, json.dumps(envelopes).encode())
+        logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
     except Exception as e:
-        logger.error(f"Error sending report: {e}")
-        return False
+        logger.warning(f"Could not save failed reports: {e}")
 
 
-def send_report_to_backend_using_curl(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None) -> bool:
+def load_pending_reports() -> List[Dict]:
+    """Load pending reports from the queue file and return the list.
+
+    Reports older than 24 hours are silently discarded.
     """
-    Send discovery report to backend endpoint using curl.
-    """
-    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
-
-    if not api_key or not api_key.strip():
-        logger.error("API key is empty or missing.")
-        return False
-
-    if app_name:
-        report["app_name"] = app_name
+    if not QUEUE_FILE.exists():
+        return []
 
     try:
+        envelopes = json.loads(QUEUE_FILE.read_text())
+    except Exception as e:
+        logger.warning(f"Could not load pending reports: {e}")
+        return []
+
+    now = datetime.now(timezone.utc)
+    valid: List[Dict] = []
+    for envelope in envelopes:
+        try:
+            queued_at = datetime.fromisoformat(envelope["queued_at"])
+            if (now - queued_at).total_seconds() > QUEUE_MAX_AGE_SECONDS:
+                logger.debug("Discarding stale queued report (older than 24h)")
+                continue
+            valid.append(envelope["report"])
+        except Exception:
+            # Malformed envelope -- keep the report data if present
+            valid.append(envelope.get("report", envelope))
+
+    expired_count = len(envelopes) - len(valid)
+    logger.info(f"Loaded {len(valid)} pending report(s) from queue ({expired_count} expired)")
+    return valid
+
+
+def _load_queue_file_safe() -> List[Dict]:
+    """Load existing queue file contents, returning an empty list on any error."""
+    if not QUEUE_FILE.exists():
+        return []
+    try:
+        return json.loads(QUEUE_FILE.read_text())
+    except Exception:
+        return []
+
+
+def _write_file_secure(path: Path, data: bytes) -> None:
+    """Write data to a file with restricted permissions (0600 on Unix)."""
+    path.write_bytes(data)
+    # Restrict permissions to owner-only (rw-------) on Unix systems
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Sentry error reporting via raw HTTP (no SDK dependency)
+# ---------------------------------------------------------------------------
+
+_SENTRY_DSN = os.environ.get("AI_DISCOVERY_SENTRY_DSN", "")
+
+
+def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
+    """Parse a Sentry DSN into its components."""
+    try:
+        # https://<key>@<host>/<project_id>
+        scheme_rest = dsn.split("://", 1)
+        scheme = scheme_rest[0]
+        key_host_project = scheme_rest[1]
+        key, host_project = key_host_project.split("@", 1)
+        host, project_id = host_project.rsplit("/", 1)
+        return {
+            "key": key,
+            "host": host,
+            "project_id": project_id,
+            "store_url": f"{scheme}://{host}/api/{project_id}/store/",
+        }
+    except Exception:
+        return None
+
+
+_SENTRY_TAG_KEYS = (
+    "device_id", "app_name", "system_user",
+    "tool_name", "domain", "phase", "http_code",
+)
+
+
+def report_to_sentry(
+    exception: Exception,
+    context: Optional[Dict] = None,
+    level: str = "error",
+) -> None:
+    """Send an event to Sentry using the raw HTTP store endpoint.
+
+    Args:
+        exception: The exception to report.
+        context: Extra tags/context (e.g. phase, tool_name, http_code).
+        level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+    """
+    try:
+        dsn = _parse_sentry_dsn(_SENTRY_DSN)
+        if not dsn:
+            return
+
+        ctx = context or {}
+
+        tags = {
+            "os": platform.system(),
+            "hostname": platform.node(),
+            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
+        }
+
+        payload = {
+            "event_id": os.urandom(16).hex(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "platform": "python",
+            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
+            "tags": tags,
+            "exception": {
+                "values": [
+                    {
+                        "type": type(exception).__name__,
+                        "value": str(exception),
+                        "stacktrace": {"frames": _extract_frames(exception)},
+                    }
+                ]
+            },
+            "extra": ctx,
+        }
+
+        sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
         result = subprocess.run(
             [
-                "curl",
-                "-s", "-f",
+                "curl", "-s", "-o", "/dev/null",
+                "-w", "%{http_code}",
                 "-X", "POST",
-                "-H", f"Authorization: Bearer {api_key}",
                 "-H", "Content-Type: application/json",
-                "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                "-d", json.dumps(report),
-                "--max-time", "30",
-                url,
+                "-H", f"X-Sentry-Auth: {sentry_auth}",
+                "-d", json.dumps(payload),
+                "--max-time", "5",
+                dsn["store_url"],
             ],
             capture_output=True,
             text=True,
-            timeout=35,
+            timeout=10,
         )
-
         if result.returncode == 0:
-            return True
+            logger.debug(f"Sentry event sent ({result.stdout.strip()})")
+    except Exception:
+        # Sentry failures must never crash the script
+        pass
 
-        error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
-        logger.error(f"Failed to send report to {url}: {error_msg}")
-        return False
 
-    except subprocess.TimeoutExpired:
-        logger.error(f"Request timed out sending report to {url}")
-        return False
-    except Exception as e:
-        logger.error(f"Error sending report: {e}")
-        return False
+def _extract_frames(exception: Exception) -> List[Dict]:
+    """Convert exception traceback into Sentry-style frame dicts."""
+    if not exception.__traceback__:
+        return []
+    return [
+        {
+            "filename": frame.filename,
+            "lineno": frame.lineno,
+            "function": frame.name,
+        }
+        for frame in traceback.extract_tb(exception.__traceback__)
+    ]

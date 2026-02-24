@@ -37,11 +37,12 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         all_projects = []
 
-        root_drive = Path.home().anchor
+        # Scan entire filesystem from root drive
+        root_drive = Path.home().anchor # Gets the root drive like "C:\"
         root_path = Path(root_drive)
         
         try:
-            system_dirs = self._get_system_directories()
+            system_dirs = self._get_system_directories() 
             top_level_dirs = [item for item in root_path.iterdir()
                             if item.is_dir() and not should_skip_path(item, system_dirs)]
             
@@ -118,7 +119,7 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
                         # Recurse into subdirectories
                         self._walk_for_claude_mcp_configs(root_path, item, projects, current_depth + 1)
                     elif item.is_file():
-                        # Check for .claude.json files (user/local scope)
+                        # Check for .claude.json files
                         if item.name == ".claude.json":
                             config_projects = self._extract_from_config_file(item)
                             if config_projects:

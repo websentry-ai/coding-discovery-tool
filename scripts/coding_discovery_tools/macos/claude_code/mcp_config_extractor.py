@@ -70,13 +70,6 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
     def _extract_project_scope_configs(self) -> List[Dict]:
         """
         Extract project-scope MCP configs from .mcp.json files at project roots.
-
-        Searches the filesystem for .mcp.json files which contain project-scope
-        MCP server configurations. Skips ~/.claude/plugins/ directory as those
-        are plugin templates, not user configurations.
-
-        Returns:
-            List of project dicts with MCP configs marked with scope="project"
         """
         projects = []
         root_path = Path("/")

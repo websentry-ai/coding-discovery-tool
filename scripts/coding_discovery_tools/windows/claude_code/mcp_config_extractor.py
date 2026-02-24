@@ -101,137 +101,76 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
     ) -> List[Dict]:
         """
         Recursively walk directory tree looking for Claude Code MCP config files.
+
+        Uses depth-limited traversal to avoid scanning entire subtrees.
         """
         projects = []
         system_dirs = self._get_system_directories()
 
-        # Find .claude.json files
-        self._find_claude_json_configs(root_path, search_dir, projects, system_dirs)
-
-        # Find .claude/mcp.json files
-        self._find_claude_dir_configs(root_path, search_dir, projects, system_dirs)
-
-        # Find .mcp.json files
-        self._find_mcp_json_configs(root_path, search_dir, projects, system_dirs)
+        self._walk_for_claude_configs(
+            root_path, search_dir, projects, system_dirs, current_depth=1
+        )
 
         return projects
 
-    def _find_claude_json_configs(
+    def _walk_for_claude_configs(
         self,
         root_path: Path,
-        search_dir: Path,
+        current_dir: Path,
         projects: List[Dict],
-        system_dirs: set
+        system_dirs: set,
+        current_depth: int = 0
     ) -> None:
-        """Find and extract .claude.json config files using rglob."""
-        try:
-            for config_file in search_dir.rglob(".claude.json"):
-                try:
-                    if not self._is_valid_path(config_file, root_path, system_dirs):
-                        continue
-
-                    config_projects = self._extract_from_config_file(config_file)
-                    if config_projects:
-                        projects.extend(config_projects)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {config_file}: {e}")
-
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error scanning for .claude.json in {search_dir}: {e}")
-
-    def _find_claude_dir_configs(
-        self,
-        root_path: Path,
-        search_dir: Path,
-        projects: List[Dict],
-        system_dirs: set
-    ) -> None:
-        """Find and extract .claude/mcp.json config files using rglob."""
-        try:
-            for claude_dir in search_dir.rglob(".claude"):
-                try:
-                    if not claude_dir.is_dir():
-                        continue
-
-                    if not self._is_valid_path(claude_dir, root_path, system_dirs):
-                        continue
-
-                    mcp_config = claude_dir / "mcp.json"
-                    if mcp_config.exists() and mcp_config.is_file():
-                        config_projects = self._extract_from_config_file(mcp_config)
-                        if config_projects:
-                            projects.extend(config_projects)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {claude_dir}: {e}")
-
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error scanning for .claude directories in {search_dir}: {e}")
-
-    def _find_mcp_json_configs(
-        self,
-        root_path: Path,
-        search_dir: Path,
-        projects: List[Dict],
-        system_dirs: set
-    ) -> None:
-        """Find and extract .mcp.json project-scope config files using rglob."""
-        try:
-            for mcp_file in search_dir.rglob(".mcp.json"):
-                try:
-                    if not self._is_valid_path(mcp_file, root_path, system_dirs):
-                        continue
-
-                    extract_claude_project_mcp_from_file(mcp_file, projects)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {mcp_file}: {e}")
-
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error scanning for .mcp.json in {search_dir}: {e}")
-
-    def _is_valid_path(
-        self,
-        file_path: Path,
-        root_path: Path,
-        system_dirs: set
-    ) -> bool:
         """
-        Check if a path is valid within depth limit
+        Walk directory tree with depth limit looking for Claude Code config files.
         """
+        if current_depth > MAX_SEARCH_DEPTH:
+            return
+
         try:
-            depth = len(file_path.relative_to(root_path).parts)
-            if depth > MAX_SEARCH_DEPTH:
-                return False
-        except ValueError:
-            # Path not relative to root
-            return False
+            for entry in current_dir.iterdir():
+                try:
+                    if should_skip_path(entry, system_dirs):
+                        continue
 
-        # Check if file or any parent should be skipped using the system directories
-        if should_skip_path(file_path, system_dirs):
-            return False
+                    if entry.is_dir():
+                        # Check for .claude directory with mcp.json
+                        if entry.name == ".claude":
+                            mcp_config = entry / "mcp.json"
+                            if mcp_config.exists() and mcp_config.is_file():
+                                config_projects = self._extract_from_config_file(
+                                    mcp_config
+                                )
+                                if config_projects:
+                                    projects.extend(config_projects)
+                            continue
 
-        for parent in file_path.parents:
-            if parent == root_path:
-                break
-            if should_skip_path(parent, system_dirs):
-                return False
+                        self._walk_for_claude_configs(
+                            root_path, entry, projects,
+                            system_dirs, current_depth + 1
+                        )
 
-        return True
-    
+                    elif entry.is_file():
+                        # Check for .claude.json files
+                        if entry.name == ".claude.json":
+                            config_projects = self._extract_from_config_file(entry)
+                            if config_projects:
+                                projects.extend(config_projects)
+
+                        # Check for .mcp.json files (project-scope)
+                        elif entry.name == ".mcp.json":
+                            extract_claude_project_mcp_from_file(entry, projects)
+
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {entry}: {e}")
+
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error walking {current_dir}: {e}")
+
     def _get_system_directories(self) -> set:
         """
         Get Windows system directories to skip.

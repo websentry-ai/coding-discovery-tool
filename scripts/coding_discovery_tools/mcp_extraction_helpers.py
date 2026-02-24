@@ -760,45 +760,43 @@ def walk_for_claude_project_mcp_configs(
 ) -> None:
     """
     Walk directory tree looking for Claude Code project-scope .mcp.json files.
-
-    This looks for .mcp.json files directly at project roots.
     """
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+
     try:
-        for mcp_file in current_dir.rglob(".mcp.json"):
+        for entry in current_dir.iterdir():
             try:
-                try:
-                    depth = len(mcp_file.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
+                if entry.is_dir():
+                    if should_skip_func(entry):
                         continue
-                except ValueError:
-                    continue
+                    walk_for_claude_project_mcp_configs(
+                        root_path, entry, projects,
+                        should_skip_func, current_depth + 1
+                    )
+                elif entry.is_file() and entry.name == ".mcp.json":
+                    try:
+                        depth = len(entry.relative_to(root_path).parts)
+                        if depth > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
 
-                if should_skip_func(mcp_file):
-                    continue
+                    if should_skip_func(entry):
+                        continue
 
-                skip_due_to_parent = False
-                for parent in mcp_file.parents:
-                    if parent == root_path or parent == current_dir:
-                        break
-                    if should_skip_func(parent):
-                        skip_due_to_parent = True
-                        break
-
-                if skip_due_to_parent:
-                    continue
-
-                extract_claude_project_mcp_from_file(mcp_file, projects)
+                    extract_claude_project_mcp_from_file(entry, projects)
 
             except (PermissionError, OSError):
                 continue
             except Exception as e:
-                logger.debug(f"Error processing {mcp_file}: {e}")
+                logger.debug(f"Error processing {entry}: {e}")
                 continue
 
     except (PermissionError, OSError):
         pass
     except Exception as e:
-        logger.debug(f"Error scanning {current_dir} for .mcp.json files: {e}")
+        logger.debug(f"Error walking {current_dir}: {e}")
 
 
 def extract_dual_path_configs_with_root_support(
@@ -921,7 +919,7 @@ def extract_managed_mcp_config(projects: List[Dict]) -> None:
     Extract MCP config from the managed-mcp.json file.
     """
     managed_path = get_managed_mcp_path()
-    if not managed_path or not managed_path.exists():
+    if not managed_path or not managed_path.exists() or not managed_path.is_file():
         return
 
     try:
@@ -950,7 +948,7 @@ def extract_plugin_mcp_from_plugin_json(
     projects: List[Dict]
 ) -> None:
     """
-    Extract MCP config from a plugin's plugin.json file.x
+    Extract MCP config from a plugin's plugin.json file.
     """
     if not plugin_json_path.exists() or not plugin_json_path.is_file():
         return

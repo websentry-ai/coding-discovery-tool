@@ -16,7 +16,6 @@ from ...macos_extraction_helpers import (
 from ...mcp_extraction_helpers import (
     extract_claude_mcp_fields,
     extract_dual_path_configs_with_root_support,
-    extract_claude_project_mcp_from_file,
     walk_for_claude_project_mcp_configs,
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,

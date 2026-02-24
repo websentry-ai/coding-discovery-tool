@@ -717,6 +717,88 @@ def extract_project_level_mcp_configs_with_fallback_windows(
     return projects
 
 
+def extract_claude_project_mcp_from_file(
+    mcp_json_path: Path,
+    projects: List[Dict]
+) -> None:
+    """
+    Extract MCP config from a project-scope .mcp.json file.
+    """
+    if not mcp_json_path.exists() or not mcp_json_path.is_file():
+        return
+
+    try:
+        project_root = mcp_json_path.parent
+
+        content = mcp_json_path.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+
+        mcp_servers_obj = config_data.get("mcpServers", {})
+
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+
+        if mcp_servers_array:
+            projects.append({
+                "path": str(project_root),
+                "mcpServers": mcp_servers_array,
+                "scope": "project"
+            })
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in Claude Code project MCP config {mcp_json_path}: {e}")
+    except PermissionError as e:
+        logger.warning(f"Permission denied reading Claude Code project MCP config {mcp_json_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading Claude Code project MCP config {mcp_json_path}: {e}")
+
+
+def walk_for_claude_project_mcp_configs(
+    root_path: Path,
+    current_dir: Path,
+    projects: List[Dict],
+    should_skip_func: Callable[[Path], bool],
+    current_depth: int = 0
+) -> None:
+    """
+    Walk directory tree looking for Claude Code project-scope .mcp.json files.
+    """
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+
+    try:
+        for entry in current_dir.iterdir():
+            try:
+                if entry.is_dir():
+                    if should_skip_func(entry):
+                        continue
+                    walk_for_claude_project_mcp_configs(
+                        root_path, entry, projects,
+                        should_skip_func, current_depth + 1
+                    )
+                elif entry.is_file() and entry.name == ".mcp.json":
+                    try:
+                        depth = len(entry.relative_to(root_path).parts)
+                        if depth > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
+
+                    if should_skip_func(entry):
+                        continue
+
+                    extract_claude_project_mcp_from_file(entry, projects)
+
+            except (PermissionError, OSError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing {entry}: {e}")
+                continue
+
+    except (PermissionError, OSError):
+        pass
+    except Exception as e:
+        logger.debug(f"Error walking {current_dir}: {e}")
+
+
 def extract_dual_path_configs_with_root_support(
     preferred_path: Path,
     fallback_path: Path,
@@ -816,4 +898,156 @@ def extract_dual_path_configs_with_root_support(
                 all_projects.extend(user_projects)
     
     return all_projects
+
+
+def get_managed_mcp_path() -> Optional[Path]:
+    """
+    Determine the path to the managed-mcp.json file.
+    """
+    import platform
+
+    system = platform.system()
+    if system == "Darwin":
+        return Path("/Library/Application Support/ClaudeCode/managed-mcp.json")
+    elif system == "Windows":
+        return Path("C:/Program Files/ClaudeCode/managed-mcp.json")
+    return None
+
+
+def extract_managed_mcp_config(projects: List[Dict]) -> None:
+    """
+    Extract MCP config from the managed-mcp.json file.
+    """
+    managed_path = get_managed_mcp_path()
+    if not managed_path or not managed_path.exists() or not managed_path.is_file():
+        return
+
+    try:
+        content = managed_path.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+
+        if mcp_servers_array:
+            projects.append({
+                "path": str(managed_path),
+                "mcpServers": mcp_servers_array,
+                "scope": "managed"
+            })
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in managed MCP config {managed_path}: {e}")
+    except PermissionError as e:
+        logger.debug(f"Permission denied reading managed MCP config {managed_path}: {e}")
+    except Exception as e:
+        logger.warning(f"Error reading managed MCP config {managed_path}: {e}")
+
+
+def extract_plugin_mcp_from_plugin_json(
+    plugin_json_path: Path,
+    projects: List[Dict]
+) -> None:
+    """
+    Extract MCP config from a plugin's plugin.json file.
+    """
+    if not plugin_json_path.exists() or not plugin_json_path.is_file():
+        return
+
+    try:
+        plugin_root = plugin_json_path.parent
+        content = plugin_json_path.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+
+        mcp_servers_obj = config_data.get("mcpServers", {})
+        if not mcp_servers_obj:
+            return
+
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+
+        if mcp_servers_array:
+            plugin_name = config_data.get("name", plugin_root.name)
+            projects.append({
+                "path": str(plugin_root),
+                "mcpServers": mcp_servers_array,
+                "scope": "plugin",
+                "pluginName": plugin_name
+            })
+    except json.JSONDecodeError as e:
+        logger.debug(f"Invalid JSON in plugin.json {plugin_json_path}: {e}")
+    except PermissionError as e:
+        logger.debug(f"Permission denied reading plugin.json {plugin_json_path}: {e}")
+    except Exception as e:
+        logger.debug(f"Error reading plugin.json {plugin_json_path}: {e}")
+
+
+def extract_claude_plugin_mcp_configs(projects: List[Dict]) -> None:
+    """
+    Extract MCP configs from Claude Code plugins.
+    """
+    plugins_dir = Path.home() / ".claude" / "plugins"
+    if not plugins_dir.exists() or not plugins_dir.is_dir():
+        return
+
+    try:
+        for plugin_dir in plugins_dir.iterdir():
+            if not plugin_dir.is_dir():
+                continue
+
+            plugin_json = plugin_dir / "plugin.json"
+            if plugin_json.exists():
+                extract_plugin_mcp_from_plugin_json(plugin_json, projects)
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Error scanning plugins directory {plugins_dir}: {e}")
+    except Exception as e:
+        logger.debug(f"Error extracting plugin MCP configs: {e}")
+
+
+def extract_claude_plugin_mcp_configs_with_root_support(projects: List[Dict]) -> None:
+    """
+    Extract MCP configs from Claude Code plugins with root user support.
+    """
+    import platform
+
+    is_admin = False
+    users_dir = None
+
+    if platform.system() == "Darwin":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/Users")
+        except ImportError:
+            pass
+    elif platform.system() == "Windows":
+        try:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            users_dir = Path("C:\\Users")
+        except Exception:
+            try:
+                import getpass
+                current_user = getpass.getuser().lower()
+                is_admin = current_user in ["administrator", "system"]
+                users_dir = Path("C:\\Users")
+            except Exception:
+                pass
+
+    if is_admin and users_dir and users_dir.exists():
+        for user_dir in users_dir.iterdir():
+            if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                plugins_dir = user_dir / ".claude" / "plugins"
+                if plugins_dir.exists() and plugins_dir.is_dir():
+                    try:
+                        for plugin_dir in plugins_dir.iterdir():
+                            if not plugin_dir.is_dir():
+                                continue
+                            plugin_json = plugin_dir / "plugin.json"
+                            if plugin_json.exists():
+                                extract_plugin_mcp_from_plugin_json(plugin_json, projects)
+                    except (PermissionError, OSError) as e:
+                        logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
+
+        extract_claude_plugin_mcp_configs(projects)
+    else:
+        extract_claude_plugin_mcp_configs(projects)
 

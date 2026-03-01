@@ -447,6 +447,7 @@ def _write_file_secure(path: Path, data: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 _SENTRY_DSN = os.environ.get("AI_DISCOVERY_SENTRY_DSN", "")
+_SENTRY_ENV = os.environ.get("AI_DISCOVERY_SENTRY_ENV", "production")
 
 
 def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
@@ -504,6 +505,7 @@ def report_to_sentry(
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": level,
             "platform": "python",
+            "environment": _SENTRY_ENV,
             "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
             "tags": tags,
             "exception": {

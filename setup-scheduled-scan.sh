@@ -56,9 +56,9 @@ store_credentials_in_keychain() {
 
     echo "Storing credentials in macOS Keychain..."
 
-    # Remove existing entries if present
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" 2>/dev/null || true
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" 2>/dev/null || true
+    # Remove existing entries if present (suppress all output)
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" >/dev/null 2>&1 || true
 
     # Store new credentials with error checking
     if ! security add-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w "$api_key" -U 2>/dev/null; then
@@ -77,8 +77,8 @@ store_credentials_in_keychain() {
 }
 
 remove_credentials_from_keychain() {
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" 2>/dev/null || true
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" 2>/dev/null || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" >/dev/null 2>&1 || true
     echo "  Removed credentials from Keychain"
 }
 

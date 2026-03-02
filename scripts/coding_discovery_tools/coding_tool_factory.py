@@ -29,6 +29,7 @@ from .coding_tool_base import (
     BaseOpenClawDetector,
     BaseCopilotDetector,
     BaseJunieRulesExtractor,
+    BaseClaudeSkillsExtractor,
 )
 
 # macOS - Shared
@@ -43,6 +44,7 @@ from .macos.cursor.settings_extractor import MacOSCursorSettingsExtractor
 from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
 from .macos.claude_code.mcp_config_extractor import MacOSClaudeMCPConfigExtractor
 from .macos.claude_code.settings_extractor import MacOSClaudeSettingsExtractor
+from .macos.claude_code.skills_extractor import MacOSClaudeSkillsExtractor
 
 # macOS - Windsurf
 from .macos.windsurf.windsurf import MacOSWindsurfDetector
@@ -162,6 +164,7 @@ from .windows.cursor.settings_extractor import WindowsCursorSettingsExtractor
 from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
 from .windows.claude_code.mcp_config_extractor import WindowsClaudeMCPConfigExtractor
 from .windows.claude_code.settings_extractor import WindowsClaudeSettingsExtractor
+from .windows.claude_code.skills_extractor import WindowsClaudeSkillsExtractor
 
 # Windows - Windsurf
 from .windows.windsurf.windsurf import WindowsWindsurfDetector
@@ -1353,5 +1356,30 @@ class CursorCliRulesExtractorFactory:
             return MacOSCursorCliRulesExtractor()
         elif os_name == "Windows":
             return WindowsCursorCliRulesExtractor()
+        else:
+            return None
+
+
+class ClaudeSkillsExtractorFactory:
+    """Factory for creating OS-specific Claude Code skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseClaudeSkillsExtractor]:
+        """
+        Create appropriate Claude Code skills extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseClaudeSkillsExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSClaudeSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsClaudeSkillsExtractor()
         else:
             return None

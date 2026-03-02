@@ -87,21 +87,24 @@ class BaseClaudeRulesExtractor(ABC):
     """Abstract base class for extracting Claude Code rules from all projects."""
 
     @abstractmethod
-    def extract_all_claude_rules(self) -> List[Dict]:
+    def extract_all_claude_rules(self) -> Dict:
         """
         Extract all Claude Code rules from all projects on the machine.
-        
+
         Searches for:
-        - Current format: **/.clauderules (recursive)
-        - Current format: **/.claude/.clauderules (recursive)
-        - Legacy format: **/claude.md (recursive)
-        - Legacy format: **/.claude/claude.md (recursive)
-        
+        - User-level: ~/.claude/CLAUDE.md (any casing)
+        - Project-level: **/.clauderules (recursive)
+        - Project-level: **/.claude/.clauderules (recursive)
+        - Project-level: **/CLAUDE.md (any casing, recursive)
+        - Project-level: **/.claude/CLAUDE.md (any casing, recursive)
+
         Returns:
-            List of project dicts, each containing:
-            - project_root: Path to the project root
-            - rules: List of rule file dicts with metadata (file_path, file_name,
-              content, size, last_modified, truncated)
+            Dict with:
+            - user_rules: List of user-level rule dicts (global, scope: "user")
+              Each rule has: file_path, file_name, content, size, last_modified, truncated, scope
+            - project_rules: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - rules: List of rule file dicts with metadata
         """
         pass
 
@@ -317,6 +320,29 @@ class BaseMCPConfigExtractor(ABC):
     def extract_mcp_config(self) -> Optional[Dict]:
         """
         Extract MCP configuration for the tool.
+        """
+        pass
+
+
+class BaseClaudeSkillsExtractor(ABC):
+    """Abstract base class for extracting Claude Code skills from all projects."""
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all Claude Code skills from all projects on the machine.
+
+        Searches for:
+        - User-level skills: ~/.claude/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.claude/skills/<skill-name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+              Each skill has: skill_name, file_path, content, size, last_modified, truncated, scope
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
         """
         pass
 

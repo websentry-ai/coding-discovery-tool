@@ -83,10 +83,11 @@ remove_credentials_from_keychain() {
 }
 
 # =============================================================================
-# Wrapper Script - Safe Auto-Update Pattern
+# Wrapper Script - EDR-Safe Auto-Update Pattern
 # =============================================================================
-# Downloads install script to a temp file, validates it, then executes.
-# This is the standard safe pattern (not curl | bash).
+# Downloads install script to a permanent location, validates it, then executes.
+# File is kept after execution (not deleted) to avoid anti-forensics pattern
+# that EDR tools like CrowdStrike flag as malware staging behavior.
 # =============================================================================
 
 create_wrapper_script() {
@@ -100,18 +101,24 @@ create_wrapper_script() {
 # Unbound Discovery Wrapper Script
 # =============================================================================
 # Executed by LaunchAgent every 12 hours.
-# Downloads and runs the latest discovery script using safe patterns.
+# Downloads and runs the latest discovery script using EDR-safe patterns.
+#
+# Security: File is kept after execution to avoid "download-execute-delete"
+# pattern that EDR tools flag as malware staging (anti-forensics behavior).
 # =============================================================================
 
 set -euo pipefail
 
 KEYCHAIN_SERVICE="ai.getunbound.discovery"
 LOG_DIR="$HOME/Library/Logs/unbound"
-TEMP_DIR="$HOME/.local/share/unbound/tmp"
+INSTALL_DIR="$HOME/.local/share/unbound"
 INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
 
+# Permanent location for downloaded script (not temp - EDR safe)
+SCRIPT_PATH="$INSTALL_DIR/install.sh"
+
 mkdir -p "$LOG_DIR"
-mkdir -p "$TEMP_DIR"
+mkdir -p "$INSTALL_DIR"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_DIR/scan.log"
@@ -132,41 +139,37 @@ DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>
 
 log "Credentials retrieved from Keychain"
 
-# Step 2: Download to temp file (safe pattern - not curl | bash)
-TEMP_SCRIPT="$TEMP_DIR/install-$(date +%s).sh"
+# Step 2: Download to permanent location (overwrites previous version)
+log "Downloading install script to: $SCRIPT_PATH"
 
-log "Downloading install script to temp file: $TEMP_SCRIPT"
-
-if ! curl -fsSL -o "$TEMP_SCRIPT" "$INSTALL_SCRIPT_URL"; then
+if ! curl -fsSL -o "$SCRIPT_PATH" "$INSTALL_SCRIPT_URL"; then
     log "ERROR: Failed to download install script"
-    rm -f "$TEMP_SCRIPT"
     exit 1
 fi
 
 # Step 3: Validate the downloaded file
-if [ ! -s "$TEMP_SCRIPT" ]; then
+if [ ! -s "$SCRIPT_PATH" ]; then
     log "ERROR: Downloaded script is empty"
-    rm -f "$TEMP_SCRIPT"
     exit 1
 fi
 
-if ! head -1 "$TEMP_SCRIPT" | grep -q '^#!/'; then
+if ! head -1 "$SCRIPT_PATH" | grep -q '^#!/'; then
     log "ERROR: Downloaded file is not a valid script"
-    rm -f "$TEMP_SCRIPT"
     exit 1
 fi
 
 log "Download validated successfully"
 
-# Step 4: Execute the local temp file
-chmod +x "$TEMP_SCRIPT"
+# Step 4: Execute the local script
+chmod +x "$SCRIPT_PATH"
 
 log "Executing local script..."
-"$TEMP_SCRIPT" --api-key "$API_KEY" --domain "$DOMAIN" >> "$LOG_DIR/scan.log" 2>&1
+"$SCRIPT_PATH" --api-key "$API_KEY" --domain "$DOMAIN" >> "$LOG_DIR/scan.log" 2>&1
 EXIT_CODE=$?
 
-# Step 5: Cleanup temp file
-rm -f "$TEMP_SCRIPT"
+# Note: Script is intentionally NOT deleted after execution.
+# Keeping the file avoids the "download-execute-delete" pattern
+# that EDR tools like CrowdStrike flag as malware staging.
 
 if [ $EXIT_CODE -eq 0 ]; then
     log "Discovery completed successfully"

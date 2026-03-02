@@ -5,8 +5,10 @@ Extracts Claude Code configuration files (.clauderules and CLAUDE.md) from all p
 on the user's machine, grouping them by project root.
 
 Rules are stored in:
+- Managed: /Library/Application Support/ClaudeCode/CLAUDE.md
 - User-level: ~/.claude/CLAUDE.md (any casing)
 - Project-level: **/.claude/CLAUDE.md, **/.clauderules, **/CLAUDE.md (any casing)
+- Local: **/CLAUDE.local.md (any casing, personal project-specific preferences)
 """
 
 import logging
@@ -39,6 +41,11 @@ def _is_claude_md_file(filename: str) -> bool:
     return filename.lower() == "claude.md"
 
 
+def _is_claude_local_md_file(filename: str) -> bool:
+    """Check if filename is a CLAUDE.local.md file (case-insensitive)."""
+    return filename.lower() == "claude.local.md"
+
+
 def build_rules_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Dict]:
     """
     Convert projects dictionary to list format with 'rules' key.
@@ -61,17 +68,24 @@ def build_rules_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Di
 class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
     """Extractor for Claude Code rules on macOS systems."""
 
+    MANAGED_RULES_PATH = Path("/Library/Application Support/ClaudeCode/CLAUDE.md")
+
     def extract_all_claude_rules(self) -> Dict:
         """
         Extract all Claude Code rules from all projects on macOS.
 
         Returns:
             Dict with:
+            - managed_rules: List of managed rule dicts (org-level, scope: "managed")
             - user_rules: List of user-level rule dicts (global, scope: "user")
             - project_rules: List of project dicts with project_root and rules
         """
+        managed_rules = []
         user_rules = []
         projects_by_root = {}
+
+        # Extract managed rules from /Library/Application Support/ClaudeCode/CLAUDE.md
+        self._extract_managed_rules(managed_rules)
 
         # Extract user-level rules from ~/.claude/CLAUDE.md
         self._extract_user_level_rules(user_rules)
@@ -83,9 +97,30 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
         self._extract_project_level_rules(root_path, projects_by_root)
 
         return {
+            "managed_rules": managed_rules,
             "user_rules": user_rules,
             "project_rules": build_rules_project_list(projects_by_root)
         }
+
+    def _extract_managed_rules(self, managed_rules: List[Dict]) -> None:
+        """
+        Extract managed rules from /Library/Application Support/ClaudeCode/CLAUDE.md.
+
+        Args:
+            managed_rules: List to populate with managed rules
+        """
+        if not self.MANAGED_RULES_PATH.exists():
+            return
+
+        try:
+            rule_info = extract_single_rule_file(
+                self.MANAGED_RULES_PATH, find_claude_project_root, scope="managed"
+            )
+            if rule_info:
+                rule_info.pop('project_root', None)
+                managed_rules.append(rule_info)
+        except Exception as e:
+            logger.debug(f"Error extracting managed rules: {e}")
 
     def _extract_user_level_rules(self, user_rules: List[Dict]) -> None:
         """
@@ -196,6 +231,14 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                         if item.name == ".clauderules" or _is_claude_md_file(item.name):
                             if should_process_file(item, root_path):
                                 rule_info = extract_single_rule_file(item, find_claude_project_root, scope="project")
+                                if rule_info:
+                                    project_root = rule_info.get('project_root')
+                                    if project_root:
+                                        add_rule_to_project(rule_info, project_root, projects_by_root)
+                        # Check for CLAUDE.local.md files (case-insensitive)
+                        elif _is_claude_local_md_file(item.name):
+                            if should_process_file(item, root_path):
+                                rule_info = extract_single_rule_file(item, find_claude_project_root, scope="local")
                                 if rule_info:
                                     project_root = rule_info.get('project_root')
                                     if project_root:

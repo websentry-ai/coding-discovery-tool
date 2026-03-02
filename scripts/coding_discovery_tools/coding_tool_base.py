@@ -92,19 +92,24 @@ class BaseClaudeRulesExtractor(ABC):
         Extract all Claude Code rules from all projects on the machine.
 
         Searches for:
+        - Managed: /Library/Application Support/ClaudeCode/CLAUDE.md (macOS)
+                   or C:\\Program Files\\ClaudeCode\\CLAUDE.md (Windows)
         - User-level: ~/.claude/CLAUDE.md (any casing)
         - Project-level: **/.clauderules (recursive)
         - Project-level: **/.claude/.clauderules (recursive)
         - Project-level: **/CLAUDE.md (any casing, recursive)
         - Project-level: **/.claude/CLAUDE.md (any casing, recursive)
+        - Local: **/CLAUDE.local.md (any casing, recursive)
 
         Returns:
             Dict with:
+            - managed_rules: List of managed rule dicts (org-level, scope: "managed")
+              Each rule has: file_path, file_name, content, size, last_modified, truncated, scope
             - user_rules: List of user-level rule dicts (global, scope: "user")
               Each rule has: file_path, file_name, content, size, last_modified, truncated, scope
             - project_rules: List of project dicts, each containing:
               - project_root: Path to the project root
-              - rules: List of rule file dicts with metadata
+              - rules: List of rule file dicts with metadata (includes scope: "project" or "local")
         """
         pass
 

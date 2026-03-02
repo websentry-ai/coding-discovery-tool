@@ -806,13 +806,19 @@ class AIToolsDetector:
         logger.info(f"Processing: {tool_name}")
         logger.info("=" * 70)
 
-        # Extract rules (now returns user_rules and project_rules separately)
+        # Extract rules (now returns managed_rules, user_rules and project_rules separately)
         logger.info(f"  Extracting {tool_name} rules...")
         if self._claude_rules_extractor:
             try:
                 rules_result = self.extract_all_claude_rules()
+                managed_rules = rules_result.get("managed_rules", []) if rules_result else []
                 user_rules = rules_result.get("user_rules", []) if rules_result else []
                 project_rules = rules_result.get("project_rules", []) if rules_result else []
+
+                # Store managed rules for tool-level output (organization-wide policy)
+                if managed_rules:
+                    logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
+                    tool["_managed_rules"] = managed_rules
 
                 # Store user-level rules for tool-level output
                 if user_rules:
@@ -830,7 +836,7 @@ class AIToolsDetector:
                     if total_rules > 0:
                         log_rules_details(projects_dict, tool_name)
 
-                if not user_rules and not project_rules:
+                if not managed_rules and not user_rules and not project_rules:
                     logger.info("  ℹ No rules found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
@@ -1256,6 +1262,11 @@ class AIToolsDetector:
         if "plugins" in tool:
             tool_dict["plugins"] = tool["plugins"]
             logger.info(f"  ✓ Added {len(tool['plugins'])} plugin(s) to {tool_name} report")
+
+        # Add managed rules (Claude Code specific - org policy from /Library/Application Support/ClaudeCode/CLAUDE.md)
+        if "_managed_rules" in tool:
+            tool_dict["managed_rules"] = tool["_managed_rules"]
+            logger.info(f"  ✓ Added {len(tool['_managed_rules'])} managed rule(s) to {tool_name} report")
 
         # Add user-level rules (Claude Code specific - global rules from ~/.claude/CLAUDE.md)
         if "_user_rules" in tool:

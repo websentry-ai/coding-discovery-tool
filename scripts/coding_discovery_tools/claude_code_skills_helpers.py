@@ -5,8 +5,11 @@ This module contains OS-agnostic functions used by both macOS and Windows
 skills extractors to avoid code duplication.
 """
 
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
+
+logger = logging.getLogger(__name__)
 
 CLAUDE_DIR_NAME = ".claude"
 SKILLS_DIR_NAME = "skills"
@@ -85,7 +88,7 @@ def find_skill_project_root(skill_file: Path) -> Path:
 def extract_skill_info(
     skill_file: Path,
     extract_single_rule_file_func: Callable,
-    scope: str = None
+    scope: str,
 ) -> Optional[Dict]:
     """
     Extract skill information from a SKILL.md file.
@@ -97,7 +100,7 @@ def extract_skill_info(
     Args:
         skill_file: Path to the SKILL.md file
         extract_single_rule_file_func: OS-specific function to extract rule file info
-        scope: Scope of the skill ("user" or "project")
+        scope: Scope of the skill ("user" or "project") - required
 
     Returns:
         Dict with skill info in unified rules format, or None if extraction fails
@@ -128,9 +131,6 @@ def extract_skills_from_directory(
         extract_single_rule_file_func: OS-specific function to extract rule file info
         add_skill_func: Function to add skill to project dict (handles thread safety)
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
     try:
         # Iterate over skill directories inside skills/
         for skill_dir in skills_dir.iterdir():

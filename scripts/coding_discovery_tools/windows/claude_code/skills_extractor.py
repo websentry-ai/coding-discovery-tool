@@ -29,6 +29,11 @@ SKILLS_DIR_NAME = "skills"
 SKILL_FILE_NAME = "SKILL.md"
 
 
+def _is_skill_md_file(filename: str) -> bool:
+    """Check if filename is a SKILL.md file (case-insensitive)."""
+    return filename.lower() == "skill.md"
+
+
 def build_skills_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Dict]:
     """
     Convert projects dictionary to list format with 'skills' key.
@@ -89,12 +94,16 @@ def _extract_skill_info(skill_file: Path, scope: str = None) -> Optional[Dict]:
     """
     Extract skill information from a SKILL.md file.
 
+    Returns a dict in the same format as rules, with additional skill-specific fields:
+    - type: "skill" (to distinguish from rules)
+    - skill_name: The skill directory name (e.g., "commit", "review-pr")
+
     Args:
         skill_file: Path to the SKILL.md file
         scope: Scope of the skill ("user" or "project")
 
     Returns:
-        Dict with skill info or None if extraction fails
+        Dict with skill info in unified rules format, or None if extraction fails
     """
     rule_info = extract_single_rule_file(skill_file, find_skill_project_root, scope=scope)
 
@@ -102,8 +111,8 @@ def _extract_skill_info(skill_file: Path, scope: str = None) -> Optional[Dict]:
         # Add skill-specific fields
         skill_name = skill_file.parent.name  # The skill directory name
         rule_info["skill_name"] = skill_name
-        # Rename file_name to be more descriptive
-        rule_info["skill_file"] = rule_info.pop("file_name", SKILL_FILE_NAME)
+        rule_info["type"] = "skill"
+        # Keep file_name as-is
 
     return rule_info
 
@@ -156,13 +165,15 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                 # Iterate over skill directories
                 for skill_dir in skills_dir.iterdir():
                     if skill_dir.is_dir():
-                        skill_file = skill_dir / SKILL_FILE_NAME
-                        if skill_file.exists() and skill_file.is_file():
-                            skill_info = _extract_skill_info(skill_file, scope="user")
-                            if skill_info:
-                                # Remove project_root from user skills (it's the home dir, not meaningful)
-                                skill_info.pop('project_root', None)
-                                user_skills.append(skill_info)
+                        # Look for SKILL.md (case-insensitive) in skill directory
+                        for item in skill_dir.iterdir():
+                            if item.is_file() and _is_skill_md_file(item.name):
+                                skill_info = _extract_skill_info(item, scope="user")
+                                if skill_info:
+                                    # Remove project_root from user skills (it's the home dir, not meaningful)
+                                    skill_info.pop('project_root', None)
+                                    user_skills.append(skill_info)
+                                break  # Only one SKILL.md per skill directory
             except Exception as e:
                 logger.debug(f"Error extracting user-level skills for {user_home}: {e}")
 
@@ -313,13 +324,15 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
             # Iterate over skill directories inside skills/
             for skill_dir in skills_dir.iterdir():
                 if skill_dir.is_dir():
-                    skill_file = skill_dir / SKILL_FILE_NAME
-                    if skill_file.exists() and skill_file.is_file():
-                        skill_info = _extract_skill_info(skill_file, scope="project")
-                        if skill_info:
-                            project_root = skill_info.get('project_root')
-                            if project_root:
-                                self._add_skill_to_project(skill_info, project_root, projects_by_root)
+                    # Look for SKILL.md (case-insensitive) in skill directory
+                    for item in skill_dir.iterdir():
+                        if item.is_file() and _is_skill_md_file(item.name):
+                            skill_info = _extract_skill_info(item, scope="project")
+                            if skill_info:
+                                project_root = skill_info.get('project_root')
+                                if project_root:
+                                    self._add_skill_to_project(skill_info, project_root, projects_by_root)
+                            break  # Only one SKILL.md per skill directory
         except Exception as e:
             logger.debug(f"Error extracting skills from {skills_dir}: {e}")
 

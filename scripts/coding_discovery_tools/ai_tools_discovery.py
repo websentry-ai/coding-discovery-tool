@@ -697,7 +697,11 @@ class AIToolsDetector:
         projects_dict: Dict[str, Dict]
     ) -> None:
         """
-        Merge Claude Code skills into projects dictionary.
+        Merge Claude Code skills into projects dictionary as a separate skills array.
+
+        Skills use the same field structure as rules with additional:
+        - type: "skill" to distinguish from regular rules
+        - skill_name: the skill directory name
 
         Args:
             skills_projects: List of skill project configs (with project_root and skills)
@@ -718,18 +722,18 @@ class AIToolsDetector:
             total_skills += num_skills
 
             if project_path in projects_dict:
-                # Merge skills into existing project
+                # Merge skills into existing project's skills array
                 if "skills" not in projects_dict[project_path]:
                     projects_dict[project_path]["skills"] = []
                 projects_dict[project_path]["skills"].extend(skills)
                 merged_count += 1
-                logger.info(f"  Merged skills into existing project: {project_path} ({num_skills} skills)")
+                logger.info(f"  Merged skills into project: {project_path} ({num_skills} skills)")
             else:
-                # Create new project entry with skills and empty rules
+                # Create new project entry with skills array
                 projects_dict[project_path] = {
                     "path": project_path,
-                    "skills": skills,
                     "rules": [],
+                    "skills": skills,
                     "mcpServers": []
                 }
                 new_count += 1
@@ -790,7 +794,8 @@ class AIToolsDetector:
         Process Claude Code tool: extract rules, MCP configs, settings, and skills.
 
         This method handles Claude Code's unique structure where rules and skills
-        are separated into user-level (tool-level) and project-level.
+        are separated into user-level and project-level. User-level and managed
+        rules/skills are placed in a home directory project entry.
 
         Args:
             tool: Tool info dict from detection
@@ -800,6 +805,9 @@ class AIToolsDetector:
         """
         tool_name = tool.get("name", "Claude Code")
         projects_dict = {}
+
+        # Get home directory path for user-level data
+        home_dir = str(Path.home())
 
         logger.info("")
         logger.info("=" * 70)
@@ -815,15 +823,25 @@ class AIToolsDetector:
                 user_rules = rules_result.get("user_rules", []) if rules_result else []
                 project_rules = rules_result.get("project_rules", []) if rules_result else []
 
-                # Store managed rules for tool-level output (organization-wide policy)
+                # Ensure home directory project exists for user-level/managed data
+                if managed_rules or user_rules:
+                    if home_dir not in projects_dict:
+                        projects_dict[home_dir] = {
+                            "path": home_dir,
+                            "rules": [],
+                            "skills": [],
+                            "mcpServers": []
+                        }
+
+                # Add managed rules to home directory project
                 if managed_rules:
                     logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
-                    tool["_managed_rules"] = managed_rules
+                    projects_dict[home_dir]["rules"].extend(managed_rules)
 
-                # Store user-level rules for tool-level output
+                # Add user-level rules to home directory project
                 if user_rules:
                     logger.info(f"  ✓ Found {len(user_rules)} user-level rule(s)")
-                    tool["_user_rules"] = user_rules
+                    projects_dict[home_dir]["rules"].extend(user_rules)
 
                 # Merge project-level rules into projects_dict
                 if project_rules:
@@ -888,10 +906,20 @@ class AIToolsDetector:
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 project_skills = skills_result.get("project_skills", []) if skills_result else []
 
-                # Store user-level skills for tool-level output
+                # Add user-level skills to home directory project
                 if user_skills:
                     logger.info(f"  ✓ Found {len(user_skills)} user-level skill(s)")
-                    tool["_user_skills"] = user_skills
+                    # Ensure home directory project exists
+                    if home_dir not in projects_dict:
+                        projects_dict[home_dir] = {
+                            "path": home_dir,
+                            "rules": [],
+                            "skills": [],
+                            "mcpServers": []
+                        }
+                    if "skills" not in projects_dict[home_dir]:
+                        projects_dict[home_dir]["skills"] = []
+                    projects_dict[home_dir]["skills"].extend(user_skills)
 
                 # Merge project-level skills into projects_dict
                 if project_skills:
@@ -1262,21 +1290,6 @@ class AIToolsDetector:
         if "plugins" in tool:
             tool_dict["plugins"] = tool["plugins"]
             logger.info(f"  ✓ Added {len(tool['plugins'])} plugin(s) to {tool_name} report")
-
-        # Add managed rules (Claude Code specific - org policy from /Library/Application Support/ClaudeCode/CLAUDE.md)
-        if "_managed_rules" in tool:
-            tool_dict["managed_rules"] = tool["_managed_rules"]
-            logger.info(f"  ✓ Added {len(tool['_managed_rules'])} managed rule(s) to {tool_name} report")
-
-        # Add user-level rules (Claude Code specific - global rules from ~/.claude/CLAUDE.md)
-        if "_user_rules" in tool:
-            tool_dict["rules"] = tool["_user_rules"]
-            logger.info(f"  ✓ Added {len(tool['_user_rules'])} user-level rule(s) to {tool_name} report")
-
-        # Add user-level skills (Claude Code specific - global skills from ~/.claude/skills/)
-        if "_user_skills" in tool:
-            tool_dict["skills"] = tool["_user_skills"]
-            logger.info(f"  ✓ Added {len(tool['_user_skills'])} user-level skill(s) to {tool_name} report")
 
         if "_ide_folder" in tool:
             tool_dict["_ide_folder"] = tool["_ide_folder"]

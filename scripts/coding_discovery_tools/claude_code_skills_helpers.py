@@ -205,22 +205,21 @@ def is_user_level_skills_dir(skills_dir: Path, users_root_path: str = None) -> b
             # So users root is home.parent
             users_root_path = str(home.parent)
 
-        # For root/admin scanning, check if it's under the users directory
-        parent_str = str(parent_of_claude)
-        if parent_str.startswith(users_root_path):
-            # Normalize path separators for comparison
-            users_root_normalized = users_root_path.rstrip('/\\')
-            parent_normalized = parent_str.rstrip('/\\')
+        # Convert users_root_path to Path for consistent comparison across platforms
+        # This handles both forward and backslash path separators
+        users_root = Path(users_root_path)
+        users_root_parts = users_root.parts
+        parent_parts = parent_of_claude.parts
 
-            # Check if this is directly under users root (e.g., /Users/john, not /Users/john/projects)
-            # by counting path components
-            users_root_parts = Path(users_root_normalized).parts
-            parent_parts = parent_of_claude.parts
-
-            # User home should have exactly one more part than users root
-            # e.g., /Users has 2 parts, /Users/john has 3 parts
-            if len(parent_parts) == len(users_root_parts) + 1:
-                return True
+        # Check if parent_of_claude starts with users_root by comparing path parts
+        # This is more reliable than string comparison across platforms
+        if len(parent_parts) >= len(users_root_parts):
+            if parent_parts[:len(users_root_parts)] == users_root_parts:
+                # Check if this is directly under users root (e.g., /Users/john, not /Users/john/projects)
+                # User home should have exactly one more part than users root
+                # e.g., /Users has 2 parts, /Users/john has 3 parts
+                if len(parent_parts) == len(users_root_parts) + 1:
+                    return True
 
         return False
     except Exception:

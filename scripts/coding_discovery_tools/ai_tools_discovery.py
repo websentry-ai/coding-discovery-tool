@@ -32,6 +32,7 @@ try:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
+        ClaudeSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -74,6 +75,7 @@ except ImportError:
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
+        ClaudeSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -133,6 +135,7 @@ class AIToolsDetector:
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
             self._claude_settings_extractor = ClaudeSettingsExtractorFactory.create(self.system)
+            self._claude_skills_extractor = ClaudeSkillsExtractorFactory.create(self.system)
             
             # Initialize Windsurf extractors
             self._windsurf_rules_extractor = WindsurfRulesExtractorFactory.create(self.system)
@@ -257,20 +260,41 @@ class AIToolsDetector:
             logger.error(f"Error extracting Cursor rules: {e}", exc_info=True)
             return []
 
-    def extract_all_claude_rules(self) -> List[Dict]:
+    def extract_all_claude_rules(self) -> Optional[Dict]:
         """
         Extract all Claude Code rules from all projects.
-        
+
         Returns:
-            List of project dicts, each containing:
-            - project_root: Path to the project root
-            - rules: List of rule file dicts with metadata
+            Dict with:
+            - user_rules: List of user-level rule dicts (global, scope: "user")
+            - project_rules: List of project dicts with project_root and rules
+            Returns None if extractor not available or on error.
         """
         try:
-            return self._claude_rules_extractor.extract_all_claude_rules()
+            if self._claude_rules_extractor:
+                return self._claude_rules_extractor.extract_all_claude_rules()
+            return None
         except Exception as e:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
-            return []
+            return None
+
+    def extract_all_claude_skills(self) -> Optional[Dict]:
+        """
+        Extract all Claude Code skills from all projects.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+            - project_skills: List of project dicts with project_root and skills
+            Returns None if extractor not available or on error.
+        """
+        try:
+            if self._claude_skills_extractor:
+                return self._claude_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Claude skills: {e}", exc_info=True)
+            return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
         """
@@ -667,11 +691,258 @@ class AIToolsDetector:
         if mcp_projects:
             logger.info(f"  Claude MCP config merge complete: {len(mcp_projects)} projects processed ({merged_count} merged, {new_count} new), {total_mcp_servers} total MCP servers")
 
+    def _merge_skills_into_projects(
+        self,
+        skills_projects: List[Dict],
+        projects_dict: Dict[str, Dict]
+    ) -> None:
+        """
+        Merge Claude Code skills into projects dictionary as a separate skills array.
+
+        Skills use the same field structure as rules with additional:
+        - type: "skill" to distinguish from regular rules
+        - skill_name: the skill directory name
+
+        Args:
+            skills_projects: List of skill project configs (with project_root and skills)
+            projects_dict: Dictionary mapping project paths to project configs
+        """
+        total_skills = 0
+        merged_count = 0
+        new_count = 0
+
+        for skill_project in skills_projects:
+            # Skills projects use "project_root" instead of "path"
+            project_path = skill_project.get("project_root")
+            if not project_path:
+                continue
+
+            skills = skill_project.get("skills", [])
+            num_skills = len(skills)
+            total_skills += num_skills
+
+            if project_path in projects_dict:
+                # Merge skills into existing project's skills array
+                if "skills" not in projects_dict[project_path]:
+                    projects_dict[project_path]["skills"] = []
+                projects_dict[project_path]["skills"].extend(skills)
+                merged_count += 1
+                logger.info(f"  Merged skills into project: {project_path} ({num_skills} skills)")
+            else:
+                # Create new project entry with skills array
+                projects_dict[project_path] = {
+                    "path": project_path,
+                    "rules": [],
+                    "skills": skills,
+                    "mcpServers": []
+                }
+                new_count += 1
+                logger.info(f"  Added new project from skills: {project_path} ({num_skills} skills)")
+
+        if skills_projects:
+            logger.info(f"  Skills merge complete: {len(skills_projects)} projects processed ({merged_count} merged, {new_count} new), {total_skills} total skills")
+
+    def _merge_rules_into_projects(
+        self,
+        rules_projects: List[Dict],
+        projects_dict: Dict[str, Dict]
+    ) -> None:
+        """
+        Merge Claude Code rules into projects dictionary.
+
+        Args:
+            rules_projects: List of rule project configs (with project_root and rules)
+            projects_dict: Dictionary mapping project paths to project configs
+        """
+        total_rules = 0
+        merged_count = 0
+        new_count = 0
+
+        for rules_project in rules_projects:
+            # Rules projects use "project_root" instead of "path"
+            project_path = rules_project.get("project_root")
+            if not project_path:
+                continue
+
+            rules = rules_project.get("rules", [])
+            num_rules = len(rules)
+            total_rules += num_rules
+
+            if project_path in projects_dict:
+                # Merge rules into existing project
+                if "rules" not in projects_dict[project_path]:
+                    projects_dict[project_path]["rules"] = []
+                projects_dict[project_path]["rules"].extend(rules)
+                merged_count += 1
+                logger.info(f"  Merged rules into existing project: {project_path} ({num_rules} rules)")
+            else:
+                # Create new project entry with rules
+                projects_dict[project_path] = {
+                    "path": project_path,
+                    "rules": rules,
+                    "skills": [],
+                    "mcpServers": []
+                }
+                new_count += 1
+                logger.info(f"  Added new project from rules: {project_path} ({num_rules} rules)")
+
+        if rules_projects:
+            logger.info(f"  Rules merge complete: {len(rules_projects)} projects processed ({merged_count} merged, {new_count} new), {total_rules} total rules")
+
+    def _process_claude_code_tool(self, tool: Dict) -> Dict[str, Dict]:
+        """
+        Process Claude Code tool: extract rules, MCP configs, settings, and skills.
+
+        This method handles Claude Code's unique structure where rules and skills
+        are separated into user-level and project-level. User-level and managed
+        rules/skills are placed in a home directory project entry.
+
+        Args:
+            tool: Tool info dict from detection
+
+        Returns:
+            Dictionary mapping project_root to project dict
+        """
+        tool_name = tool.get("name", "Claude Code")
+        projects_dict = {}
+
+        # Get home directory path for user-level data
+        home_dir = str(Path.home())
+
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info(f"Processing: {tool_name}")
+        logger.info("=" * 70)
+
+        # Extract rules (now returns managed_rules, user_rules and project_rules separately)
+        logger.info(f"  Extracting {tool_name} rules...")
+        if self._claude_rules_extractor:
+            try:
+                rules_result = self.extract_all_claude_rules()
+                managed_rules = rules_result.get("managed_rules", []) if rules_result else []
+                user_rules = rules_result.get("user_rules", []) if rules_result else []
+                project_rules = rules_result.get("project_rules", []) if rules_result else []
+
+                # Ensure home directory project exists for user-level/managed data
+                if managed_rules or user_rules:
+                    if home_dir not in projects_dict:
+                        projects_dict[home_dir] = {
+                            "path": home_dir,
+                            "rules": [],
+                            "skills": [],
+                            "mcpServers": []
+                        }
+
+                # Add managed rules to home directory project
+                if managed_rules:
+                    logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
+                    projects_dict[home_dir]["rules"].extend(managed_rules)
+
+                # Add user-level rules to home directory project
+                if user_rules:
+                    logger.info(f"  ✓ Found {len(user_rules)} user-level rule(s)")
+                    projects_dict[home_dir]["rules"].extend(user_rules)
+
+                # Merge project-level rules into projects_dict
+                if project_rules:
+                    num_rules_projects = len(project_rules)
+                    total_rules = sum(len(project.get("rules", [])) for project in project_rules)
+                    logger.info(f"  ✓ Found {num_rules_projects} project(s) with {total_rules} project-level rule(s)")
+                    self._merge_rules_into_projects(project_rules, projects_dict)
+
+                    # Log rules details
+                    if total_rules > 0:
+                        log_rules_details(projects_dict, tool_name)
+
+                if not managed_rules and not user_rules and not project_rules:
+                    logger.info("  ℹ No rules found")
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+        else:
+            logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
+
+        # Extract and merge MCP configs
+        logger.info(f"  Extracting {tool_name} MCP configs...")
+        if self._claude_mcp_extractor:
+            try:
+                mcp_config = self._claude_mcp_extractor.extract_mcp_config()
+                if mcp_config and "projects" in mcp_config:
+                    num_mcp_projects = len(mcp_config["projects"])
+                    logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
+                    self._merge_claude_mcp_configs_into_projects(mcp_config["projects"], projects_dict)
+                    # Log MCP details
+                    log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info("  ℹ No MCP configs found")
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+        else:
+            logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
+
+        # Extract settings
+        logger.info(f"  Extracting {tool_name} settings...")
+        if self._claude_settings_extractor:
+            try:
+                settings = self._claude_settings_extractor.extract_settings()
+                logger.info(f"  Settings extraction returned: {settings is not None}, count: {len(settings) if settings else 0}")
+                if settings:
+                    num_settings = len(settings)
+                    logger.info(f"  ✓ Found {num_settings} settings file(s)")
+                    tool["_settings"] = settings
+                    logger.info(f"  ✓ Stored _settings in tool dict (keys: {list(tool.keys())})")
+                    log_settings_details(settings, tool_name)
+                else:
+                    logger.warning("  ⚠ No settings found - extract_settings() returned None or empty list")
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+        else:
+            logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
+
+        # Extract skills (Claude Code specific)
+        logger.info(f"  Extracting {tool_name} skills...")
+        if self._claude_skills_extractor:
+            try:
+                skills_result = self.extract_all_claude_skills()
+                user_skills = skills_result.get("user_skills", []) if skills_result else []
+                project_skills = skills_result.get("project_skills", []) if skills_result else []
+
+                # Add user-level skills to home directory project
+                if user_skills:
+                    logger.info(f"  ✓ Found {len(user_skills)} user-level skill(s)")
+                    # Ensure home directory project exists
+                    if home_dir not in projects_dict:
+                        projects_dict[home_dir] = {
+                            "path": home_dir,
+                            "rules": [],
+                            "skills": [],
+                            "mcpServers": []
+                        }
+                    if "skills" not in projects_dict[home_dir]:
+                        projects_dict[home_dir]["skills"] = []
+                    projects_dict[home_dir]["skills"].extend(user_skills)
+
+                # Merge project-level skills into projects_dict
+                if project_skills:
+                    num_skills_projects = len(project_skills)
+                    total_skills = sum(len(project.get("skills", [])) for project in project_skills)
+                    logger.info(f"  ✓ Found {num_skills_projects} project(s) with {total_skills} project-level skill(s)")
+                    self._merge_skills_into_projects(project_skills, projects_dict)
+
+                if not user_skills and not project_skills:
+                    logger.info("  ℹ No skills found")
+            except Exception as e:
+                logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+        else:
+            logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+        return projects_dict
+
     def _is_project_empty(self, project: Dict) -> bool:
-        """Check if a project has no meaningful data (empty mcpServers and rules)."""
+        """Check if a project has no meaningful data (empty mcpServers, rules, and skills)."""
         mcp_servers = project.get("mcpServers", [])
         rules = project.get("rules", [])
-        return len(mcp_servers) == 0 and len(rules) == 0
+        skills = project.get("skills", [])
+        return len(mcp_servers) == 0 and len(rules) == 0 and len(skills) == 0
 
     def _is_jetbrains_tool(self, tool: Dict) -> bool:
         """Check if a tool is a JetBrains IDE based on its properties."""
@@ -893,35 +1164,8 @@ class AIToolsDetector:
                 logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
         elif tool_name == "claude code":
-            projects_dict = self._process_tool_with_rules_and_mcp(
-                tool,
-                self._claude_rules_extractor,
-                self._claude_mcp_extractor,
-                self.extract_all_claude_rules,
-                merge_mcp_func=self._merge_claude_mcp_configs_into_projects
-            )
-            
-            # Extract settings
-            logger.info(f"  Extracting {tool_name} settings...")
-            if self._claude_settings_extractor:
-                try:
-                    settings = self._claude_settings_extractor.extract_settings()
-                    logger.info(f"  Settings extraction returned: {settings is not None}, count: {len(settings) if settings else 0}")
-                    if settings:
-                        num_settings = len(settings)
-                        logger.info(f"  ✓ Found {num_settings} settings file(s)")
-                        # Store settings to be included in tool dict
-                        tool["_settings"] = settings
-                        logger.info(f"  ✓ Stored _settings in tool dict (keys: {list(tool.keys())})")
-                        # Log settings details
-                        log_settings_details(settings, tool_name)
-                    else:
-                        logger.warning("  ⚠ No settings found - extract_settings() returned None or empty list")
-                except Exception as e:
-                    logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
-            else:
-                logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
-        
+            projects_dict = self._process_claude_code_tool(tool)
+
         elif tool_name == "windsurf":
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,

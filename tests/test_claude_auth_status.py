@@ -83,7 +83,7 @@ class TestFindClaudeBinaryForUser(unittest.TestCase):
         self._create_executable(".nvm/versions/node/v20.11.0/bin/claude")
         result = find_claude_binary_for_user(self.user_home)
         if result and result.startswith(str(self.user_home)):
-            self.assertIn(".nvm/versions/node/", result)
+            self.assertIn(os.path.join(".nvm", "versions", "node"), result)
 
     @patch("scripts.coding_discovery_tools.user_tool_detector.platform.system", return_value="Darwin")
     def test_returns_none_when_not_found(self, _mock_sys):

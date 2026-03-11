@@ -8,6 +8,11 @@ import os
 import platform
 import re
 import shlex
+
+try:
+    import pwd
+except ImportError:
+    pwd = None  # Not available on Windows
 import subprocess
 import time
 import traceback
@@ -486,7 +491,6 @@ def get_claude_subscription_type(
     """
     try:
         if platform.system() == "Darwin" and _is_root():
-            import pwd
             uid = pwd.getpwnam(username).pw_uid
 
             # Approach 1: launchctl asuser (MDM / LaunchDaemon context)

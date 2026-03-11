@@ -7,6 +7,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import subprocess
 import time
 import traceback
@@ -14,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .constants import COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +441,81 @@ def _write_file_secure(path: Path, data: bytes) -> None:
         path.chmod(0o600)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Claude Code subscription plan detection
+# ---------------------------------------------------------------------------
+
+
+def _is_root() -> bool:
+    """Check if the current process is running as root (UID 0).
+
+    Returns False on Windows where os.getuid() is not available.
+    """
+    try:
+        return os.getuid() == 0
+    except AttributeError:
+        return False
+
+
+def get_claude_subscription_type(
+    username: str,
+    claude_binary: str,
+) -> Optional[str]:
+    """
+    Get the Claude Code subscription type for a specific user.
+
+    Runs 'claude auth status' as the specified user and extracts the
+    subscriptionType from the JSON output.
+
+    On macOS when running as root, uses 'su - {username} -c ...' to execute
+    as the target user (required for Keychain access).
+    On other platforms or when not running as root, runs directly.
+
+    Args:
+        username: System username to run the command as
+        claude_binary: Absolute path to the claude binary
+
+    Returns:
+        Subscription type string (e.g., "max", "pro", "team", "enterprise")
+        or None if detection fails or user is not logged in
+    """
+    try:
+        if platform.system() == "Darwin" and _is_root():
+            cmd = ["su", "-", username, "-c", f"{shlex.quote(claude_binary)} auth status --json"]
+        else:
+            cmd = [claude_binary, "auth", "status", "--json"]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=AUTH_STATUS_TIMEOUT,
+        )
+
+        if result.returncode != 0:
+            logger.debug(
+                f"claude auth status returned non-zero for {username}: "
+                f"rc={result.returncode}"
+            )
+            return None
+
+        parsed = json.loads(result.stdout.strip())
+        return parsed.get("subscriptionType")
+
+    except subprocess.TimeoutExpired:
+        logger.debug(f"claude auth status timed out for {username}")
+        return None
+    except json.JSONDecodeError:
+        logger.warning(f"claude auth status returned non-JSON for {username}")
+        return None
+    except OSError as e:
+        logger.debug(f"Could not run claude auth status for {username}: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"Unexpected error getting subscription for {username}: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------

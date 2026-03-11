@@ -51,10 +51,10 @@ try:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
     )
-    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
+    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
-    from .user_tool_detector import detect_tool_for_user
+    from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -94,10 +94,10 @@ except ImportError:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
-    from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
+    from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -1513,6 +1513,19 @@ def main():
                     try:
                         # Filter projects to only include this user's projects
                         tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+
+                        # Detect subscription plan for Claude Code
+                        if tool_name.lower() == "claude code":
+                            claude_bin = find_claude_binary_for_user(user_home)
+                            if claude_bin:
+                                subscription = get_claude_subscription_type(user_name, claude_bin)
+                                if subscription:
+                                    tool_filtered["plan"] = subscription
+                                    logger.info(f"    Plan: {subscription}")
+                                else:
+                                    logger.debug(f"    Could not detect plan for {user_name}")
+                            else:
+                                logger.debug(f"    Claude binary not found for {user_name}")
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)

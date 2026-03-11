@@ -5,6 +5,8 @@ This module handles detection of tools that are installed per-user, checking
 user-specific paths like ~/.nvm, ~/.bun, and user configuration directories.
 """
 
+import os
+import platform
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -254,3 +256,56 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
         }
 
     return detector.detect()
+
+
+def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
+    """
+    Find the absolute path to the claude binary for a specific user.
+
+    On macOS: Homebrew (Apple Silicon and Intel), .local/bin, Bun, nvm.
+    On Windows: .local/bin, AppData npm, AppData Local Programs.
+
+    Args:
+        user_home: Path to the user's home directory
+
+    Returns:
+        Absolute path to claude binary as string, or None if not found
+    """
+    if platform.system() == "Windows":
+        candidates = [
+            user_home / ".local" / "bin" / "claude.exe",
+            user_home / "AppData" / "Roaming" / "npm" / "claude.cmd",
+            user_home / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
+        ]
+    else:
+        candidates = [
+            Path("/opt/homebrew/bin/claude"),          # Apple Silicon Homebrew
+            Path("/usr/local/bin/claude"),             # Intel Mac / manual install
+            user_home / ".local" / "bin" / "claude",   # Official installer
+            user_home / ".bun" / "bin" / "claude",     # Bun global install
+        ]
+
+    for candidate in candidates:
+        try:
+            if candidate.exists() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except (PermissionError, OSError):
+            continue
+
+    # Walk nvm versions directory for node-installed claude binaries
+    nvm_node_dir = user_home / ".nvm" / "versions" / "node"
+    if nvm_node_dir.exists():
+        try:
+            for version_dir in nvm_node_dir.iterdir():
+                if not version_dir.is_dir():
+                    continue
+                nvm_candidate = version_dir / "bin" / "claude"
+                try:
+                    if nvm_candidate.exists() and os.access(str(nvm_candidate), os.X_OK):
+                        return str(nvm_candidate)
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
+
+    return None

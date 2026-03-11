@@ -214,6 +214,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         result = get_claude_subscription_type(self.username, self.claude_binary)
         self.assertIsNone(result)
 
+    @unittest.skipIf(platform.system() == "Windows", "pwd module not available on Windows")
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
@@ -238,6 +239,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
             self.claude_binary, "auth", "status", "--json",
         ])
 
+    @unittest.skipIf(platform.system() == "Windows", "pwd module not available on Windows")
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
@@ -271,6 +273,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         second_args = mock_run.call_args_list[1][0][0]
         self.assertTrue(second_args[0:3] == ["/usr/bin/su", "-", self.username])
 
+    @unittest.skipIf(platform.system() == "Windows", "pwd module not available on Windows")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
     @patch("scripts.coding_discovery_tools.utils.pwd.getpwnam", side_effect=KeyError("getpwnam(): name not found: 'nosuchuser'"))

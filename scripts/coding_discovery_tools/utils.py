@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import platform
-import pwd
 import re
 import shlex
 import subprocess
@@ -487,6 +486,7 @@ def get_claude_subscription_type(
     """
     try:
         if platform.system() == "Darwin" and _is_root():
+            import pwd
             uid = pwd.getpwnam(username).pw_uid
 
             # Approach 1: launchctl asuser (MDM / LaunchDaemon context)

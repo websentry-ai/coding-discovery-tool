@@ -228,7 +228,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertEqual(args[1], "-")
         self.assertEqual(args[2], self.username)
         self.assertEqual(args[3], "-c")
-        self.assertIn("auth status", args[4])
+        self.assertIn("auth status --json", args[4])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
@@ -239,7 +239,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         )
         get_claude_subscription_type(self.username, self.claude_binary)
         args = mock_run.call_args[0][0]
-        self.assertEqual(args, [self.claude_binary, "auth", "status"])
+        self.assertEqual(args, [self.claude_binary, "auth", "status", "--json"])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
@@ -252,7 +252,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         result = get_claude_subscription_type(self.username, self.claude_binary)
         self.assertEqual(result, "team")
         args = mock_run.call_args[0][0]
-        self.assertEqual(args, [self.claude_binary, "auth", "status"])
+        self.assertEqual(args, [self.claude_binary, "auth", "status", "--json"])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)

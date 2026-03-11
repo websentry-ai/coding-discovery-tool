@@ -483,9 +483,9 @@ def get_claude_subscription_type(
     """
     try:
         if platform.system() == "Darwin" and _is_root():
-            cmd = ["su", "-", username, "-c", f"{shlex.quote(claude_binary)} auth status"]
+            cmd = ["su", "-", username, "-c", f"{shlex.quote(claude_binary)} auth status --json"]
         else:
-            cmd = [claude_binary, "auth", "status"]
+            cmd = [claude_binary, "auth", "status", "--json"]
 
         result = subprocess.run(
             cmd,
@@ -508,7 +508,7 @@ def get_claude_subscription_type(
         logger.debug(f"claude auth status timed out for {username}")
         return None
     except json.JSONDecodeError:
-        logger.debug(f"claude auth status returned non-JSON for {username}")
+        logger.warning(f"claude auth status returned non-JSON for {username}")
         return None
     except OSError as e:
         logger.debug(f"Could not run claude auth status for {username}: {e}")

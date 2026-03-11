@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform
+import pwd
 import re
 import shlex
 import subprocess
@@ -469,8 +470,11 @@ def get_claude_subscription_type(
     Runs 'claude auth status' as the specified user and extracts the
     subscriptionType from the JSON output.
 
-    On macOS when running as root, uses 'su - {username} -c ...' to execute
-    as the target user (required for Keychain access).
+    On macOS when running as root, tries two approaches in order:
+      1. 'launchctl asuser <uid> sudo -u <username> claude auth status --json'
+         (works from MDM/LaunchDaemon — needs Mach bootstrap namespace)
+      2. 'su - <username> -c "claude auth status --json"'
+         (works in SSH-only or non-GUI contexts)
     On other platforms or when not running as root, runs directly.
 
     Args:
@@ -483,27 +487,85 @@ def get_claude_subscription_type(
     """
     try:
         if platform.system() == "Darwin" and _is_root():
-            cmd = ["su", "-", username, "-c", f"{shlex.quote(claude_binary)} auth status --json"]
+            uid = pwd.getpwnam(username).pw_uid
+
+            # Approach 1: launchctl asuser (MDM / LaunchDaemon context)
+            launchctl_cmd = [
+                "/bin/launchctl", "asuser", str(uid),
+                "/usr/bin/sudo", "-u", username,
+                claude_binary, "auth", "status", "--json",
+            ]
+            try:
+                result = subprocess.run(
+                    launchctl_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=AUTH_STATUS_TIMEOUT,
+                )
+                if result.returncode == 0:
+                    parsed = json.loads(result.stdout.strip())
+                    logger.debug(
+                        f"launchctl asuser succeeded for {username}"
+                    )
+                    return parsed.get("subscriptionType")
+                logger.debug(
+                    f"launchctl asuser returned non-zero for {username}: "
+                    f"rc={result.returncode}, falling back to su"
+                )
+            except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as e:
+                logger.debug(
+                    f"launchctl asuser failed for {username}: {e}, "
+                    f"falling back to su"
+                )
+            except Exception as e:
+                logger.debug(
+                    f"launchctl asuser unexpected error for {username}: {e}, "
+                    f"falling back to su"
+                )
+
+            # Approach 2: su - (SSH-only / non-GUI context)
+            inner_cmd = f"{shlex.quote(claude_binary)} auth status --json"
+            su_cmd = ["/usr/bin/su", "-", username, "-c", inner_cmd]
+            result = subprocess.run(
+                su_cmd,
+                capture_output=True,
+                text=True,
+                timeout=AUTH_STATUS_TIMEOUT,
+            )
+
+            if result.returncode != 0:
+                logger.debug(
+                    f"su fallback returned non-zero for {username}: "
+                    f"rc={result.returncode}"
+                )
+                return None
+
+            parsed = json.loads(result.stdout.strip())
+            logger.debug(f"su fallback succeeded for {username}")
+            return parsed.get("subscriptionType")
+
         else:
             cmd = [claude_binary, "auth", "status", "--json"]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=AUTH_STATUS_TIMEOUT,
-        )
-
-        if result.returncode != 0:
-            logger.debug(
-                f"claude auth status returned non-zero for {username}: "
-                f"rc={result.returncode}"
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=AUTH_STATUS_TIMEOUT,
             )
-            return None
 
-        parsed = json.loads(result.stdout.strip())
-        return parsed.get("subscriptionType")
+            if result.returncode != 0:
+                logger.debug(
+                    f"claude auth status returned non-zero for {username}: "
+                    f"rc={result.returncode}"
+                )
+                return None
 
+            parsed = json.loads(result.stdout.strip())
+            return parsed.get("subscriptionType")
+
+    except KeyError:
+        logger.debug(f"User {username} not found in password database")
+        return None
     except subprocess.TimeoutExpired:
         logger.debug(f"claude auth status timed out for {username}")
         return None

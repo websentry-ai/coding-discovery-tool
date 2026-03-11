@@ -217,18 +217,67 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
-    def test_uses_su_when_root_on_macos(self, _mock_root, _mock_sys, mock_run):
-        """On macOS as root, command is wrapped with 'su - username -c ...'."""
+    @patch("scripts.coding_discovery_tools.utils.pwd.getpwnam")
+    def test_uses_launchctl_asuser_when_root_on_macos(self, mock_getpwnam, _mock_root, _mock_sys, mock_run):
+        """On macOS as root, launchctl asuser is tried first and works."""
+        mock_pw = MagicMock()
+        mock_pw.pw_uid = 501
+        mock_getpwnam.return_value = mock_pw
         mock_run.return_value = self._mock_result(
             stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"})
         )
-        get_claude_subscription_type(self.username, self.claude_binary)
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "max")
+        mock_getpwnam.assert_called_once_with(self.username)
+        # Only the launchctl call should have been made (no fallback needed)
+        mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
-        self.assertEqual(args[0], "su")
-        self.assertEqual(args[1], "-")
-        self.assertEqual(args[2], self.username)
-        self.assertEqual(args[3], "-c")
-        self.assertIn("auth status --json", args[4])
+        self.assertEqual(args, [
+            "/bin/launchctl", "asuser", "501",
+            "/usr/bin/sudo", "-u", self.username,
+            self.claude_binary, "auth", "status", "--json",
+        ])
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils.pwd.getpwnam")
+    def test_falls_back_to_su_when_launchctl_fails(self, mock_getpwnam, _mock_root, _mock_sys, mock_run):
+        """Falls back to su - when launchctl asuser fails (non-zero exit)."""
+        mock_pw = MagicMock()
+        mock_pw.pw_uid = 501
+        mock_getpwnam.return_value = mock_pw
+
+        # First call (launchctl) fails with non-zero exit code;
+        # second call (su) succeeds with valid subscription JSON.
+        launchctl_result = self._mock_result(stdout="", returncode=1)
+        su_result = self._mock_result(
+            stdout=json.dumps({"loggedIn": True, "subscriptionType": "pro"})
+        )
+        mock_run.side_effect = [launchctl_result, su_result]
+
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "pro")
+        self.assertEqual(mock_run.call_count, 2)
+
+        # Verify first call was launchctl
+        first_args = mock_run.call_args_list[0][0][0]
+        self.assertEqual(first_args, [
+            "/bin/launchctl", "asuser", "501",
+            "/usr/bin/sudo", "-u", self.username,
+            self.claude_binary, "auth", "status", "--json",
+        ])
+        # Verify second call was su fallback
+        second_args = mock_run.call_args_list[1][0][0]
+        self.assertTrue(second_args[0:3] == ["/usr/bin/su", "-", self.username])
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils.pwd.getpwnam", side_effect=KeyError("getpwnam(): name not found: 'nosuchuser'"))
+    def test_returns_none_on_unknown_user(self, _mock_getpwnam, _mock_root, _mock_sys):
+        """Returns None when pwd.getpwnam raises KeyError for unknown user."""
+        result = get_claude_subscription_type("nosuchuser", self.claude_binary)
+        self.assertIsNone(result)
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)

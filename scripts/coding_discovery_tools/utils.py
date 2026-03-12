@@ -514,10 +514,23 @@ def _is_daemon_container() -> bool:
     return "Daemon Containers" in str(Path.home())
 
 
+def _get_real_home(username: str) -> Optional[str]:
+    """Resolve the real home directory for a user via the pwd module.
+    Returns the home directory path or None if it cannot be resolved.
+    """
+    if pwd is None:
+        return None
+    try:
+        return pwd.getpwnam(username).pw_dir
+    except (KeyError, ImportError):
+        return None
+
+
 def _run_auth_status(
     cmd: list,
     username: str,
     method: str = "direct",
+    env: Optional[dict] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Execute an auth-status command and parse the subscription type.
 
@@ -532,6 +545,7 @@ def _run_auth_status(
             capture_output=True,
             text=True,
             timeout=AUTH_STATUS_TIMEOUT,
+            env=env,
         )
 
         if result.returncode != 0:
@@ -621,7 +635,17 @@ def get_claude_subscription_type(
         # Direct execution (non-root, non-Darwin, or all fallbacks failed)
         if not is_root or not is_darwin:
             cmd = [claude_binary, "auth", "status", "--json"]
-            ok, plan = _run_auth_status(cmd, username, method="direct")
+            env = None
+            if is_darwin and _is_daemon_container():
+                real_home = _get_real_home(username)
+                if real_home:
+                    env = dict(os.environ)
+                    env["HOME"] = real_home
+                    logger.debug(
+                        f"Overriding HOME to {real_home} for {username} "
+                        f"(daemon container detected)"
+                    )
+            ok, plan = _run_auth_status(cmd, username, method="direct", env=env)
             return plan
 
         return None

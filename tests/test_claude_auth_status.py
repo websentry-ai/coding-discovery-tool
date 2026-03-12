@@ -307,13 +307,15 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         args = mock_run.call_args[0][0]
         self.assertEqual(args[0], "su")
 
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
     @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
     @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
     def test_uses_launchctl_in_daemon_container(
-        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container,
+        _mock_home
     ):
         """In daemon container (non-root), uses launchctl asuser then direct."""
         mock_run.side_effect = [
@@ -328,6 +330,28 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertEqual(first_args[0], "launchctl")
         second_args = mock_run.call_args_list[1][0][0]
         self.assertEqual(second_args[0], self.claude_binary)
+
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_daemon_container_overrides_home_on_direct_exec(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container,
+        _mock_home
+    ):
+        """In daemon container, direct execution overrides HOME to real user home."""
+        mock_run.side_effect = [
+            self._mock_result(stdout="", returncode=1, stderr="error"),
+            self._mock_result(
+                stdout=json.dumps({"loggedIn": True, "subscriptionType": "pro"})
+            ),
+        ]
+        get_claude_subscription_type(self.username, self.claude_binary)
+        # Second call (direct exec) should have env with HOME override
+        kwargs = mock_run.call_args_list[1][1]
+        self.assertEqual(kwargs["env"]["HOME"], "/Users/testuser")
 
     @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
@@ -389,6 +413,20 @@ class TestHelpers(unittest.TestCase):
         from scripts.coding_discovery_tools.utils import _get_uid_for_user
         mock_pwd.getpwnam.side_effect = KeyError("user not found")
         self.assertIsNone(_get_uid_for_user("unknown"))
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_real_home_success(self, mock_pwd):
+        """Returns home directory when user is found."""
+        from scripts.coding_discovery_tools.utils import _get_real_home
+        mock_pwd.getpwnam.return_value = MagicMock(pw_dir="/Users/testuser")
+        self.assertEqual(_get_real_home("testuser"), "/Users/testuser")
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_real_home_not_found(self, mock_pwd):
+        """Returns None when user is not found."""
+        from scripts.coding_discovery_tools.utils import _get_real_home
+        mock_pwd.getpwnam.side_effect = KeyError("user not found")
+        self.assertIsNone(_get_real_home("unknown"))
 
     @patch("scripts.coding_discovery_tools.utils.Path.home")
     def test_is_daemon_container_true(self, mock_home):

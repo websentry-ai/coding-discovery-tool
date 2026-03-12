@@ -260,7 +260,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
     # Write payload to a temp file to avoid OSError when payload exceeds ARG_MAX.
     # The file is written once and reused across retries, then cleaned up in finally.
-    fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-payload-", suffix=".json")
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-payload-", suffix=".json")
+    except OSError as e:
+        logger.error(f"Could not create temp file for payload: {e}")
+        report_to_sentry(e, {**ctx, "phase": "send_report_tmpfile"}, level="warning")
+        return (False, True)
+
     try:
         try:
             os.write(fd, payload_json.encode("utf-8"))

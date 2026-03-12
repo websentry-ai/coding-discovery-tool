@@ -23,7 +23,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
-from scripts.coding_discovery_tools.utils import report_to_sentry
+from scripts.coding_discovery_tools.utils import (
+    report_to_sentry,
+    _parse_sentry_dsn,
+    _extract_frames,
+)
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 from scripts.coding_discovery_tools.settings_transformers import (
     transform_settings_to_backend_format,
@@ -215,6 +219,67 @@ class TestSentryNeverCrashes(unittest.TestCase):
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_with_none_context(self):
         report_to_sentry(RuntimeError("x"), context=None, level="warning")
+
+
+class TestParseSentryDsn(unittest.TestCase):
+    """_parse_sentry_dsn correctly parses valid DSNs and rejects invalid ones."""
+
+    def test_valid_dsn(self):
+        result = _parse_sentry_dsn("https://abc123@o123.ingest.us.sentry.io/456")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["key"], "abc123")
+        self.assertEqual(result["host"], "o123.ingest.us.sentry.io")
+        self.assertEqual(result["project_id"], "456")
+        self.assertEqual(result["store_url"], "https://o123.ingest.us.sentry.io/api/456/store/")
+
+    def test_empty_string(self):
+        self.assertIsNone(_parse_sentry_dsn(""))
+
+    def test_malformed_dsn(self):
+        self.assertIsNone(_parse_sentry_dsn("not-a-valid-dsn"))
+
+    def test_missing_key(self):
+        self.assertIsNone(_parse_sentry_dsn("https://sentry.io/123"))
+
+
+class TestExtractFrames(unittest.TestCase):
+    """_extract_frames returns real frames from raised exceptions and empty list otherwise."""
+
+    def test_exception_with_traceback(self):
+        try:
+            raise RuntimeError("test error")
+        except RuntimeError as exc:
+            frames = _extract_frames(exc)
+        self.assertGreater(len(frames), 0)
+        self.assertIn("filename", frames[0])
+        self.assertIn("lineno", frames[0])
+        self.assertIn("function", frames[0])
+
+    def test_exception_without_traceback(self):
+        exc = RuntimeError("no traceback")
+        exc.__traceback__ = None
+        self.assertEqual(_extract_frames(exc), [])
+
+    def test_manually_constructed_exception_has_no_frames(self):
+        exc = RuntimeError("manual")
+        self.assertEqual(_extract_frames(exc), [])
+
+
+class TestSentryDebugLogging(unittest.TestCase):
+    """Sentry helpers log debug messages for missing DSN and curl failures."""
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_logs_debug_when_dsn_missing(self):
+        with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
+            report_to_sentry(RuntimeError("test"))
+        self.assertTrue(any("no valid DSN configured" in msg for msg in cm.output))
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@localhost:1/0")
+    @patch("subprocess.run", side_effect=OSError("connection refused"))
+    def test_logs_debug_when_sentry_curl_fails(self, mock_run):
+        with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
+            report_to_sentry(RuntimeError("test"))
+        self.assertTrue(any("Sentry reporting failed" in msg for msg in cm.output))
 
 
 class TestSettingsTransformPrecedence(unittest.TestCase):

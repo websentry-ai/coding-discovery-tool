@@ -9,6 +9,7 @@ import platform
 import re
 import shlex
 import subprocess
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
@@ -257,89 +258,109 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
     payload_json = json.dumps(payload)
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    # Write payload to a temp file to avoid OSError when payload exceeds ARG_MAX.
+    # The file is written once and reused across retries, then cleaned up in finally.
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-payload-", suffix=".json")
+    except OSError as e:
+        logger.error(f"Could not create temp file for payload: {e}")
+        report_to_sentry(e, {**ctx, "phase": "send_report_tmpfile"}, level="warning")
+        return (False, True)
+
+    try:
         try:
-            result = subprocess.run(
-                [
-                    "curl", "-s",
-                    "-X", "POST",
-                    "-H", f"Authorization: Bearer {api_key}",
-                    "-H", "Content-Type: application/json",
-                    "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                    "-d", payload_json,
-                    "--max-time", "60",
-                    "-w", "\n%{http_code}",
-                    url,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=65,
-            )
+            os.write(fd, payload_json.encode("utf-8"))
+        finally:
+            os.close(fd)
 
-            # Parse response: stdout = body + "\n" + http_code
-            lines = result.stdout.rsplit("\n", 1)
-            status_str = lines[-1].strip() if lines else ""
-            response_body = lines[0] if len(lines) > 1 else ""
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                result = subprocess.run(
+                    [
+                        "curl", "-s",
+                        "-X", "POST",
+                        "-H", f"Authorization: Bearer {api_key}",
+                        "-H", "Content-Type: application/json",
+                        "-H", "User-Agent: AI-Tools-Discovery/1.0",
+                        "-d", f"@{tmp_path}",
+                        "--max-time", "60",
+                        "-w", "\n%{http_code}",
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=65,
+                )
 
-            if result.returncode != 0 or not status_str.isdigit():
-                # Connection/DNS failure — retryable
-                error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
-                logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
+                # Parse response: stdout = body + "\n" + http_code
+                lines = result.stdout.rsplit("\n", 1)
+                status_str = lines[-1].strip() if lines else ""
+                response_body = lines[0] if len(lines) > 1 else ""
+
+                if result.returncode != 0 or not status_str.isdigit():
+                    # Connection/DNS failure — retryable
+                    error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
+                    logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
+                    if attempt < MAX_ATTEMPTS:
+                        _backoff(attempt, BACKOFF_SECONDS)
+                        continue
+                    try:
+                        raise RuntimeError(error_msg)
+                    except RuntimeError as exc:
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                    return (False, True)
+
+                http_code = int(status_str)
+
+                if 200 <= http_code < 300:
+                    return (True, False)
+
+                logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
+                _log_http_error_details(http_code, response_body or None)
+
+                # Cloudflare 403s with error 1010 are transient rate limits — allow retry
+                is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body
+                if http_code in NON_RETRYABLE_CODES and not is_cloudflare_block:
+                    try:
+                        raise RuntimeError(f"HTTP {http_code}")
+                    except RuntimeError as exc:
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                    return (False, False)
+
                 if attempt < MAX_ATTEMPTS:
                     _backoff(attempt, BACKOFF_SECONDS)
-                    continue
-                try:
-                    raise RuntimeError(error_msg)
-                except RuntimeError as exc:
-                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
-                return (False, True)
+                else:
+                    try:
+                        raise RuntimeError(f"HTTP {http_code}")
+                    except RuntimeError as exc:
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                    return (False, True)
 
-            http_code = int(status_str)
+            except subprocess.TimeoutExpired:
+                logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
+                if attempt < MAX_ATTEMPTS:
+                    _backoff(attempt, BACKOFF_SECONDS)
+                else:
+                    try:
+                        raise RuntimeError("curl timeout")
+                    except RuntimeError as exc:
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                    return (False, True)
 
-            if 200 <= http_code < 300:
-                return (True, False)
+            except Exception as e:
+                logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
+                if attempt < MAX_ATTEMPTS:
+                    _backoff(attempt, BACKOFF_SECONDS)
+                else:
+                    report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                    return (False, True)
 
-            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
-            _log_http_error_details(http_code, response_body or None)
-
-            # Cloudflare 403s with error 1010 are transient rate limits — allow retry
-            is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body
-            if http_code in NON_RETRYABLE_CODES and not is_cloudflare_block:
-                try:
-                    raise RuntimeError(f"HTTP {http_code}")
-                except RuntimeError as exc:
-                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
-                return (False, False)
-
-            if attempt < MAX_ATTEMPTS:
-                _backoff(attempt, BACKOFF_SECONDS)
-            else:
-                try:
-                    raise RuntimeError(f"HTTP {http_code}")
-                except RuntimeError as exc:
-                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
-                return (False, True)
-
-        except subprocess.TimeoutExpired:
-            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
-            if attempt < MAX_ATTEMPTS:
-                _backoff(attempt, BACKOFF_SECONDS)
-            else:
-                try:
-                    raise RuntimeError("curl timeout")
-                except RuntimeError as exc:
-                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
-                return (False, True)
-
-        except Exception as e:
-            logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
-            if attempt < MAX_ATTEMPTS:
-                _backoff(attempt, BACKOFF_SECONDS)
-            else:
-                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
-                return (False, True)
-
-    return (False, True)
+        return (False, True)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
@@ -373,7 +394,6 @@ def _get_queue_file_path() -> Path:
     On Windows, fall back to the standard temp directory.
     """
     if platform.system() == "Windows":
-        import tempfile
         return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
     return Path("/var/tmp/ai-discovery-queue.json")
 
@@ -609,23 +629,34 @@ def report_to_sentry(
         }
 
         sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
-        result = subprocess.run(
-            [
-                "curl", "-s", "-o", "/dev/null",
-                "-w", "%{http_code}",
-                "-X", "POST",
-                "-H", "Content-Type: application/json",
-                "-H", f"X-Sentry-Auth: {sentry_auth}",
-                "-d", json.dumps(payload),
-                "--max-time", "5",
-                dsn["store_url"],
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            logger.debug(f"Sentry event sent ({result.stdout.strip()})")
+        fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-sentry-", suffix=".json")
+        try:
+            try:
+                os.write(fd, json.dumps(payload).encode("utf-8"))
+            finally:
+                os.close(fd)
+            result = subprocess.run(
+                [
+                    "curl", "-s", "-o", "/dev/null",
+                    "-w", "%{http_code}",
+                    "-X", "POST",
+                    "-H", "Content-Type: application/json",
+                    "-H", f"X-Sentry-Auth: {sentry_auth}",
+                    "-d", f"@{tmp_path}",
+                    "--max-time", "5",
+                    dsn["store_url"],
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                logger.debug(f"Sentry event sent ({result.stdout.strip()})")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     except Exception as sentry_err:
         # Sentry failures must never crash the script
         logger.debug(f"Sentry reporting failed: {sentry_err}")

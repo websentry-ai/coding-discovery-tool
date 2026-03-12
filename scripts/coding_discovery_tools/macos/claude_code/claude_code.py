@@ -77,13 +77,13 @@ class MacOSClaudeDetector(BaseToolDetector):
                     user_home / ".bun" / "bin" / "claude",
                 ]
             for binary in system_paths + user_paths:
-                if binary.exists():
-                    try:
+                try:
+                    if binary.exists():
                         output = run_command([str(binary), "--version"], VERSION_TIMEOUT)
                         if output:
                             return extract_version_number(output)
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
 
             # Fallback to PATH-based lookup
             output = run_command(["claude", "--version"], VERSION_TIMEOUT)

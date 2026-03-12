@@ -600,7 +600,8 @@ def get_claude_subscription_type(
     try:
         is_root = _is_root()
         is_darwin = platform.system() == "Darwin"
-        use_launchctl = is_darwin and (is_root or _is_daemon_container())
+        is_container = is_darwin and _is_daemon_container()
+        use_launchctl = is_darwin and (is_root or is_container)
 
         if use_launchctl:
             uid = _get_uid_for_user(username)
@@ -636,7 +637,7 @@ def get_claude_subscription_type(
         if not is_root or not is_darwin:
             cmd = [claude_binary, "auth", "status", "--json"]
             env = None
-            if is_darwin and _is_daemon_container():
+            if is_container:
                 real_home = _get_real_home(username)
                 if real_home:
                     env = dict(os.environ)

@@ -16,6 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+try:
+    import pwd
+except ImportError:
+    pwd = None  # Not available on Windows
+
 from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
 logger = logging.getLogger(__name__)
@@ -487,6 +492,67 @@ def _is_root() -> bool:
         return False
 
 
+def _get_uid_for_user(username: str) -> Optional[int]:
+    """Resolve username to UID via the pwd module.
+
+    Returns the numeric UID or None if the user cannot be found.
+    """
+    if pwd is None:
+        return None
+    try:
+        return pwd.getpwnam(username).pw_uid
+    except (KeyError, ImportError):
+        return None
+
+
+def _is_daemon_container() -> bool:
+    """Detect if running inside a macOS Daemon Container (e.g. Rippling MDM).
+
+    Daemon Containers redirect Path.home() to a path under
+    ~/Library/Daemon Containers/<UUID>/Data/Downloads.
+    """
+    return "Daemon Containers" in str(Path.home())
+
+
+def _run_auth_status(
+    cmd: list,
+    username: str,
+    method: str = "direct",
+) -> Optional[str]:
+    """Execute an auth-status command and parse the subscription type.
+
+    Returns the subscription type string or None on any failure.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=AUTH_STATUS_TIMEOUT,
+        )
+
+        if result.returncode != 0:
+            logger.debug(
+                f"claude auth status ({method}) returned non-zero for "
+                f"{username}: rc={result.returncode}, "
+                f"stderr={result.stderr.strip()}"
+            )
+            return None
+
+        parsed = json.loads(result.stdout.strip())
+        return parsed.get("subscriptionType")
+
+    except subprocess.TimeoutExpired:
+        logger.debug(f"claude auth status ({method}) timed out for {username}")
+        return None
+    except json.JSONDecodeError:
+        logger.warning(f"claude auth status ({method}) returned non-JSON for {username}")
+        return None
+    except OSError as e:
+        logger.debug(f"Could not run claude auth status ({method}) for {username}: {e}")
+        return None
+
+
 def get_claude_subscription_type(
     username: str,
     claude_binary: str,
@@ -497,8 +563,13 @@ def get_claude_subscription_type(
     Runs 'claude auth status' as the specified user and extracts the
     subscriptionType from the JSON output.
 
-    On macOS when running as root, uses 'su - {username} -c ...' to execute
-    as the target user (required for Keychain access).
+    On macOS when running as root, uses 'launchctl asuser <uid>' to execute
+    in the user's Mach bootstrap namespace (required for Keychain access).
+    Falls back to 'su - {username} -c ...' if launchctl fails.
+
+    On macOS when running inside a Daemon Container (e.g. Rippling MDM),
+    also tries 'launchctl asuser' to escape the sandbox.
+
     On other platforms or when not running as root, runs directly.
 
     Args:
@@ -510,37 +581,47 @@ def get_claude_subscription_type(
         or None if detection fails or user is not logged in
     """
     try:
-        if platform.system() == "Darwin" and _is_root():
-            cmd = ["su", "-", username, "-c", f"{shlex.quote(claude_binary)} auth status --json"]
-        else:
+        is_root = _is_root()
+        is_darwin = platform.system() == "Darwin"
+        use_launchctl = is_darwin and (is_root or _is_daemon_container())
+
+        if use_launchctl:
+            uid = _get_uid_for_user(username)
+            if uid is not None:
+                cmd = [
+                    "launchctl", "asuser", str(uid),
+                    claude_binary, "auth", "status", "--json",
+                ]
+                result = _run_auth_status(cmd, username, method="launchctl asuser")
+                if result is not None:
+                    return result
+                logger.debug(
+                    f"launchctl asuser failed for {username}, "
+                    f"trying fallback"
+                )
+            else:
+                logger.debug(
+                    f"Could not resolve UID for {username}, "
+                    f"skipping launchctl asuser"
+                )
+
+        # Fallback for root on macOS: su - username
+        if is_darwin and is_root:
+            cmd = [
+                "su", "-", username, "-c",
+                f"{shlex.quote(claude_binary)} auth status --json",
+            ]
+            result = _run_auth_status(cmd, username, method="su")
+            if result is not None:
+                return result
+
+        # Direct execution (non-root, non-container, or all fallbacks failed)
+        if not is_root:
             cmd = [claude_binary, "auth", "status", "--json"]
+            return _run_auth_status(cmd, username, method="direct")
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=AUTH_STATUS_TIMEOUT,
-        )
-
-        if result.returncode != 0:
-            logger.debug(
-                f"claude auth status returned non-zero for {username}: "
-                f"rc={result.returncode}"
-            )
-            return None
-
-        parsed = json.loads(result.stdout.strip())
-        return parsed.get("subscriptionType")
-
-    except subprocess.TimeoutExpired:
-        logger.debug(f"claude auth status timed out for {username}")
         return None
-    except json.JSONDecodeError:
-        logger.warning(f"claude auth status returned non-JSON for {username}")
-        return None
-    except OSError as e:
-        logger.debug(f"Could not run claude auth status for {username}: {e}")
-        return None
+
     except Exception as e:
         logger.debug(f"Unexpected error getting subscription for {username}: {e}")
         return None

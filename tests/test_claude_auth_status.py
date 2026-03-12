@@ -125,11 +125,12 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.claude_binary = "/usr/local/bin/claude"
         self.username = "testuser"
 
-    def _mock_result(self, stdout="", returncode=0):
+    def _mock_result(self, stdout="", returncode=0, stderr=""):
         """Create a mock subprocess.CompletedProcess."""
         mock = MagicMock(spec=subprocess.CompletedProcess)
         mock.stdout = stdout
         mock.returncode = returncode
+        mock.stderr = stderr
         return mock
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
@@ -214,21 +215,26 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         result = get_claude_subscription_type(self.username, self.claude_binary)
         self.assertIsNone(result)
 
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
-    def test_uses_su_when_root_on_macos(self, _mock_root, _mock_sys, mock_run):
-        """On macOS as root, command is wrapped with 'su - username -c ...'."""
+    def test_uses_launchctl_asuser_when_root_on_macos(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid
+    ):
+        """On macOS as root, command uses 'launchctl asuser <uid>' first."""
         mock_run.return_value = self._mock_result(
             stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"})
         )
         get_claude_subscription_type(self.username, self.claude_binary)
-        args = mock_run.call_args[0][0]
-        self.assertEqual(args[0], "su")
-        self.assertEqual(args[1], "-")
-        self.assertEqual(args[2], self.username)
-        self.assertEqual(args[3], "-c")
-        self.assertIn("auth status --json", args[4])
+        args = mock_run.call_args_list[0][0][0]
+        self.assertEqual(args[0], "launchctl")
+        self.assertEqual(args[1], "asuser")
+        self.assertEqual(args[2], "501")
+        self.assertEqual(args[3], self.claude_binary)
+        self.assertIn("auth", args)
+        self.assertIn("status", args)
+        self.assertIn("--json", args)
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
@@ -263,6 +269,113 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         )
         result = get_claude_subscription_type(self.username, self.claude_binary)
         self.assertIsNone(result)
+
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    def test_falls_back_to_su_when_launchctl_fails(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid
+    ):
+        """On macOS as root, falls back to 'su -' when launchctl asuser fails."""
+        mock_run.side_effect = [
+            self._mock_result(stdout="", returncode=1, stderr="service error"),
+            self._mock_result(
+                stdout=json.dumps({"loggedIn": True, "subscriptionType": "pro"})
+            ),
+        ]
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "pro")
+        first_args = mock_run.call_args_list[0][0][0]
+        self.assertEqual(first_args[0], "launchctl")
+        second_args = mock_run.call_args_list[1][0][0]
+        self.assertEqual(second_args[0], "su")
+
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=None)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    def test_skips_launchctl_when_uid_unknown(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid
+    ):
+        """Skips launchctl asuser when UID cannot be resolved, uses su directly."""
+        mock_run.return_value = self._mock_result(
+            stdout=json.dumps({"loggedIn": True, "subscriptionType": "team"})
+        )
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "team")
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "su")
+
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_uses_launchctl_in_daemon_container(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container
+    ):
+        """In daemon container (non-root), uses launchctl asuser then direct."""
+        mock_run.side_effect = [
+            self._mock_result(stdout="", returncode=1, stderr="error"),
+            self._mock_result(
+                stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"})
+            ),
+        ]
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "max")
+        first_args = mock_run.call_args_list[0][0][0]
+        self.assertEqual(first_args[0], "launchctl")
+        second_args = mock_run.call_args_list[1][0][0]
+        self.assertEqual(second_args[0], self.claude_binary)
+
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_runs_directly_when_not_root_no_container(
+        self, _mock_root, mock_run, _mock_container
+    ):
+        """When not root and not in daemon container, runs directly."""
+        mock_run.return_value = self._mock_result(
+            stdout=json.dumps({"loggedIn": True, "subscriptionType": "pro"})
+        )
+        get_claude_subscription_type(self.username, self.claude_binary)
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args, [self.claude_binary, "auth", "status", "--json"])
+
+
+class TestHelpers(unittest.TestCase):
+    """Tests for helper functions used in subscription detection."""
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_uid_for_user_success(self, mock_pwd):
+        """Returns UID when user is found."""
+        from scripts.coding_discovery_tools.utils import _get_uid_for_user
+        mock_pwd.getpwnam.return_value = MagicMock(pw_uid=501)
+        self.assertEqual(_get_uid_for_user("testuser"), 501)
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_uid_for_user_not_found(self, mock_pwd):
+        """Returns None when user is not found."""
+        from scripts.coding_discovery_tools.utils import _get_uid_for_user
+        mock_pwd.getpwnam.side_effect = KeyError("user not found")
+        self.assertIsNone(_get_uid_for_user("unknown"))
+
+    @patch("scripts.coding_discovery_tools.utils.Path.home")
+    def test_is_daemon_container_true(self, mock_home):
+        """Detects Daemon Container path."""
+        from scripts.coding_discovery_tools.utils import _is_daemon_container
+        mock_home.return_value = Path(
+            "/Users/pugazh/Library/Daemon Containers/ABC123/Data/Downloads"
+        )
+        self.assertTrue(_is_daemon_container())
+
+    @patch("scripts.coding_discovery_tools.utils.Path.home")
+    def test_is_daemon_container_false(self, mock_home):
+        """Returns False for normal home directory."""
+        from scripts.coding_discovery_tools.utils import _is_daemon_container
+        mock_home.return_value = Path("/Users/pugazh")
+        self.assertFalse(_is_daemon_container())
 
 
 if __name__ == "__main__":

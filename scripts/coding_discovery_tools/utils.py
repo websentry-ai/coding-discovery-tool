@@ -288,8 +288,10 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 if attempt < MAX_ATTEMPTS:
                     _backoff(attempt, BACKOFF_SECONDS)
                     continue
-                exc = RuntimeError(error_msg)
-                report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                try:
+                    raise RuntimeError(error_msg)
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                 return (False, True)
 
             http_code = int(status_str)
@@ -303,15 +305,19 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             # Cloudflare 403s with error 1010 are transient rate limits — allow retry
             is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body
             if http_code in NON_RETRYABLE_CODES and not is_cloudflare_block:
-                exc = RuntimeError(f"HTTP {http_code}")
-                report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                try:
+                    raise RuntimeError(f"HTTP {http_code}")
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
                 return (False, False)
 
             if attempt < MAX_ATTEMPTS:
                 _backoff(attempt, BACKOFF_SECONDS)
             else:
-                exc = RuntimeError(f"HTTP {http_code}")
-                report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                try:
+                    raise RuntimeError(f"HTTP {http_code}")
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
                 return (False, True)
 
         except subprocess.TimeoutExpired:
@@ -319,8 +325,10 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             if attempt < MAX_ATTEMPTS:
                 _backoff(attempt, BACKOFF_SECONDS)
             else:
-                exc = RuntimeError("curl timeout")
-                report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                try:
+                    raise RuntimeError("curl timeout")
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                 return (False, True)
 
         except Exception as e:
@@ -522,7 +530,10 @@ def get_claude_subscription_type(
 # Sentry error reporting via raw HTTP (no SDK dependency)
 # ---------------------------------------------------------------------------
 
-_SENTRY_DSN = os.environ.get("AI_DISCOVERY_SENTRY_DSN", "")
+_SENTRY_DSN = os.environ.get(
+    "AI_DISCOVERY_SENTRY_DSN",
+    "https://62a73a0043568547cb63a35394b63906@o4509196569149440.ingest.us.sentry.io/4510874666663936",
+)
 _SENTRY_ENV = os.environ.get("AI_DISCOVERY_SENTRY_ENV", "production")
 
 
@@ -566,6 +577,7 @@ def report_to_sentry(
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
         if not dsn:
+            logger.debug("Sentry reporting skipped (no valid DSN configured)")
             return
 
         ctx = context or {}
@@ -614,9 +626,9 @@ def report_to_sentry(
         )
         if result.returncode == 0:
             logger.debug(f"Sentry event sent ({result.stdout.strip()})")
-    except Exception:
+    except Exception as sentry_err:
         # Sentry failures must never crash the script
-        pass
+        logger.debug(f"Sentry reporting failed: {sentry_err}")
 
 
 def _extract_frames(exception: Exception) -> List[Dict]:

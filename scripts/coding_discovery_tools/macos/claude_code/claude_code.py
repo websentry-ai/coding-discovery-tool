@@ -58,8 +58,34 @@ class MacOSClaudeDetector(BaseToolDetector):
         return None
 
     def get_version(self) -> Optional[str]:
-        """Extract Claude Code version."""
+        """Extract Claude Code version.
+
+        Tries user-specific binary paths first (does not rely on PATH),
+        then falls back to bare 'claude' command via PATH lookup.
+        """
         try:
+            # Always try system-wide absolute paths first (works in daemon containers / MDM)
+            system_paths = [
+                Path("/opt/homebrew/bin/claude"),
+                Path("/usr/local/bin/claude"),
+            ]
+            user_paths = []
+            if hasattr(self, 'user_home') and self.user_home:
+                user_home = Path(self.user_home) if not isinstance(self.user_home, Path) else self.user_home
+                user_paths = [
+                    user_home / ".local" / "bin" / "claude",
+                    user_home / ".bun" / "bin" / "claude",
+                ]
+            for binary in system_paths + user_paths:
+                try:
+                    if binary.exists():
+                        output = run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                        if output:
+                            return extract_version_number(output)
+                except Exception:
+                    continue
+
+            # Fallback to PATH-based lookup
             output = run_command(["claude", "--version"], VERSION_TIMEOUT)
             return extract_version_number(output) if output else None
         except Exception as e:

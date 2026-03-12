@@ -5,12 +5,15 @@ This module handles detection of tools that are installed per-user, checking
 user-specific paths like ~/.nvm, ~/.bun, and user configuration directories.
 """
 
+import logging
 import os
 import platform
 from pathlib import Path
 from typing import Dict, Optional
 
 from .coding_tool_base import BaseToolDetector
+
+logger = logging.getLogger(__name__)
 
 
 def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
@@ -287,8 +290,12 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
 
     for candidate in candidates:
         try:
-            if candidate.exists() and os.access(str(candidate), os.X_OK):
-                return str(candidate)
+            if candidate.exists():
+                if os.access(str(candidate), os.X_OK):
+                    return str(candidate)
+                logger.debug(
+                    f"Claude binary exists but not executable: {candidate}"
+                )
         except (PermissionError, OSError):
             continue
 
@@ -301,8 +308,12 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                     continue
                 nvm_candidate = version_dir / "bin" / "claude"
                 try:
-                    if nvm_candidate.exists() and os.access(str(nvm_candidate), os.X_OK):
-                        return str(nvm_candidate)
+                    if nvm_candidate.exists():
+                        if os.access(str(nvm_candidate), os.X_OK):
+                            return str(nvm_candidate)
+                        logger.debug(
+                            f"Claude binary exists but not executable: {nvm_candidate}"
+                        )
                 except (PermissionError, OSError):
                     continue
         except (PermissionError, OSError):

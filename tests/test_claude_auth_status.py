@@ -343,6 +343,35 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         args = mock_run.call_args[0][0]
         self.assertEqual(args, [self.claude_binary, "auth", "status", "--json"])
 
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Linux")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    def test_runs_directly_on_linux_as_root(self, _mock_root, _mock_sys, mock_run):
+        """On Linux as root, command runs directly (no launchctl or su)."""
+        mock_run.return_value = self._mock_result(
+            stdout=json.dumps({"loggedIn": True, "subscriptionType": "enterprise"})
+        )
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "enterprise")
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args, [self.claude_binary, "auth", "status", "--json"])
+
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    def test_not_logged_in_short_circuits_fallback(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid
+    ):
+        """When launchctl succeeds but user is not logged in, does not try su."""
+        mock_run.return_value = self._mock_result(
+            stdout=json.dumps({"loggedIn": False, "subscriptionType": None})
+        )
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertIsNone(result)
+        # Only one subprocess call (launchctl), no su fallback
+        self.assertEqual(mock_run.call_count, 1)
+
 
 class TestHelpers(unittest.TestCase):
     """Tests for helper functions used in subscription detection."""

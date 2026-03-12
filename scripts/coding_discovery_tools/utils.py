@@ -518,10 +518,13 @@ def _run_auth_status(
     cmd: list,
     username: str,
     method: str = "direct",
-) -> Optional[str]:
+) -> Tuple[bool, Optional[str]]:
     """Execute an auth-status command and parse the subscription type.
 
-    Returns the subscription type string or None on any failure.
+    Returns a tuple of (success, subscription_type):
+    - (True, "max")  — command ran successfully, user has a plan
+    - (True, None)   — command ran successfully, user is not logged in
+    - (False, None)  — command failed (non-zero exit, timeout, OS error)
     """
     try:
         result = subprocess.run(
@@ -537,20 +540,20 @@ def _run_auth_status(
                 f"{username}: rc={result.returncode}, "
                 f"stderr={result.stderr.strip()}"
             )
-            return None
+            return (False, None)
 
         parsed = json.loads(result.stdout.strip())
-        return parsed.get("subscriptionType")
+        return (True, parsed.get("subscriptionType"))
 
     except subprocess.TimeoutExpired:
         logger.debug(f"claude auth status ({method}) timed out for {username}")
-        return None
+        return (False, None)
     except json.JSONDecodeError:
         logger.warning(f"claude auth status ({method}) returned non-JSON for {username}")
-        return None
+        return (False, None)
     except OSError as e:
         logger.debug(f"Could not run claude auth status ({method}) for {username}: {e}")
-        return None
+        return (False, None)
 
 
 def get_claude_subscription_type(
@@ -592,9 +595,9 @@ def get_claude_subscription_type(
                     "launchctl", "asuser", str(uid),
                     claude_binary, "auth", "status", "--json",
                 ]
-                result = _run_auth_status(cmd, username, method="launchctl asuser")
-                if result is not None:
-                    return result
+                ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")
+                if ok:
+                    return plan
                 logger.debug(
                     f"launchctl asuser failed for {username}, "
                     f"trying fallback"
@@ -611,14 +614,15 @@ def get_claude_subscription_type(
                 "su", "-", username, "-c",
                 f"{shlex.quote(claude_binary)} auth status --json",
             ]
-            result = _run_auth_status(cmd, username, method="su")
-            if result is not None:
-                return result
+            ok, plan = _run_auth_status(cmd, username, method="su")
+            if ok:
+                return plan
 
-        # Direct execution (non-root, non-container, or all fallbacks failed)
-        if not is_root:
+        # Direct execution (non-root, non-Darwin, or all fallbacks failed)
+        if not is_root or not is_darwin:
             cmd = [claude_binary, "auth", "status", "--json"]
-            return _run_auth_status(cmd, username, method="direct")
+            ok, plan = _run_auth_status(cmd, username, method="direct")
+            return plan
 
         return None
 

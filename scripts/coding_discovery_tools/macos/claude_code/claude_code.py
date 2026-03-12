@@ -64,23 +64,26 @@ class MacOSClaudeDetector(BaseToolDetector):
         then falls back to bare 'claude' command via PATH lookup.
         """
         try:
-            # Try absolute binary paths (works in daemon containers / MDM)
+            # Always try system-wide absolute paths first (works in daemon containers / MDM)
+            system_paths = [
+                Path("/opt/homebrew/bin/claude"),
+                Path("/usr/local/bin/claude"),
+            ]
+            user_paths = []
             if hasattr(self, 'user_home') and self.user_home:
                 user_home = Path(self.user_home) if not isinstance(self.user_home, Path) else self.user_home
-                binary_paths = [
-                    Path("/opt/homebrew/bin/claude"),
-                    Path("/usr/local/bin/claude"),
+                user_paths = [
                     user_home / ".local" / "bin" / "claude",
                     user_home / ".bun" / "bin" / "claude",
                 ]
-                for binary in binary_paths:
-                    if binary.exists():
-                        try:
-                            output = run_command([str(binary), "--version"], VERSION_TIMEOUT)
-                            if output:
-                                return extract_version_number(output)
-                        except Exception:
-                            continue
+            for binary in system_paths + user_paths:
+                if binary.exists():
+                    try:
+                        output = run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                        if output:
+                            return extract_version_number(output)
+                    except Exception:
+                        continue
 
             # Fallback to PATH-based lookup
             output = run_command(["claude", "--version"], VERSION_TIMEOUT)

@@ -171,6 +171,27 @@ class TestSendReport(unittest.TestCase):
         self.assertTrue(retryable)
         self.assertEqual(len(self.server.requests), 3)
 
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_large_payload_succeeds(self, _sleep):
+        """Payloads exceeding ARG_MAX (~262KB) must not cause OSError."""
+        large_report = {
+            "home_user": "test",
+            "device_id": "TEST123",
+            "tools": [{"name": "x" * 300_000, "projects": []}],
+        }
+        success, retryable = send_report_to_backend(
+            f"http://127.0.0.1:{self.port}",
+            "test-key",
+            large_report,
+        )
+        self.assertTrue(success)
+        self.assertFalse(retryable)
+        # Verify the server received the correct payload
+        self.assertEqual(len(self.server.requests), 1)
+        received = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(received["device_id"], "TEST123")
+
 
 class TestPersistence(unittest.TestCase):
     """Integration tests for queue persistence lifecycle."""

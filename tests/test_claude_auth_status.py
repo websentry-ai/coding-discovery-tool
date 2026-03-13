@@ -231,10 +231,9 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertEqual(args[0], "launchctl")
         self.assertEqual(args[1], "asuser")
         self.assertEqual(args[2], "501")
-        self.assertEqual(args[3], self.claude_binary)
-        self.assertIn("auth", args)
-        self.assertIn("status", args)
-        self.assertIn("--json", args)
+        self.assertEqual(args[3], "/bin/bash")
+        self.assertEqual(args[4], "-lc")
+        self.assertIn("auth status --json", args[5])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
@@ -395,6 +394,32 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertIsNone(result)
         # Only one subprocess call (launchctl), no su fallback
         self.assertEqual(mock_run.call_count, 1)
+
+
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    def test_root_darwin_container_falls_through_to_direct_exec(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container,
+        _mock_home
+    ):
+        """When root on Darwin in daemon container, falls through to direct exec if launchctl and su fail."""
+        mock_run.side_effect = [
+            self._mock_result(stdout="", returncode=1, stderr="launchctl error"),
+            self._mock_result(stdout="", returncode=1, stderr="su error"),
+            self._mock_result(
+                stdout=json.dumps({"loggedIn": True, "subscriptionType": "pro"})
+            ),
+        ]
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "pro")
+        self.assertEqual(mock_run.call_count, 3)
+        # Third call is direct execution with HOME override
+        kwargs = mock_run.call_args_list[2][1]
+        self.assertEqual(kwargs["env"]["HOME"], "/Users/testuser")
 
 
 class TestHelpers(unittest.TestCase):

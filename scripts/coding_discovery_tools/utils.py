@@ -608,7 +608,8 @@ def get_claude_subscription_type(
             if uid is not None:
                 cmd = [
                     "launchctl", "asuser", str(uid),
-                    claude_binary, "auth", "status", "--json",
+                    "/bin/bash", "-lc",
+                    f"{shlex.quote(claude_binary)} auth status --json",
                 ]
                 ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")
                 if ok:
@@ -633,23 +634,20 @@ def get_claude_subscription_type(
             if ok:
                 return plan
 
-        # Direct execution (non-root, non-Darwin, or all fallbacks failed)
-        if not is_root or not is_darwin:
-            cmd = [claude_binary, "auth", "status", "--json"]
-            env = None
-            if is_container:
-                real_home = _get_real_home(username)
-                if real_home:
-                    env = dict(os.environ)
-                    env["HOME"] = real_home
-                    logger.debug(
-                        f"Overriding HOME to {real_home} for {username} "
-                        f"(daemon container detected)"
-                    )
-            ok, plan = _run_auth_status(cmd, username, method="direct", env=env)
-            return plan
-
-        return None
+        # Direct execution — final fallback for all platforms
+        cmd = [claude_binary, "auth", "status", "--json"]
+        env = None
+        if is_container:
+            real_home = _get_real_home(username)
+            if real_home:
+                env = dict(os.environ)
+                env["HOME"] = real_home
+                logger.debug(
+                    f"Overriding HOME to {real_home} for {username} "
+                    f"(daemon container detected)"
+                )
+        ok, plan = _run_auth_status(cmd, username, method="direct", env=env)
+        return plan
 
     except Exception as e:
         logger.debug(f"Unexpected error getting subscription for {username}: {e}")

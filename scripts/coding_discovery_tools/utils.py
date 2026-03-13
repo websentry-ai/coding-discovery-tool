@@ -262,6 +262,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         payload["app_name"] = app_name
 
     payload_json = json.dumps(payload)
+    ctx = {
+        **ctx,
+        "payload_size_bytes": len(payload_json),
+        "payload_keys": ",".join(sorted(payload.keys())),
+    }
 
     # Write payload to a temp file to avoid OSError when payload exceeds ARG_MAX.
     # The file is written once and reused across retries, then cleaned up in finally.
@@ -312,7 +317,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     try:
                         raise RuntimeError(error_msg)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning")
                     return (False, True)
 
                 http_code = int(status_str)
@@ -327,18 +332,24 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body
                 if http_code in NON_RETRYABLE_CODES and not is_cloudflare_block:
                     try:
-                        raise RuntimeError(f"HTTP {http_code}")
+                        error_detail = f"HTTP {http_code}"
+                        if response_body:
+                            error_detail += f": {response_body[:200]}"
+                        raise RuntimeError(error_detail)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
                     return (False, False)
 
                 if attempt < MAX_ATTEMPTS:
                     _backoff(attempt, BACKOFF_SECONDS)
                 else:
                     try:
-                        raise RuntimeError(f"HTTP {http_code}")
+                        error_detail = f"HTTP {http_code}"
+                        if response_body:
+                            error_detail += f": {response_body[:200]}"
+                        raise RuntimeError(error_detail)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
                     return (False, True)
 
             except subprocess.TimeoutExpired:

@@ -120,8 +120,9 @@ class TestAddSkillToProject(unittest.TestCase):
 
         self.assertIn("/test/project", projects)
         self.assertEqual(len(projects["/test/project"]), 1)
-        # project_root should be removed from the skill
+        # project_root should be renamed to project_path
         self.assertNotIn("project_root", projects["/test/project"][0])
+        self.assertEqual(projects["/test/project"][0]["project_path"], "/test/project")
         self.assertEqual(projects["/test/project"][0]["skill_name"], "commit")
 
     def test_add_to_existing_project(self):
@@ -652,6 +653,7 @@ class TestExtractCommandsFromDirectory(unittest.TestCase):
         for cmd in commands:
             self.assertEqual(cmd["type"], "command")
             self.assertNotIn("project_root", cmd)
+            self.assertIn("project_path", cmd)
 
     def test_ignores_non_md_and_hidden(self):
         """Non-.md files and hidden .md files must be skipped."""
@@ -774,9 +776,10 @@ class TestMacOSExtractorEndToEnd(unittest.TestCase):
         self.assertEqual(types, {"skill", "command"})
         names = {s["skill_name"] for s in user_skills}
         self.assertEqual(names, {"my-skill", "deploy"})
-        # project_root should be stripped for user-level items
+        # project_root should be renamed to project_path for user-level items
         for item in user_skills:
             self.assertNotIn("project_root", item)
+            self.assertIn("project_path", item)
 
     @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.is_running_as_root')
     @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.Path.home')

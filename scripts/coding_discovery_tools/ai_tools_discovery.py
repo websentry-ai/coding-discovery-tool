@@ -944,6 +944,19 @@ class AIToolsDetector:
         skills = project.get("skills", [])
         return len(mcp_servers) == 0 and len(rules) == 0 and len(skills) == 0
 
+    @staticmethod
+    def _deduplicate_project_items(items: List[Dict]) -> List[Dict]:
+        """Remove duplicate items by file_path, keeping the first occurrence."""
+        seen: set = set()
+        result: List[Dict] = []
+        for item in items:
+            fp = item.get("file_path")
+            if fp is None or fp not in seen:
+                if fp is not None:
+                    seen.add(fp)
+                result.append(item)
+        return result
+
     def _is_jetbrains_tool(self, tool: Dict) -> bool:
         """Check if a tool is a JetBrains IDE based on its properties."""
         return "_ide_folder" in tool or "_config_path" in tool
@@ -1264,6 +1277,13 @@ class AIToolsDetector:
         # Check if this is a JetBrains IDE (has _ide_folder or _config_path)
         elif "_ide_folder" in tool or "_config_path" in tool:
             projects_dict = self._process_jetbrains_tool(tool)
+
+        # Deduplicate rules and skills within each project by file_path
+        for project in projects_dict.values():
+            if "rules" in project:
+                project["rules"] = self._deduplicate_project_items(project["rules"])
+            if "skills" in project:
+                project["skills"] = self._deduplicate_project_items(project["skills"])
 
         # Filter out empty projects (no mcpServers and no rules)
         total_projects_before_filter = len(projects_dict)

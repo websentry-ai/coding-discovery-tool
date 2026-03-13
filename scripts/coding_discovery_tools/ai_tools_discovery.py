@@ -51,7 +51,7 @@ try:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
     )
-    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE
+    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE, _breadcrumbs, send_run_summary_to_sentry
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -94,7 +94,7 @@ except ImportError:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE, _breadcrumbs, send_run_summary_to_sentry
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -224,6 +224,7 @@ class AIToolsDetector:
                         tools.append(tool_info)
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
+                _breadcrumbs.record_error("extraction", e, {"tool_name": detector.tool_name, "phase": "tool_detection"})
 
         return tools
 
@@ -258,6 +259,7 @@ class AIToolsDetector:
             return self._cursor_rules_extractor.extract_all_cursor_rules()
         except Exception as e:
             logger.error(f"Error extracting Cursor rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Cursor", "phase": "cursor_rules"})
             return []
 
     def extract_all_claude_rules(self) -> Optional[Dict]:
@@ -276,6 +278,7 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Claude Code", "phase": "claude_rules"})
             return None
 
     def extract_all_claude_skills(self) -> Optional[Dict]:
@@ -294,6 +297,7 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude skills: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Claude Code", "phase": "claude_skills"})
             return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
@@ -309,6 +313,7 @@ class AIToolsDetector:
             return self._windsurf_rules_extractor.extract_all_windsurf_rules()
         except Exception as e:
             logger.error(f"Error extracting Windsurf rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Windsurf", "phase": "windsurf_rules"})
             return []
 
     def extract_all_roo_rules(self) -> List[Dict]:
@@ -321,6 +326,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Roo Code rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Roo Code", "phase": "roo_rules"})
             return []
 
     def extract_all_antigravity_rules(self) -> List[Dict]:
@@ -338,6 +344,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Antigravity rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Antigravity", "phase": "antigravity_rules"})
             return []
 
     def extract_all_kilocode_rules(self) -> List[Dict]:
@@ -355,6 +362,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Kilo Code rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Kilo Code", "phase": "kilocode_rules"})
             return []
 
     def extract_all_gemini_cli_rules(self) -> List[Dict]:
@@ -372,6 +380,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Gemini CLI rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Gemini CLI", "phase": "gemini_cli_rules"})
             return []
 
     def extract_all_codex_rules(self) -> List[Dict]:
@@ -389,6 +398,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Codex rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Codex", "phase": "codex_rules"})
             return []
 
     def extract_all_opencode_rules(self) -> List[Dict]:
@@ -406,6 +416,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting OpenCode rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "OpenCode", "phase": "opencode_rules"})
             return []
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
@@ -426,6 +437,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting GitHub Copilot rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "GitHub Copilot", "phase": "github_copilot_rules"})
             return []
 
     def extract_all_junie_rules(self) -> List[Dict]:
@@ -438,6 +450,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Junie rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Junie", "phase": "junie_rules"})
             return []
 
     def extract_all_cursor_cli_rules(self) -> List[Dict]:
@@ -450,6 +463,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Cursor CLI rules: {e}", exc_info=True)
+            _breadcrumbs.record_error("extraction", e, {"tool_name": "Cursor CLI", "phase": "cursor_cli_rules"})
             return []
 
     def _process_tool_with_rules_and_mcp(
@@ -514,6 +528,7 @@ class AIToolsDetector:
                     log_rules_details(projects_dict, tool_name)
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "rules_extraction"})
                 projects_dict = {}
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
@@ -538,9 +553,10 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "mcp_extraction"})
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
-        
+
         return projects_dict
 
     def _process_tool_with_mcp_only(
@@ -584,9 +600,10 @@ class AIToolsDetector:
                     logger.info("  ⚠ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "mcp_extraction"})
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
-        
+
         return projects_dict
 
     def _merge_mcp_configs_into_projects(
@@ -858,6 +875,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No rules found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "claude_rules_extraction"})
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
 
@@ -876,6 +894,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "claude_mcp_extraction"})
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
 
@@ -895,6 +914,7 @@ class AIToolsDetector:
                     logger.warning("  ⚠ No settings found - extract_settings() returned None or empty list")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "claude_settings_extraction"})
         else:
             logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
@@ -932,6 +952,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No skills found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "claude_skills_extraction"})
         else:
             logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
@@ -1000,6 +1021,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "mcp_extraction"})
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available or config path missing")
 
@@ -1096,6 +1118,7 @@ class AIToolsDetector:
                         logger.info(f"  No GitHub Copilot rules found")
                 except Exception as e:
                     logger.warning(f"  Error extracting {tool_name} rules: {e}")
+                    _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "github_copilot_rules"})
 
             # Extract MCP configs for GitHub Copilot
             logger.info(f"  Extracting {tool_name} MCP configs...")
@@ -1120,6 +1143,7 @@ class AIToolsDetector:
                         logger.info(f"  No GitHub Copilot MCP configs found")
                 except Exception as e:
                     logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
+                    _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "github_copilot_mcp"})
 
             # Convert projects_dict back to list format for tool_dict
             projects_list = [
@@ -1160,6 +1184,7 @@ class AIToolsDetector:
                         logger.info("  ℹ No Cursor settings found")
                 except Exception as e:
                     logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+                    _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "cursor_settings"})
             else:
                 logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
@@ -1258,6 +1283,7 @@ class AIToolsDetector:
                         logger.info("  ℹ No Cursor CLI settings found")
                 except Exception as e:
                     logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+                    _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "cursor_cli_settings"})
             else:
                 logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
@@ -1327,6 +1353,7 @@ class AIToolsDetector:
                     logger.warning(f"  Settings that were passed: {tool['_settings']}")
             except Exception as e:
                 logger.error(f"Error transforming permissions for {tool_name}: {e}", exc_info=True)
+                _breadcrumbs.record_error("extraction", e, {"tool_name": tool_name, "phase": "permissions_transform"})
         else:
             logger.debug(f"  ℹ No _settings found in tool dict for {tool_name}")
         
@@ -1398,12 +1425,16 @@ def main():
         "app_name": args.app_name or "",
     }
 
+    outcome = "success"
     try:
+        _breadcrumbs.add("lifecycle", "Script started", data={"domain": args.domain, "app_name": args.app_name or "", "os": platform.system()})
+
         detector = AIToolsDetector()
 
         # Get device ID once (shared across all user reports)
         device_id = detector.get_device_id()
         sentry_ctx["device_id"] = device_id
+        _breadcrumbs.add("init", "Device ID extracted", data={"device_id": device_id})
 
         # Track failed reports for persistence
         failed_reports = []
@@ -1423,6 +1454,7 @@ def main():
                     failed_reports.append(queued_report)
                 else:
                     logger.warning("  ✗ Queued report discarded (non-retryable error)")
+            _breadcrumbs.add("queue", f"Drained {len(pending)} queued report(s)", data={"pending_count": len(pending)})
             logger.info("")
 
         # Get all users for macOS, or use current user for other platforms
@@ -1431,6 +1463,9 @@ def main():
         # If no users found or not macOS, fall back to current user behavior
         if not all_users:
             all_users = [get_user_info()]
+
+        _breadcrumbs.add("detection", f"Users to scan: {len(all_users)}", data={"user_count": len(all_users)})
+        _breadcrumbs.set_stat("users_scanned", len(all_users))
 
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
@@ -1484,6 +1519,10 @@ def main():
         logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
         logger.info("")
 
+        tool_names = [t.get("name", "Unknown") for t in tools]
+        _breadcrumbs.add("detection", f"Found {len(tools)} tools", data={"tool_names": tool_names})
+        _breadcrumbs.set_stat("tools_found", len(tools))
+
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
@@ -1496,6 +1535,8 @@ def main():
             logger.info("")
 
             try:
+                _breadcrumbs.start_phase(f"process_{tool_name}")
+
                 # Process this tool once (extract all rules and MCP configs for all users)
                 logger.info(f"  Extracting rules and MCP configs for {tool_name}...")
                 tool_with_projects = detector.process_single_tool(tool)
@@ -1600,19 +1641,30 @@ def main():
                         # Send report to backend
                         logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
+                        try:
+                            payload_size_bytes = len(json.dumps(single_tool_report))
+                        except Exception:
+                            payload_size_bytes = 0
+                        _breadcrumbs.increment_stat("total_payload_bytes", payload_size_bytes)
+
                         success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                         if success:
                             logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                            _breadcrumbs.add("report", f"Report sent for {user_name}/{tool_name}", data={"payload_size_bytes": payload_size_bytes})
+                            _breadcrumbs.increment_stat("reports_sent")
                         else:
                             logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                             if retryable:
                                 failed_reports.append(single_tool_report)
+                            _breadcrumbs.add("report", f"Report FAILED for {user_name}/{tool_name}", level="warning", data={"payload_size_bytes": payload_size_bytes, "retryable": retryable})
+                            _breadcrumbs.increment_stat("reports_failed")
 
                         logger.info("")
 
                     except Exception as e:
                         logger.error(f"Error processing {tool_name} for user {user_name}: {e}", exc_info=True)
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name}, level="warning")
+                        _breadcrumbs.record_error("processing", e, {"tool_name": tool_name, "user": user_name, "phase": "process_tool_user"})
                         logger.info("")
 
                 # Print summary for this tool
@@ -1626,9 +1678,12 @@ def main():
                 logger.info("=" * 60)
                 logger.info("")
 
+                _breadcrumbs.end_phase(f"process_{tool_name}")
+
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
+                _breadcrumbs.record_error("processing", e, {"tool_name": tool_name, "phase": "process_tool"})
                 logger.info("")
 
         # --- Persist any failed reports for the next run ---
@@ -1638,10 +1693,17 @@ def main():
             # All queued reports succeeded and no new failures — clean up
             QUEUE_FILE.unlink(missing_ok=True)
 
+        if _breadcrumbs._errors:
+            outcome = "partial_failure"
+
     except Exception as e:
+        outcome = "crash"
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        _breadcrumbs.add("lifecycle", f"Script finished: {outcome}")
+        send_run_summary_to_sentry(outcome=outcome, context=sentry_ctx)
 
 
 if __name__ == "__main__":

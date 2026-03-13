@@ -14,7 +14,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, VERSION_TIMEOUT
 
@@ -626,6 +626,7 @@ def report_to_sentry(
                 ]
             },
             "extra": ctx,
+            "breadcrumbs": _breadcrumbs.get_breadcrumbs_payload(),
         }
 
         sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
@@ -674,3 +675,267 @@ def _extract_frames(exception: Exception) -> List[Dict]:
         }
         for frame in traceback.extract_tb(exception.__traceback__)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Breadcrumb collection for Sentry observability
+# ---------------------------------------------------------------------------
+
+
+class BreadcrumbCollector:
+    """Collect Sentry-style breadcrumbs throughout a script run.
+
+    Every public method is wrapped in try/except so that breadcrumb
+    collection never crashes the host script. Only uses Python stdlib.
+    """
+
+    def __init__(self) -> None:
+        self._breadcrumbs: List[Dict[str, Any]] = []
+        self._errors: List[Dict[str, Any]] = []
+        self._phases: Dict[str, Any] = {}
+        self._stats: Dict[str, Any] = {}
+        self._start_time: float = time.time()
+        self._max_breadcrumbs: int = 100
+        self._max_errors: int = 20
+
+    def add(
+        self,
+        category: str,
+        message: str,
+        level: str = "info",
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append a breadcrumb dict with timestamp, category, message, level, data.
+
+        Caps the list at ``_max_breadcrumbs`` by dropping the oldest entries.
+        """
+        try:
+            breadcrumb: Dict[str, Any] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "category": category,
+                "message": message,
+                "level": level,
+            }
+            if data is not None:
+                breadcrumb["data"] = data
+            self._breadcrumbs.append(breadcrumb)
+            if len(self._breadcrumbs) > self._max_breadcrumbs:
+                self._breadcrumbs = self._breadcrumbs[-self._max_breadcrumbs:]
+        except Exception:
+            pass
+
+    def record_error(
+        self,
+        category: str,
+        error: Exception,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record an error breadcrumb and append to the ``_errors`` list.
+
+        Stores ``error_type``, ``error_message``, ``category``, and optional
+        ``context`` in the error entry.  Both the breadcrumb list and the
+        error list are capped at their respective maximums.
+        """
+        try:
+            self.add(
+                category=category,
+                message=str(error),
+                level="error",
+                data=context,
+            )
+            error_entry: Dict[str, Any] = {
+                "error_type": type(error).__name__,
+                "error_message": str(error),
+                "category": category,
+            }
+            if context is not None:
+                error_entry["context"] = context
+            self._errors.append(error_entry)
+            if len(self._errors) > self._max_errors:
+                self._errors = self._errors[-self._max_errors:]
+        except Exception:
+            pass
+
+    def start_phase(self, name: str) -> None:
+        """Record the start time for a named phase."""
+        try:
+            self._phases[name] = {"start": time.time()}
+        except Exception:
+            pass
+
+    def end_phase(self, name: str) -> None:
+        """Calculate phase duration, add a breadcrumb, and store the duration."""
+        try:
+            phase = self._phases.get(name)
+            if phase is None or "start" not in phase:
+                return
+            duration = time.time() - phase["start"]
+            self._phases[name] = {"duration_seconds": round(duration, 3)}
+            self.add(
+                category="phase",
+                message=f"Phase '{name}' completed in {duration:.3f}s",
+                level="info",
+                data={"phase": name, "duration_seconds": round(duration, 3)},
+            )
+        except Exception:
+            pass
+
+    def set_stat(self, key: str, value: Any) -> None:
+        """Set a stat value."""
+        try:
+            self._stats[key] = value
+        except Exception:
+            pass
+
+    def increment_stat(self, key: str, amount: int = 1) -> None:
+        """Increment a stat counter, starting at 0 if not set."""
+        try:
+            self._stats[key] = self._stats.get(key, 0) + amount
+        except Exception:
+            pass
+
+    def get_breadcrumbs_payload(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Return breadcrumbs in Sentry envelope format: ``{"values": [...]}``.
+        """
+        try:
+            return {"values": list(self._breadcrumbs)}
+        except Exception:
+            return {"values": []}
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Return a summary dict of the run.
+
+        Keys: ``total_duration_seconds``, ``phase_durations``, ``stats``,
+        ``error_count``, ``errors``.
+        """
+        try:
+            phase_durations = {
+                name: info.get("duration_seconds")
+                for name, info in self._phases.items()
+                if isinstance(info, dict) and "duration_seconds" in info
+            }
+            return {
+                "total_duration_seconds": round(time.time() - self._start_time, 3),
+                "phase_durations": phase_durations,
+                "stats": dict(self._stats),
+                "error_count": len(self._errors),
+                "errors": list(self._errors),
+            }
+        except Exception:
+            return {
+                "total_duration_seconds": 0,
+                "phase_durations": {},
+                "stats": {},
+                "error_count": 0,
+                "errors": [],
+            }
+
+    def reset(self) -> None:
+        """Clear all state.  Useful for tests."""
+        try:
+            self._breadcrumbs = []
+            self._errors = []
+            self._phases = {}
+            self._stats = {}
+            self._start_time = time.time()
+        except Exception:
+            pass
+
+
+# Module-level singleton
+_breadcrumbs = BreadcrumbCollector()
+
+
+def send_run_summary_to_sentry(
+    outcome: str,
+    context: Optional[Dict] = None,
+) -> None:
+    """Send a single message-type Sentry event summarising the discovery run.
+
+    Args:
+        outcome: One of ``"success"``, ``"partial_failure"``, or ``"crash"``.
+        context: Extra key/value context merged into ``extra`` and used for tags.
+    """
+    try:
+        dsn = _parse_sentry_dsn(_SENTRY_DSN)
+        if not dsn:
+            logger.debug("Sentry run-summary skipped (no valid DSN configured)")
+            return
+
+        level_map = {
+            "success": "info",
+            "partial_failure": "warning",
+            "crash": "error",
+        }
+        level = level_map.get(outcome, "error")
+        ctx = context or {}
+        summary = _breadcrumbs.get_summary()
+
+        tags = {
+            "os": platform.system(),
+            "hostname": platform.node(),
+            "outcome": outcome,
+            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
+        }
+
+        payload = {
+            "event_id": os.urandom(16).hex(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "platform": "python",
+            "environment": _SENTRY_ENV,
+            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
+            "tags": tags,
+            "message": {
+                "formatted": f"Discovery run completed: {outcome}",
+            },
+            "breadcrumbs": _breadcrumbs.get_breadcrumbs_payload(),
+            "extra": {
+                **ctx,
+                "summary": summary,
+                "phase_durations": summary.get("phase_durations", {}),
+                "stats": summary.get("stats", {}),
+                "error_count": summary.get("error_count", 0),
+                "errors": summary.get("errors", []),
+            },
+        }
+
+        sentry_auth = (
+            f"Sentry sentry_version=7, sentry_key={dsn['key']}, "
+            f"sentry_client=ai-tools-discovery/1.0.0"
+        )
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="ai-discovery-sentry-summary-", suffix=".json",
+        )
+        try:
+            try:
+                os.write(fd, json.dumps(payload).encode("utf-8"))
+            finally:
+                os.close(fd)
+            result = subprocess.run(
+                [
+                    "curl", "-s", "-o", "/dev/null",
+                    "-w", "%{http_code}",
+                    "-X", "POST",
+                    "-H", "Content-Type: application/json",
+                    "-H", f"X-Sentry-Auth: {sentry_auth}",
+                    "-d", f"@{tmp_path}",
+                    "--max-time", "5",
+                    dsn["store_url"],
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                logger.debug(
+                    f"Sentry run-summary sent ({result.stdout.strip()})"
+                )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    except Exception as sentry_err:
+        # Sentry failures must never crash the script
+        logger.debug(f"Sentry run-summary failed: {sentry_err}")

@@ -843,6 +843,23 @@ class AIToolsDetector:
                         if rule.get("project_path"):
                             user_homes.add(rule["project_path"])
                     if not user_homes:
+                        if self.system == "Darwin":
+                            for username in get_all_users_macos():
+                                user_homes.add(str(Path("/Users") / username))
+                        elif self.system == "Windows":
+                            win_users = Path("C:\\Users")
+                            if win_users.exists():
+                                try:
+                                    for user_dir in win_users.iterdir():
+                                        if (user_dir.is_dir()
+                                                and not user_dir.name.startswith('.')
+                                                and user_dir.name not in (
+                                                    "Public", "Default", "Default User",
+                                                    "All Users")):
+                                            user_homes.add(str(user_dir))
+                                except (PermissionError, OSError):
+                                    pass
+                    if not user_homes:
                         user_homes.add(str(Path.home()))
                     for user_home in user_homes:
                         if user_home not in projects_dict:

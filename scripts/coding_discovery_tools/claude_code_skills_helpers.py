@@ -283,7 +283,7 @@ def is_user_level_skills_dir(skills_dir: Path, users_root_path: str = None) -> b
         if users_root_path is None:
             home = Path.home()
             users_root_path = str(home.parent)
-\            if sys.platform == "darwin" and not users_root_path.startswith("/Users"):
+            if sys.platform == "darwin" and not users_root_path.startswith("/Users"):
                 users_root_path = "/Users"
             elif sys.platform == "win32" and "Users" not in users_root_path:
                 users_root_path = str(Path(home.anchor) / "Users")

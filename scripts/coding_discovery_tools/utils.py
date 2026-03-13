@@ -526,6 +526,34 @@ def _get_real_home(username: str) -> Optional[str]:
         return None
 
 
+_COMPATIBLE_SHELLS = frozenset({"/bin/bash", "/bin/zsh", "/bin/sh"})
+
+
+def _get_compatible_shell(username: str) -> str:
+    """Return the user's login shell if it supports ``-lc``, else ``/bin/bash``.
+
+    Reads the shell from the system passwd database via ``pwd.getpwnam``.
+    Only shells in the allowlist (bash, zsh, sh) are returned directly;
+    exotic shells like fish or csh are replaced with ``/bin/bash`` because
+    their ``-lc`` behaviour is incompatible.
+
+    Args:
+        username: System username to look up.
+
+    Returns:
+        Absolute path to a shell that accepts ``-lc``.
+    """
+    if pwd is None:
+        return "/bin/bash"
+    try:
+        shell = pwd.getpwnam(username).pw_shell
+        if shell in _COMPATIBLE_SHELLS:
+            return shell
+    except (KeyError, ImportError):
+        pass
+    return "/bin/bash"
+
+
 def _run_auth_status(
     cmd: list,
     username: str,
@@ -606,9 +634,10 @@ def get_claude_subscription_type(
         if use_launchctl:
             uid = _get_uid_for_user(username)
             if uid is not None:
+                shell = _get_compatible_shell(username)
                 cmd = [
                     "launchctl", "asuser", str(uid),
-                    "/bin/bash", "-lc",
+                    shell, "-lc",
                     f"{shlex.quote(claude_binary)} auth status --json",
                 ]
                 ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")

@@ -215,14 +215,15 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         result = get_claude_subscription_type(self.username, self.claude_binary)
         self.assertIsNone(result)
 
+    @patch("scripts.coding_discovery_tools.utils._get_compatible_shell", return_value="/bin/zsh")
     @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
     def test_uses_launchctl_asuser_when_root_on_macos(
-        self, _mock_root, _mock_sys, mock_run, _mock_uid
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_shell
     ):
-        """On macOS as root, command uses 'launchctl asuser <uid>' first."""
+        """On macOS as root, command uses 'launchctl asuser <uid>' with user shell."""
         mock_run.return_value = self._mock_result(
             stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"})
         )
@@ -231,10 +232,9 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertEqual(args[0], "launchctl")
         self.assertEqual(args[1], "asuser")
         self.assertEqual(args[2], "501")
-        self.assertEqual(args[3], self.claude_binary)
-        self.assertIn("auth", args)
-        self.assertIn("status", args)
-        self.assertIn("--json", args)
+        self.assertEqual(args[3], "/bin/zsh")
+        self.assertEqual(args[4], "-lc")
+        self.assertIn("auth status --json", args[5])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
@@ -270,12 +270,13 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         result = get_claude_subscription_type(self.username, self.claude_binary)
         self.assertIsNone(result)
 
+    @patch("scripts.coding_discovery_tools.utils._get_compatible_shell", return_value="/bin/bash")
     @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
     def test_falls_back_to_su_when_launchctl_fails(
-        self, _mock_root, _mock_sys, mock_run, _mock_uid
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_shell
     ):
         """On macOS as root, falls back to 'su -' when launchctl asuser fails."""
         mock_run.side_effect = [
@@ -307,6 +308,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         args = mock_run.call_args[0][0]
         self.assertEqual(args[0], "su")
 
+    @patch("scripts.coding_discovery_tools.utils._get_compatible_shell", return_value="/bin/bash")
     @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
     @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
     @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
@@ -315,7 +317,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
     def test_uses_launchctl_in_daemon_container(
         self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container,
-        _mock_home
+        _mock_home, _mock_shell
     ):
         """In daemon container (non-root), uses launchctl asuser then direct."""
         mock_run.side_effect = [
@@ -331,6 +333,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         second_args = mock_run.call_args_list[1][0][0]
         self.assertEqual(second_args[0], self.claude_binary)
 
+    @patch("scripts.coding_discovery_tools.utils._get_compatible_shell", return_value="/bin/bash")
     @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
     @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
     @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
@@ -339,7 +342,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
     def test_daemon_container_overrides_home_on_direct_exec(
         self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container,
-        _mock_home
+        _mock_home, _mock_shell
     ):
         """In daemon container, direct execution overrides HOME to real user home."""
         mock_run.side_effect = [
@@ -380,12 +383,13 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         args = mock_run.call_args[0][0]
         self.assertEqual(args, [self.claude_binary, "auth", "status", "--json"])
 
+    @patch("scripts.coding_discovery_tools.utils._get_compatible_shell", return_value="/bin/bash")
     @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
     def test_not_logged_in_short_circuits_fallback(
-        self, _mock_root, _mock_sys, mock_run, _mock_uid
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_shell
     ):
         """When launchctl succeeds but user is not logged in, does not try su."""
         mock_run.return_value = self._mock_result(
@@ -395,6 +399,33 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertIsNone(result)
         # Only one subprocess call (launchctl), no su fallback
         self.assertEqual(mock_run.call_count, 1)
+
+
+    @patch("scripts.coding_discovery_tools.utils._get_compatible_shell", return_value="/bin/bash")
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    def test_root_darwin_container_falls_through_to_direct_exec(
+        self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_container,
+        _mock_home, _mock_shell
+    ):
+        """When root on Darwin in daemon container, falls through to direct exec if launchctl and su fail."""
+        mock_run.side_effect = [
+            self._mock_result(stdout="", returncode=1, stderr="launchctl error"),
+            self._mock_result(stdout="", returncode=1, stderr="su error"),
+            self._mock_result(
+                stdout=json.dumps({"loggedIn": True, "subscriptionType": "pro"})
+            ),
+        ]
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "pro")
+        self.assertEqual(mock_run.call_count, 3)
+        # Third call is direct execution with HOME override
+        kwargs = mock_run.call_args_list[2][1]
+        self.assertEqual(kwargs["env"]["HOME"], "/Users/testuser")
 
 
 class TestHelpers(unittest.TestCase):
@@ -443,6 +474,34 @@ class TestHelpers(unittest.TestCase):
         from scripts.coding_discovery_tools.utils import _is_daemon_container
         mock_home.return_value = Path("/Users/pugazh")
         self.assertFalse(_is_daemon_container())
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_compatible_shell_zsh(self, mock_pwd):
+        """Returns /bin/zsh for a user whose login shell is zsh."""
+        from scripts.coding_discovery_tools.utils import _get_compatible_shell
+        mock_pwd.getpwnam.return_value = MagicMock(pw_shell="/bin/zsh")
+        self.assertEqual(_get_compatible_shell("zshuser"), "/bin/zsh")
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_compatible_shell_bash(self, mock_pwd):
+        """Returns /bin/bash for a user whose login shell is bash."""
+        from scripts.coding_discovery_tools.utils import _get_compatible_shell
+        mock_pwd.getpwnam.return_value = MagicMock(pw_shell="/bin/bash")
+        self.assertEqual(_get_compatible_shell("bashuser"), "/bin/bash")
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_compatible_shell_fish_falls_back(self, mock_pwd):
+        """Falls back to /bin/bash when user shell is fish (not in allowlist)."""
+        from scripts.coding_discovery_tools.utils import _get_compatible_shell
+        mock_pwd.getpwnam.return_value = MagicMock(pw_shell="/usr/local/bin/fish")
+        self.assertEqual(_get_compatible_shell("fishuser"), "/bin/bash")
+
+    @patch("scripts.coding_discovery_tools.utils.pwd")
+    def test_get_compatible_shell_lookup_fails(self, mock_pwd):
+        """Falls back to /bin/bash when user lookup raises KeyError."""
+        from scripts.coding_discovery_tools.utils import _get_compatible_shell
+        mock_pwd.getpwnam.side_effect = KeyError("user not found")
+        self.assertEqual(_get_compatible_shell("unknown"), "/bin/bash")
 
 
 if __name__ == "__main__":

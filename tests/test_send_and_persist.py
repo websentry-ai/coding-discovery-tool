@@ -193,6 +193,72 @@ class TestSendReport(unittest.TestCase):
         self.assertEqual(received["device_id"], "TEST123")
 
 
+    @patch("time.sleep")
+    @patch.object(utils_mod, "report_to_sentry")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_non_retryable_sentry_includes_response_body(self, mock_sentry, _sleep):
+        self.server.default_code = 400
+        self.server.response_body = b'{"skills": ["Unknown field"]}'
+
+        success, retryable = send_report_to_backend(
+            self.base_url, "test-key", self.report
+        )
+
+        self.assertFalse(success)
+        self.assertFalse(retryable)
+        mock_sentry.assert_called()
+        # Check the context dict (second positional arg) contains response_body
+        call_args = mock_sentry.call_args
+        ctx = call_args[0][1]
+        self.assertIn("response_body", ctx)
+        self.assertEqual(ctx["response_body"], '{"skills": ["Unknown field"]}')
+        # Check the RuntimeError message includes the response body snippet
+        exc = call_args[0][0]
+        self.assertIn('{"skills": ["Unknown field"]}', str(exc))
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "report_to_sentry")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_retryable_exhaustion_sentry_includes_response_body(self, mock_sentry, _sleep):
+        self.server.default_code = 500
+        self.server.response_body = b'{"error": "internal"}'
+
+        success, retryable = send_report_to_backend(
+            self.base_url, "test-key", self.report
+        )
+
+        self.assertFalse(success)
+        self.assertTrue(retryable)
+        mock_sentry.assert_called()
+        call_args = mock_sentry.call_args
+        ctx = call_args[0][1]
+        self.assertIn("response_body", ctx)
+        self.assertEqual(ctx["response_body"], '{"error": "internal"}')
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "report_to_sentry")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_sentry_context_includes_payload_metadata(self, mock_sentry, _sleep):
+        self.server.default_code = 400
+        self.server.response_body = b"{}"
+
+        success, retryable = send_report_to_backend(
+            self.base_url, "test-key", self.report
+        )
+
+        self.assertFalse(success)
+        self.assertFalse(retryable)
+        mock_sentry.assert_called()
+        call_args = mock_sentry.call_args
+        ctx = call_args[0][1]
+        self.assertIn("payload_size_bytes", ctx)
+        self.assertIsInstance(ctx["payload_size_bytes"], int)
+        self.assertGreater(ctx["payload_size_bytes"], 0)
+        self.assertIn("payload_keys", ctx)
+        # report keys are device_id, home_user, tools — sorted
+        self.assertEqual(ctx["payload_keys"], "device_id,home_user,tools")
+
+
 class TestPersistence(unittest.TestCase):
     """Integration tests for queue persistence lifecycle."""
 

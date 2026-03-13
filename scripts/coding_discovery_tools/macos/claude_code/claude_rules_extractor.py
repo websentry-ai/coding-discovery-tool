@@ -117,7 +117,7 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                 self.MANAGED_RULES_PATH, find_claude_project_root, scope="managed"
             )
             if rule_info:
-                rule_info.pop('project_root', None)
+                rule_info["project_path"] = rule_info.pop("project_root", None)
                 managed_rules.append(rule_info)
         except Exception as e:
             logger.debug(f"Error extracting managed rules: {e}")
@@ -144,8 +144,7 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                     if item.is_file() and _is_claude_md_file(item.name):
                         rule_info = extract_single_rule_file(item, find_claude_project_root, scope="user")
                         if rule_info:
-                            # Remove project_root from user rules (it's the home dir, not meaningful)
-                            rule_info.pop('project_root', None)
+                            rule_info["project_path"] = rule_info.pop("project_root", None)
                             user_rules.append(rule_info)
             except Exception as e:
                 logger.debug(f"Error extracting user-level rules for {user_home}: {e}")

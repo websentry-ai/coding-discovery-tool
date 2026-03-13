@@ -90,7 +90,7 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                                         scope="user"
                                     )
                                     if skill_info:
-                                        skill_info.pop('project_root', None)
+                                        skill_info["project_path"] = skill_info.pop("project_root", None)
                                         user_skills.append(skill_info)
                                     break
                 except Exception as e:
@@ -103,7 +103,7 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                         if item.is_file() and is_command_md_file(item.name):
                             command_info = extract_command_info(item, extract_single_rule_file, scope="user")
                             if command_info:
-                                command_info.pop('project_root', None)
+                                command_info["project_path"] = command_info.pop("project_root", None)
                                 user_skills.append(command_info)
                 except Exception as e:
                     logger.debug(f"Error extracting user-level commands for {user_home}: {e}")

@@ -847,7 +847,7 @@ class AIToolsDetector:
                             for username in get_all_users_macos():
                                 user_homes.add(str(Path("/Users") / username))
                         elif self.system == "Windows":
-                            win_users = Path("C:\\Users")
+                            win_users = Path(Path.home().anchor) / "Users"
                             if win_users.exists():
                                 try:
                                     for user_dir in win_users.iterdir():

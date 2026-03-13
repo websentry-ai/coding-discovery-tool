@@ -805,9 +805,7 @@ class AIToolsDetector:
         """
         tool_name = tool.get("name", "Claude Code")
         projects_dict = {}
-
-        # Get home directory path for user-level data
-        home_dir = str(Path.home())
+        managed_rules = []
 
         logger.info("")
         logger.info("=" * 70)
@@ -823,25 +821,55 @@ class AIToolsDetector:
                 user_rules = rules_result.get("user_rules", []) if rules_result else []
                 project_rules = rules_result.get("project_rules", []) if rules_result else []
 
-                # Ensure home directory project exists for user-level/managed data
-                if managed_rules or user_rules:
-                    if home_dir not in projects_dict:
-                        projects_dict[home_dir] = {
-                            "path": home_dir,
-                            "rules": [],
-                            "skills": [],
-                            "mcpServers": []
-                        }
-
-                # Add managed rules to home directory project
-                if managed_rules:
-                    logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
-                    projects_dict[home_dir]["rules"].extend(managed_rules)
-
-                # Add user-level rules to home directory project
+                # Add user-level rules grouped by their project_path (user's home)
                 if user_rules:
                     logger.info(f"  ✓ Found {len(user_rules)} user-level rule(s)")
-                    projects_dict[home_dir]["rules"].extend(user_rules)
+                    for rule in user_rules:
+                        user_home = rule.get("project_path") or str(Path.home())
+                        if user_home not in projects_dict:
+                            projects_dict[user_home] = {
+                                "path": user_home,
+                                "rules": [],
+                                "skills": [],
+                                "mcpServers": []
+                            }
+                        projects_dict[user_home]["rules"].append(rule)
+
+                # Add managed rules to every discovered user home
+                if managed_rules:
+                    logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
+                    user_homes = set()
+                    for rule in user_rules:
+                        if rule.get("project_path"):
+                            user_homes.add(rule["project_path"])
+                    if not user_homes:
+                        if self.system == "Darwin":
+                            for username in get_all_users_macos():
+                                user_homes.add(str(Path("/Users") / username))
+                        elif self.system == "Windows":
+                            win_users = Path(Path.home().anchor) / "Users"
+                            if win_users.exists():
+                                try:
+                                    for user_dir in win_users.iterdir():
+                                        if (user_dir.is_dir()
+                                                and not user_dir.name.startswith('.')
+                                                and user_dir.name not in (
+                                                    "Public", "Default", "Default User",
+                                                    "All Users")):
+                                            user_homes.add(str(user_dir))
+                                except (PermissionError, OSError):
+                                    pass
+                    if not user_homes:
+                        user_homes.add(str(Path.home()))
+                    for user_home in user_homes:
+                        if user_home not in projects_dict:
+                            projects_dict[user_home] = {
+                                "path": user_home,
+                                "rules": [],
+                                "skills": [],
+                                "mcpServers": []
+                            }
+                        projects_dict[user_home]["rules"].extend(managed_rules)
 
                 # Merge project-level rules into projects_dict
                 if project_rules:
@@ -906,20 +934,32 @@ class AIToolsDetector:
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 project_skills = skills_result.get("project_skills", []) if skills_result else []
 
-                # Add user-level skills to home directory project
+                # Add user-level skills grouped by their project_path (user's home)
                 if user_skills:
                     logger.info(f"  ✓ Found {len(user_skills)} user-level skill(s)")
-                    # Ensure home directory project exists
-                    if home_dir not in projects_dict:
-                        projects_dict[home_dir] = {
-                            "path": home_dir,
-                            "rules": [],
-                            "skills": [],
-                            "mcpServers": []
-                        }
-                    if "skills" not in projects_dict[home_dir]:
-                        projects_dict[home_dir]["skills"] = []
-                    projects_dict[home_dir]["skills"].extend(user_skills)
+                    for skill in user_skills:
+                        user_home = skill.get("project_path") or str(Path.home())
+                        if user_home not in projects_dict:
+                            projects_dict[user_home] = {
+                                "path": user_home,
+                                "rules": [],
+                                "skills": [],
+                                "mcpServers": []
+                            }
+                        if "skills" not in projects_dict[user_home]:
+                            projects_dict[user_home]["skills"] = []
+                        projects_dict[user_home]["skills"].append(skill)
+
+                    # Also distribute managed rules to any newly discovered user homes from skills
+                    if managed_rules:
+                        for skill in user_skills:
+                            uh = skill.get("project_path")
+                            if uh and uh in projects_dict:
+                                existing_managed = any(
+                                    r.get("scope") == "managed" for r in projects_dict[uh].get("rules", [])
+                                )
+                                if not existing_managed:
+                                    projects_dict[uh]["rules"].extend(managed_rules)
 
                 # Merge project-level skills into projects_dict
                 if project_skills:

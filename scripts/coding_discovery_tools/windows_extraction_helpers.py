@@ -105,7 +105,7 @@ def extract_single_rule_file(
         project_root = (find_project_root_func or find_project_root)(rule_file)
         content, truncated = read_file_content(rule_file, file_metadata['size'])
 
-        if scope is None:
+        if scope is None or scope == "project":
             scope = _detect_rule_scope(rule_file)
 
         return {
@@ -134,27 +134,16 @@ def _detect_rule_scope(rule_file: Path) -> str:
     """
     Detect the scope of a rule file based on its location.
 
-    Returns "user" for rules in the user's home directory config folders,
-    "project" for rules in project directories.
+    Uses path structure (C:\\Users\\<anyone>\\.<config_dir>\\...) instead of
+    Path.home() so that scope detection works correctly when running
+    as admin via MDM (where Path.home() may not match the actual user).
     """
+    config_dir_names = {".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"}
     try:
-        home = Path.home()
-        rule_path = rule_file.resolve()
-
-        # Check if the rule file is in the user's home config directory
-        # e.g., ~/.cursor/, ~/.claude/, ~/.windsurf/, ~/.roo/, ~/.gemini/, etc.
-        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"]:
-            user_config_dir = home / config_dir_name
-            if user_config_dir.exists():
-                try:
-                    # Check if rule_file is under the user's config directory
-                    rule_path.relative_to(user_config_dir)
-                    return "user"
-                except ValueError:
-                    # Not relative to this config dir, continue checking
-                    pass
-
-        # Default to project scope
+        parts = rule_file.resolve().parts
+        # On Windows: ('C:\\', 'Users', '<username>', '.<config_dir>', ...)
+        if len(parts) >= 4 and parts[1] == "Users" and parts[3].startswith(".") and parts[3] in config_dir_names:
+            return "user"
         return "project"
     except Exception:
         return "project"

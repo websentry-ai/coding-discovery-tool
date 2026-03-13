@@ -141,8 +141,7 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                     if item.is_file() and _is_claude_md_file(item.name):
                         rule_info = extract_single_rule_file(item, find_project_root, scope="user")
                         if rule_info:
-                            # Remove project_root from user rules (it's the home dir, not meaningful)
-                            rule_info.pop('project_root', None)
+                            rule_info["project_path"] = rule_info.pop("project_root", None)
                             user_rules.append(rule_info)
             except Exception as e:
                 logger.debug(f"Error extracting user-level rules for {user_home}: {e}")

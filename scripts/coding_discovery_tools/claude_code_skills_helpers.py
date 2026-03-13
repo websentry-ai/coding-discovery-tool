@@ -6,6 +6,7 @@ skills extractors to avoid code duplication.
 """
 
 import logging
+import sys
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 
@@ -280,11 +281,12 @@ def is_user_level_skills_dir(skills_dir: Path, users_root_path: str = None) -> b
 
         # Derive users root from home directory if not provided
         if users_root_path is None:
-            # Get the users root dynamically (e.g., /Users on macOS, C:\Users on Windows)
             home = Path.home()
-            # Home is typically /Users/<username> or C:\Users\<username>
-            # So users root is home.parent
             users_root_path = str(home.parent)
+            if sys.platform == "darwin" and not users_root_path.startswith("/Users"):
+                users_root_path = "/Users"
+            elif sys.platform == "win32" and "Users" not in users_root_path:
+                users_root_path = str(Path(home.anchor) / "Users")
 
         # Convert users_root_path to Path for consistent comparison across platforms
         # This handles both forward and backslash path separators

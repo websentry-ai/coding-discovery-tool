@@ -124,7 +124,7 @@ def extract_single_rule_file(rule_file: Path, find_project_root_func, scope: str
         project_root = find_project_root_func(rule_file)
         content, truncated = read_file_content(rule_file, file_metadata['size'])
 
-        if scope is None:
+        if scope is None or scope == "project":
             scope = _detect_rule_scope(rule_file)
 
         return {
@@ -152,20 +152,17 @@ def extract_single_rule_file(rule_file: Path, find_project_root_func, scope: str
 def _detect_rule_scope(rule_file: Path) -> str:
     """
     Detect the scope of a rule file based on its location.
+
+    Uses path structure (/Users/<anyone>/.<config_dir>/...) instead of
+    Path.home() so that scope detection works correctly when running
+    as root via MDM (where Path.home() is /var/root).
     """
+    config_dir_names = {".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"}
     try:
-        home = Path.home()
-        rule_path = rule_file.resolve()
-
-        for config_dir_name in [".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"]:
-            user_config_dir = home / config_dir_name
-            if user_config_dir.exists():
-                try:
-                    rule_path.relative_to(user_config_dir)
-                    return "user"
-                except ValueError:
-                    pass
-
+        parts = rule_file.resolve().parts
+        # On macOS: ('/', 'Users', '<username>', '.<config_dir>', ...)
+        if len(parts) >= 4 and parts[1] == "Users" and parts[3].startswith(".") and parts[3] in config_dir_names:
+            return "user"
         return "project"
     except Exception:
         return "project"

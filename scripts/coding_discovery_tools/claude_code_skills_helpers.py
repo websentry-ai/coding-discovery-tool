@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 CLAUDE_DIR_NAME = ".claude"
 SKILLS_DIR_NAME = "skills"
 SKILL_FILE_NAME = "SKILL.md"
+COMMANDS_DIR_NAME = "commands"
 
 
 def is_skill_md_file(filename: str) -> bool:
@@ -27,6 +28,11 @@ def is_skill_md_file(filename: str) -> bool:
         True if the filename matches SKILL.md (case-insensitive)
     """
     return filename.lower() == SKILL_FILE_NAME.lower()
+
+
+def is_command_md_file(filename: str) -> bool:
+    """Check if filename is a markdown command file (excludes hidden files)."""
+    return filename.lower().endswith(".md") and not filename.startswith(".")
 
 
 def build_skills_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Dict]:
@@ -83,6 +89,81 @@ def find_skill_project_root(skill_file: Path) -> Path:
 
     # Last resort: use the skill file's parent
     return skill_file.parent
+
+
+def find_command_project_root(command_file: Path) -> Path:
+    """
+    Find the project root directory for a Claude Code command file.
+
+    For commands:
+    - User-level: ~/.claude/commands/<name>.md -> home directory
+    - Project-level: <project>/.claude/commands/<name>.md -> project directory
+
+    Args:
+        command_file: Path to the command .md file
+
+    Returns:
+        Project root path
+    """
+    commands_dir = command_file.parent   # commands/
+    claude_dir = commands_dir.parent     # .claude/
+
+    if commands_dir.name == COMMANDS_DIR_NAME and claude_dir.name == CLAUDE_DIR_NAME:
+        return claude_dir.parent
+
+    for parent in command_file.parents:
+        if parent.name == CLAUDE_DIR_NAME:
+            return parent.parent
+
+    return command_file.parent
+
+
+def extract_command_info(
+    command_file: Path,
+    extract_single_rule_file_func: Callable,
+    scope: str,
+) -> Optional[Dict]:
+    """
+    Extract command information from a command .md file.
+    """
+    rule_info = extract_single_rule_file_func(command_file, find_command_project_root, scope=scope)
+
+    if rule_info:
+        rule_info["skill_name"] = command_file.stem
+        rule_info["type"] = "command"
+
+    return rule_info
+
+
+def extract_commands_from_directory(
+    commands_dir: Path,
+    projects_by_root: Dict[str, List[Dict]],
+    extract_single_rule_file_func: Callable,
+    add_skill_func: Callable
+) -> None:
+    """
+    Extract all commands from a .claude/commands directory.
+
+    Args:
+        commands_dir: Path to the commands directory
+        projects_by_root: Dictionary to populate with commands
+        extract_single_rule_file_func: OS-specific function to extract rule file info
+        add_skill_func: Function to add command to project dict (handles thread safety)
+    """
+    try:
+        for item in commands_dir.iterdir():
+            if item.is_file() and is_command_md_file(item.name):
+                command_info = extract_command_info(
+                    item,
+                    extract_single_rule_file_func,
+                    scope="project"
+                )
+                if command_info:
+                    project_root = command_info.get('project_root')
+                    if project_root:
+                        add_skill_func(command_info, project_root, projects_by_root)
+    except Exception as e:
+        logger.debug(f"Error extracting commands from {commands_dir}: {e}")
 
 
 def extract_skill_info(

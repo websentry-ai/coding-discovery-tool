@@ -1,12 +1,11 @@
 """
-Claude Code skills extraction for macOS systems.
+Claude Code skills and commands extraction for macOS systems.
 
-Extracts Claude Code skills (SKILL.md files) from all projects on the user's machine,
+Extracts Claude Code skills and legacy commands from all projects,
 grouping them by project root.
 
-Skills are stored in:
-- User-level: ~/.claude/skills/<skill-name>/SKILL.md
-- Project-level: **/.claude/skills/<skill-name>/SKILL.md
+Skills:  ~/.claude/skills/<name>/SKILL.md, **/.claude/skills/<name>/SKILL.md
+Commands: ~/.claude/commands/<name>.md, **/.claude/commands/<name>.md
 """
 
 import logging
@@ -27,10 +26,14 @@ from ...macos_extraction_helpers import (
 from ...claude_code_skills_helpers import (
     CLAUDE_DIR_NAME,
     SKILLS_DIR_NAME,
+    COMMANDS_DIR_NAME,
     is_skill_md_file,
+    is_command_md_file,
     build_skills_project_list,
     extract_skill_info,
+    extract_command_info,
     extract_skills_from_directory,
+    extract_commands_from_directory,
     add_skill_to_project,
     is_user_level_skills_dir,
 )
@@ -73,31 +76,37 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
             user_skills: List to populate with user-level skills
         """
         def extract_for_user(user_home: Path) -> None:
-            """Extract user-level skills for a specific user."""
+            """Extract user-level skills and commands for a specific user."""
             skills_dir = user_home / CLAUDE_DIR_NAME / SKILLS_DIR_NAME
+            if skills_dir.exists() and skills_dir.is_dir():
+                try:
+                    for skill_dir in skills_dir.iterdir():
+                        if skill_dir.is_dir():
+                            for item in skill_dir.iterdir():
+                                if item.is_file() and is_skill_md_file(item.name):
+                                    skill_info = extract_skill_info(
+                                        item,
+                                        extract_single_rule_file,
+                                        scope="user"
+                                    )
+                                    if skill_info:
+                                        skill_info.pop('project_root', None)
+                                        user_skills.append(skill_info)
+                                    break
+                except Exception as e:
+                    logger.debug(f"Error extracting user-level skills for {user_home}: {e}")
 
-            if not skills_dir.exists() or not skills_dir.is_dir():
-                return
-
-            try:
-                # Iterate over skill directories
-                for skill_dir in skills_dir.iterdir():
-                    if skill_dir.is_dir():
-                        # Look for SKILL.md (case-insensitive) in skill directory
-                        for item in skill_dir.iterdir():
-                            if item.is_file() and is_skill_md_file(item.name):
-                                skill_info = extract_skill_info(
-                                    item,
-                                    extract_single_rule_file,
-                                    scope="user"
-                                )
-                                if skill_info:
-                                    # Remove project_root from user skills (it's the home dir, not meaningful)
-                                    skill_info.pop('project_root', None)
-                                    user_skills.append(skill_info)
-                                break  # Only one SKILL.md per skill directory
-            except Exception as e:
-                logger.debug(f"Error extracting user-level skills for {user_home}: {e}")
+            commands_dir = user_home / CLAUDE_DIR_NAME / COMMANDS_DIR_NAME
+            if commands_dir.exists() and commands_dir.is_dir():
+                try:
+                    for item in commands_dir.iterdir():
+                        if item.is_file() and is_command_md_file(item.name):
+                            command_info = extract_command_info(item, extract_single_rule_file, scope="user")
+                            if command_info:
+                                command_info.pop('project_root', None)
+                                user_skills.append(command_info)
+                except Exception as e:
+                    logger.debug(f"Error extracting user-level commands for {user_home}: {e}")
 
         # When running as root, scan all user directories
         if is_running_as_root():
@@ -164,20 +173,26 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                     if item.is_dir():
                         # Check if this is a .claude directory
                         if item.name == CLAUDE_DIR_NAME:
-                            # Check for skills subdirectory
                             skills_dir = item / SKILLS_DIR_NAME
                             if skills_dir.exists() and skills_dir.is_dir():
-                                # Skip user-level skills (already extracted)
-                                if is_user_level_skills_dir(skills_dir):
-                                    continue
-                                # Extract skills from this .claude/skills directory
-                                extract_skills_from_directory(
-                                    skills_dir,
-                                    projects_by_root,
-                                    extract_single_rule_file,
-                                    add_skill_to_project
-                                )
-                            # Don't recurse into .claude directory
+                                if not is_user_level_skills_dir(skills_dir):
+                                    extract_skills_from_directory(
+                                        skills_dir,
+                                        projects_by_root,
+                                        extract_single_rule_file,
+                                        add_skill_to_project
+                                    )
+
+                            commands_dir = item / COMMANDS_DIR_NAME
+                            if commands_dir.exists() and commands_dir.is_dir():
+                                if not is_user_level_skills_dir(commands_dir):
+                                    extract_commands_from_directory(
+                                        commands_dir,
+                                        projects_by_root,
+                                        extract_single_rule_file,
+                                        add_skill_to_project
+                                    )
+
                             continue
 
                         # Recurse into other directories

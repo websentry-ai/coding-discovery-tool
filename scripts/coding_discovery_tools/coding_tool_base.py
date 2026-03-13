@@ -335,19 +335,23 @@ class BaseClaudeSkillsExtractor(ABC):
     @abstractmethod
     def extract_all_skills(self) -> Dict:
         """
-        Extract all Claude Code skills from all projects on the machine.
+        Extract all Claude Code skills and commands from all projects on the machine.
 
         Searches for:
         - User-level skills: ~/.claude/skills/<skill-name>/SKILL.md
         - Project-level skills: **/.claude/skills/<skill-name>/SKILL.md
+        - User-level commands: ~/.claude/commands/<name>.md
+        - Project-level commands: **/.claude/commands/<name>.md
+
+        The `type` field distinguishes entries: "skill" for skills, "command" for commands.
 
         Returns:
             Dict with:
-            - user_skills: List of user-level skill dicts (global, scope: "user")
-              Each skill has: skill_name, file_path, content, size, last_modified, truncated, scope
+            - user_skills: List of user-level skill/command dicts (global, scope: "user")
+              Each entry has: skill_name, file_path, content, size, last_modified, truncated, scope, type
             - project_skills: List of project dicts, each containing:
               - project_root: Path to the project root
-              - skills: List of skill dicts with metadata
+              - skills: List of skill/command dicts with metadata
         """
         pass
 

@@ -50,6 +50,7 @@ try:
         CursorCliSettingsExtractorFactory,
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
+        CursorSkillsExtractorFactory,
     )
     from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -93,6 +94,7 @@ except ImportError:
         CursorCliSettingsExtractorFactory,
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
+        CursorSkillsExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -130,6 +132,7 @@ class AIToolsDetector:
             self._cursor_rules_extractor = CursorRulesExtractorFactory.create(self.system)
             self._cursor_mcp_extractor = CursorMCPConfigExtractorFactory.create(self.system)
             self._cursor_settings_extractor = CursorSettingsExtractorFactory.create(self.system)
+            self._cursor_skills_extractor = CursorSkillsExtractorFactory.create(self.system)
 
             # Initialize Claude Code extractors
             self._claude_rules_extractor = ClaudeRulesExtractorFactory.create(self.system)
@@ -294,6 +297,24 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude skills: {e}", exc_info=True)
+            return None
+
+    def extract_all_cursor_skills(self) -> Optional[Dict]:
+        """
+        Extract all Cursor skills from all projects.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+            - project_skills: List of project dicts with project_root and skills
+            Returns None if extractor not available or on error.
+        """
+        try:
+            if self._cursor_skills_extractor:
+                return self._cursor_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Cursor skills: {e}", exc_info=True)
             return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
@@ -1215,6 +1236,44 @@ class AIToolsDetector:
                     logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
             else:
                 logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
+
+            # Extract Cursor skills
+            logger.info(f"  Extracting {tool_name} skills...")
+            if self._cursor_skills_extractor:
+                try:
+                    skills_result = self.extract_all_cursor_skills()
+                    user_skills = skills_result.get("user_skills", []) if skills_result else []
+                    project_skills = skills_result.get("project_skills", []) if skills_result else []
+
+                    # Add user-level skills grouped by their project_path (user's home)
+                    if user_skills:
+                        logger.info(f"  ✓ Found {len(user_skills)} user-level Cursor skill(s)")
+                        for skill in user_skills:
+                            user_home = skill.get("project_path") or str(Path.home())
+                            if user_home not in projects_dict:
+                                projects_dict[user_home] = {
+                                    "path": user_home,
+                                    "rules": [],
+                                    "skills": [],
+                                    "mcpServers": []
+                                }
+                            if "skills" not in projects_dict[user_home]:
+                                projects_dict[user_home]["skills"] = []
+                            projects_dict[user_home]["skills"].append(skill)
+
+                    # Merge project-level skills into projects_dict
+                    if project_skills:
+                        num_skills_projects = len(project_skills)
+                        total_skills = sum(len(project.get("skills", [])) for project in project_skills)
+                        logger.info(f"  ✓ Found {num_skills_projects} project(s) with {total_skills} project-level Cursor skill(s)")
+                        self._merge_skills_into_projects(project_skills, projects_dict)
+
+                    if not user_skills and not project_skills:
+                        logger.info("  ℹ No Cursor skills found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+            else:
+                logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
         elif tool_name == "claude code":
             projects_dict = self._process_claude_code_tool(tool)

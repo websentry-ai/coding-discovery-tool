@@ -356,6 +356,31 @@ class BaseClaudeSkillsExtractor(ABC):
         pass
 
 
+class BaseCursorSkillsExtractor(ABC):
+    """Abstract base class for extracting Cursor skills from all projects."""
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all Cursor skills from all projects on the machine.
+
+        Searches for:
+        - User-level skills: ~/.cursor/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.cursor/skills/<skill-name>/SKILL.md
+
+        The `type` field distinguishes entries: "skill" for skills.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+              Each entry has: skill_name, file_path, content, size, last_modified, truncated, scope, type
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
 class BaseClaudeSettingsExtractor(ABC):
     """Abstract base class for extracting Claude Code settings (permissions)."""
 

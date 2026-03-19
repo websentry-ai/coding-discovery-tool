@@ -33,7 +33,7 @@ AUTH_STATUS_TIMEOUT = 15
 # Cursor rules extraction settings
 MAX_CONFIG_FILE_SIZE = 50 * 1024  # 50KB in bytes
 MAX_SEARCH_DEPTH = 10  # Maximum directory depth to search recursively
-SKIP_DIRS = {'.git', 'node_modules', 'venv', '__pycache__', '.venv', 'vendor', '.idea', '.vscode'}
+SKIP_DIRS = {'.git', 'node_modules', 'venv', '__pycache__', '.venv', 'vendor', '.idea', '.vscode', 'Library', '.Trash'}
 
 # System directories to skip when searching from root (macOS/Unix)
 SKIP_SYSTEM_DIRS = {

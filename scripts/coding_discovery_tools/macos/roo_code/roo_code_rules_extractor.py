@@ -158,6 +158,8 @@ class MacOSRooRulesExtractor(BaseRooRulesExtractor):
                         if item.name == ".roo":
                             self._extract_rules_from_roo_directory(item, projects_by_root)
                             continue
+                        if item.is_symlink():
+                            continue
                         self._walk_for_roo_directories(root_path, item, projects_by_root, current_depth + 1)
 
                 except (PermissionError, OSError):

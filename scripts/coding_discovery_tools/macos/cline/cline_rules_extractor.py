@@ -205,6 +205,9 @@ class MacOSClineRulesExtractor(BaseClineRulesExtractor):
                             # Don't recurse into .clinerules directory
                             continue
                         
+                        if item.is_symlink():
+                            continue
+
                         # Recurse into subdirectories
                         self._walk_for_clinerules_directories(root_path, item, projects_by_root, current_depth + 1)
                     

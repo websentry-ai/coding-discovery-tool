@@ -140,6 +140,8 @@ class MacOSJunieRulesExtractor(BaseJunieRulesExtractor):
                             # Extract all .md files from this .junie directory
                             self._extract_junie_dir_rules(item, projects_by_root)
                         else:
+                            if item.is_symlink():
+                                continue
                             self._walk_for_junie_dirs(root_path, item, projects_by_root, current_depth + 1)
 
                 except (PermissionError, OSError):

@@ -136,6 +136,8 @@ class MacOSGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
                                 configs.append(config)
                             continue
 
+                        if item.is_symlink():
+                            continue
                         self._walk_for_gemini_configs(root_path, item, configs, current_depth + 1)
 
                 except (PermissionError, OSError):

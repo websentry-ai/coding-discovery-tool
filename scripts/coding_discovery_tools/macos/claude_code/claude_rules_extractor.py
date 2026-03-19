@@ -222,6 +222,9 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                             # Don't recurse into .claude directory
                             continue
 
+                        if item.is_symlink():
+                            continue
+
                         # Recurse into other directories
                         self._walk_for_claude_files(root_path, item, projects_by_root, current_depth + 1)
 

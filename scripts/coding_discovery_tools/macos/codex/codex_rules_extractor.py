@@ -181,7 +181,8 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
                             self._extract_agents_file(item, projects_by_root)
                     
                     elif item.is_dir():
-                        # Recurse into subdirectories
+                        if item.is_symlink():
+                            continue
                         self._walk_for_agents_files(root_path, item, projects_by_root, current_depth + 1)
                     
                 except (PermissionError, OSError):

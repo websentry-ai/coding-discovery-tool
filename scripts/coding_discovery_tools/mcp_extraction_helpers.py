@@ -154,7 +154,6 @@ def walk_for_mcp_configs_generic(
                         # Don't recurse into tool directory
                         continue
                     
-                    # Skip symlinks to prevent duplicate discovery
                     if item.is_symlink():
                         continue
 
@@ -774,7 +773,6 @@ def walk_for_claude_project_mcp_configs(
                 if entry.is_dir():
                     if should_skip_func(entry):
                         continue
-                    # Skip symlinks to prevent duplicate discovery
                     if entry.is_symlink():
                         continue
                     walk_for_claude_project_mcp_configs(

@@ -553,8 +553,6 @@ def walk_for_tool_directories(
                         # Don't recurse into tool directory
                         continue
                     
-                    # Skip symlinks to prevent duplicate discovery
-                    # (e.g., ~/Library/Containers/*/Data/Desktop -> ~/Desktop)
                     if item.is_symlink():
                         continue
 

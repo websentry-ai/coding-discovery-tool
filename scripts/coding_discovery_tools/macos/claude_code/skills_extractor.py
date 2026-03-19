@@ -195,7 +195,6 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
 
                             continue
 
-                        # Skip symlinks to prevent duplicate discovery
                         if item.is_symlink():
                             continue
 

@@ -202,7 +202,6 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
 
                             continue
 
-                        # Skip symlinks to prevent duplicate discovery
                         if item.is_symlink():
                             continue
 

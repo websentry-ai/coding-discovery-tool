@@ -154,6 +154,9 @@ def walk_for_mcp_configs_generic(
                         # Don't recurse into tool directory
                         continue
                     
+                    if item.is_symlink():
+                        continue
+
                     # Recurse into subdirectories
                     walk_for_mcp_configs_generic(
                         root_path, item, projects, tool_dir_name, config_filename,
@@ -769,6 +772,8 @@ def walk_for_claude_project_mcp_configs(
             try:
                 if entry.is_dir():
                     if should_skip_func(entry):
+                        continue
+                    if entry.is_symlink():
                         continue
                     walk_for_claude_project_mcp_configs(
                         root_path, entry, projects,

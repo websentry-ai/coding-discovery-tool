@@ -553,6 +553,9 @@ def walk_for_tool_directories(
                         # Don't recurse into tool directory
                         continue
                     
+                    if item.is_symlink():
+                        continue
+
                     # Recurse into subdirectories
                     walk_for_tool_directories(
                         root_path, item, tool_dir_name, extract_from_dir_func,

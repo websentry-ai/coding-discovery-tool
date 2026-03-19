@@ -195,6 +195,9 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
 
                             continue
 
+                        if item.is_symlink():
+                            continue
+
                         # Recurse into other directories
                         self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)
 

@@ -24,6 +24,7 @@ from ...macos_extraction_helpers import (
 )
 from ...cursor_skills_helpers import (
     CURSOR_DIR_NAME,
+    AGENTS_DIR_NAME,
     SKILLS_DIR_NAME,
     COMMANDS_DIR_NAME,
     is_skill_md_file,
@@ -71,48 +72,51 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
 
     def _extract_user_level_skills(self, user_skills: List[Dict]) -> None:
         """
-        Extract user-level skills from ~/.cursor/skills/ directory.
+        Extract user-level skills from ~/.cursor/skills/ and ~/.agents/skills/ directories.
 
         Args:
             user_skills: List to populate with user-level skills
         """
         def extract_for_user(user_home: Path) -> None:
             """Extract user-level skills for a specific user."""
-            skills_dir = user_home / CURSOR_DIR_NAME / SKILLS_DIR_NAME
-            if skills_dir.exists() and skills_dir.is_dir():
-                try:
-                    for skill_dir in skills_dir.iterdir():
-                        if skill_dir.is_dir():
-                            for item in skill_dir.iterdir():
-                                if item.is_file() and is_skill_md_file(item.name):
-                                    skill_info = extract_cursor_skill_info(
-                                        item,
-                                        extract_single_rule_file,
-                                        scope="user"
-                                    )
-                                    if skill_info:
-                                        skill_info["project_path"] = skill_info.pop("project_root", None)
-                                        user_skills.append(skill_info)
-                                    break
-                except Exception as e:
-                    logger.debug(f"Error extracting user-level Cursor skills for {user_home}: {e}")
+            # Scan both .cursor and .agents directories
+            for tool_dir_name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME):
+                # Extract skills
+                skills_dir = user_home / tool_dir_name / SKILLS_DIR_NAME
+                if skills_dir.exists() and skills_dir.is_dir():
+                    try:
+                        for skill_dir in skills_dir.iterdir():
+                            if skill_dir.is_dir():
+                                for item in skill_dir.iterdir():
+                                    if item.is_file() and is_skill_md_file(item.name):
+                                        skill_info = extract_cursor_skill_info(
+                                            item,
+                                            extract_single_rule_file,
+                                            scope="user"
+                                        )
+                                        if skill_info:
+                                            skill_info["project_path"] = skill_info.pop("project_root", None)
+                                            user_skills.append(skill_info)
+                                        break
+                    except Exception as e:
+                        logger.debug(f"Error extracting user-level skills from {skills_dir}: {e}")
 
-            # Extract commands from ~/.cursor/commands/
-            commands_dir = user_home / CURSOR_DIR_NAME / COMMANDS_DIR_NAME
-            if commands_dir.exists() and commands_dir.is_dir():
-                try:
-                    for item in commands_dir.iterdir():
-                        if item.is_file() and is_command_md_file(item.name):
-                            command_info = extract_cursor_command_info(
-                                item,
-                                extract_single_rule_file,
-                                scope="user"
-                            )
-                            if command_info:
-                                command_info["project_path"] = command_info.pop("project_root", None)
-                                user_skills.append(command_info)
-                except Exception as e:
-                    logger.debug(f"Error extracting user-level Cursor commands for {user_home}: {e}")
+                # Extract commands
+                commands_dir = user_home / tool_dir_name / COMMANDS_DIR_NAME
+                if commands_dir.exists() and commands_dir.is_dir():
+                    try:
+                        for item in commands_dir.iterdir():
+                            if item.is_file() and is_command_md_file(item.name):
+                                command_info = extract_cursor_command_info(
+                                    item,
+                                    extract_single_rule_file,
+                                    scope="user"
+                                )
+                                if command_info:
+                                    command_info["project_path"] = command_info.pop("project_root", None)
+                                    user_skills.append(command_info)
+                    except Exception as e:
+                        logger.debug(f"Error extracting user-level commands from {commands_dir}: {e}")
 
         # When running as root, scan all user directories
         if is_running_as_root():
@@ -177,8 +181,8 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
                         continue
 
                     if item.is_dir():
-                        # Check if this is a .cursor directory
-                        if item.name == CURSOR_DIR_NAME:
+                        # Check if this is a .cursor or .agents directory
+                        if item.name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME):
                             skills_dir = item / SKILLS_DIR_NAME
                             if skills_dir.exists() and skills_dir.is_dir():
                                 if not is_user_level_skills_dir(skills_dir):

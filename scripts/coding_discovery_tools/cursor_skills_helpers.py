@@ -17,6 +17,7 @@ from .claude_code_skills_helpers import (
 logger = logging.getLogger(__name__)
 
 CURSOR_DIR_NAME = ".cursor"
+AGENTS_DIR_NAME = ".agents"
 SKILLS_DIR_NAME = "skills"
 SKILL_FILE_NAME = "SKILL.md"
 COMMANDS_DIR_NAME = "commands"
@@ -28,7 +29,9 @@ def find_cursor_skill_project_root(skill_file: Path) -> Path:
 
     For skills:
     - User-level: ~/.cursor/skills/<skill-name>/SKILL.md -> home directory
+    - User-level: ~/.agents/skills/<skill-name>/SKILL.md -> home directory
     - Project-level: <project>/.cursor/skills/<skill-name>/SKILL.md -> project directory
+    - Project-level: <project>/.agents/skills/<skill-name>/SKILL.md -> project directory
 
     Args:
         skill_file: Path to the SKILL.md file
@@ -36,23 +39,23 @@ def find_cursor_skill_project_root(skill_file: Path) -> Path:
     Returns:
         Project root path
     """
-    # SKILL.md is inside <skill-name> directory, which is inside skills/, which is inside .cursor/
+    # SKILL.md is inside <skill-name> directory, which is inside skills/, which is inside .cursor/ or .agents/
     # So: skill_file.parent = <skill-name>
     #     skill_file.parent.parent = skills/
-    #     skill_file.parent.parent.parent = .cursor/
+    #     skill_file.parent.parent.parent = .cursor/ or .agents/
     #     skill_file.parent.parent.parent.parent = project_root
 
     skill_dir = skill_file.parent  # <skill-name>
     skills_dir = skill_dir.parent  # skills/
-    cursor_dir = skills_dir.parent  # .cursor/
+    tool_dir = skills_dir.parent  # .cursor/ or .agents/
 
     # Verify the directory structure
-    if skills_dir.name == SKILLS_DIR_NAME and cursor_dir.name == CURSOR_DIR_NAME:
-        return cursor_dir.parent  # project root
+    if skills_dir.name == SKILLS_DIR_NAME and tool_dir.name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME):
+        return tool_dir.parent  # project root
 
-    # Fallback: use the parent of .cursor if we can find it
+    # Fallback: use the parent of .cursor or .agents if we can find it
     for parent in skill_file.parents:
-        if parent.name == CURSOR_DIR_NAME:
+        if parent.name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME):
             return parent.parent
 
     # Last resort: use the skill file's parent
@@ -65,7 +68,9 @@ def find_cursor_command_project_root(command_file: Path) -> Path:
 
     For commands:
     - User-level: ~/.cursor/commands/<name>.md -> home directory
+    - User-level: ~/.agents/commands/<name>.md -> home directory
     - Project-level: <project>/.cursor/commands/<name>.md -> project directory
+    - Project-level: <project>/.agents/commands/<name>.md -> project directory
 
     Args:
         command_file: Path to the command .md file
@@ -74,13 +79,13 @@ def find_cursor_command_project_root(command_file: Path) -> Path:
         Project root path
     """
     commands_dir = command_file.parent   # commands/
-    cursor_dir = commands_dir.parent     # .cursor/
+    tool_dir = commands_dir.parent       # .cursor/ or .agents/
 
-    if commands_dir.name == COMMANDS_DIR_NAME and cursor_dir.name == CURSOR_DIR_NAME:
-        return cursor_dir.parent
+    if commands_dir.name == COMMANDS_DIR_NAME and tool_dir.name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME):
+        return tool_dir.parent
 
     for parent in command_file.parents:
-        if parent.name == CURSOR_DIR_NAME:
+        if parent.name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME):
             return parent.parent
 
     return command_file.parent

@@ -19,6 +19,7 @@ from ...claude_rules_helpers import (
     is_claude_md_file,
     is_claude_local_md_file,
     build_rules_project_list,
+    extract_user_rules_from_rules_directory,
     extract_rules_from_rules_directory,
 )
 from ...coding_tool_base import BaseClaudeRulesExtractor
@@ -126,14 +127,9 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                             rule_info["project_path"] = rule_info.pop("project_root", None)
                             user_rules.append(rule_info)
 
-                rules_dir = claude_dir / "rules"
-                if rules_dir.exists() and rules_dir.is_dir():
-                    for md_file in rules_dir.rglob("*.md"):
-                        if md_file.is_file() and not md_file.name.startswith("."):
-                            rule_info = extract_single_rule_file(md_file, find_claude_project_root, scope="user")
-                            if rule_info:
-                                rule_info["project_path"] = rule_info.pop("project_root", None)
-                                user_rules.append(rule_info)
+                extract_user_rules_from_rules_directory(
+                    claude_dir / "rules", extract_single_rule_file, find_claude_project_root, user_rules
+                )
             except Exception as e:
                 logger.debug(f"Error extracting user-level rules for {user_home}: {e}")
 

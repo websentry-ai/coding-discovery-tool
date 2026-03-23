@@ -8,11 +8,20 @@ on Windows and macOS to avoid code duplication.
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Union
 
 from .constants import MAX_SEARCH_DEPTH
 
 logger = logging.getLogger(__name__)
+
+# Claude Code (project-level)
+MCP_CLAUDE_PROJECT_FILENAMES = [".mcp.json"]
+
+# Windsurf (global: ~/.codeium/windsurf/mcp_config.json)
+MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json"]
+
+# VS Code, Cursor, others
+MCP_JSON_FILENAMES = ["mcp.json"]
 
 
 def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
@@ -50,24 +59,34 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
 def extract_mcp_from_dir_generic(
     tool_dir: Path,
     projects: List[Dict],
-    config_filename: str,
+    config_filename: Union[str, List[str]],
     tool_name: str,
     global_tool_dir: Optional[Path] = None
 ) -> None:
     """
     Generic function to extract MCP config from a tool directory.
-    
+
     This replaces all tool-specific extract_*_mcp_from_dir functions.
-    
+
     Args:
         tool_dir: Path to the tool directory (e.g., .cursor, .windsurf, .roo, .kilocode)
         projects: List to append project configs to
-        config_filename: Name of the MCP config file (e.g., "mcp.json", "mcp_config.json")
+        config_filename: Name(s) of the MCP config file (e.g., "mcp.json" or ["mcp.json", "mcp.JSON", "MCP.json"])
         tool_name: Name of the tool (for logging)
         global_tool_dir: Path to global tool directory to skip (optional)
     """
-    mcp_config_file = tool_dir / config_filename
-    if not mcp_config_file.exists():
+    # Normalize config_filename to a list
+    config_filenames = [config_filename] if isinstance(config_filename, str) else config_filename
+
+    # Try each possible filename variation
+    mcp_config_file = None
+    for filename in config_filenames:
+        candidate = tool_dir / filename
+        if candidate.exists():
+            mcp_config_file = candidate
+            break
+
+    if mcp_config_file is None:
         return
     
     try:
@@ -104,7 +123,7 @@ def walk_for_mcp_configs_generic(
     current_dir: Path,
     projects: List[Dict],
     tool_dir_name: str,
-    config_filename: str,
+    config_filename: Union[str, List[str]],
     tool_name: str,
     global_tool_dir: Optional[Path],
     should_skip_func: Callable[[Path], bool],
@@ -112,15 +131,15 @@ def walk_for_mcp_configs_generic(
 ) -> None:
     """
     Generic function to recursively walk directory tree looking for tool MCP config files.
-    
+
     This replaces all tool-specific walk_for_*_mcp_configs functions.
-    
+
     Args:
         root_path: Root search path (for depth calculation)
         current_dir: Current directory being processed
         projects: List to append project configs to
         tool_dir_name: Name of the tool directory to look for (e.g., ".cursor", ".windsurf")
-        config_filename: Name of the MCP config file (e.g., "mcp.json", "mcp_config.json")
+        config_filename: Name(s) of the MCP config file (e.g., "mcp.json" or ["mcp.json", "mcp.JSON"])
         tool_name: Name of the tool (for logging)
         global_tool_dir: Path to global tool directory to skip (optional)
         should_skip_func: Function to check if a path should be skipped
@@ -147,7 +166,7 @@ def walk_for_mcp_configs_generic(
                 
                 if item.is_dir():
                     # Found the tool directory!
-                    if item.name == tool_dir_name:
+                    if item.name.lower() == tool_dir_name.lower():
                         extract_mcp_from_dir_generic(
                             item, projects, config_filename, tool_name, global_tool_dir
                         )
@@ -237,7 +256,7 @@ def extract_cursor_mcp_from_dir(
         global_cursor_dir: Path to global .cursor directory to skip
     """
     extract_mcp_from_dir_generic(
-        cursor_dir, projects, "mcp.json", "Cursor", global_cursor_dir
+        cursor_dir, projects, MCP_JSON_FILENAMES, "Cursor", global_cursor_dir
     )
 
 
@@ -261,7 +280,7 @@ def walk_for_cursor_mcp_configs(
         current_depth: Current recursion depth
     """
     walk_for_mcp_configs_generic(
-        root_path, current_dir, projects, ".cursor", "mcp.json",
+        root_path, current_dir, projects, ".cursor", MCP_JSON_FILENAMES,
         "Cursor", global_cursor_dir, should_skip_func, current_depth
     )
 
@@ -280,7 +299,7 @@ def extract_windsurf_mcp_from_dir(
         global_windsurf_dir: Path to global .windsurf directory to skip
     """
     extract_mcp_from_dir_generic(
-        windsurf_dir, projects, "mcp_config.json", "Windsurf", global_windsurf_dir
+        windsurf_dir, projects, MCP_CONFIG_JSON_FILENAMES, "Windsurf", global_windsurf_dir
     )
 
 
@@ -304,7 +323,7 @@ def walk_for_windsurf_mcp_configs(
         current_depth: Current recursion depth
     """
     walk_for_mcp_configs_generic(
-        root_path, current_dir, projects, ".windsurf", "mcp_config.json",
+        root_path, current_dir, projects, ".windsurf", MCP_CONFIG_JSON_FILENAMES,
         "Windsurf", global_windsurf_dir, should_skip_func, current_depth
     )
 
@@ -323,7 +342,7 @@ def extract_roo_mcp_from_dir(
         global_roo_dir: Path to global .roo directory to skip (optional)
     """
     extract_mcp_from_dir_generic(
-        roo_dir, projects, "mcp.json", "Roo Code", global_roo_dir
+        roo_dir, projects, MCP_JSON_FILENAMES, "Roo Code", global_roo_dir
     )
 
 
@@ -347,7 +366,7 @@ def walk_for_roo_mcp_configs(
         current_depth: Current recursion depth
     """
     walk_for_mcp_configs_generic(
-        root_path, current_dir, projects, ".roo", "mcp.json",
+        root_path, current_dir, projects, ".roo", MCP_JSON_FILENAMES,
         "Roo Code", global_roo_dir, should_skip_func, current_depth
     )
 
@@ -366,7 +385,7 @@ def extract_kilocode_mcp_from_dir(
         global_kilocode_dir: Path to global .kilocode directory to skip (optional)
     """
     extract_mcp_from_dir_generic(
-        kilocode_dir, projects, "mcp.json", "Kilo Code", global_kilocode_dir
+        kilocode_dir, projects, MCP_JSON_FILENAMES, "Kilo Code", global_kilocode_dir
     )
 
 
@@ -390,7 +409,7 @@ def walk_for_kilocode_mcp_configs(
         current_depth: Current recursion depth
     """
     walk_for_mcp_configs_generic(
-        root_path, current_dir, projects, ".kilocode", "mcp.json",
+        root_path, current_dir, projects, ".kilocode", MCP_JSON_FILENAMES,
         "Kilo Code", global_kilocode_dir, should_skip_func, current_depth
     )
 
@@ -779,7 +798,7 @@ def walk_for_claude_project_mcp_configs(
                         root_path, entry, projects,
                         should_skip_func, current_depth + 1
                     )
-                elif entry.is_file() and entry.name == ".mcp.json":
+                elif entry.is_file() and entry.name in MCP_CLAUDE_PROJECT_FILENAMES:
                     try:
                         depth = len(entry.relative_to(root_path).parts)
                         if depth > MAX_SEARCH_DEPTH:

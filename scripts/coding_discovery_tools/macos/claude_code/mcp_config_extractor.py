@@ -19,6 +19,7 @@ from ...mcp_extraction_helpers import (
     walk_for_claude_project_mcp_configs,
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
+    extract_claudeai_mcp_servers_with_root_support,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,13 +41,14 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         2. ~/.claude.json (preferred - main Claude Code config file with user/local scope)
         3. ~/.claude/mcp.json (fallback - separate MCP config file)
         4. Project-scope .mcp.json files at project roots throughout the filesystem
-        5. Plugin MCP servers from ~/.claude/plugins/*/plugin.json
+        5. Plugin MCP servers from ~/.claude/plugins/
+        6. Cloud-synced MCP server names from ~/.claude/mcp-needs-auth-cache.json
 
         When running as root, collects MCP configs from ALL user directories.
 
         Extracts only MCP-related fields (mcpServers, mcpContextUris,
         enabledMcpjsonServers, disabledMcpjsonServers) from the config file.
-        
+
         Returns:
             Dict with MCP config info (projects array) or None if not found
         """
@@ -67,8 +69,11 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         project_scope_configs = self._extract_project_scope_configs()
         all_projects.extend(project_scope_configs)
 
-        # Extract plugin MCP configs from ~/.claude/plugins/*/plugin.json
+        # Extract plugin MCP configs from ~/.claude/plugins/
         extract_claude_plugin_mcp_configs_with_root_support(all_projects)
+
+        # Extract cloud-synced MCP server names from claude.ai
+        extract_claudeai_mcp_servers_with_root_support(all_projects)
 
         # Return None if no configs found
         if not all_projects:

@@ -948,6 +948,98 @@ def extract_managed_mcp_config(projects: List[Dict]) -> None:
         logger.warning(f"Error reading managed MCP config {managed_path}: {e}")
 
 
+def extract_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None:
+    """
+    Extract cloud-synced MCP server names from claude.ai auth cache.
+
+    Reads ~/.claude/mcp-needs-auth-cache.json and extracts server names
+    prefixed with "claude.ai ". These are cloud-synced MCP servers whose
+    full config lives server-side; only names are available locally.
+
+    Args:
+        claude_dir: Path to the .claude directory (e.g., ~/.claude)
+        projects: List to append results to
+    """
+    cache_file = claude_dir / "mcp-needs-auth-cache.json"
+    if not cache_file.exists() or not cache_file.is_file():
+        return
+
+    try:
+        content = cache_file.read_text(encoding='utf-8', errors='replace')
+        cache_data = json.loads(content)
+
+        if not isinstance(cache_data, dict):
+            return
+
+        servers = [
+            {"name": key, "scope": "claudeai"}
+            for key in cache_data
+            if key.startswith("claude.ai ")
+        ]
+
+        if servers:
+            projects.append({
+                "path": str(claude_dir),
+                "mcpServers": servers,
+                "scope": "claudeai"
+            })
+    except json.JSONDecodeError as e:
+        logger.debug(f"Invalid JSON in claude.ai auth cache {cache_file}: {e}")
+    except PermissionError as e:
+        logger.debug(f"Permission denied reading claude.ai auth cache {cache_file}: {e}")
+    except Exception as e:
+        logger.debug(f"Error reading claude.ai auth cache {cache_file}: {e}")
+
+
+def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None:
+    """
+    Extract cloud-synced MCP server names with root user support.
+
+    When running as root/admin, scans all user directories for
+    ~/.claude/mcp-needs-auth-cache.json. Otherwise checks only
+    the current user's home directory.
+    """
+    import platform
+
+    is_admin = False
+    users_dir = None
+
+    if platform.system() == "Darwin":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/Users")
+        except ImportError:
+            pass
+    elif platform.system() == "Windows":
+        try:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            users_dir = Path("C:\\Users")
+        except Exception:
+            try:
+                import getpass
+                current_user = getpass.getuser().lower()
+                is_admin = current_user in ["administrator", "system"]
+                users_dir = Path("C:\\Users")
+            except Exception:
+                pass
+
+    if is_admin and users_dir and users_dir.exists():
+        for user_dir in users_dir.iterdir():
+            if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                claude_dir = user_dir / ".claude"
+                if claude_dir.exists() and claude_dir.is_dir():
+                    try:
+                        extract_claudeai_mcp_servers(claude_dir, projects)
+                    except (PermissionError, OSError) as e:
+                        logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
+
+        extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
+    else:
+        extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
+
+
 def extract_plugin_mcp_from_plugin_json(
     plugin_json_path: Path,
     projects: List[Dict]
@@ -985,6 +1077,93 @@ def extract_plugin_mcp_from_plugin_json(
         logger.debug(f"Error reading plugin.json {plugin_json_path}: {e}")
 
 
+def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
+    """
+    Scan the plugin cache directory for MCP configs.
+
+    Handles the nested structure:
+        cache/<marketplace>/<plugin>/<version>/.mcp.json
+        cache/<marketplace>/<plugin>/<version>/.claude-plugin/plugin.json
+
+    Args:
+        cache_dir: Path to ~/.claude/plugins/cache
+        projects: List to append results to
+    """
+    if not cache_dir.exists() or not cache_dir.is_dir():
+        return
+
+    try:
+        for marketplace_dir in cache_dir.iterdir():
+            if not marketplace_dir.is_dir():
+                continue
+            try:
+                for plugin_dir in marketplace_dir.iterdir():
+                    if not plugin_dir.is_dir():
+                        continue
+                    try:
+                        for version_dir in plugin_dir.iterdir():
+                            if not version_dir.is_dir():
+                                continue
+
+                            mcp_file = version_dir / ".mcp.json"
+                            if mcp_file.exists() and mcp_file.is_file():
+                                _extract_plugin_mcp_from_dot_mcp_json(
+                                    mcp_file, plugin_dir.name, projects
+                                )
+
+                            claude_plugin_json = version_dir / ".claude-plugin" / "plugin.json"
+                            if claude_plugin_json.exists():
+                                extract_plugin_mcp_from_plugin_json(claude_plugin_json, projects)
+                    except (PermissionError, OSError):
+                        continue
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Error scanning plugin cache directory {cache_dir}: {e}")
+    except Exception as e:
+        logger.debug(f"Error extracting plugin cache MCP configs: {e}")
+
+
+def _extract_plugin_mcp_from_dot_mcp_json(
+    mcp_json_path: Path,
+    plugin_name: str,
+    projects: List[Dict]
+) -> None:
+    """
+    Extract MCP config from a plugin's .mcp.json file in the cache directory.
+
+    Args:
+        mcp_json_path: Path to the .mcp.json file
+        plugin_name: Name of the plugin (directory name)
+        projects: List to append results to
+    """
+    try:
+        content = mcp_json_path.read_text(encoding='utf-8', errors='replace')
+        config_data = json.loads(content)
+
+        mcp_servers_obj = config_data.get("mcpServers")
+        if not mcp_servers_obj:
+            mcp_servers_obj = {k: v for k, v in config_data.items() if isinstance(v, dict)}
+        if not mcp_servers_obj:
+            return
+
+        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+
+        if mcp_servers_array:
+            projects.append({
+                "path": str(mcp_json_path.parent),
+                "mcpServers": mcp_servers_array,
+                "scope": "plugin",
+                "pluginName": plugin_name
+            })
+    except json.JSONDecodeError as e:
+        logger.debug(f"Invalid JSON in plugin .mcp.json {mcp_json_path}: {e}")
+    except PermissionError as e:
+        logger.debug(f"Permission denied reading plugin .mcp.json {mcp_json_path}: {e}")
+    except Exception as e:
+        logger.debug(f"Error reading plugin .mcp.json {mcp_json_path}: {e}")
+
+
 def extract_claude_plugin_mcp_configs(projects: List[Dict]) -> None:
     """
     Extract MCP configs from Claude Code plugins.
@@ -1005,6 +1184,8 @@ def extract_claude_plugin_mcp_configs(projects: List[Dict]) -> None:
         logger.debug(f"Error scanning plugins directory {plugins_dir}: {e}")
     except Exception as e:
         logger.debug(f"Error extracting plugin MCP configs: {e}")
+
+    _scan_plugin_cache_dir(plugins_dir / "cache", projects)
 
 
 def extract_claude_plugin_mcp_configs_with_root_support(projects: List[Dict]) -> None:
@@ -1051,6 +1232,8 @@ def extract_claude_plugin_mcp_configs_with_root_support(projects: List[Dict]) ->
                                 extract_plugin_mcp_from_plugin_json(plugin_json, projects)
                     except (PermissionError, OSError) as e:
                         logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
+
+                    _scan_plugin_cache_dir(plugins_dir / "cache", projects)
 
         extract_claude_plugin_mcp_configs(projects)
     else:

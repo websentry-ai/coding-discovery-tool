@@ -295,8 +295,15 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                         add_rule_to_project(rule_info, project_root, projects_by_root)
                 break  # Only one AGENTS.md per directory
 
-        # Walk for nested AGENTS.md in subdirectories
-        self._walk_for_agents_md(project_root_path, project_root_path, projects_by_root, current_depth=0)
+        # Walk for nested AGENTS.md in subdirectories (skip root — already handled above)
+        for subdir in project_root_path.iterdir():
+            try:
+                system_dirs = self._get_system_directories()
+                if subdir.is_dir() and not subdir.name.startswith(".") and not subdir.is_symlink():
+                    if not should_skip_path(subdir, system_dirs):
+                        self._walk_for_agents_md(project_root_path, subdir, projects_by_root, current_depth=1)
+            except (PermissionError, OSError):
+                continue
 
     def _walk_for_agents_md(
         self,

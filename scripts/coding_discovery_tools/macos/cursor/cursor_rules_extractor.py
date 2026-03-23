@@ -27,7 +27,6 @@ from ...macos_extraction_helpers import (
     should_skip_path,
     should_skip_system_path,
 )
-from ...constants import MAX_SEARCH_DEPTH
 
 logger = logging.getLogger(__name__)
 
@@ -215,8 +214,14 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
                         add_rule_to_project(rule_info, project_root, projects_by_root)
                 break  # Only one AGENTS.md per directory
 
-        # Walk for nested AGENTS.md in subdirectories
-        self._walk_for_agents_md(project_root_path, project_root_path, projects_by_root, current_depth=0)
+        # Walk for nested AGENTS.md in subdirectories (skip root — already handled above)
+        for subdir in project_root_path.iterdir():
+            try:
+                if subdir.is_dir() and not subdir.name.startswith(".") and not subdir.is_symlink():
+                    if not should_skip_path(subdir) and not should_skip_system_path(subdir):
+                        self._walk_for_agents_md(project_root_path, subdir, projects_by_root, current_depth=1)
+            except (PermissionError, OSError):
+                continue
 
     def _walk_for_agents_md(
         self,

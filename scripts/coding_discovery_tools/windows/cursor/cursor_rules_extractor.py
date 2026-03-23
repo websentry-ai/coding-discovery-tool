@@ -16,12 +16,16 @@ from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH
-from ...cursor_rules_helpers import is_cursor_rule_md_file, is_agents_md_file
+from ...cursor_rules_helpers import is_cursor_rule_md_file, is_agents_md_file, extract_cursor_rules_from_dir
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
+    extract_and_add_rule,
     extract_single_rule_file,
     find_project_root,
+    get_windows_system_directories,
+    is_user_level_tool_dir,
+    scan_windows_user_directories,
     should_skip_path,
     is_running_as_admin,
 )
@@ -77,52 +81,12 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             if not user_cursor_dir.exists() or not user_cursor_dir.is_dir():
                 return
 
-            # Extract .mdc files from ~/.cursor/
-            for mdc_file in user_cursor_dir.glob("*.mdc"):
-                rule_info = extract_single_rule_file(mdc_file, find_project_root, scope="user")
-                if rule_info:
-                    project_root = str(user_home)  # User home is the "project root" for user rules
-                    add_rule_to_project(rule_info, project_root, projects_by_root)
+            extract_cursor_rules_from_dir(
+                user_cursor_dir, extract_single_rule_file, find_project_root,
+                add_rule_to_project, projects_by_root, str(user_home), scope="user"
+            )
 
-            for md_file in user_cursor_dir.glob("*.md"):
-                if is_cursor_rule_md_file(md_file.name):
-                    rule_info = extract_single_rule_file(md_file, find_project_root, scope="user")
-                    if rule_info:
-                        project_root = str(user_home)
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
-
-            # Extract from ~/.cursor/rules/
-            rules_dir = user_cursor_dir / "rules"
-            if rules_dir.exists() and rules_dir.is_dir():
-                for mdc_file in rules_dir.glob("*.mdc"):
-                    rule_info = extract_single_rule_file(mdc_file, find_project_root, scope="user")
-                    if rule_info:
-                        project_root = str(user_home)
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
-
-                for md_file in rules_dir.glob("*.md"):
-                    if is_cursor_rule_md_file(md_file.name):
-                        rule_info = extract_single_rule_file(md_file, find_project_root, scope="user")
-                        if rule_info:
-                            project_root = str(user_home)
-                            add_rule_to_project(rule_info, project_root, projects_by_root)
-
-        # When running as admin, scan all user directories
-        if is_running_as_admin():
-            users_dir = Path("C:\\Users")
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        # Skip system user directories
-                        if user_dir.name.lower() in ['public', 'default', 'default user', 'all users']:
-                            continue
-                        try:
-                            extract_for_user(user_dir)
-                        except (PermissionError, OSError) as e:
-                            logger.debug(f"Skipping user directory {user_dir}: {e}")
-                            continue
-        else:
-            extract_for_user(Path.home())
+        scan_windows_user_directories(extract_for_user)
 
     def _extract_project_level_rules(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
@@ -136,7 +100,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         """
         # Process top-level directories in parallel for better performance
         try:
-            system_dirs = self._get_system_directories()
+            system_dirs = get_windows_system_directories()
             top_level_dirs = [item for item in root_path.iterdir() 
                             if item.is_dir() and not should_skip_path(item, system_dirs)]
             
@@ -184,7 +148,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             return
 
         if system_dirs is None:
-            system_dirs = self._get_system_directories()
+            system_dirs = get_windows_system_directories()
 
         try:
             for item in current_dir.iterdir():
@@ -227,17 +191,6 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         except Exception as e:
             logger.debug(f"Error walking {current_dir}: {e}")
 
-    def _is_user_level_cursor_dir(self, cursor_dir: Path) -> bool:
-        """Check if cursor_dir is a user-level .cursor directory (under C:\\Users\\<name>\\)."""
-        parent = cursor_dir.parent
-        try:
-            users_dir = Path(parent.anchor) / "Users"
-            if parent.parent == users_dir:
-                return True
-        except Exception:
-            pass
-        return False
-
     def _extract_rules_from_cursor_directory(self, cursor_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
         Extract all rule files from a .cursor directory (project scope).
@@ -246,67 +199,37 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             cursor_dir: Path to .cursor directory
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        if self._is_user_level_cursor_dir(cursor_dir):
+        if is_user_level_tool_dir(cursor_dir):
             return
 
-        # Extract .mdc files directly from .cursor directory (project scope)
-        for mdc_file in cursor_dir.glob("*.mdc"):
-            rule_info = extract_single_rule_file(mdc_file, find_project_root, scope="project")
-            if rule_info:
-                project_root = rule_info.get('project_root')
-                if project_root:
-                    add_rule_to_project(rule_info, project_root, projects_by_root)
-
-        for md_file in cursor_dir.glob("*.md"):
-            if is_cursor_rule_md_file(md_file.name):
-                rule_info = extract_single_rule_file(md_file, find_project_root, scope="project")
-                if rule_info:
-                    project_root = rule_info.get('project_root')
-                    if project_root:
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
-
-        # Also check .cursor/rules/ subdirectory (if it exists)
-        rules_dir = cursor_dir / "rules"
-        if rules_dir.exists() and rules_dir.is_dir():
-            for mdc_file in rules_dir.glob("*.mdc"):
-                rule_info = extract_single_rule_file(mdc_file, find_project_root, scope="project")
-                if rule_info:
-                    project_root = rule_info.get('project_root')
-                    if project_root:
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
-
-            for md_file in rules_dir.glob("*.md"):
-                if is_cursor_rule_md_file(md_file.name):
-                    rule_info = extract_single_rule_file(md_file, find_project_root, scope="project")
-                    if rule_info:
-                        project_root = rule_info.get('project_root')
-                        if project_root:
-                            add_rule_to_project(rule_info, project_root, projects_by_root)
+        # Extract .mdc and .md files from .cursor/ and .cursor/rules/
+        project_root_path = cursor_dir.parent
+        extract_cursor_rules_from_dir(
+            cursor_dir, extract_single_rule_file, find_project_root,
+            add_rule_to_project, projects_by_root, str(project_root_path), scope="project"
+        )
 
         # Check for legacy .cursorrules file in project root (project scope)
-        project_root_path = cursor_dir.parent
         legacy_file = project_root_path / ".cursorrules"
         if legacy_file.exists() and legacy_file.is_file():
-            rule_info = extract_single_rule_file(legacy_file, find_project_root, scope="project")
-            if rule_info:
-                project_root = rule_info.get('project_root')
-                if project_root:
-                    add_rule_to_project(rule_info, project_root, projects_by_root)
+            extract_and_add_rule(
+                legacy_file, find_project_root, add_rule_to_project,
+                projects_by_root, scope="project"
+            )
 
         try:
             for item in project_root_path.iterdir():
                 if item.is_file() and is_agents_md_file(item.name):
-                    rule_info = extract_single_rule_file(item, find_project_root, scope="project")
-                    if rule_info:
-                        project_root = rule_info.get('project_root')
-                        if project_root:
-                            add_rule_to_project(rule_info, project_root, projects_by_root)
+                    extract_and_add_rule(
+                        item, find_project_root, add_rule_to_project,
+                        projects_by_root, scope="project"
+                    )
                     break  # Only one AGENTS.md per directory
         except (PermissionError, OSError):
             pass
 
-        # Walk for nested AGENTS.md in subdirectories (skip root — already handled above)
-        system_dirs = self._get_system_directories()
+        # Walk for nested AGENTS.md in subdirectories (skip root -- already handled above)
+        system_dirs = get_windows_system_directories()
         try:
             for subdir in project_root_path.iterdir():
                 try:
@@ -340,7 +263,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             return
 
         if system_dirs is None:
-            system_dirs = self._get_system_directories()
+            system_dirs = get_windows_system_directories()
 
         try:
             for item in current_dir.iterdir():
@@ -361,11 +284,10 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                         self._walk_for_agents_md(root_path, item, projects_by_root, current_depth + 1, system_dirs)
 
                     elif item.is_file() and is_agents_md_file(item.name):
-                        rule_info = extract_single_rule_file(item, find_project_root, scope="project")
-                        if rule_info:
-                            project_root = rule_info.get('project_root')
-                            if project_root:
-                                add_rule_to_project(rule_info, project_root, projects_by_root)
+                        extract_and_add_rule(
+                            item, find_project_root, add_rule_to_project,
+                            projects_by_root, scope="project"
+                        )
 
                 except (PermissionError, OSError):
                     continue
@@ -378,17 +300,4 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         except Exception as e:
             logger.debug(f"Error walking for AGENTS.md in {current_dir}: {e}")
 
-    def _get_system_directories(self) -> set:
-        """
-        Get Windows system directories to skip.
-        
-        Returns:
-            Set of system directory names
-        """
-        return {
-            'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
-            'System Volume Information', '$Recycle.Bin', 'Recovery',
-            'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
-            'Config.Msi', 'Documents and Settings', 'MSOCache'
-        }
 

@@ -8,15 +8,20 @@ on Windows and macOS to avoid code duplication.
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Callable, Set, Tuple, Union
+from typing import List, Dict, Optional, Callable, Union
 
 from .constants import MAX_SEARCH_DEPTH
 
 logger = logging.getLogger(__name__)
 
-# MCP config filename variations (case-insensitive variations)
-MCP_JSON_FILENAMES = ["mcp.json", "mcp.JSON", "MCP.json", ".mcp.json"]
-MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json", "mcp_config.JSON", "MCP_CONFIG.json"]
+# Claude Code (project-level)
+MCP_CLAUDE_PROJECT_FILENAMES = [".mcp.json"]
+
+# Windsurf (global: ~/.codeium/windsurf/mcp_config.json)
+MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json"]
+
+# VS Code, Cursor, others
+MCP_JSON_FILENAMES = ["mcp.json"]
 
 
 def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
@@ -793,7 +798,7 @@ def walk_for_claude_project_mcp_configs(
                         root_path, entry, projects,
                         should_skip_func, current_depth + 1
                     )
-                elif entry.is_file() and entry.name in MCP_JSON_FILENAMES:
+                elif entry.is_file() and entry.name in MCP_CLAUDE_PROJECT_FILENAMES:
                     try:
                         depth = len(entry.relative_to(root_path).parts)
                         if depth > MAX_SEARCH_DEPTH:

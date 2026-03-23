@@ -15,6 +15,7 @@ from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH
+from ...cursor_rules_helpers import is_cursor_rule_md_file, is_agents_md_file
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -29,16 +30,6 @@ from ...macos_extraction_helpers import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _is_cursor_rule_md_file(filename: str) -> bool:
-    """Check if filename is a Cursor rule .md file (excludes hidden files and non-rule .md)."""
-    return filename.lower().endswith(".md") and not filename.startswith(".")
-
-
-def _is_agents_md_file(filename: str) -> bool:
-    """Check if filename is an AGENTS.md file (case-insensitive)."""
-    return filename.lower() == "agents.md"
 
 
 class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
@@ -96,7 +87,7 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
             for md_file in user_cursor_dir.glob("*.md"):
-                if _is_cursor_rule_md_file(md_file.name):
+                if is_cursor_rule_md_file(md_file.name):
                     rule_info = extract_single_rule_file(md_file, find_cursor_project_root, scope="user")
                     if rule_info:
                         project_root = str(user_home)
@@ -112,7 +103,7 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
                         add_rule_to_project(rule_info, project_root, projects_by_root)
 
                 for md_file in rules_dir.glob("*.md"):
-                    if _is_cursor_rule_md_file(md_file.name):
+                    if is_cursor_rule_md_file(md_file.name):
                         rule_info = extract_single_rule_file(md_file, find_cursor_project_root, scope="user")
                         if rule_info:
                             project_root = str(user_home)
@@ -165,7 +156,7 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
         for md_file in cursor_dir.glob("*.md"):
-            if _is_cursor_rule_md_file(md_file.name):
+            if is_cursor_rule_md_file(md_file.name):
                 rule_info = extract_single_rule_file(md_file, find_cursor_project_root, scope="project")
                 if rule_info:
                     project_root = rule_info.get('project_root')
@@ -183,7 +174,7 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
                         add_rule_to_project(rule_info, project_root, projects_by_root)
 
             for md_file in rules_dir.glob("*.md"):
-                if _is_cursor_rule_md_file(md_file.name):
+                if is_cursor_rule_md_file(md_file.name):
                     rule_info = extract_single_rule_file(md_file, find_cursor_project_root, scope="project")
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -200,23 +191,29 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
                 if project_root:
                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
-        for item in project_root_path.iterdir():
-            if item.is_file() and _is_agents_md_file(item.name):
-                rule_info = extract_single_rule_file(item, find_cursor_project_root, scope="project")
-                if rule_info:
-                    project_root = rule_info.get('project_root')
-                    if project_root:
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
-                break  # Only one AGENTS.md per directory
+        try:
+            for item in project_root_path.iterdir():
+                if item.is_file() and is_agents_md_file(item.name):
+                    rule_info = extract_single_rule_file(item, find_cursor_project_root, scope="project")
+                    if rule_info:
+                        project_root = rule_info.get('project_root')
+                        if project_root:
+                            add_rule_to_project(rule_info, project_root, projects_by_root)
+                    break  # Only one AGENTS.md per directory
+        except (PermissionError, OSError):
+            pass
 
         # Walk for nested AGENTS.md in subdirectories (skip root — already handled above)
-        for subdir in project_root_path.iterdir():
-            try:
-                if subdir.is_dir() and not subdir.name.startswith(".") and not subdir.is_symlink():
-                    if not should_skip_path(subdir) and not should_skip_system_path(subdir):
-                        self._walk_for_agents_md(project_root_path, subdir, projects_by_root, current_depth=1)
-            except (PermissionError, OSError):
-                continue
+        try:
+            for subdir in project_root_path.iterdir():
+                try:
+                    if subdir.is_dir() and not subdir.name.startswith(".") and not subdir.is_symlink():
+                        if not should_skip_path(subdir) and not should_skip_system_path(subdir):
+                            self._walk_for_agents_md(project_root_path, subdir, projects_by_root, current_depth=1)
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
 
     def _walk_for_agents_md(
         self,
@@ -252,7 +249,7 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
 
                         self._walk_for_agents_md(root_path, item, projects_by_root, current_depth + 1)
 
-                    elif item.is_file() and _is_agents_md_file(item.name):
+                    elif item.is_file() and is_agents_md_file(item.name):
                         rule_info = extract_single_rule_file(item, find_cursor_project_root, scope="project")
                         if rule_info:
                             project_root = rule_info.get('project_root')

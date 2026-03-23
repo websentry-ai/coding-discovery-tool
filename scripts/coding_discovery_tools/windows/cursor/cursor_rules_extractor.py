@@ -16,6 +16,7 @@ from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH
+from ...cursor_rules_helpers import is_cursor_rule_md_file, is_agents_md_file
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -26,16 +27,6 @@ from ...windows_extraction_helpers import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _is_cursor_rule_md_file(filename: str) -> bool:
-    """Check if filename is a Cursor rule .md file (excludes hidden files and non-rule .md)."""
-    return filename.lower().endswith(".md") and not filename.startswith(".")
-
-
-def _is_agents_md_file(filename: str) -> bool:
-    """Check if filename is an AGENTS.md file (case-insensitive)."""
-    return filename.lower() == "agents.md"
 
 
 class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
@@ -94,7 +85,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
             for md_file in user_cursor_dir.glob("*.md"):
-                if _is_cursor_rule_md_file(md_file.name):
+                if is_cursor_rule_md_file(md_file.name):
                     rule_info = extract_single_rule_file(md_file, find_project_root, scope="user")
                     if rule_info:
                         project_root = str(user_home)
@@ -110,7 +101,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                         add_rule_to_project(rule_info, project_root, projects_by_root)
 
                 for md_file in rules_dir.glob("*.md"):
-                    if _is_cursor_rule_md_file(md_file.name):
+                    if is_cursor_rule_md_file(md_file.name):
                         rule_info = extract_single_rule_file(md_file, find_project_root, scope="user")
                         if rule_info:
                             project_root = str(user_home)
@@ -152,7 +143,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             # Use parallel processing for top-level directories
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {
-                    executor.submit(self._walk_for_cursor_directories, root_path, dir_path, projects_by_root, current_depth=1)
+                    executor.submit(self._walk_for_cursor_directories, root_path, dir_path, projects_by_root, 1, system_dirs)
                     for dir_path in top_level_dirs
                 }
                 
@@ -170,31 +161,35 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         root_path: Path,
         current_dir: Path,
         projects_by_root: Dict[str, List[Dict]],
-        current_depth: int = 0
+        current_depth: int = 0,
+        system_dirs: set = None
     ) -> None:
         """
         Recursively walk directory tree looking for .cursor directories.
-        
+
         This optimized walker:
         - Skips ignored directories early (before recursing)
         - Checks depth limits to avoid searching too deep
         - Stops recursing into project subdirectories once a project is found
-        
+
         Args:
             root_path: Root search path (for depth calculation)
             current_dir: Current directory being processed
             projects_by_root: Dictionary to populate with rules
             current_depth: Current recursion depth
+            system_dirs: Cached set of system directory names to skip
         """
         # Check depth limit
         if current_depth > MAX_SEARCH_DEPTH:
             return
 
+        if system_dirs is None:
+            system_dirs = self._get_system_directories()
+
         try:
             for item in current_dir.iterdir():
                 try:
                     # Check if we should skip this path
-                    system_dirs = self._get_system_directories()
                     if should_skip_path(item, system_dirs):
                         continue
                     
@@ -214,9 +209,12 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                             self._extract_rules_from_cursor_directory(item, projects_by_root)
                             # Don't recurse into .cursor directory
                             continue
-                        
+
+                        if item.is_symlink():
+                            continue
+
                         # Recurse into subdirectories
-                        self._walk_for_cursor_directories(root_path, item, projects_by_root, current_depth + 1)
+                        self._walk_for_cursor_directories(root_path, item, projects_by_root, current_depth + 1, system_dirs)
                     
                 except (PermissionError, OSError):
                     continue
@@ -239,15 +237,15 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         """
         # Extract .mdc files directly from .cursor directory (project scope)
         for mdc_file in cursor_dir.glob("*.mdc"):
-            rule_info = extract_single_rule_file(mdc_file, scope="project")
+            rule_info = extract_single_rule_file(mdc_file, find_project_root, scope="project")
             if rule_info:
                 project_root = rule_info.get('project_root')
                 if project_root:
                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
         for md_file in cursor_dir.glob("*.md"):
-            if _is_cursor_rule_md_file(md_file.name):
-                rule_info = extract_single_rule_file(md_file, scope="project")
+            if is_cursor_rule_md_file(md_file.name):
+                rule_info = extract_single_rule_file(md_file, find_project_root, scope="project")
                 if rule_info:
                     project_root = rule_info.get('project_root')
                     if project_root:
@@ -257,15 +255,15 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         rules_dir = cursor_dir / "rules"
         if rules_dir.exists() and rules_dir.is_dir():
             for mdc_file in rules_dir.glob("*.mdc"):
-                rule_info = extract_single_rule_file(mdc_file, scope="project")
+                rule_info = extract_single_rule_file(mdc_file, find_project_root, scope="project")
                 if rule_info:
                     project_root = rule_info.get('project_root')
                     if project_root:
                         add_rule_to_project(rule_info, project_root, projects_by_root)
 
             for md_file in rules_dir.glob("*.md"):
-                if _is_cursor_rule_md_file(md_file.name):
-                    rule_info = extract_single_rule_file(md_file, scope="project")
+                if is_cursor_rule_md_file(md_file.name):
+                    rule_info = extract_single_rule_file(md_file, find_project_root, scope="project")
                     if rule_info:
                         project_root = rule_info.get('project_root')
                         if project_root:
@@ -275,37 +273,44 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         project_root_path = cursor_dir.parent
         legacy_file = project_root_path / ".cursorrules"
         if legacy_file.exists() and legacy_file.is_file():
-            rule_info = extract_single_rule_file(legacy_file, scope="project")
+            rule_info = extract_single_rule_file(legacy_file, find_project_root, scope="project")
             if rule_info:
                 project_root = rule_info.get('project_root')
                 if project_root:
                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
-        for item in project_root_path.iterdir():
-            if item.is_file() and _is_agents_md_file(item.name):
-                rule_info = extract_single_rule_file(item, scope="project")
-                if rule_info:
-                    project_root = rule_info.get('project_root')
-                    if project_root:
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
-                break  # Only one AGENTS.md per directory
+        try:
+            for item in project_root_path.iterdir():
+                if item.is_file() and is_agents_md_file(item.name):
+                    rule_info = extract_single_rule_file(item, find_project_root, scope="project")
+                    if rule_info:
+                        project_root = rule_info.get('project_root')
+                        if project_root:
+                            add_rule_to_project(rule_info, project_root, projects_by_root)
+                    break  # Only one AGENTS.md per directory
+        except (PermissionError, OSError):
+            pass
 
         # Walk for nested AGENTS.md in subdirectories (skip root — already handled above)
-        for subdir in project_root_path.iterdir():
-            try:
-                system_dirs = self._get_system_directories()
-                if subdir.is_dir() and not subdir.name.startswith(".") and not subdir.is_symlink():
-                    if not should_skip_path(subdir, system_dirs):
-                        self._walk_for_agents_md(project_root_path, subdir, projects_by_root, current_depth=1)
-            except (PermissionError, OSError):
-                continue
+        system_dirs = self._get_system_directories()
+        try:
+            for subdir in project_root_path.iterdir():
+                try:
+                    if subdir.is_dir() and not subdir.name.startswith(".") and not subdir.is_symlink():
+                        if not should_skip_path(subdir, system_dirs):
+                            self._walk_for_agents_md(project_root_path, subdir, projects_by_root, current_depth=1, system_dirs=system_dirs)
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
 
     def _walk_for_agents_md(
         self,
         root_path: Path,
         current_dir: Path,
         projects_by_root: Dict[str, List[Dict]],
-        current_depth: int = 0
+        current_depth: int = 0,
+        system_dirs: set = None
     ) -> None:
         """
         Walk project subdirectories looking for nested AGENTS.md files.
@@ -315,14 +320,17 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             current_dir: Current directory being walked
             projects_by_root: Dictionary to populate with rules
             current_depth: Current recursion depth
+            system_dirs: Cached set of system directory names to skip
         """
         if current_depth > MAX_SEARCH_DEPTH:
             return
 
+        if system_dirs is None:
+            system_dirs = self._get_system_directories()
+
         try:
             for item in current_dir.iterdir():
                 try:
-                    system_dirs = self._get_system_directories()
                     if should_skip_path(item, system_dirs):
                         continue
 
@@ -330,10 +338,13 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                         if item.name.startswith("."):
                             continue
 
-                        self._walk_for_agents_md(root_path, item, projects_by_root, current_depth + 1)
+                        if item.is_symlink():
+                            continue
 
-                    elif item.is_file() and _is_agents_md_file(item.name):
-                        rule_info = extract_single_rule_file(item, scope="project")
+                        self._walk_for_agents_md(root_path, item, projects_by_root, current_depth + 1, system_dirs)
+
+                    elif item.is_file() and is_agents_md_file(item.name):
+                        rule_info = extract_single_rule_file(item, find_project_root, scope="project")
                         if rule_info:
                             project_root = rule_info.get('project_root')
                             if project_root:

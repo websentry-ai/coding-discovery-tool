@@ -111,7 +111,6 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                 except Exception as e:
                     logger.debug(f"Error extracting user-level commands for {user_home}: {e}")
 
-            # Extract agents from ~/.claude/agents/
             agents_dir = user_home / CLAUDE_DIR_NAME / AGENTS_DIR_NAME
             if agents_dir.exists() and agents_dir.is_dir():
                 try:

@@ -144,7 +144,6 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                             rule_info["project_path"] = rule_info.pop("project_root", None)
                             user_rules.append(rule_info)
 
-                # Scan ~/.claude/rules/ for user-level modular rules
                 rules_dir = claude_dir / "rules"
                 if rules_dir.exists() and rules_dir.is_dir():
                     for md_file in rules_dir.rglob("*.md"):
@@ -329,7 +328,6 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                         if project_root:
                             add_rule_to_project(rule_info, project_root, projects_by_root)
 
-            # Scan .claude/rules/ for modular .md rule files (recursive)
             rules_dir = claude_dir / "rules"
             if rules_dir.exists() and rules_dir.is_dir():
                 for md_file in rules_dir.rglob("*.md"):

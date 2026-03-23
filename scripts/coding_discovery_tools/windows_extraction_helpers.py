@@ -221,24 +221,19 @@ def find_project_root(rule_file: Path) -> Path:
     if parent.name == "rules" and parent.parent.name == ".cursor":
         return parent.parent.parent
 
-    # Case 4: File is in .claude/rules/ subdirectory
     if parent.name == "rules" and parent.parent.name == ".claude":
         return parent.parent.parent
 
-    # Case 5: File is in .claude, .cursor, or .windsurf directory
     if parent.name in (".claude", ".cursor", ".windsurf"):
         return parent.parent
 
-    # Case 6: Legacy .cursorrules file (in project root)
     if rule_file.name == ".cursorrules":
         return parent
 
-    # Case 7: Walk up for deeper nesting inside .claude (e.g. .claude/rules/subdir/bar.md)
     for ancestor in rule_file.parents:
         if ancestor.name == ".claude":
             return ancestor.parent
 
-    # Case 8: File is directly in project root
     return parent
 
 

@@ -219,20 +219,16 @@ def find_claude_project_root(rule_file: Path) -> Path:
     """
     parent = rule_file.parent
 
-    # Case 1: File is in .claude/rules/ subdirectory
     if parent.name == "rules" and parent.parent.name == ".claude":
         return parent.parent.parent
 
-    # Case 2: File is in .claude directory
     if parent.name == ".claude":
         return parent.parent
 
-    # Case 3: Walk up for deeper nesting inside .claude (e.g. .claude/rules/subdir/bar.md)
     for ancestor in rule_file.parents:
         if ancestor.name == ".claude":
             return ancestor.parent
 
-    # Case 4: File is directly in project root (.clauderules or claude.md)
     return parent
 
 

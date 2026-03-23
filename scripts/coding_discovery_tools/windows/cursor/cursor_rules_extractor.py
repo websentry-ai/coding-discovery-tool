@@ -227,6 +227,17 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         except Exception as e:
             logger.debug(f"Error walking {current_dir}: {e}")
 
+    def _is_user_level_cursor_dir(self, cursor_dir: Path) -> bool:
+        """Check if cursor_dir is a user-level .cursor directory (under C:\\Users\\<name>\\)."""
+        parent = cursor_dir.parent
+        try:
+            users_dir = Path(parent.anchor) / "Users"
+            if parent.parent == users_dir:
+                return True
+        except Exception:
+            pass
+        return False
+
     def _extract_rules_from_cursor_directory(self, cursor_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
         Extract all rule files from a .cursor directory (project scope).
@@ -235,6 +246,9 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             cursor_dir: Path to .cursor directory
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
+        if self._is_user_level_cursor_dir(cursor_dir):
+            return
+
         # Extract .mdc files directly from .cursor directory (project scope)
         for mdc_file in cursor_dir.glob("*.mdc"):
             rule_info = extract_single_rule_file(mdc_file, find_project_root, scope="project")
@@ -339,6 +353,9 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                             continue
 
                         if item.is_symlink():
+                            continue
+
+                        if (item / ".cursor").is_dir():
                             continue
 
                         self._walk_for_agents_md(root_path, item, projects_by_root, current_depth + 1, system_dirs)

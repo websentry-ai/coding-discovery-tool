@@ -17,8 +17,9 @@ from ...coding_tool_base import BaseCursorSkillsExtractor
 from ...constants import MAX_SEARCH_DEPTH
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
+    get_windows_system_directories,
+    scan_windows_user_directories,
     should_skip_path,
-    is_running_as_admin,
 )
 from ...cursor_skills_helpers import (
     CURSOR_DIR_NAME,
@@ -37,14 +38,6 @@ from ...claude_code_skills_helpers import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Windows system directories to skip during scanning
-WINDOWS_SYSTEM_DIRECTORIES = frozenset({
-    'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
-    'System Volume Information', '$Recycle.Bin', 'Recovery',
-    'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
-    'Config.Msi', 'Documents and Settings', 'MSOCache'
-})
 
 
 class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
@@ -141,19 +134,7 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
                     except Exception as e:
                         logger.debug(f"Error extracting user-level commands from {commands_dir}: {e}")
 
-        # When running as admin, scan all user directories
-        if is_running_as_admin():
-            users_dir = self._get_users_directory()
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        try:
-                            extract_for_user(user_dir)
-                        except (PermissionError, OSError) as e:
-                            logger.debug(f"Skipping user directory {user_dir}: {e}")
-                            continue
-        else:
-            extract_for_user(Path.home())
+        scan_windows_user_directories(extract_for_user)
 
     def _extract_project_level_skills(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
@@ -165,7 +146,7 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
         """
         try:
             top_level_dirs = [item for item in root_path.iterdir()
-                              if item.is_dir() and not should_skip_path(item, WINDOWS_SYSTEM_DIRECTORIES)]
+                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())]
 
             # Use parallel processing for top-level directories
             with ThreadPoolExecutor(max_workers=4) as executor:
@@ -206,7 +187,7 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
             for item in current_dir.iterdir():
                 try:
                     # Performance fix: check skip condition without recreating set each iteration
-                    if should_skip_path(item, WINDOWS_SYSTEM_DIRECTORIES):
+                    if should_skip_path(item, get_windows_system_directories()):
                         continue
 
                     # Check depth for this item

@@ -104,6 +104,56 @@ def should_skip_system_path(path: Path) -> bool:
     return any(path_str.startswith(skip_dir) for skip_dir in SKIP_SYSTEM_DIRS)
 
 
+def extract_and_add_rule(
+    file_path: Path,
+    find_project_root_func,
+    add_func,
+    projects_by_root: Dict[str, List[Dict]],
+    scope: str = "project"
+) -> Optional[Dict]:
+    """
+    Extract a rule file and add it to the projects dictionary.
+
+    Args:
+        file_path: Path to the rule file
+        find_project_root_func: Function to find project root (tool-specific)
+        add_func: Function to add rule to project (e.g., add_rule_to_project)
+        projects_by_root: Dictionary to update
+        scope: Scope of the rule ("user", "project", etc.)
+
+    Returns:
+        The extracted rule_info dict, or None if extraction failed
+    """
+    rule_info = extract_single_rule_file(file_path, find_project_root_func, scope=scope)
+    if rule_info:
+        project_root = rule_info.get('project_root')
+        if project_root:
+            add_func(rule_info, project_root, projects_by_root)
+    return rule_info
+
+
+def is_user_level_tool_dir(tool_dir: Path) -> bool:
+    """
+    Check if a tool directory (e.g., .cursor, .claude) is at the user level.
+
+    On macOS, user-level means directly under /Users/<username>/.
+
+    Args:
+        tool_dir: Path to the tool directory
+
+    Returns:
+        True if this is a user-level tool directory
+    """
+    parent = tool_dir.parent
+    users_dir = Path("/Users")
+    try:
+        if parent.parent == users_dir:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def extract_single_rule_file(rule_file: Path, find_project_root_func, scope: str = None) -> Optional[Dict]:
     """
     Extract a single rule file with metadata.
@@ -218,12 +268,17 @@ def find_claude_project_root(rule_file: Path) -> Path:
         Project root path
     """
     parent = rule_file.parent
-    
-    # Case 1: File is in .claude directory
+
+    if parent.name == "rules" and parent.parent.name == ".claude":
+        return parent.parent.parent
+
     if parent.name == ".claude":
         return parent.parent
-    
-    # Case 2: File is directly in project root (.clauderules or claude.md)
+
+    for ancestor in rule_file.parents:
+        if ancestor.name == ".claude":
+            return ancestor.parent
+
     return parent
 
 

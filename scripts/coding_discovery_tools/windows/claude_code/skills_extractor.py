@@ -18,32 +18,28 @@ from ...coding_tool_base import BaseClaudeSkillsExtractor
 from ...constants import MAX_SEARCH_DEPTH
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
+    get_windows_system_directories,
+    scan_windows_user_directories,
     should_skip_path,
-    is_running_as_admin,
 )
 from ...claude_code_skills_helpers import (
     CLAUDE_DIR_NAME,
     SKILLS_DIR_NAME,
     COMMANDS_DIR_NAME,
+    AGENTS_DIR_NAME,
     is_skill_md_file,
     is_command_md_file,
     build_skills_project_list,
     extract_skill_info,
     extract_command_info,
+    extract_agent_info,
     extract_commands_from_directory,
+    extract_agents_from_directory,
     add_skill_to_project,
     is_user_level_skills_dir,
 )
 
 logger = logging.getLogger(__name__)
-
-# Windows system directories to skip during scanning
-WINDOWS_SYSTEM_DIRECTORIES = frozenset({
-    'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
-    'System Volume Information', '$Recycle.Bin', 'Recovery',
-    'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
-    'Config.Msi', 'Documents and Settings', 'MSOCache'
-})
 
 
 class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
@@ -132,19 +128,19 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                 except Exception as e:
                     logger.debug(f"Error extracting user-level commands for {user_home}: {e}")
 
-        # When running as admin, scan all user directories
-        if is_running_as_admin():
-            users_dir = self._get_users_directory()
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        try:
-                            extract_for_user(user_dir)
-                        except (PermissionError, OSError) as e:
-                            logger.debug(f"Skipping user directory {user_dir}: {e}")
-                            continue
-        else:
-            extract_for_user(Path.home())
+            agents_dir = user_home / CLAUDE_DIR_NAME / AGENTS_DIR_NAME
+            if agents_dir.exists() and agents_dir.is_dir():
+                try:
+                    for item in agents_dir.iterdir():
+                        if item.is_file() and is_command_md_file(item.name):
+                            agent_info = extract_agent_info(item, extract_single_rule_file, scope="user")
+                            if agent_info:
+                                agent_info["project_path"] = agent_info.pop("project_root", None)
+                                user_skills.append(agent_info)
+                except Exception as e:
+                    logger.debug(f"Error extracting user-level agents for {user_home}: {e}")
+
+        scan_windows_user_directories(extract_for_user)
 
     def _extract_project_level_skills(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
@@ -156,7 +152,7 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
         """
         try:
             top_level_dirs = [item for item in root_path.iterdir()
-                              if item.is_dir() and not should_skip_path(item, WINDOWS_SYSTEM_DIRECTORIES)]
+                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())]
 
             # Use parallel processing for top-level directories
             with ThreadPoolExecutor(max_workers=4) as executor:
@@ -197,7 +193,7 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
             for item in current_dir.iterdir():
                 try:
                     # Performance fix: check skip condition without recreating set each iteration
-                    if should_skip_path(item, WINDOWS_SYSTEM_DIRECTORIES):
+                    if should_skip_path(item, get_windows_system_directories()):
                         continue
 
                     # Check depth for this item
@@ -223,6 +219,16 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                                 if not is_user_level_skills_dir(commands_dir, users_root):
                                     extract_commands_from_directory(
                                         commands_dir,
+                                        projects_by_root,
+                                        extract_single_rule_file,
+                                        self._add_skill_to_project_threadsafe
+                                    )
+
+                            agents_dir = item / AGENTS_DIR_NAME
+                            if agents_dir.exists() and agents_dir.is_dir():
+                                if not is_user_level_skills_dir(agents_dir, users_root):
+                                    extract_agents_from_directory(
+                                        agents_dir,
                                         projects_by_root,
                                         extract_single_rule_file,
                                         self._add_skill_to_project_threadsafe

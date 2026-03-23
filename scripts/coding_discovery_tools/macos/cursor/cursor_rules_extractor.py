@@ -15,15 +15,20 @@ from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH
+from ...cursor_rules_helpers import is_cursor_rule_md_file, is_agents_md_file, extract_cursor_rules_from_dir
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
+    extract_and_add_rule,
     extract_single_rule_file,
     find_cursor_project_root,
     extract_project_level_rules_with_fallback,
+    is_user_level_tool_dir,
     walk_for_tool_directories,
     is_running_as_root,
     scan_user_directories,
+    should_skip_path,
+    should_skip_system_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,21 +81,10 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
             if not user_cursor_dir.exists() or not user_cursor_dir.is_dir():
                 return
 
-            # Extract .mdc files from ~/.cursor/
-            for mdc_file in user_cursor_dir.glob("*.mdc"):
-                rule_info = extract_single_rule_file(mdc_file, find_cursor_project_root, scope="user")
-                if rule_info:
-                    project_root = str(user_home)  # User home is the "project root" for user rules
-                    add_rule_to_project(rule_info, project_root, projects_by_root)
-
-            # Extract from ~/.cursor/rules/
-            rules_dir = user_cursor_dir / "rules"
-            if rules_dir.exists() and rules_dir.is_dir():
-                for mdc_file in rules_dir.glob("*.mdc"):
-                    rule_info = extract_single_rule_file(mdc_file, find_cursor_project_root, scope="user")
-                    if rule_info:
-                        project_root = str(user_home)
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
+            extract_cursor_rules_from_dir(
+                user_cursor_dir, extract_single_rule_file, find_cursor_project_root,
+                add_rule_to_project, projects_by_root, str(user_home), scope="user"
+            )
 
         # When running as root, scan all user directories
         if is_running_as_root():
@@ -130,32 +124,99 @@ class MacOSCursorRulesExtractor(BaseCursorRulesExtractor):
             cursor_dir: Path to .cursor directory
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        # Extract .mdc files directly from .cursor directory (project scope)
-        for mdc_file in cursor_dir.glob("*.mdc"):
-            rule_info = extract_single_rule_file(mdc_file, find_cursor_project_root, scope="project")
-            if rule_info:
-                project_root = rule_info.get('project_root')
-                if project_root:
-                    add_rule_to_project(rule_info, project_root, projects_by_root)
+        if is_user_level_tool_dir(cursor_dir):
+            return
 
-        # Also check .cursor/rules/ subdirectory (if it exists)
-        rules_dir = cursor_dir / "rules"
-        if rules_dir.exists() and rules_dir.is_dir():
-            for mdc_file in rules_dir.glob("*.mdc"):
-                rule_info = extract_single_rule_file(mdc_file, find_cursor_project_root, scope="project")
-                if rule_info:
-                    project_root = rule_info.get('project_root')
-                    if project_root:
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
+        # Extract .mdc and .md files from .cursor/ and .cursor/rules/
+        project_root_path = cursor_dir.parent
+        extract_cursor_rules_from_dir(
+            cursor_dir, extract_single_rule_file, find_cursor_project_root,
+            add_rule_to_project, projects_by_root, str(project_root_path), scope="project"
+        )
 
         # Check for legacy .cursorrules file in project root (project scope)
-        project_root_path = cursor_dir.parent
         legacy_file = project_root_path / ".cursorrules"
         if legacy_file.exists() and legacy_file.is_file():
-            rule_info = extract_single_rule_file(legacy_file, find_cursor_project_root, scope="project")
-            if rule_info:
-                project_root = rule_info.get('project_root')
-                if project_root:
-                    add_rule_to_project(rule_info, project_root, projects_by_root)
+            extract_and_add_rule(
+                legacy_file, find_cursor_project_root, add_rule_to_project,
+                projects_by_root, scope="project"
+            )
+
+        try:
+            for item in project_root_path.iterdir():
+                if item.is_file() and is_agents_md_file(item.name):
+                    extract_and_add_rule(
+                        item, find_cursor_project_root, add_rule_to_project,
+                        projects_by_root, scope="project"
+                    )
+                    break  # Only one AGENTS.md per directory
+        except (PermissionError, OSError):
+            pass
+
+        # Walk for nested AGENTS.md in subdirectories (skip root -- already handled above)
+        try:
+            for subdir in project_root_path.iterdir():
+                try:
+                    if subdir.is_dir() and not subdir.name.startswith(".") and not subdir.is_symlink():
+                        if not should_skip_path(subdir) and not should_skip_system_path(subdir):
+                            self._walk_for_agents_md(project_root_path, subdir, projects_by_root, current_depth=1)
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
+
+    def _walk_for_agents_md(
+        self,
+        root_path: Path,
+        current_dir: Path,
+        projects_by_root: Dict[str, List[Dict]],
+        current_depth: int = 0
+    ) -> None:
+        """
+        Walk project subdirectories looking for nested AGENTS.md files.
+
+        Args:
+            root_path: Project root path (for depth calculation)
+            current_dir: Current directory being walked
+            projects_by_root: Dictionary to populate with rules
+            current_depth: Current recursion depth
+        """
+        if current_depth > MAX_SEARCH_DEPTH:
+            return
+
+        try:
+            for item in current_dir.iterdir():
+                try:
+                    if should_skip_path(item) or should_skip_system_path(item):
+                        continue
+
+                    if item.is_dir():
+                        if item.name.startswith("."):
+                            continue
+
+                        if item.is_symlink():
+                            continue
+
+                        if (item / ".cursor").is_dir():
+                            continue
+
+                        self._walk_for_agents_md(root_path, item, projects_by_root, current_depth + 1)
+
+                    elif item.is_file() and is_agents_md_file(item.name):
+                        extract_and_add_rule(
+                            item, find_cursor_project_root, add_rule_to_project,
+                            projects_by_root, scope="project"
+                        )
+
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {item}: {e}")
+                    continue
+
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error walking for AGENTS.md in {current_dir}: {e}")
 
 

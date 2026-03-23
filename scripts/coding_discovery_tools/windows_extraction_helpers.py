@@ -80,6 +80,82 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
     return False
 
 
+def extract_and_add_rule(
+    file_path: Path,
+    find_project_root_func,
+    add_func,
+    projects_by_root: Dict[str, List[Dict]],
+    scope: str = "project"
+) -> Optional[Dict]:
+    """
+    Extract a rule file and add it to the projects dictionary.
+
+    Args:
+        file_path: Path to the rule file
+        find_project_root_func: Function to find project root (tool-specific)
+        add_func: Function to add rule to project (e.g., add_rule_to_project)
+        projects_by_root: Dictionary to update
+        scope: Scope of the rule ("user", "project", etc.)
+
+    Returns:
+        The extracted rule_info dict, or None if extraction failed
+    """
+    rule_info = extract_single_rule_file(file_path, find_project_root_func, scope=scope)
+    if rule_info:
+        project_root = rule_info.get('project_root')
+        if project_root:
+            add_func(rule_info, project_root, projects_by_root)
+    return rule_info
+
+
+def is_user_level_tool_dir(tool_dir: Path) -> bool:
+    """
+    Check if a tool directory (e.g., .cursor, .claude) is at the user level.
+
+    On Windows, user-level means directly under <drive>:\\Users\\<username>\\.
+
+    Args:
+        tool_dir: Path to the tool directory
+
+    Returns:
+        True if this is a user-level tool directory
+    """
+    parent = tool_dir.parent
+    try:
+        users_dir = Path(parent.anchor) / "Users"
+        if parent.parent == users_dir:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def scan_windows_user_directories(callback) -> None:
+    """
+    Scan Windows user directories and invoke callback for each.
+
+    When running as admin, iterates all user directories under C:\\Users.
+    Otherwise, invokes callback with the current user's home directory.
+
+    Args:
+        callback: Function that takes a user_dir Path argument
+    """
+    if is_running_as_admin():
+        users_dir = Path("C:\\Users")
+        if users_dir.exists():
+            excluded = {'public', 'default', 'default user', 'all users'}
+            for user_dir in users_dir.iterdir():
+                if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                    if user_dir.name.lower() in excluded:
+                        continue
+                    try:
+                        callback(user_dir)
+                    except (PermissionError, OSError) as e:
+                        logger.debug(f"Skipping user directory {user_dir}: {e}")
+    else:
+        callback(Path.home())
+
+
 def extract_single_rule_file(
     rule_file: Path,
     find_project_root_func: Optional[Callable[[Path], Path]] = None,
@@ -208,28 +284,32 @@ def find_project_root(rule_file: Path) -> Path:
         Project root path
     """
     parent = rule_file.parent
-    
+
     # Case 1: File is in .windsurf/rules/ subdirectory
     if parent.name == "rules" and parent.parent.name == ".windsurf":
         return parent.parent.parent
-    
+
     # Case 2: Global Windsurf rules file in ~/.windsurf/global_rules.md
     if parent.name == ".windsurf" and rule_file.name == "global_rules.md":
         return parent.parent
-    
+
     # Case 3: File is in .cursor/rules/ subdirectory
     if parent.name == "rules" and parent.parent.name == ".cursor":
         return parent.parent.parent
-    
-    # Case 4: File is in .claude, .cursor, or .windsurf directory
+
+    if parent.name == "rules" and parent.parent.name == ".claude":
+        return parent.parent.parent
+
     if parent.name in (".claude", ".cursor", ".windsurf"):
         return parent.parent
-    
-    # Case 5: Legacy .cursorrules file (in project root)
+
     if rule_file.name == ".cursorrules":
         return parent
-    
-    # Case 6: File is directly in project root
+
+    for ancestor in rule_file.parents:
+        if ancestor.name == ".claude":
+            return ancestor.parent
+
     return parent
 
 

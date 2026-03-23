@@ -15,15 +15,24 @@ import logging
 from pathlib import Path
 from typing import List, Dict
 
+from ...claude_rules_helpers import (
+    is_claude_md_file,
+    is_claude_local_md_file,
+    build_rules_project_list,
+    extract_user_rules_from_rules_directory,
+    extract_rules_from_rules_directory,
+)
 from ...coding_tool_base import BaseClaudeRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
+    extract_and_add_rule,
     extract_single_rule_file,
     find_claude_project_root,
     get_top_level_directories,
     is_running_as_root,
+    is_user_level_tool_dir,
     scan_user_directories,
     should_process_directory,
     should_process_file,
@@ -34,35 +43,6 @@ from ...macos_extraction_helpers import (
 logger = logging.getLogger(__name__)
 
 CLAUDE_DIR_NAME = ".claude"
-
-
-def _is_claude_md_file(filename: str) -> bool:
-    """Check if filename is a CLAUDE.md file (case-insensitive)."""
-    return filename.lower() == "claude.md"
-
-
-def _is_claude_local_md_file(filename: str) -> bool:
-    """Check if filename is a CLAUDE.local.md file (case-insensitive)."""
-    return filename.lower() == "claude.local.md"
-
-
-def build_rules_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Dict]:
-    """
-    Convert projects dictionary to list format with 'rules' key.
-
-    Args:
-        projects_by_root: Dictionary mapping project_root to list of rules
-
-    Returns:
-        List of project dicts with project_root and rules
-    """
-    return [
-        {
-            "project_root": project_root,
-            "rules": rules
-        }
-        for project_root, rules in projects_by_root.items()
-    ]
 
 
 class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
@@ -141,11 +121,15 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
             try:
                 # Look for CLAUDE.md (case-insensitive) in .claude directory
                 for item in claude_dir.iterdir():
-                    if item.is_file() and _is_claude_md_file(item.name):
+                    if item.is_file() and is_claude_md_file(item.name):
                         rule_info = extract_single_rule_file(item, find_claude_project_root, scope="user")
                         if rule_info:
                             rule_info["project_path"] = rule_info.pop("project_root", None)
                             user_rules.append(rule_info)
+
+                extract_user_rules_from_rules_directory(
+                    claude_dir / "rules", extract_single_rule_file, find_claude_project_root, user_rules
+                )
             except Exception as e:
                 logger.debug(f"Error extracting user-level rules for {user_home}: {e}")
 
@@ -215,7 +199,7 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                         # Check if this is a .claude directory
                         if item.name == CLAUDE_DIR_NAME:
                             # Skip user-level .claude directories (already extracted)
-                            if self._is_user_level_claude_dir(item):
+                            if is_user_level_tool_dir(item):
                                 continue
                             # Extract rules from this .claude directory
                             self._extract_rules_from_claude_directory(item, projects_by_root)
@@ -230,21 +214,19 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
 
                     elif item.is_file():
                         # Check for .clauderules or CLAUDE.md files (case-insensitive for claude.md)
-                        if item.name == ".clauderules" or _is_claude_md_file(item.name):
+                        if item.name == ".clauderules" or is_claude_md_file(item.name):
                             if should_process_file(item, root_path):
-                                rule_info = extract_single_rule_file(item, find_claude_project_root, scope="project")
-                                if rule_info:
-                                    project_root = rule_info.get('project_root')
-                                    if project_root:
-                                        add_rule_to_project(rule_info, project_root, projects_by_root)
+                                extract_and_add_rule(
+                                    item, find_claude_project_root, add_rule_to_project,
+                                    projects_by_root, scope="project"
+                                )
                         # Check for CLAUDE.local.md files (case-insensitive)
-                        elif _is_claude_local_md_file(item.name):
+                        elif is_claude_local_md_file(item.name):
                             if should_process_file(item, root_path):
-                                rule_info = extract_single_rule_file(item, find_claude_project_root, scope="local")
-                                if rule_info:
-                                    project_root = rule_info.get('project_root')
-                                    if project_root:
-                                        add_rule_to_project(rule_info, project_root, projects_by_root)
+                                extract_and_add_rule(
+                                    item, find_claude_project_root, add_rule_to_project,
+                                    projects_by_root, scope="local"
+                                )
 
                 except (PermissionError, OSError):
                     continue
@@ -256,34 +238,6 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
             pass
         except Exception as e:
             logger.debug(f"Error walking {current_dir}: {e}")
-
-    def _is_user_level_claude_dir(self, claude_dir: Path) -> bool:
-        """
-        Check if a .claude directory is at the user level (in home directory).
-
-        Args:
-            claude_dir: Path to the .claude directory
-
-        Returns:
-            True if this is a user-level .claude directory
-        """
-        try:
-            parent_of_claude = claude_dir.parent
-
-            # Check if parent of .claude is a home directory
-            if parent_of_claude == Path.home():
-                return True
-
-            # For root scanning, check if it's under /Users/<username>
-            if str(parent_of_claude).startswith('/Users/'):
-                parent_parts = parent_of_claude.parts
-                # /Users/<username> has 3 parts: ('/', 'Users', '<username>')
-                if len(parent_parts) == 3:
-                    return True
-
-            return False
-        except Exception:
-            return False
 
     def _extract_rules_from_claude_directory(self, claude_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
@@ -297,19 +251,26 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
             # Extract .clauderules from .claude directory (current format)
             clauderules_file = claude_dir / ".clauderules"
             if clauderules_file.exists() and clauderules_file.is_file():
-                rule_info = extract_single_rule_file(clauderules_file, find_claude_project_root, scope="project")
-                if rule_info:
-                    project_root = rule_info.get('project_root')
-                    if project_root:
-                        add_rule_to_project(rule_info, project_root, projects_by_root)
+                extract_and_add_rule(
+                    clauderules_file, find_claude_project_root, add_rule_to_project,
+                    projects_by_root, scope="project"
+                )
 
             # Extract CLAUDE.md (case-insensitive) from .claude directory
             for item in claude_dir.iterdir():
-                if item.is_file() and _is_claude_md_file(item.name):
-                    rule_info = extract_single_rule_file(item, find_claude_project_root, scope="project")
-                    if rule_info:
-                        project_root = rule_info.get('project_root')
-                        if project_root:
-                            add_rule_to_project(rule_info, project_root, projects_by_root)
+                if item.is_file() and is_claude_md_file(item.name):
+                    extract_and_add_rule(
+                        item, find_claude_project_root, add_rule_to_project,
+                        projects_by_root, scope="project"
+                    )
+
+            # Extract from .claude/rules/ directory
+            def _extract_and_add(file_path, find_root_func, pbr, scope="project"):
+                extract_and_add_rule(file_path, find_root_func, add_rule_to_project, pbr, scope=scope)
+
+            extract_rules_from_rules_directory(
+                claude_dir / "rules", find_claude_project_root,
+                _extract_and_add, projects_by_root, scope="project"
+            )
         except Exception as e:
             logger.debug(f"Error extracting rules from {claude_dir}: {e}")

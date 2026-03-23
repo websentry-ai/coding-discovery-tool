@@ -15,6 +15,7 @@ from ...mcp_extraction_helpers import (
     walk_for_claude_project_mcp_configs,
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
+    extract_claudeai_mcp_servers_with_root_support,
 )
 from ...windows_extraction_helpers import should_skip_path
 
@@ -36,7 +37,8 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         1. C:\\Program Files\\ClaudeCode\\managed-mcp.json (enterprise managed)
         2. User/local scope configs from .claude.json and .claude/mcp.json
         3. Project-scope configs from .mcp.json files at project roots
-        4. Plugin MCP servers from ~/.claude/plugins/*/plugin.json
+        4. Plugin MCP servers from ~/.claude/plugins/
+        5. Cloud-synced MCP server names from ~/.claude/mcp-needs-auth-cache.json
 
         Uses parallel processing for filesystem scanning.
 
@@ -61,8 +63,11 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         project_scope_configs = self._extract_project_scope_configs()
         all_projects.extend(project_scope_configs)
 
-        # Extract plugin MCP configs from ~/.claude/plugins/*/plugin.json
+        # Extract plugin MCP configs from ~/.claude/plugins/
         extract_claude_plugin_mcp_configs_with_root_support(all_projects)
+
+        # Extract cloud-synced MCP server names from claude.ai
+        extract_claudeai_mcp_servers_with_root_support(all_projects)
 
         if not all_projects:
             return None

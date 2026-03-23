@@ -27,13 +27,16 @@ from ...claude_code_skills_helpers import (
     CLAUDE_DIR_NAME,
     SKILLS_DIR_NAME,
     COMMANDS_DIR_NAME,
+    AGENTS_DIR_NAME,
     is_skill_md_file,
     is_command_md_file,
     build_skills_project_list,
     extract_skill_info,
     extract_command_info,
+    extract_agent_info,
     extract_skills_from_directory,
     extract_commands_from_directory,
+    extract_agents_from_directory,
     add_skill_to_project,
     is_user_level_skills_dir,
 )
@@ -107,6 +110,19 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                                 user_skills.append(command_info)
                 except Exception as e:
                     logger.debug(f"Error extracting user-level commands for {user_home}: {e}")
+
+            # Extract agents from ~/.claude/agents/
+            agents_dir = user_home / CLAUDE_DIR_NAME / AGENTS_DIR_NAME
+            if agents_dir.exists() and agents_dir.is_dir():
+                try:
+                    for item in agents_dir.iterdir():
+                        if item.is_file() and is_command_md_file(item.name):
+                            agent_info = extract_agent_info(item, extract_single_rule_file, scope="user")
+                            if agent_info:
+                                agent_info["project_path"] = agent_info.pop("project_root", None)
+                                user_skills.append(agent_info)
+                except Exception as e:
+                    logger.debug(f"Error extracting user-level agents for {user_home}: {e}")
 
         # When running as root, scan all user directories
         if is_running_as_root():
@@ -188,6 +204,16 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                                 if not is_user_level_skills_dir(commands_dir):
                                     extract_commands_from_directory(
                                         commands_dir,
+                                        projects_by_root,
+                                        extract_single_rule_file,
+                                        add_skill_to_project
+                                    )
+
+                            agents_dir = item / AGENTS_DIR_NAME
+                            if agents_dir.exists() and agents_dir.is_dir():
+                                if not is_user_level_skills_dir(agents_dir):
+                                    extract_agents_from_directory(
+                                        agents_dir,
                                         projects_by_root,
                                         extract_single_rule_file,
                                         add_skill_to_project

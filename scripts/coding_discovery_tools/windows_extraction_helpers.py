@@ -208,28 +208,37 @@ def find_project_root(rule_file: Path) -> Path:
         Project root path
     """
     parent = rule_file.parent
-    
+
     # Case 1: File is in .windsurf/rules/ subdirectory
     if parent.name == "rules" and parent.parent.name == ".windsurf":
         return parent.parent.parent
-    
+
     # Case 2: Global Windsurf rules file in ~/.windsurf/global_rules.md
     if parent.name == ".windsurf" and rule_file.name == "global_rules.md":
         return parent.parent
-    
+
     # Case 3: File is in .cursor/rules/ subdirectory
     if parent.name == "rules" and parent.parent.name == ".cursor":
         return parent.parent.parent
-    
-    # Case 4: File is in .claude, .cursor, or .windsurf directory
+
+    # Case 4: File is in .claude/rules/ subdirectory
+    if parent.name == "rules" and parent.parent.name == ".claude":
+        return parent.parent.parent
+
+    # Case 5: File is in .claude, .cursor, or .windsurf directory
     if parent.name in (".claude", ".cursor", ".windsurf"):
         return parent.parent
-    
-    # Case 5: Legacy .cursorrules file (in project root)
+
+    # Case 6: Legacy .cursorrules file (in project root)
     if rule_file.name == ".cursorrules":
         return parent
-    
-    # Case 6: File is directly in project root
+
+    # Case 7: Walk up for deeper nesting inside .claude (e.g. .claude/rules/subdir/bar.md)
+    for ancestor in rule_file.parents:
+        if ancestor.name == ".claude":
+            return ancestor.parent
+
+    # Case 8: File is directly in project root
     return parent
 
 

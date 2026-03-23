@@ -143,6 +143,16 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                         if rule_info:
                             rule_info["project_path"] = rule_info.pop("project_root", None)
                             user_rules.append(rule_info)
+
+                # Scan ~/.claude/rules/ for user-level modular rules
+                rules_dir = claude_dir / "rules"
+                if rules_dir.exists() and rules_dir.is_dir():
+                    for md_file in rules_dir.rglob("*.md"):
+                        if md_file.is_file() and not md_file.name.startswith("."):
+                            rule_info = extract_single_rule_file(md_file, find_project_root, scope="user")
+                            if rule_info:
+                                rule_info["project_path"] = rule_info.pop("project_root", None)
+                                user_rules.append(rule_info)
             except Exception as e:
                 logger.debug(f"Error extracting user-level rules for {user_home}: {e}")
 
@@ -318,6 +328,17 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                         project_root = rule_info.get('project_root')
                         if project_root:
                             add_rule_to_project(rule_info, project_root, projects_by_root)
+
+            # Scan .claude/rules/ for modular .md rule files (recursive)
+            rules_dir = claude_dir / "rules"
+            if rules_dir.exists() and rules_dir.is_dir():
+                for md_file in rules_dir.rglob("*.md"):
+                    if md_file.is_file() and not md_file.name.startswith("."):
+                        rule_info = extract_single_rule_file(md_file, find_project_root, scope="project")
+                        if rule_info:
+                            project_root = rule_info.get('project_root')
+                            if project_root:
+                                add_rule_to_project(rule_info, project_root, projects_by_root)
         except Exception as e:
             logger.debug(f"Error extracting rules from {claude_dir}: {e}")
 

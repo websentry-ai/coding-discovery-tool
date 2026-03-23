@@ -16,6 +16,7 @@ CLAUDE_DIR_NAME = ".claude"
 SKILLS_DIR_NAME = "skills"
 SKILL_FILE_NAME = "SKILL.md"
 COMMANDS_DIR_NAME = "commands"
+AGENTS_DIR_NAME = "agents"
 
 
 def is_skill_md_file(filename: str) -> bool:
@@ -134,6 +135,84 @@ def extract_command_info(
         rule_info["type"] = "command"
 
     return rule_info
+
+
+def find_agent_project_root(agent_file: Path) -> Path:
+    """
+    Find the project root directory for a Claude Code agent file.
+
+    For agents:
+    - User-level: ~/.claude/agents/<name>.md -> home directory
+    - Project-level: <project>/.claude/agents/<name>.md -> project directory
+
+    Args:
+        agent_file: Path to the agent .md file
+
+    Returns:
+        Project root path
+    """
+    agents_dir = agent_file.parent   # agents/
+    claude_dir = agents_dir.parent   # .claude/
+
+    if agents_dir.name == AGENTS_DIR_NAME and claude_dir.name == CLAUDE_DIR_NAME:
+        return claude_dir.parent
+
+    # Fallback: walk up to find .claude ancestor
+    for parent in agent_file.parents:
+        if parent.name == CLAUDE_DIR_NAME:
+            return parent.parent
+
+    return agent_file.parent
+
+
+def extract_agent_info(
+    agent_file: Path,
+    extract_single_rule_file_func: Callable,
+    scope: str,
+) -> Optional[Dict]:
+    """
+    Extract agent information from an agent .md file.
+
+    Returns a dict in the same format as skills, with type='agent'.
+    """
+    rule_info = extract_single_rule_file_func(agent_file, find_agent_project_root, scope=scope)
+
+    if rule_info:
+        rule_info["skill_name"] = agent_file.stem
+        rule_info["type"] = "agent"
+
+    return rule_info
+
+
+def extract_agents_from_directory(
+    agents_dir: Path,
+    projects_by_root: Dict[str, List[Dict]],
+    extract_single_rule_file_func: Callable,
+    add_skill_func: Callable
+) -> None:
+    """
+    Extract all agents from a .claude/agents directory.
+
+    Args:
+        agents_dir: Path to the agents directory
+        projects_by_root: Dictionary to populate with agents
+        extract_single_rule_file_func: OS-specific function to extract rule file info
+        add_skill_func: Function to add agent to project dict (handles thread safety)
+    """
+    try:
+        for item in agents_dir.iterdir():
+            if item.is_file() and is_command_md_file(item.name):
+                agent_info = extract_agent_info(
+                    item,
+                    extract_single_rule_file_func,
+                    scope="project"
+                )
+                if agent_info:
+                    project_root = agent_info.get('project_root')
+                    if project_root:
+                        add_skill_func(agent_info, project_root, projects_by_root)
+    except Exception as e:
+        logger.debug(f"Error extracting agents from {agents_dir}: {e}")
 
 
 def extract_commands_from_directory(

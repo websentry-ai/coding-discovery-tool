@@ -1635,16 +1635,19 @@ def main():
 
                         # Detect subscription plan for Claude Code
                         if tool_name.lower() == "claude code":
-                            claude_bin = find_claude_binary_for_user(user_home)
-                            if claude_bin:
-                                subscription = get_claude_subscription_type(user_name, claude_bin)
-                                if subscription:
-                                    tool_filtered["plan"] = subscription
-                                    logger.info(f"    Plan: {subscription}")
+                            try:
+                                claude_bin = find_claude_binary_for_user(user_home)
+                                if claude_bin:
+                                    subscription = get_claude_subscription_type(user_name, claude_bin)
+                                    if subscription:
+                                        tool_filtered["plan"] = subscription
+                                        logger.info(f"    Plan: {subscription}")
+                                    else:
+                                        logger.debug(f"    Could not detect plan for {user_name}")
                                 else:
-                                    logger.debug(f"    Could not detect plan for {user_name}")
-                            else:
-                                logger.debug(f"    Claude binary not found for {user_name}")
+                                    logger.debug(f"    Claude binary not found for {user_name}")
+                            except (PermissionError, OSError) as e:
+                                logger.warning(f"    Could not detect plan for {user_name}: {e}")
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)

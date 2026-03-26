@@ -301,8 +301,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
 
     # Walk nvm versions directory for node-installed claude binaries
     nvm_node_dir = user_home / ".nvm" / "versions" / "node"
-    if nvm_node_dir.exists():
-        try:
+    try:
+        if nvm_node_dir.exists():
             for version_dir in nvm_node_dir.iterdir():
                 if not version_dir.is_dir():
                     continue
@@ -316,7 +316,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                         )
                 except (PermissionError, OSError):
                     continue
-        except (PermissionError, OSError):
-            pass
+    except (PermissionError, OSError):
+        pass
 
     return None

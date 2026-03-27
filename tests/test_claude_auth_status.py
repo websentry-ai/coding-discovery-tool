@@ -21,7 +21,111 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from scripts.coding_discovery_tools.user_tool_detector import find_claude_binary_for_user
-from scripts.coding_discovery_tools.utils import get_claude_subscription_type
+from scripts.coding_discovery_tools.utils import (
+    get_claude_subscription_type,
+    _get_plan_from_keychain,
+)
+
+
+class TestGetPlanFromKeychain(unittest.TestCase):
+    """Tests for _get_plan_from_keychain direct Keychain reader."""
+
+    def _mock_result(self, stdout="", returncode=0):
+        mock = MagicMock(spec=subprocess.CompletedProcess)
+        mock.stdout = stdout
+        mock.returncode = returncode
+        return mock
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_returns_plan_from_keychain(self, _mock_root, mock_run):
+        """Extracts subscriptionType from keychain credentials JSON."""
+        creds = {"claudeAiOauth": {"subscriptionType": "max", "accessToken": "sk-..."}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        self.assertEqual(_get_plan_from_keychain("testuser"), "max")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_returns_none_when_no_entry(self, _mock_root, mock_run):
+        """Returns None when keychain entry does not exist."""
+        mock_run.return_value = self._mock_result(returncode=44)
+        self.assertIsNone(_get_plan_from_keychain("unknown"))
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_returns_none_on_invalid_json(self, _mock_root, mock_run):
+        """Returns None when keychain value is not valid JSON."""
+        mock_run.return_value = self._mock_result(stdout="not json")
+        self.assertIsNone(_get_plan_from_keychain("testuser"))
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_returns_none_when_no_oauth_key(self, _mock_root, mock_run):
+        """Returns None when JSON lacks claudeAiOauth key."""
+        mock_run.return_value = self._mock_result(stdout=json.dumps({"other": "data"}))
+        self.assertIsNone(_get_plan_from_keychain("testuser"))
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_returns_none_on_timeout(self, _mock_root, mock_run):
+        """Returns None when security command times out."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="security", timeout=5)
+        self.assertIsNone(_get_plan_from_keychain("testuser"))
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_returns_none_on_os_error(self, _mock_root, mock_run):
+        """Returns None when security binary is missing."""
+        mock_run.side_effect = OSError("No such file")
+        self.assertIsNone(_get_plan_from_keychain("testuser"))
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    def test_appends_keychain_path_when_root(self, _mock_root, mock_run):
+        """When running as root, passes explicit keychain path."""
+        creds = {"claudeAiOauth": {"subscriptionType": "pro"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        _get_plan_from_keychain("alice")
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[-1], "/Users/alice/Library/Keychains/login.keychain-db")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_does_not_append_keychain_path_when_not_root(self, _mock_root, mock_run):
+        """When not root, does not pass explicit keychain path."""
+        creds = {"claudeAiOauth": {"subscriptionType": "max"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        _get_plan_from_keychain("alice")
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("/Users/alice/Library/Keychains/login.keychain-db", cmd)
+        self.assertEqual(cmd[-1], "-w")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_keychain_fast_path_skips_cli(self, _mock_root, mock_run):
+        """When keychain succeeds, get_claude_subscription_type returns immediately without CLI."""
+        creds = {"claudeAiOauth": {"subscriptionType": "team"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        with patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin"):
+            result = get_claude_subscription_type("testuser", "/usr/local/bin/claude")
+        self.assertEqual(result, "team")
+        # Only one subprocess call (keychain), not two (keychain + CLI)
+        self.assertEqual(mock_run.call_count, 1)
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], "security")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_keychain_failure_falls_through_to_cli(self, _mock_root, mock_run):
+        """When keychain fails, falls through to CLI approach."""
+        mock_run.side_effect = [
+            self._mock_result(returncode=44),  # keychain: no entry
+            self._mock_result(stdout=json.dumps({"subscriptionType": "pro"})),  # CLI: success
+        ]
+        with patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin"):
+            result = get_claude_subscription_type("testuser", "/usr/local/bin/claude")
+        self.assertEqual(result, "pro")
+        self.assertEqual(mock_run.call_count, 2)
 
 
 class TestFindClaudeBinaryForUser(unittest.TestCase):
@@ -119,11 +223,21 @@ class TestFindClaudeBinaryForUser(unittest.TestCase):
 
 
 class TestGetClaudeSubscriptionType(unittest.TestCase):
-    """Tests for get_claude_subscription_type auth status parsing."""
+    """Tests for get_claude_subscription_type CLI fallback parsing.
+
+    The keychain fast-path is patched to return None so every test
+    exercises the CLI-based fallback path.
+    """
 
     def setUp(self):
         self.claude_binary = "/usr/local/bin/claude"
         self.username = "testuser"
+        patcher = patch(
+            "scripts.coding_discovery_tools.utils._get_plan_from_keychain",
+            return_value=None,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _mock_result(self, stdout="", returncode=0, stderr=""):
         """Create a mock subprocess.CompletedProcess."""

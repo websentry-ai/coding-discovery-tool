@@ -8,6 +8,8 @@ import os
 import platform
 import re
 import shlex
+import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -21,7 +23,7 @@ try:
 except ImportError:
     pwd = None  # Not available on Windows
 
-from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, VERSION_TIMEOUT
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, VERSION_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -757,6 +759,90 @@ def get_claude_subscription_type(
     except Exception as e:
         logger.debug(f"Unexpected error getting subscription for {username}: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Cursor IDE subscription plan detection
+# ---------------------------------------------------------------------------
+
+
+def _get_cursor_db_path(user_home: Path) -> Optional[Path]:
+    """Return the path to Cursor's state.vscdb for the given user home directory.
+
+    Supports macOS and Windows. Returns None if the platform is unsupported
+    or the database file does not exist.
+
+    Args:
+        user_home: Path to the user's home directory.
+
+    Returns:
+        Path to state.vscdb or None.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        db_path = user_home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    elif system == "Windows":
+        db_path = user_home / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    else:
+        return None
+
+    if not db_path.is_file():
+        return None
+
+    return db_path
+
+
+def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
+    """Get the Cursor IDE subscription plan for a specific user.
+
+    Reads the plan string from Cursor's SQLite state database using a
+    temporary copy to avoid holding locks on the live file.
+
+    Args:
+        user_home: Path to the user's home directory.
+
+    Returns:
+        Plan string (e.g. "pro", "enterprise", "free", "business")
+        or None if detection fails.
+    """
+    temp_db_path = None
+    try:
+        db_path = _get_cursor_db_path(user_home)
+        if db_path is None:
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".vscdb", delete=False) as temp_db:
+            temp_db_path = temp_db.name
+
+        shutil.copy2(db_path, temp_db_path)
+
+        conn = sqlite3.connect(temp_db_path, timeout=CURSOR_DB_TIMEOUT)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM ItemTable WHERE key = ?", (CURSOR_PLAN_KEY,))
+            row = cursor.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            return None
+
+        raw_value = row[0]
+        if isinstance(raw_value, bytes):
+            plan = raw_value.decode("utf-8", errors="ignore").strip()
+        else:
+            plan = str(raw_value).strip()
+
+        return plan if plan else None
+
+    except Exception:
+        return None
+    finally:
+        if temp_db_path:
+            try:
+                Path(temp_db_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

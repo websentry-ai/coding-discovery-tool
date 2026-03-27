@@ -44,3 +44,7 @@ SKIP_SYSTEM_DIRS = {
     '/.fseventsd', '/.Spotlight-V100', '/.Trashes', '/.vol'
 }
 
+# Cursor plan detection
+CURSOR_DB_TIMEOUT = 5  # seconds
+CURSOR_PLAN_KEY = "cursorAuth/stripeMembershipType"
+

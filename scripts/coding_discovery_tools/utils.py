@@ -23,7 +23,7 @@ try:
 except ImportError:
     pwd = None  # Not available on Windows
 
-from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_PLAN_KEY, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, VERSION_TIMEOUT
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, VERSION_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -816,10 +816,13 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
 
         shutil.copy2(db_path, temp_db_path)
 
-        with sqlite3.connect(temp_db_path) as conn:
+        conn = sqlite3.connect(temp_db_path, timeout=CURSOR_DB_TIMEOUT)
+        try:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM ItemTable WHERE key = ?", (CURSOR_PLAN_KEY,))
             row = cursor.fetchone()
+        finally:
+            conn.close()
 
         if not row:
             return None

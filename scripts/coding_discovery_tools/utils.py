@@ -633,8 +633,10 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
     ]
 
     if _is_root():
-        keychain_path = f"/Users/{username}/Library/Keychains/login.keychain-db"
-        cmd.append(keychain_path)
+        real_home = _get_real_home(username)
+        if real_home:
+            keychain_path = f"{real_home}/Library/Keychains/login.keychain-db"
+            cmd.append(keychain_path)
 
     try:
         result = subprocess.run(

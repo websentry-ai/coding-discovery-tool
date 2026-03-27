@@ -81,8 +81,9 @@ class TestGetPlanFromKeychain(unittest.TestCase):
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
-    def test_appends_keychain_path_when_root(self, _mock_root, mock_run):
-        """When running as root, passes explicit keychain path."""
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/alice")
+    def test_appends_keychain_path_when_root(self, _mock_home, _mock_root, mock_run):
+        """When running as root, passes explicit keychain path resolved via pwd."""
         creds = {"claudeAiOauth": {"subscriptionType": "pro"}}
         mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
         _get_plan_from_keychain("alice")
@@ -116,7 +117,8 @@ class TestGetPlanFromKeychain(unittest.TestCase):
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_keychain_failure_falls_through_to_cli(self, _mock_root, mock_run):
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    def test_keychain_failure_falls_through_to_cli(self, _mock_container, _mock_root, mock_run):
         """When keychain fails, falls through to CLI approach."""
         mock_run.side_effect = [
             self._mock_result(returncode=44),  # keychain: no entry

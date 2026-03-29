@@ -212,8 +212,8 @@ GLOBAL_INSTALL_DIR="/usr/local/share/unbound"
 GLOBAL_WRAPPER_SCRIPT="$GLOBAL_INSTALL_DIR/run-discovery.sh"
 
 create_system_config() {
-    local api_key="$1"
-    local domain="$2"
+    local api_key="${1//$'\n'/}"
+    local domain="${2//$'\n'/}"
 
     print_info "Creating system config..."
     mkdir -p "$SYSTEM_CONFIG_DIR"
@@ -248,7 +248,7 @@ INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discov
 SCRIPT_PATH="$LOCAL_DIR/install.sh"
 
 mkdir -p "$LOG_DIR" 2>/dev/null || true
-mkdir -p "$LOCAL_DIR" 2>/dev/null || true
+mkdir -p "$LOCAL_DIR" || { log "ERROR: Cannot create $LOCAL_DIR"; exit 1; }
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_DIR/scan.log"
@@ -270,8 +270,12 @@ fi
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     SYSTEM_CONFIG="/Library/Application Support/Unbound/config"
     if [ -f "$SYSTEM_CONFIG" ]; then
-        [ -z "$API_KEY" ] && API_KEY=$(grep '^API_KEY=' "$SYSTEM_CONFIG" | cut -d= -f2-)
-        [ -z "$DOMAIN" ] && DOMAIN=$(grep '^DOMAIN=' "$SYSTEM_CONFIG" | cut -d= -f2-)
+        if [ -z "$API_KEY" ]; then
+            API_KEY=$(grep '^API_KEY=' "$SYSTEM_CONFIG" | head -1 | cut -d= -f2-)
+        fi
+        if [ -z "$DOMAIN" ]; then
+            DOMAIN=$(grep '^DOMAIN=' "$SYSTEM_CONFIG" | head -1 | cut -d= -f2-)
+        fi
         if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
             log "Credentials retrieved from system config"
         fi
@@ -279,8 +283,12 @@ if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
 fi
 
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
-    [ -z "$API_KEY" ] && API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
-    [ -z "$DOMAIN" ] && DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
+    if [ -z "$API_KEY" ]; then
+        API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
+    fi
+    if [ -z "$DOMAIN" ]; then
+        DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
+    fi
     if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
         log "Credentials retrieved from user keychain"
     fi
@@ -343,13 +351,10 @@ uninstall_mdm_artifacts() {
         print_success "Removed wrapper script: $GLOBAL_WRAPPER_SCRIPT"
     fi
 
-    if [ -f "$GLOBAL_INSTALL_DIR/install.sh" ]; then
-        rm -f "$GLOBAL_INSTALL_DIR/install.sh"
-    fi
-
     rmdir "$GLOBAL_INSTALL_DIR" 2>/dev/null || true
 
     print_info "Note: MDM-deployed plist must be removed via your MDM platform"
+    print_info "Note: Per-user caches (~/.local/share/unbound/, ~/Library/Logs/unbound/) are left in place"
     print_success "MDM artifacts removed"
 }
 

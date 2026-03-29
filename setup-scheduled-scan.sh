@@ -140,8 +140,8 @@ fi
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     SYSTEM_CONFIG="/Library/Application Support/Unbound/config"
     if [ -f "$SYSTEM_CONFIG" ]; then
-        API_KEY=$(grep '^API_KEY=' "$SYSTEM_CONFIG" | cut -d= -f2-)
-        DOMAIN=$(grep '^DOMAIN=' "$SYSTEM_CONFIG" | cut -d= -f2-)
+        [ -z "$API_KEY" ] && API_KEY=$(grep '^API_KEY=' "$SYSTEM_CONFIG" | cut -d= -f2-)
+        [ -z "$DOMAIN" ] && DOMAIN=$(grep '^DOMAIN=' "$SYSTEM_CONFIG" | cut -d= -f2-)
         if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
             log "Credentials retrieved from system config"
         fi
@@ -149,8 +149,8 @@ if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
 fi
 
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
-    API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
-    DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
+    [ -z "$API_KEY" ] && API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
+    [ -z "$DOMAIN" ] && DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
     if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
         log "Credentials retrieved from user keychain"
     fi

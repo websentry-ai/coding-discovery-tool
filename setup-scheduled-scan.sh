@@ -126,12 +126,10 @@ log() {
 
 log "=== Starting Unbound Discovery ==="
 
-# --- 3-Source Credential Chain ---
-
 API_KEY=""
 DOMAIN=""
 
-# Priority 1: Managed preferences (future — MDM Configuration Profile)
+# Credential chain: managed preferences > system config > user keychain
 API_KEY=$(defaults read ai.getunbound.discovery api_key 2>/dev/null) || true
 DOMAIN=$(defaults read ai.getunbound.discovery domain 2>/dev/null) || true
 
@@ -139,8 +137,6 @@ if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
     log "Credentials retrieved from managed preferences"
 fi
 
-# Priority 2: System config file (MDM install.sh deployment)
-# Uses grep/cut instead of source to prevent arbitrary code execution
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     SYSTEM_CONFIG="/Library/Application Support/Unbound/config"
     if [ -f "$SYSTEM_CONFIG" ]; then
@@ -152,7 +148,6 @@ if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     fi
 fi
 
-# Priority 3: User keychain (manual setup-scheduled-scan.sh deployment)
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
     DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
@@ -162,7 +157,7 @@ if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
 fi
 
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
-    log "ERROR: No credentials found (checked managed preferences, system config, keychain)"
+    log "ERROR: No credentials found"
     exit 1
 fi
 

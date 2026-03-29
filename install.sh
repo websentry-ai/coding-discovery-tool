@@ -210,10 +210,7 @@ SYSTEM_CONFIG_DIR="/Library/Application Support/Unbound"
 SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_DIR/config"
 GLOBAL_INSTALL_DIR="/usr/local/share/unbound"
 GLOBAL_WRAPPER_SCRIPT="$GLOBAL_INSTALL_DIR/run-discovery.sh"
-GLOBAL_LOG_DIR="/var/log/unbound"
-SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
 
-# Create system-wide config file with credentials (readable by all users)
 create_system_config() {
     local api_key="$1"
     local domain="$2"
@@ -221,41 +218,25 @@ create_system_config() {
     print_info "Creating system config..."
     mkdir -p "$SYSTEM_CONFIG_DIR"
 
-    # Write config file (sourceable by bash)
     printf 'API_KEY=%s\nDOMAIN=%s\n' "$api_key" "$domain" > "$SYSTEM_CONFIG_FILE"
 
-    # root:staff 0640 — readable by logged-in users (staff group on macOS),
-    # not world-readable. API key is org-scoped reporting token (same trust
-    # model as CrowdStrike CID), but we still limit exposure.
+    # 0640 root:staff — readable by logged-in users, not world-readable
     chown root:staff "$SYSTEM_CONFIG_FILE"
     chmod 0640 "$SYSTEM_CONFIG_FILE"
 
     print_success "System config created: $SYSTEM_CONFIG_FILE"
 }
 
-# Create global wrapper script with 3-source credential chain
 create_wrapper_script() {
     print_info "Creating global wrapper script..."
 
     mkdir -p "$GLOBAL_INSTALL_DIR"
-    mkdir -p "$GLOBAL_LOG_DIR"
 
     cat > "$GLOBAL_WRAPPER_SCRIPT" << 'WRAPPER_EOF'
 #!/bin/bash
-# =============================================================================
-# Unbound Discovery Wrapper Script (Global / MDM)
-# =============================================================================
-# Deployed by install.sh (root). Executed by LaunchAgent in each user session.
-# Downloads and runs the latest discovery script using EDR-safe patterns.
-#
-# Credential chain (first non-empty wins):
-#   1. Managed preferences (MDM Configuration Profile — future)
-#   2. System config file  (/Library/Application Support/Unbound/config)
-#   3. User keychain        (manual setup-scheduled-scan.sh deployment)
-#
-# Security: File is kept after execution to avoid "download-execute-delete"
-# pattern that EDR tools flag as malware staging (anti-forensics behavior).
-# =============================================================================
+# Unbound Discovery Wrapper (Global / MDM)
+# Executed by LaunchAgent in each user session.
+# File is kept after execution (not deleted) to avoid EDR alerts.
 
 set -euo pipefail
 
@@ -264,7 +245,6 @@ LOG_DIR="$HOME/Library/Logs/unbound"
 INSTALL_DIR="/usr/local/share/unbound"
 INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
 
-# Permanent location for downloaded script (not temp - EDR safe)
 SCRIPT_PATH="$INSTALL_DIR/install.sh"
 
 mkdir -p "$LOG_DIR" 2>/dev/null || true
@@ -276,12 +256,10 @@ log() {
 
 log "=== Starting Unbound Discovery ==="
 
-# --- 3-Source Credential Chain ---
-
 API_KEY=""
 DOMAIN=""
 
-# Priority 1: Managed preferences (future — MDM Configuration Profile)
+# Credential chain: managed preferences > system config > user keychain
 API_KEY=$(defaults read ai.getunbound.discovery api_key 2>/dev/null) || true
 DOMAIN=$(defaults read ai.getunbound.discovery domain 2>/dev/null) || true
 
@@ -289,8 +267,6 @@ if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
     log "Credentials retrieved from managed preferences"
 fi
 
-# Priority 2: System config file (MDM install.sh deployment)
-# Uses grep/cut instead of source to prevent arbitrary code execution
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     SYSTEM_CONFIG="/Library/Application Support/Unbound/config"
     if [ -f "$SYSTEM_CONFIG" ]; then
@@ -302,7 +278,6 @@ if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     fi
 fi
 
-# Priority 3: User keychain (manual setup-scheduled-scan.sh deployment)
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
     API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
     DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
@@ -312,13 +287,10 @@ if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
 fi
 
 if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
-    log "ERROR: No credentials found (checked managed preferences, system config, keychain)"
+    log "ERROR: No credentials found"
     exit 1
 fi
 
-# --- Download and Execute ---
-
-# Step 1: Download to permanent location (overwrites previous version)
 log "Downloading install script to: $SCRIPT_PATH"
 
 if ! curl -fsSL -o "$SCRIPT_PATH" "$INSTALL_SCRIPT_URL"; then
@@ -326,7 +298,6 @@ if ! curl -fsSL -o "$SCRIPT_PATH" "$INSTALL_SCRIPT_URL"; then
     exit 1
 fi
 
-# Step 2: Validate the downloaded file
 if [ ! -s "$SCRIPT_PATH" ]; then
     log "ERROR: Downloaded script is empty"
     exit 1
@@ -338,17 +309,11 @@ if ! head -1 "$SCRIPT_PATH" | grep -q '^#!/'; then
 fi
 
 log "Download validated successfully"
-
-# Step 3: Execute the local script
 chmod +x "$SCRIPT_PATH"
 
 log "Executing local script..."
 "$SCRIPT_PATH" --api-key "$API_KEY" --domain "$DOMAIN" >> "$LOG_DIR/scan.log" 2>&1
 EXIT_CODE=$?
-
-# Note: Script is intentionally NOT deleted after execution.
-# Keeping the file avoids the "download-execute-delete" pattern
-# that EDR tools like CrowdStrike flag as malware staging.
 
 if [ $EXIT_CODE -eq 0 ]; then
     log "Discovery completed successfully"
@@ -363,7 +328,6 @@ WRAPPER_EOF
     print_success "Wrapper script created: $GLOBAL_WRAPPER_SCRIPT"
 }
 
-# Remove MDM artifacts (does NOT touch the MDM-deployed plist)
 uninstall_mdm_artifacts() {
     print_info "Removing MDM artifacts..."
 
@@ -372,7 +336,6 @@ uninstall_mdm_artifacts() {
         print_success "Removed system config: $SYSTEM_CONFIG_FILE"
     fi
 
-    # Remove config dir if empty
     rmdir "$SYSTEM_CONFIG_DIR" 2>/dev/null || true
 
     if [ -f "$GLOBAL_WRAPPER_SCRIPT" ]; then
@@ -380,12 +343,10 @@ uninstall_mdm_artifacts() {
         print_success "Removed wrapper script: $GLOBAL_WRAPPER_SCRIPT"
     fi
 
-    # Remove cached install script if present
     if [ -f "$GLOBAL_INSTALL_DIR/install.sh" ]; then
         rm -f "$GLOBAL_INSTALL_DIR/install.sh"
     fi
 
-    # Remove install dir if empty
     rmdir "$GLOBAL_INSTALL_DIR" 2>/dev/null || true
 
     print_info "Note: MDM-deployed plist must be removed via your MDM platform"
@@ -397,23 +358,17 @@ uninstall_mdm_artifacts() {
 # ==============================================================================
 
 main() {
-    # Check dependencies (silently)
     check_python
     download_repo
 
-    # Change to repository root directory
     cd "$TEMP_DIR"
-
-    # Execute the discovery script with all provided arguments
-    # (The Python script will handle its own output)
     $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "$@"
 
-    # If running as root on macOS, create system-wide MDM support files
+    # Create system-wide MDM support files when running as root on macOS
     if [ "$(detect_os)" = "Darwin" ] && [ "$(id -u)" -eq 0 ]; then
         echo ""
         print_info "Running as root on macOS — setting up MDM support files..."
 
-        # Extract --api-key and --domain from arguments
         local mdm_api_key=""
         local mdm_domain=""
         local args=("$@")
@@ -460,7 +415,6 @@ main() {
 # ARGUMENT PARSING AND SCRIPT ENTRY POINT
 # ==============================================================================
 
-# Handle --uninstall before anything else
 for arg in "$@"; do
     if [ "$arg" = "--uninstall" ]; then
         if [ "$(detect_os)" != "Darwin" ]; then
@@ -476,7 +430,6 @@ for arg in "$@"; do
     fi
 done
 
-# Check if arguments were provided
 if [ $# -eq 0 ]; then
     echo ""
     print_error "Missing required arguments"
@@ -491,5 +444,4 @@ if [ $# -eq 0 ]; then
     exit 1
 fi
 
-# Execute main function with all arguments
 main "$@"

@@ -203,33 +203,245 @@ download_repo() {
 }
 
 # ==============================================================================
+# MDM SUPPORT FUNCTIONS (macOS + root only)
+# ==============================================================================
+
+SYSTEM_CONFIG_DIR="/Library/Application Support/Unbound"
+SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_DIR/config"
+GLOBAL_INSTALL_DIR="/usr/local/share/unbound"
+GLOBAL_WRAPPER_SCRIPT="$GLOBAL_INSTALL_DIR/run-discovery.sh"
+
+create_system_config() {
+    local api_key="${1//$'\n'/}"
+    local domain="${2//$'\n'/}"
+
+    print_info "Creating system config..."
+    mkdir -p "$SYSTEM_CONFIG_DIR"
+
+    printf 'API_KEY=%s\nDOMAIN=%s\n' "$api_key" "$domain" > "$SYSTEM_CONFIG_FILE"
+
+    # 0640 root:staff — readable by logged-in users, not world-readable
+    chown root:staff "$SYSTEM_CONFIG_FILE"
+    chmod 0640 "$SYSTEM_CONFIG_FILE"
+
+    print_success "System config created: $SYSTEM_CONFIG_FILE"
+}
+
+create_wrapper_script() {
+    print_info "Creating global wrapper script..."
+
+    mkdir -p "$GLOBAL_INSTALL_DIR"
+
+    cat > "$GLOBAL_WRAPPER_SCRIPT" << 'WRAPPER_EOF'
+#!/bin/bash
+# Unbound Discovery Wrapper (Global / MDM)
+# Executed by LaunchAgent in each user session.
+# File is kept after execution (not deleted) to avoid EDR alerts.
+
+set -euo pipefail
+
+KEYCHAIN_SERVICE="ai.getunbound.discovery"
+LOG_DIR="$HOME/Library/Logs/unbound"
+LOCAL_DIR="$HOME/.local/share/unbound"
+INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
+
+SCRIPT_PATH="$LOCAL_DIR/install.sh"
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+mkdir -p "$LOCAL_DIR" || { log "ERROR: Cannot create $LOCAL_DIR"; exit 1; }
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_DIR/scan.log"
+}
+
+log "=== Starting Unbound Discovery ==="
+
+API_KEY=""
+DOMAIN=""
+
+# Credential chain: managed preferences > system config > user keychain
+API_KEY=$(defaults read ai.getunbound.discovery api_key 2>/dev/null) || true
+DOMAIN=$(defaults read ai.getunbound.discovery domain 2>/dev/null) || true
+
+if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
+    log "Credentials retrieved from managed preferences"
+fi
+
+if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
+    SYSTEM_CONFIG="/Library/Application Support/Unbound/config"
+    if [ -f "$SYSTEM_CONFIG" ]; then
+        if [ -z "$API_KEY" ]; then
+            API_KEY=$(grep '^API_KEY=' "$SYSTEM_CONFIG" | head -1 | cut -d= -f2-)
+        fi
+        if [ -z "$DOMAIN" ]; then
+            DOMAIN=$(grep '^DOMAIN=' "$SYSTEM_CONFIG" | head -1 | cut -d= -f2-)
+        fi
+        if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
+            log "Credentials retrieved from system config"
+        fi
+    fi
+fi
+
+if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
+    if [ -z "$API_KEY" ]; then
+        API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
+    fi
+    if [ -z "$DOMAIN" ]; then
+        DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
+    fi
+    if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
+        log "Credentials retrieved from user keychain"
+    fi
+fi
+
+if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
+    log "ERROR: No credentials found"
+    exit 1
+fi
+
+log "Downloading install script to: $SCRIPT_PATH"
+
+if ! curl -fsSL -o "$SCRIPT_PATH" "$INSTALL_SCRIPT_URL"; then
+    log "ERROR: Failed to download install script"
+    exit 1
+fi
+
+if [ ! -s "$SCRIPT_PATH" ]; then
+    log "ERROR: Downloaded script is empty"
+    exit 1
+fi
+
+if ! head -1 "$SCRIPT_PATH" | grep -q '^#!/'; then
+    log "ERROR: Downloaded file is not a valid script"
+    exit 1
+fi
+
+log "Download validated successfully"
+chmod +x "$SCRIPT_PATH"
+
+log "Executing local script..."
+"$SCRIPT_PATH" --api-key "$API_KEY" --domain "$DOMAIN" >> "$LOG_DIR/scan.log" 2>&1
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    log "Discovery completed successfully"
+else
+    log "Discovery failed with exit code: $EXIT_CODE"
+fi
+
+log "=== Finished ==="
+WRAPPER_EOF
+
+    chmod +x "$GLOBAL_WRAPPER_SCRIPT"
+    print_success "Wrapper script created: $GLOBAL_WRAPPER_SCRIPT"
+}
+
+uninstall_mdm_artifacts() {
+    print_info "Removing MDM artifacts..."
+
+    if [ -f "$SYSTEM_CONFIG_FILE" ]; then
+        rm -f "$SYSTEM_CONFIG_FILE"
+        print_success "Removed system config: $SYSTEM_CONFIG_FILE"
+    fi
+
+    rmdir "$SYSTEM_CONFIG_DIR" 2>/dev/null || true
+
+    if [ -f "$GLOBAL_WRAPPER_SCRIPT" ]; then
+        rm -f "$GLOBAL_WRAPPER_SCRIPT"
+        print_success "Removed wrapper script: $GLOBAL_WRAPPER_SCRIPT"
+    fi
+
+    rmdir "$GLOBAL_INSTALL_DIR" 2>/dev/null || true
+
+    print_info "Note: MDM-deployed plist must be removed via your MDM platform"
+    print_info "Note: Per-user caches (~/.local/share/unbound/, ~/Library/Logs/unbound/) are left in place"
+    print_success "MDM artifacts removed"
+}
+
+# ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
 
 main() {
-    # Check dependencies (silently)
     check_python
     download_repo
-    
-    # Change to repository root directory
+
     cd "$TEMP_DIR"
-    
-    # Execute the discovery script with all provided arguments
-    # (The Python script will handle its own output)
     $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "$@"
+
+    # Create system-wide MDM support files when running as root on macOS
+    if [ "$(detect_os)" = "Darwin" ] && [ "$(id -u)" -eq 0 ]; then
+        echo ""
+        print_info "Running as root on macOS — setting up MDM support files..."
+
+        local mdm_api_key=""
+        local mdm_domain=""
+        local args=("$@")
+        local i=0
+        while [ $i -lt ${#args[@]} ]; do
+            case "${args[$i]}" in
+                --api-key)
+                    if [ $((i + 1)) -ge ${#args[@]} ]; then
+                        print_warning "Missing value for --api-key; skipping MDM file creation"
+                        break
+                    fi
+                    mdm_api_key="${args[$((i+1))]}"
+                    i=$((i + 2))
+                    ;;
+                --domain)
+                    if [ $((i + 1)) -ge ${#args[@]} ]; then
+                        print_warning "Missing value for --domain; skipping MDM file creation"
+                        break
+                    fi
+                    mdm_domain="${args[$((i+1))]}"
+                    i=$((i + 2))
+                    ;;
+                *)
+                    i=$((i + 1))
+                    ;;
+            esac
+        done
+
+        if [ -n "$mdm_api_key" ] && [ -n "$mdm_domain" ]; then
+            create_system_config "$mdm_api_key" "$mdm_domain"
+            create_wrapper_script
+            echo ""
+            print_success "MDM support files created. Deploy the LaunchAgent plist via your MDM platform."
+            print_info "  Config:  $SYSTEM_CONFIG_FILE"
+            print_info "  Wrapper: $GLOBAL_WRAPPER_SCRIPT"
+            print_info "  Plist:   See mdm/ai.getunbound.discovery.plist in the repository"
+        else
+            print_warning "Could not extract --api-key and --domain; skipping MDM file creation"
+        fi
+    fi
 }
 
 # ==============================================================================
 # ARGUMENT PARSING AND SCRIPT ENTRY POINT
 # ==============================================================================
 
-# Check if arguments were provided
+for arg in "$@"; do
+    if [ "$arg" = "--uninstall" ]; then
+        if [ "$(detect_os)" != "Darwin" ]; then
+            print_error "--uninstall is only supported on macOS"
+            exit 1
+        fi
+        if [ "$(id -u)" -ne 0 ]; then
+            print_error "--uninstall must be run as root (sudo)"
+            exit 1
+        fi
+        uninstall_mdm_artifacts
+        exit 0
+    fi
+done
+
 if [ $# -eq 0 ]; then
     echo ""
     print_error "Missing required arguments"
     echo ""
     echo "Usage:"
     echo "  $0 --api-key YOUR_API_KEY --domain YOUR_DOMAIN [--app_name APP_NAME]"
+    echo "  $0 --uninstall  (macOS, root only — remove MDM artifacts)"
     echo ""
     echo "Or run via curl:"
     echo "  curl -fsSL https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/$BRANCH/install.sh | bash -s -- --api-key YOUR_API_KEY --domain YOUR_DOMAIN --app_name APP_NAME"
@@ -237,5 +449,4 @@ if [ $# -eq 0 ]; then
     exit 1
 fi
 
-# Execute main function with all arguments
 main "$@"

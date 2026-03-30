@@ -634,11 +634,20 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
         "-a", username, "-w",
     ]
 
-    if _is_root():
+    is_root = _is_root()
+    is_darwin = platform.system() == "Darwin"
+
+    if is_root:
         real_home = _get_real_home(username)
         if real_home:
             keychain_path = f"{real_home}/Library/Keychains/login.keychain-db"
             cmd.append(keychain_path)
+
+    is_container = is_darwin and _is_daemon_container()
+    if is_darwin and (is_root or is_container):
+        uid = _get_uid_for_user(username)
+        if uid is not None:
+            cmd = ["launchctl", "asuser", str(uid)] + cmd
 
     try:
         result = subprocess.run(

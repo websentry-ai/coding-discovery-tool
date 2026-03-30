@@ -82,13 +82,119 @@ class TestGetPlanFromKeychain(unittest.TestCase):
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
     @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/alice")
-    def test_appends_keychain_path_when_root(self, _mock_home, _mock_root, mock_run):
-        """When running as root, passes explicit keychain path resolved via pwd."""
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    def test_appends_keychain_path_when_root(
+        self, _mock_container, _mock_uid, _mock_sys, _mock_home, _mock_root, mock_run
+    ):
+        """When running as root on Darwin, wraps with launchctl and appends keychain path."""
         creds = {"claudeAiOauth": {"subscriptionType": "pro"}}
         mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
         _get_plan_from_keychain("alice")
         cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[:3], ["launchctl", "asuser", "501"])
+        self.assertEqual(cmd[3], "security")
         self.assertEqual(cmd[-1], "/Users/alice/Library/Keychains/login.keychain-db")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/alice")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    def test_wraps_with_launchctl_when_root_on_darwin(
+        self, _mock_container, _mock_uid, _mock_sys, _mock_home, _mock_root, mock_run
+    ):
+        """On Darwin as root, prepends launchctl asuser <uid> to security command."""
+        creds = {"claudeAiOauth": {"subscriptionType": "pro"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        _get_plan_from_keychain("alice")
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[:3], ["launchctl", "asuser", "501"])
+        self.assertEqual(cmd[3], "security")
+        self.assertEqual(cmd[-1], "/Users/alice/Library/Keychains/login.keychain-db")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/home/alice")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Linux")
+    def test_no_launchctl_when_root_on_linux(
+        self, _mock_sys, _mock_home, _mock_root, mock_run
+    ):
+        """On Linux as root, does NOT prepend launchctl (macOS-only feature)."""
+        creds = {"claudeAiOauth": {"subscriptionType": "pro"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        _get_plan_from_keychain("alice")
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], "security")
+        self.assertNotIn("launchctl", cmd)
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/alice")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=None)
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    def test_no_launchctl_when_uid_unknown_on_darwin(
+        self, _mock_container, _mock_uid, _mock_sys, _mock_home, _mock_root, mock_run
+    ):
+        """On Darwin as root, falls back to plain security when UID cannot be resolved."""
+        creds = {"claudeAiOauth": {"subscriptionType": "pro"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        _get_plan_from_keychain("alice")
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], "security")
+        self.assertNotIn("launchctl", cmd)
+        self.assertEqual(cmd[-1], "/Users/alice/Library/Keychains/login.keychain-db")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    def test_no_launchctl_when_not_root_on_darwin(
+        self, _mock_container, _mock_sys, _mock_root, mock_run
+    ):
+        """On Darwin as non-root (no daemon container), runs security directly."""
+        creds = {"claudeAiOauth": {"subscriptionType": "max"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        _get_plan_from_keychain("alice")
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], "security")
+        self.assertNotIn("launchctl", cmd)
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    def test_wraps_with_launchctl_in_daemon_container(
+        self, _mock_uid, _mock_container, _mock_sys, _mock_root, mock_run
+    ):
+        """In daemon container (non-root), wraps with launchctl asuser."""
+        creds = {"claudeAiOauth": {"subscriptionType": "max"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        _get_plan_from_keychain("alice")
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[:3], ["launchctl", "asuser", "501"])
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=501)
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    def test_keychain_launchctl_succeeds_skips_cli(
+        self, _mock_container, _mock_uid, _mock_sys, _mock_home, _mock_root, mock_run
+    ):
+        """When keychain with launchctl succeeds, get_claude_subscription_type skips CLI fallback."""
+        creds = {"claudeAiOauth": {"subscriptionType": "pro"}}
+        mock_run.return_value = self._mock_result(stdout=json.dumps(creds))
+        result = get_claude_subscription_type("testuser", "/usr/local/bin/claude")
+        self.assertEqual(result, "pro")
+        self.assertEqual(mock_run.call_count, 1)
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], "launchctl")
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
@@ -103,7 +209,8 @@ class TestGetPlanFromKeychain(unittest.TestCase):
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_keychain_fast_path_skips_cli(self, _mock_root, mock_run):
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=False)
+    def test_keychain_fast_path_skips_cli(self, _mock_container, _mock_root, mock_run):
         """When keychain succeeds, get_claude_subscription_type returns immediately without CLI."""
         creds = {"claudeAiOauth": {"subscriptionType": "team"}}
         mock_run.return_value = self._mock_result(stdout=json.dumps(creds))

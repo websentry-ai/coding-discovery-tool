@@ -387,64 +387,72 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
     def test_prefix_collision_excludes_similar_username(self):
         detector = AIToolsDetector()
-        gowshik_home = "/Users/gowshik"
-        gowshik_2_home = "/Users/gowshik_2"
+        # Use OS-agnostic paths via tempdir so separators match on Windows
+        base = str(Path(tempfile.gettempdir()) / "Users")
+        gowshik_home = os.path.join(base, "gowshik")
+        gowshik_2_home = os.path.join(base, "gowshik_2")
+
+        # Build all paths with os.path.join for cross-platform compatibility
+        gow_proj1 = os.path.join(gowshik_home, "unbound", "unbound-fe")
+        gow_proj2 = os.path.join(gowshik_home, "personal", "blog")
+        gow2_proj1 = os.path.join(gowshik_2_home, "unbound", "unbound-fe")
+        gow2_settings = os.path.join(gowshik_2_home, ".cursor", "settings.json")
 
         tool = {
             "name": "TestTool",
             "version": "1.0",
             "projects": [
                 {
-                    "path": "/Users/gowshik/unbound/unbound-fe",
+                    "path": gow_proj1,
                     "mcpServers": [{"name": "sentry"}],
                     "rules": [
                         {
-                            "file_path": "/Users/gowshik/unbound/unbound-fe/.cursorrules",
+                            "file_path": os.path.join(gow_proj1, ".cursorrules"),
                             "content": "be concise",
                         }
                     ],
                     "skills": [
                         {
                             "name": "deploy",
-                            "file_path": "/Users/gowshik/unbound/unbound-fe/.claude/skills/deploy/skill.md",
+                            "file_path": os.path.join(gow_proj1, ".claude", "skills", "deploy", "skill.md"),
                         }
                     ],
                 },
                 {
-                    "path": "/Users/gowshik/personal/blog",
+                    "path": gow_proj2,
                     "mcpServers": [{"name": "postgres"}],
                     "rules": [
                         {
-                            "file_path": "/Users/gowshik/personal/blog/.cursorrules",
+                            "file_path": os.path.join(gow_proj2, ".cursorrules"),
                             "content": "use markdown",
                         }
                     ],
                     "skills": [
                         {
                             "name": "publish",
-                            "file_path": "/Users/gowshik/personal/blog/.claude/skills/publish/skill.md",
+                            "file_path": os.path.join(gow_proj2, ".claude", "skills", "publish", "skill.md"),
                         }
                     ],
                 },
                 {
-                    "path": "/Users/gowshik_2/unbound/unbound-fe",
+                    "path": gow2_proj1,
                     "mcpServers": [{"name": "linear"}],
                     "rules": [
                         {
-                            "file_path": "/Users/gowshik_2/unbound/unbound-fe/.cursorrules",
+                            "file_path": os.path.join(gow2_proj1, ".cursorrules"),
                             "content": "use TypeScript",
                         }
                     ],
                     "skills": [
                         {
                             "name": "review",
-                            "file_path": "/Users/gowshik_2/unbound/unbound-fe/.claude/skills/review/skill.md",
+                            "file_path": os.path.join(gow2_proj1, ".claude", "skills", "review", "skill.md"),
                         }
                     ],
                 },
             ],
             "permissions": {
-                "settings_path": "/Users/gowshik_2/.cursor/settings.json",
+                "settings_path": gow2_settings,
                 "settings_source": "user",
             },
         }
@@ -457,7 +465,7 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
         # gowshik_2's project (with linear MCP server) is NOT included
         filtered_paths = [p["path"] for p in filtered_gowshik["projects"]]
-        self.assertNotIn("/Users/gowshik_2/unbound/unbound-fe", filtered_paths)
+        self.assertNotIn(gow2_proj1, filtered_paths)
 
         # MCP servers in kept projects are sentry and postgres (not linear)
         mcp_names = [
@@ -500,8 +508,8 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
         # gowshik's projects are NOT included
         filtered_paths_2 = [p["path"] for p in filtered_gowshik_2["projects"]]
-        self.assertNotIn("/Users/gowshik/unbound/unbound-fe", filtered_paths_2)
-        self.assertNotIn("/Users/gowshik/personal/blog", filtered_paths_2)
+        self.assertNotIn(gow_proj1, filtered_paths_2)
+        self.assertNotIn(gow_proj2, filtered_paths_2)
 
         # MCP server is linear (not sentry or postgres)
         mcp_names_2 = [

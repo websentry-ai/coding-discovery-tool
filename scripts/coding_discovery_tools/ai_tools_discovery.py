@@ -8,6 +8,7 @@ on macOS and Windows
 import argparse
 import json
 import logging
+import os
 import platform
 import sys
 from datetime import datetime
@@ -1096,7 +1097,7 @@ class AIToolsDetector:
         for project in tool.get('projects', []):
             project_path = project.get('path', '')
             # Checking if project path is under the user's home directory
-            if project_path == user_home_str or project_path.startswith(user_home_str + "/"):
+            if project_path == user_home_str or project_path.startswith(user_home_str + os.sep):
                 filtered_projects.append(project)
 
         filtered_tool = tool.copy()
@@ -1106,7 +1107,7 @@ class AIToolsDetector:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
             settings_path = perms.get('settings_path', '')
-            if settings_source != 'managed' and settings_path and not (settings_path == user_home_str or settings_path.startswith(user_home_str + "/")):
+            if settings_source != 'managed' and settings_path and not (settings_path == user_home_str or settings_path.startswith(user_home_str + os.sep)):
                 del filtered_tool['permissions']
         
         return filtered_tool

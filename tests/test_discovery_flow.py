@@ -385,5 +385,145 @@ class TestFilterProjectsByUser(unittest.TestCase):
         self.assertEqual(filtered["projects"], [])
 
 
+    def test_prefix_collision_excludes_similar_username(self):
+        detector = AIToolsDetector()
+        # Use OS-agnostic paths via tempdir so separators match on Windows
+        base = str(Path(tempfile.gettempdir()) / "Users")
+        gowshik_home = os.path.join(base, "gowshik")
+        gowshik_2_home = os.path.join(base, "gowshik_2")
+
+        # Build all paths with os.path.join for cross-platform compatibility
+        gow_proj1 = os.path.join(gowshik_home, "unbound", "unbound-fe")
+        gow_proj2 = os.path.join(gowshik_home, "personal", "blog")
+        gow2_proj1 = os.path.join(gowshik_2_home, "unbound", "unbound-fe")
+        gow2_settings = os.path.join(gowshik_2_home, ".cursor", "settings.json")
+
+        tool = {
+            "name": "TestTool",
+            "version": "1.0",
+            "projects": [
+                {
+                    "path": gow_proj1,
+                    "mcpServers": [{"name": "sentry"}],
+                    "rules": [
+                        {
+                            "file_path": os.path.join(gow_proj1, ".cursorrules"),
+                            "content": "be concise",
+                        }
+                    ],
+                    "skills": [
+                        {
+                            "name": "deploy",
+                            "file_path": os.path.join(gow_proj1, ".claude", "skills", "deploy", "skill.md"),
+                        }
+                    ],
+                },
+                {
+                    "path": gow_proj2,
+                    "mcpServers": [{"name": "postgres"}],
+                    "rules": [
+                        {
+                            "file_path": os.path.join(gow_proj2, ".cursorrules"),
+                            "content": "use markdown",
+                        }
+                    ],
+                    "skills": [
+                        {
+                            "name": "publish",
+                            "file_path": os.path.join(gow_proj2, ".claude", "skills", "publish", "skill.md"),
+                        }
+                    ],
+                },
+                {
+                    "path": gow2_proj1,
+                    "mcpServers": [{"name": "linear"}],
+                    "rules": [
+                        {
+                            "file_path": os.path.join(gow2_proj1, ".cursorrules"),
+                            "content": "use TypeScript",
+                        }
+                    ],
+                    "skills": [
+                        {
+                            "name": "review",
+                            "file_path": os.path.join(gow2_proj1, ".claude", "skills", "review", "skill.md"),
+                        }
+                    ],
+                },
+            ],
+            "permissions": {
+                "settings_path": gow2_settings,
+                "settings_source": "user",
+            },
+        }
+
+        # --- Filter for gowshik ---
+        filtered_gowshik = detector.filter_tool_projects_by_user(tool, Path(gowshik_home))
+
+        # Only gowshik's 2 projects remain
+        self.assertEqual(len(filtered_gowshik["projects"]), 2)
+
+        # gowshik_2's project (with linear MCP server) is NOT included
+        filtered_paths = [p["path"] for p in filtered_gowshik["projects"]]
+        self.assertNotIn(gow2_proj1, filtered_paths)
+
+        # MCP servers in kept projects are sentry and postgres (not linear)
+        mcp_names = [
+            s["name"]
+            for p in filtered_gowshik["projects"]
+            for s in p.get("mcpServers", [])
+        ]
+        self.assertIn("sentry", mcp_names)
+        self.assertIn("postgres", mcp_names)
+        self.assertNotIn("linear", mcp_names)
+
+        # Rules in kept projects are gowshik's rules (not gowshik_2's)
+        rule_contents = [
+            r["content"]
+            for p in filtered_gowshik["projects"]
+            for r in p.get("rules", [])
+        ]
+        self.assertIn("be concise", rule_contents)
+        self.assertIn("use markdown", rule_contents)
+        self.assertNotIn("use TypeScript", rule_contents)
+
+        # Skills in kept projects are gowshik's skills (not gowshik_2's)
+        skill_names = [
+            s["name"]
+            for p in filtered_gowshik["projects"]
+            for s in p.get("skills", [])
+        ]
+        self.assertIn("deploy", skill_names)
+        self.assertIn("publish", skill_names)
+        self.assertNotIn("review", skill_names)
+
+        # Permissions block is removed (settings_path is under gowshik_2's home)
+        self.assertNotIn("permissions", filtered_gowshik)
+
+        # --- Filter for gowshik_2 ---
+        filtered_gowshik_2 = detector.filter_tool_projects_by_user(tool, Path(gowshik_2_home))
+
+        # Only gowshik_2's 1 project remains
+        self.assertEqual(len(filtered_gowshik_2["projects"]), 1)
+
+        # gowshik's projects are NOT included
+        filtered_paths_2 = [p["path"] for p in filtered_gowshik_2["projects"]]
+        self.assertNotIn(gow_proj1, filtered_paths_2)
+        self.assertNotIn(gow_proj2, filtered_paths_2)
+
+        # MCP server is linear (not sentry or postgres)
+        mcp_names_2 = [
+            s["name"]
+            for p in filtered_gowshik_2["projects"]
+            for s in p.get("mcpServers", [])
+        ]
+        self.assertIn("linear", mcp_names_2)
+        self.assertNotIn("sentry", mcp_names_2)
+        self.assertNotIn("postgres", mcp_names_2)
+
+        # Permissions block is kept (settings_path is under gowshik_2's home)
+        self.assertIn("permissions", filtered_gowshik_2)
+
+
 if __name__ == "__main__":
     unittest.main()

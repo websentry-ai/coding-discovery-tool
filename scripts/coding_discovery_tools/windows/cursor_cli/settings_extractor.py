@@ -26,7 +26,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, WINDOWS_SKIP_USER_DIRS
 from ...windows_extraction_helpers import (
     is_running_as_admin,
     read_file_content,
@@ -34,8 +34,6 @@ from ...windows_extraction_helpers import (
 )
 
 logger = logging.getLogger(__name__)
-
-WINDOWS_SYSTEM_DIRS = {"Default", "Default User", "Public", "All Users", "TEMP"}
 
 
 class WindowsCursorCliSettingsExtractor:
@@ -93,7 +91,7 @@ class WindowsCursorCliSettingsExtractor:
                 for user_dir in users_dir.iterdir():
                     if (user_dir.is_dir()
                         and not user_dir.name.startswith(".")
-                        and user_dir.name not in WINDOWS_SYSTEM_DIRS):
+                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
                         try:
                             extract_for_user(user_dir)
                         except (PermissionError, OSError) as e:
@@ -118,7 +116,7 @@ class WindowsCursorCliSettingsExtractor:
             users_dir = Path("C:\\Users")
             if users_dir.exists():
                 for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and user_dir.name not in WINDOWS_SYSTEM_DIRS:
+                    if user_dir.is_dir() and user_dir.name not in WINDOWS_SKIP_USER_DIRS:
                         global_cursor = user_dir / self.CURSOR_DIR_NAME
                         if global_cursor.exists():
                             global_cursor_dirs.add(global_cursor)
@@ -151,7 +149,7 @@ class WindowsCursorCliSettingsExtractor:
                 for user_dir in users_dir.iterdir():
                     if (user_dir.is_dir()
                         and not user_dir.name.startswith(".")
-                        and user_dir.name not in WINDOWS_SYSTEM_DIRS):
+                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
                         roots.append(user_dir)
         else:
             roots.append(Path.home())

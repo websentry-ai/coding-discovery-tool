@@ -4,11 +4,10 @@ import logging
 from pathlib import Path
 
 from ...coding_tool_base import BaseCursorSettingsExtractor
+from ...constants import WINDOWS_SKIP_USER_DIRS
 from ...windows_extraction_helpers import is_running_as_admin
 
 logger = logging.getLogger(__name__)
-
-WINDOWS_SYSTEM_DIRS = {"Default", "Default User", "Public", "All Users", "TEMP"}
 
 
 class WindowsCursorSettingsExtractor(BaseCursorSettingsExtractor):
@@ -36,7 +35,7 @@ class WindowsCursorSettingsExtractor(BaseCursorSettingsExtractor):
                 for user_dir in users_dir.iterdir():
                     if (user_dir.is_dir()
                         and not user_dir.name.startswith(".")
-                        and user_dir.name not in WINDOWS_SYSTEM_DIRS):
+                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
                         try:
                             callback(user_dir)
                         except (PermissionError, OSError) as e:

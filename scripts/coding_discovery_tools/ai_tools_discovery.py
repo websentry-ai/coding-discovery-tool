@@ -869,8 +869,8 @@ class AIToolsDetector:
                             for username in get_all_users_macos():
                                 user_homes.add(str(Path("/Users") / username))
                         elif self.system == "Windows":
+                            win_users_dir = Path(Path.home().anchor) / "Users"
                             for username in get_all_users_windows():
-                                win_users_dir = Path(Path.home().anchor) / "Users"
                                 user_homes.add(str(win_users_dir / username))
                     if not user_homes:
                         user_homes.add(str(Path.home()))
@@ -1544,7 +1544,7 @@ def main():
         else:
             all_users = []
 
-        # If no users found or not macOS, fall back to current user behavior
+        # If no users found, fall back to current user
         if not all_users:
             all_users = [get_user_info()]
 
@@ -1575,7 +1575,12 @@ def main():
         tools_by_user = {}  # Track which tools belong to which user
 
         for user in all_users:
-            user_home = Path(f"/Users/{user}") if platform.system() == "Darwin" else Path.home()
+            if platform.system() == "Darwin":
+                user_home = Path(f"/Users/{user}")
+            elif platform.system() == "Windows":
+                user_home = Path(Path.home().anchor) / "Users" / user
+            else:
+                user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             user_tools = detector.detect_all_tools(user_home=user_home)
 
@@ -1624,7 +1629,12 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
-                    user_home = Path(f"/Users/{user_name}") if platform.system() == "Darwin" else Path.home()
+                    if platform.system() == "Darwin":
+                        user_home = Path(f"/Users/{user_name}")
+                    elif platform.system() == "Windows":
+                        user_home = Path(Path.home().anchor) / "Users" / user_name
+                    else:
+                        user_home = Path.home()
 
                     try:
                         # Filter projects to only include this user's projects

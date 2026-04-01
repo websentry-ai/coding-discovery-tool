@@ -332,9 +332,9 @@ def add_skill_to_project(
     if project_root not in projects_by_root:
         projects_by_root[project_root] = []
 
-    # Remove project_root from skill since it's now at project level
-    skill_without_root = {k: v for k, v in skill_info.items() if k != 'project_root'}
-    projects_by_root[project_root].append(skill_without_root)
+    # Rename project_root to project_path on the output object
+    skill_for_project = {('project_path' if k == 'project_root' else k): v for k, v in skill_info.items()}
+    projects_by_root[project_root].append(skill_for_project)
 
 
 def is_user_level_skills_dir(skills_dir: Path, users_root_path: str = None) -> bool:

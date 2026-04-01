@@ -31,9 +31,9 @@ def add_rule_to_project(
     if project_root not in projects_by_root:
         projects_by_root[project_root] = []
 
-    # Remove project_root from rule since it's now at project level
-    rule_without_root = {k: v for k, v in rule_info.items() if k != 'project_root'}
-    projects_by_root[project_root].append(rule_without_root)
+    # Rename project_root to project_path on the output object
+    rule_for_project = {('project_path' if k == 'project_root' else k): v for k, v in rule_info.items()}
+    projects_by_root[project_root].append(rule_for_project)
 
 
 def build_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Dict]:

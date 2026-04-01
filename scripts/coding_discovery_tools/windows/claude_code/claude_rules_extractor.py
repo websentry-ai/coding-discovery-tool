@@ -96,7 +96,7 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                 self.MANAGED_RULES_PATH, find_project_root, scope="managed"
             )
             if rule_info:
-                rule_info.pop('project_root', None)
+                rule_info["project_path"] = rule_info.pop("project_root", None)
                 managed_rules.append(rule_info)
         except Exception as e:
             logger.debug(f"Error extracting managed rules: {e}")

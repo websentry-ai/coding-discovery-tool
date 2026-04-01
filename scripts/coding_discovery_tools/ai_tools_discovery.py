@@ -53,7 +53,7 @@ try:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -97,7 +97,7 @@ except ImportError:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -869,18 +869,9 @@ class AIToolsDetector:
                             for username in get_all_users_macos():
                                 user_homes.add(str(Path("/Users") / username))
                         elif self.system == "Windows":
-                            win_users = Path(Path.home().anchor) / "Users"
-                            if win_users.exists():
-                                try:
-                                    for user_dir in win_users.iterdir():
-                                        if (user_dir.is_dir()
-                                                and not user_dir.name.startswith('.')
-                                                and user_dir.name not in (
-                                                    "Public", "Default", "Default User",
-                                                    "All Users")):
-                                            user_homes.add(str(user_dir))
-                                except (PermissionError, OSError):
-                                    pass
+                            win_users_dir = Path(Path.home().anchor) / "Users"
+                            for username in get_all_users_windows():
+                                user_homes.add(str(win_users_dir / username))
                     if not user_homes:
                         user_homes.add(str(Path.home()))
                     for user_home in user_homes:
@@ -1545,10 +1536,15 @@ def main():
                     logger.warning("  ✗ Queued report discarded (non-retryable error)")
             logger.info("")
 
-        # Get all users for macOS, or use current user for other platforms
-        all_users = get_all_users_macos() if platform.system() == "Darwin" else []
+        # Get all users for macOS/Windows, or use current user for other platforms
+        if platform.system() == "Darwin":
+            all_users = get_all_users_macos()
+        elif platform.system() == "Windows":
+            all_users = get_all_users_windows()
+        else:
+            all_users = []
 
-        # If no users found or not macOS, fall back to current user behavior
+        # If no users found, fall back to current user
         if not all_users:
             all_users = [get_user_info()]
 
@@ -1579,7 +1575,12 @@ def main():
         tools_by_user = {}  # Track which tools belong to which user
 
         for user in all_users:
-            user_home = Path(f"/Users/{user}") if platform.system() == "Darwin" else Path.home()
+            if platform.system() == "Darwin":
+                user_home = Path(f"/Users/{user}")
+            elif platform.system() == "Windows":
+                user_home = Path(Path.home().anchor) / "Users" / user
+            else:
+                user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             user_tools = detector.detect_all_tools(user_home=user_home)
 
@@ -1628,7 +1629,12 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
-                    user_home = Path(f"/Users/{user_name}") if platform.system() == "Darwin" else Path.home()
+                    if platform.system() == "Darwin":
+                        user_home = Path(f"/Users/{user_name}")
+                    elif platform.system() == "Windows":
+                        user_home = Path(Path.home().anchor) / "Users" / user_name
+                    else:
+                        user_home = Path.home()
 
                     try:
                         # Filter projects to only include this user's projects

@@ -16,14 +16,14 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 try:
     import pwd
 except ImportError:
     pwd = None  # Not available on Windows
 
-from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, VERSION_TIMEOUT
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -101,30 +101,162 @@ def get_hostname() -> str:
     return platform.node()
 
 
+class DsclBatchData(NamedTuple):
+    uid_map: Dict[str, int]
+    shell_map: Dict[str, str]
+    hidden_set: FrozenSet[str]
+
+
+def _parse_dscl_list_output(output: Optional[str]) -> Dict[str, str]:
+    """Parse ``dscl . -list`` output into {username: value}."""
+    if not output:
+        return {}
+    result: Dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            result[parts[0]] = parts[-1]
+    return result
+
+
+def _fetch_dscl_batch_data() -> DsclBatchData:
+    """Fetch UID, shell, and IsHidden data for all users in 3 bulk dscl calls.
+
+    Each query is independently try/excepted — a single failure yields
+    an empty map for that attribute while the others remain populated.
+    """
+    uid_map: Dict[str, int] = {}
+    shell_map: Dict[str, str] = {}
+    hidden_set: FrozenSet[str] = frozenset()
+
+    try:
+        raw = run_command(["dscl", ".", "-list", "/Users", "UniqueID"], timeout=DSCL_TIMEOUT)
+        for name, val in _parse_dscl_list_output(raw).items():
+            try:
+                uid_map[name] = int(val)
+            except ValueError:
+                pass
+    except Exception as exc:
+        logger.debug(f"Batch dscl UniqueID query failed: {exc}")
+
+    try:
+        raw = run_command(["dscl", ".", "-list", "/Users", "UserShell"], timeout=DSCL_TIMEOUT)
+        shell_map = _parse_dscl_list_output(raw)
+    except Exception as exc:
+        logger.debug(f"Batch dscl UserShell query failed: {exc}")
+
+    try:
+        raw = run_command(["dscl", ".", "-list", "/Users", "IsHidden"], timeout=DSCL_TIMEOUT)
+        hidden_set = frozenset(
+            name for name, val in _parse_dscl_list_output(raw).items() if val == "1"
+        )
+    except Exception as exc:
+        logger.debug(f"Batch dscl IsHidden query failed: {exc}")
+
+    return DsclBatchData(uid_map=uid_map, shell_map=shell_map, hidden_set=hidden_set)
+
+
+def _is_human_user_macos(username: str, batch_data: DsclBatchData) -> bool:
+    """Check if a macOS username is a real human user using batch dscl data.
+
+    Empty maps (from failed batch queries) cause that check to pass through.
+    """
+    try:
+        if batch_data.uid_map and username not in batch_data.uid_map:
+            logger.debug(f"Filtering user '{username}': not in uid_map")
+            return False
+    except Exception as exc:
+        logger.debug(f"uid_map lookup failed for '{username}': {exc}")
+
+    try:
+        uid = batch_data.uid_map.get(username)
+        if uid is not None and uid < MACOS_MIN_HUMAN_UID:
+            logger.debug(f"Filtering user '{username}': UID {uid} < {MACOS_MIN_HUMAN_UID}")
+            return False
+    except Exception as exc:
+        logger.debug(f"UID check failed for '{username}': {exc}")
+
+    try:
+        shell = batch_data.shell_map.get(username)
+        if shell in NON_INTERACTIVE_SHELLS:
+            logger.debug(f"Filtering user '{username}': non-interactive shell {shell}")
+            return False
+    except Exception as exc:
+        logger.debug(f"Shell check failed for '{username}': {exc}")
+
+    try:
+        if username in batch_data.hidden_set:
+            logger.debug(f"Filtering user '{username}': hidden")
+            return False
+    except Exception as exc:
+        logger.debug(f"Hidden check failed for '{username}': {exc}")
+
+    return True
+
+
 def get_all_users_macos() -> List[str]:
     """
     Get all user directories from /Users on macOS.
-    
+
+    Filters out hidden directories, directories in MACOS_SKIP_USER_DIRS,
+    and accounts that fail the _is_human_user_macos checks (service
+    accounts, MDM profiles, etc.).
+
     Returns:
         List of usernames (directory names in /Users)
     """
     users = []
     if platform.system() != "Darwin":
         return users
-    
+
     users_dir = Path("/Users")
     if not users_dir.exists():
         return users
-    
+
+    batch_data = _fetch_dscl_batch_data()
+
     try:
         for user_dir in users_dir.iterdir():
-            # Skip hidden directories and Shared directory
-            if user_dir.is_dir() and not user_dir.name.startswith('.') and user_dir.name != "Shared":
+            if (user_dir.is_dir()
+                    and not user_dir.name.startswith('.')
+                    and user_dir.name not in MACOS_SKIP_USER_DIRS
+                    and _is_human_user_macos(user_dir.name, batch_data=batch_data)):
                 users.append(user_dir.name)
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from /Users: {e}")
-    
+
     return users
+
+
+def get_all_users_windows() -> List[str]:
+    """
+    Get all user directory names from C:\\Users on Windows.
+
+    Filters out hidden directories and well-known system/service
+    directories listed in WINDOWS_SKIP_USER_DIRS.
+
+    Returns:
+        List of usernames (directory names under C:\\Users), or an
+        empty list if not running on Windows or the path does not exist.
+    """
+    if platform.system() != "Windows":
+        return []
+
+    try:
+        win_users_dir = Path(Path.home().anchor) / "Users"
+        if not win_users_dir.exists():
+            return []
+
+        users = []
+        for user_dir in win_users_dir.iterdir():
+            if (user_dir.is_dir()
+                    and not user_dir.name.startswith('.')
+                    and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
+                users.append(user_dir.name)
+        return users
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Could not list users from Windows Users directory: {e}")
+        return []
 
 
 def get_user_info() -> str:

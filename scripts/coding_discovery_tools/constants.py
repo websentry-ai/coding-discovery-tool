@@ -48,3 +48,15 @@ SKIP_SYSTEM_DIRS = {
 CURSOR_DB_TIMEOUT = 5  # seconds
 CURSOR_PLAN_KEY = "cursorAuth/stripeMembershipType"
 
+# User filtering constants
+MACOS_MIN_HUMAN_UID = 500
+MACOS_SKIP_USER_DIRS = frozenset({"Shared"})
+NON_INTERACTIVE_SHELLS = frozenset({
+    "/usr/bin/false", "/usr/sbin/nologin", "/dev/null",
+    "/bin/false", "/sbin/nologin",
+})
+DSCL_TIMEOUT = 5
+WINDOWS_SKIP_USER_DIRS = frozenset({
+    "Public", "Default", "Default User", "All Users", "TEMP",
+})
+

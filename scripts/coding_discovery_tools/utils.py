@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
@@ -996,6 +997,8 @@ _SENTRY_DSN = os.environ.get(
 )
 _SENTRY_ENV = os.environ.get("AI_DISCOVERY_SENTRY_ENV", "production")
 
+_SENTRY_CRON_MONITOR_SLUG = "ai-tools-discovery"
+
 
 def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
     """Parse a Sentry DSN into its components."""
@@ -1010,7 +1013,9 @@ def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
             "key": key,
             "host": host,
             "project_id": project_id,
+            "full_dsn": dsn,
             "store_url": f"{scheme}://{host}/api/{project_id}/store/",
+            "envelope_url": f"{scheme}://{host}/api/{project_id}/envelope/",
         }
     except Exception:
         return None
@@ -1114,3 +1119,93 @@ def _extract_frames(exception: Exception) -> List[Dict]:
         }
         for frame in traceback.extract_tb(exception.__traceback__)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Sentry Cron monitoring via raw HTTP envelope (no SDK dependency)
+# ---------------------------------------------------------------------------
+
+def sentry_cron_checkin(
+    check_in_id: str,
+    status: str,
+    duration_s: Optional[float] = None,
+) -> None:
+    """Send a cron check-in to the pre-created Sentry cron monitor.
+
+    Uses the envelope endpoint with a ``check_in`` item.  No
+    ``monitor_config`` is sent — the monitor must already exist in Sentry
+    so we never accidentally overwrite its schedule/threshold settings.
+
+    Args:
+        check_in_id: UUID string tying the in_progress and ok/error pair.
+        status: ``"in_progress"``, ``"ok"``, or ``"error"``.
+        duration_s: Execution duration in **seconds** (only for ok/error).
+    """
+    try:
+        dsn = _parse_sentry_dsn(_SENTRY_DSN)
+        if not dsn:
+            logger.debug("Sentry cron check-in skipped (no valid DSN)")
+            return
+
+        checkin_payload: Dict[str, Any] = {
+            "check_in_id": check_in_id,
+            "monitor_slug": _SENTRY_CRON_MONITOR_SLUG,
+            "status": status,
+            "environment": _SENTRY_ENV,
+        }
+        if duration_s is not None:
+            checkin_payload["duration"] = round(duration_s, 2)
+
+        payload_bytes = json.dumps(checkin_payload).encode("utf-8")
+
+        envelope_header = json.dumps({
+            "event_id": check_in_id,
+            "dsn": dsn["full_dsn"],
+            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
+        })
+        item_header = json.dumps({
+            "type": "check_in",
+            "length": len(payload_bytes),
+        })
+        envelope = f"{envelope_header}\n{item_header}\n".encode("utf-8") + payload_bytes
+
+        sentry_auth = (
+            f"Sentry sentry_version=7, "
+            f"sentry_key={dsn['key']}, "
+            f"sentry_client=ai-tools-discovery/1.0.0"
+        )
+
+        fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-cron-", suffix=".bin")
+        try:
+            try:
+                os.write(fd, envelope)
+            finally:
+                os.close(fd)
+            subprocess.run(
+                [
+                    "curl", "-s", "-o", "/dev/null",
+                    "-w", "%{http_code}",
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-sentry-envelope",
+                    "-H", f"X-Sentry-Auth: {sentry_auth}",
+                    "--data-binary", f"@{tmp_path}",
+                    "--max-time", "5",
+                    dsn["envelope_url"],
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    except Exception as cron_err:
+        # Cron check-in failures must never crash the discovery script
+        logger.debug(f"Sentry cron check-in failed: {cron_err}")
+
+
+def generate_cron_checkin_id() -> str:
+    """Return a new UUID suitable for use as a Sentry cron check-in ID."""
+    return str(uuid.uuid4())

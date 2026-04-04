@@ -15,14 +15,16 @@ from scripts.coding_discovery_tools.claude_code_skills_helpers import (
     is_skill_md_file,
     is_command_md_file,
     build_skills_project_list,
-    find_skill_project_root,
-    find_command_project_root,
-    extract_skill_info,
-    extract_command_info,
-    extract_commands_from_directory,
-    extract_skills_from_directory,
+    find_item_project_root,
+    extract_item_info,
+    extract_items_from_directory,
     add_skill_to_project,
-    is_user_level_skills_dir,
+    is_user_level_claude_subdir,
+    ItemTypeConfig,
+    SKILL_CONFIG,
+    COMMAND_CONFIG,
+    AGENT_CONFIG,
+    CLAUDE_ITEM_CONFIGS,
 )
 from scripts.coding_discovery_tools.macos_extraction_helpers import (
     extract_single_rule_file,
@@ -78,30 +80,30 @@ class TestBuildSkillsProjectList(unittest.TestCase):
 
 
 class TestFindSkillProjectRoot(unittest.TestCase):
-    """Tests for find_skill_project_root function."""
+    """Tests for find_item_project_root with SKILL_CONFIG."""
 
     def test_standard_project_structure(self):
         # /Users/test/myproject/.claude/skills/commit/SKILL.md
         skill_file = Path("/Users/test/myproject/.claude/skills/commit/SKILL.md")
-        result = find_skill_project_root(skill_file)
+        result = find_item_project_root(skill_file, SKILL_CONFIG)
         self.assertEqual(result, Path("/Users/test/myproject"))
 
     def test_user_level_skill(self):
         # /Users/test/.claude/skills/global-skill/SKILL.md
         skill_file = Path("/Users/test/.claude/skills/global-skill/SKILL.md")
-        result = find_skill_project_root(skill_file)
+        result = find_item_project_root(skill_file, SKILL_CONFIG)
         self.assertEqual(result, Path("/Users/test"))
 
     def test_nested_project(self):
         # /Users/test/work/repos/myproject/.claude/skills/deploy/SKILL.md
         skill_file = Path("/Users/test/work/repos/myproject/.claude/skills/deploy/SKILL.md")
-        result = find_skill_project_root(skill_file)
+        result = find_item_project_root(skill_file, SKILL_CONFIG)
         self.assertEqual(result, Path("/Users/test/work/repos/myproject"))
 
     def test_windows_style_path(self):
         # Test with Windows-style path (works on any OS since Path normalizes)
         skill_file = Path("C:/Users/test/project/.claude/skills/commit/SKILL.md")
-        result = find_skill_project_root(skill_file)
+        result = find_item_project_root(skill_file, SKILL_CONFIG)
         expected = Path("C:/Users/test/project")
         self.assertEqual(result, expected)
 
@@ -148,7 +150,7 @@ class TestAddSkillToProject(unittest.TestCase):
 
 
 class TestIsUserLevelSkillsDir(unittest.TestCase):
-    """Tests for is_user_level_skills_dir function."""
+    """Tests for is_user_level_claude_subdir (formerly is_user_level_skills_dir)."""
 
     @patch('scripts.coding_discovery_tools.claude_code_skills_helpers.Path.home')
     def test_current_user_home(self, mock_home):
@@ -156,7 +158,7 @@ class TestIsUserLevelSkillsDir(unittest.TestCase):
 
         # User-level: /Users/testuser/.claude/skills
         skills_dir = Path("/Users/testuser/.claude/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir))
 
     @patch('scripts.coding_discovery_tools.claude_code_skills_helpers.Path.home')
     def test_project_level(self, mock_home):
@@ -164,30 +166,30 @@ class TestIsUserLevelSkillsDir(unittest.TestCase):
 
         # Project-level: /Users/testuser/projects/myapp/.claude/skills
         skills_dir = Path("/Users/testuser/projects/myapp/.claude/skills")
-        self.assertFalse(is_user_level_skills_dir(skills_dir))
+        self.assertFalse(is_user_level_claude_subdir(skills_dir))
 
     def test_with_explicit_users_root(self):
         # Test macOS-style path
         skills_dir = Path("/Users/john/.claude/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir, "/Users"))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir, "/Users"))
 
         # Test project-level
         skills_dir = Path("/Users/john/project/.claude/skills")
-        self.assertFalse(is_user_level_skills_dir(skills_dir, "/Users"))
+        self.assertFalse(is_user_level_claude_subdir(skills_dir, "/Users"))
 
     def test_with_windows_users_root(self):
         # Test Windows-style user path
         skills_dir = Path("C:/Users/john/.claude/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir, "C:/Users"))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir, "C:/Users"))
 
         # Test project-level
         skills_dir = Path("C:/Users/john/projects/app/.claude/skills")
-        self.assertFalse(is_user_level_skills_dir(skills_dir, "C:/Users"))
+        self.assertFalse(is_user_level_claude_subdir(skills_dir, "C:/Users"))
 
     def test_alternate_drive(self):
         # Test with D: drive
         skills_dir = Path("D:/Users/john/.claude/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir, "D:/Users"))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir, "D:/Users"))
 
 
 class TestSkillsExtractionIntegration(unittest.TestCase):
@@ -223,7 +225,7 @@ class TestSkillsExtractionIntegration(unittest.TestCase):
         self.assertTrue(is_skill_md_file(skill_file.name))
 
         # Verify project root detection
-        project_root = find_skill_project_root(skill_file)
+        project_root = find_item_project_root(skill_file, SKILL_CONFIG)
         self.assertEqual(project_root, project_path)
 
     def test_multiple_skills_in_project(self):
@@ -325,26 +327,26 @@ class TestIsCommandMdFile(unittest.TestCase):
 
 
 class TestFindCommandProjectRoot(unittest.TestCase):
-    """Tests for find_command_project_root function."""
+    """Tests for find_item_project_root with COMMAND_CONFIG."""
 
     def test_standard_project(self):
         command_file = Path("/Users/test/myproject/.claude/commands/deploy.md")
-        result = find_command_project_root(command_file)
+        result = find_item_project_root(command_file, COMMAND_CONFIG)
         self.assertEqual(result, Path("/Users/test/myproject"))
 
     def test_user_level_command(self):
         command_file = Path("/Users/test/.claude/commands/cmd.md")
-        result = find_command_project_root(command_file)
+        result = find_item_project_root(command_file, COMMAND_CONFIG)
         self.assertEqual(result, Path("/Users/test"))
 
     def test_nested_project_path(self):
         command_file = Path("/Users/test/work/repos/myproject/.claude/commands/deploy.md")
-        result = find_command_project_root(command_file)
+        result = find_item_project_root(command_file, COMMAND_CONFIG)
         self.assertEqual(result, Path("/Users/test/work/repos/myproject"))
 
     def test_windows_style_path(self):
         command_file = Path("C:/Users/test/project/.claude/commands/deploy.md")
-        result = find_command_project_root(command_file)
+        result = find_item_project_root(command_file, COMMAND_CONFIG)
         self.assertEqual(result, Path("C:/Users/test/project"))
 
 
@@ -377,7 +379,7 @@ class TestCommandsExtractionIntegration(unittest.TestCase):
         self.assertTrue(command_file.exists())
         self.assertTrue(is_command_md_file(command_file.name))
 
-        project_root = find_command_project_root(command_file)
+        project_root = find_item_project_root(command_file, COMMAND_CONFIG)
         self.assertEqual(project_root, project_path)
 
     def test_multiple_commands_in_project(self):
@@ -526,7 +528,7 @@ class TestCommandThreadSafety(unittest.TestCase):
 
 
 class TestExtractCommandInfo(unittest.TestCase):
-    """Tests for extract_command_info output fields."""
+    """Tests for extract_item_info output fields (commands)."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -546,14 +548,14 @@ class TestExtractCommandInfo(unittest.TestCase):
     def test_type_is_command(self):
         """extract_command_info must set type to 'command'."""
         cmd_file = self._create_command(self.temp_path / "proj", "deploy")
-        result = extract_command_info(cmd_file, extract_single_rule_file, scope="project")
+        result = extract_item_info(cmd_file, extract_single_rule_file, "project", COMMAND_CONFIG)
         self.assertIsNotNone(result)
         self.assertEqual(result["type"], "command")
 
     def test_skill_name_from_stem(self):
         """skill_name must be the filename stem, not the full filename."""
         cmd_file = self._create_command(self.temp_path / "proj", "review-pr", "# Review PR")
-        result = extract_command_info(cmd_file, extract_single_rule_file, scope="project")
+        result = extract_item_info(cmd_file, extract_single_rule_file, "project", COMMAND_CONFIG)
         self.assertEqual(result["skill_name"], "review-pr")
         self.assertEqual(result["file_name"], "review-pr.md")
 
@@ -561,31 +563,31 @@ class TestExtractCommandInfo(unittest.TestCase):
         """project_root must point to the directory containing .claude."""
         project = self.temp_path / "myproject"
         cmd_file = self._create_command(project, "build")
-        result = extract_command_info(cmd_file, extract_single_rule_file, scope="project")
+        result = extract_item_info(cmd_file, extract_single_rule_file, "project", COMMAND_CONFIG)
         self.assertEqual(result["project_root"], str(project))
 
     def test_content_preserved(self):
         """File content must be included in the result."""
         cmd_file = self._create_command(self.temp_path / "proj", "lint", "# Lint\nRun the linter")
-        result = extract_command_info(cmd_file, extract_single_rule_file, scope="project")
+        result = extract_item_info(cmd_file, extract_single_rule_file, "project", COMMAND_CONFIG)
         self.assertIn("Lint", result["content"])
         self.assertIn("Run the linter", result["content"])
 
     def test_scope_passed_through(self):
         """Scope argument must be reflected in the result."""
         cmd_file = self._create_command(self.temp_path / "proj", "cmd")
-        result = extract_command_info(cmd_file, extract_single_rule_file, scope="user")
+        result = extract_item_info(cmd_file, extract_single_rule_file, "user", COMMAND_CONFIG)
         self.assertEqual(result["scope"], "user")
 
     def test_nonexistent_file_returns_none(self):
         """Non-existent command file must return None."""
         fake = self.temp_path / ".claude" / "commands" / "ghost.md"
-        result = extract_command_info(fake, extract_single_rule_file, scope="project")
+        result = extract_item_info(fake, extract_single_rule_file, "project", COMMAND_CONFIG)
         self.assertIsNone(result)
 
 
 class TestExtractSkillInfoFields(unittest.TestCase):
-    """Tests for extract_skill_info output fields (parity with command tests)."""
+    """Tests for extract_item_info output fields (skills)."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -602,7 +604,7 @@ class TestExtractSkillInfoFields(unittest.TestCase):
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text("# Deploy")
 
-        result = extract_skill_info(skill_file, extract_single_rule_file, scope="project")
+        result = extract_item_info(skill_file, extract_single_rule_file, "project", SKILL_CONFIG)
         self.assertIsNotNone(result)
         self.assertEqual(result["type"], "skill")
 
@@ -613,13 +615,13 @@ class TestExtractSkillInfoFields(unittest.TestCase):
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text("# Tool")
 
-        result = extract_skill_info(skill_file, extract_single_rule_file, scope="project")
+        result = extract_item_info(skill_file, extract_single_rule_file, "project", SKILL_CONFIG)
         self.assertEqual(result["skill_name"], "my-tool")
         self.assertEqual(result["file_name"], "SKILL.md")
 
 
 class TestExtractCommandsFromDirectory(unittest.TestCase):
-    """Tests for extract_commands_from_directory populating projects_by_root."""
+    """Tests for extract_items_from_directory populating projects_by_root (commands)."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -638,8 +640,8 @@ class TestExtractCommandsFromDirectory(unittest.TestCase):
         (commands_dir / "test.md").write_text("# Test")
 
         projects_by_root = {}
-        extract_commands_from_directory(
-            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project
+        extract_items_from_directory(
+            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, COMMAND_CONFIG
         )
 
         self.assertEqual(len(projects_by_root), 1)
@@ -663,8 +665,8 @@ class TestExtractCommandsFromDirectory(unittest.TestCase):
         (commands_dir / "notes.txt").write_text("notes")
 
         projects_by_root = {}
-        extract_commands_from_directory(
-            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project
+        extract_items_from_directory(
+            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, COMMAND_CONFIG
         )
 
         commands = projects_by_root[str(project)]
@@ -682,8 +684,8 @@ class TestExtractCommandsFromDirectory(unittest.TestCase):
         (nested / "nested.md").write_text("# Nested")
 
         projects_by_root = {}
-        extract_commands_from_directory(
-            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project
+        extract_items_from_directory(
+            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, COMMAND_CONFIG
         )
 
         commands = projects_by_root[str(project)]
@@ -697,37 +699,37 @@ class TestExtractCommandsFromDirectory(unittest.TestCase):
         commands_dir.mkdir(parents=True)
 
         projects_by_root = {}
-        extract_commands_from_directory(
-            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project
+        extract_items_from_directory(
+            commands_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, COMMAND_CONFIG
         )
 
         self.assertEqual(len(projects_by_root), 0)
 
 
 class TestIsUserLevelWithCommandsDir(unittest.TestCase):
-    """Tests that is_user_level_skills_dir works correctly for commands directories."""
+    """Tests is_user_level_claude_subdir works correctly for commands directories."""
 
     def test_user_level_commands_dir(self):
         commands_dir = Path("/Users/john/.claude/commands")
-        self.assertTrue(is_user_level_skills_dir(commands_dir, "/Users"))
+        self.assertTrue(is_user_level_claude_subdir(commands_dir, "/Users"))
 
     def test_project_level_commands_dir(self):
         commands_dir = Path("/Users/john/project/.claude/commands")
-        self.assertFalse(is_user_level_skills_dir(commands_dir, "/Users"))
+        self.assertFalse(is_user_level_claude_subdir(commands_dir, "/Users"))
 
     @patch('scripts.coding_discovery_tools.claude_code_skills_helpers.Path.home')
     def test_user_level_commands_via_home(self, mock_home):
         mock_home.return_value = Path("/Users/testuser")
         commands_dir = Path("/Users/testuser/.claude/commands")
-        self.assertTrue(is_user_level_skills_dir(commands_dir))
+        self.assertTrue(is_user_level_claude_subdir(commands_dir))
 
     def test_windows_user_level_commands(self):
         commands_dir = Path("C:/Users/john/.claude/commands")
-        self.assertTrue(is_user_level_skills_dir(commands_dir, "C:/Users"))
+        self.assertTrue(is_user_level_claude_subdir(commands_dir, "C:/Users"))
 
     def test_windows_project_level_commands(self):
         commands_dir = Path("C:/Users/john/repos/app/.claude/commands")
-        self.assertFalse(is_user_level_skills_dir(commands_dir, "C:/Users"))
+        self.assertFalse(is_user_level_claude_subdir(commands_dir, "C:/Users"))
 
 
 class TestMacOSExtractorEndToEnd(unittest.TestCase):
@@ -851,6 +853,341 @@ class TestMacOSExtractorEndToEnd(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["type"], "command")
         self.assertEqual(items[0]["skill_name"], "deploy")
+
+
+class TestItemTypeConfigIntegrity(unittest.TestCase):
+    """Tests that ItemTypeConfig instances are well-formed and consistent."""
+
+    def test_all_configs_present(self):
+        self.assertEqual(len(CLAUDE_ITEM_CONFIGS), 3)
+
+    def test_skill_config(self):
+        self.assertEqual(SKILL_CONFIG.type_name, "skill")
+        self.assertEqual(SKILL_CONFIG.dir_name, "skills")
+        self.assertEqual(SKILL_CONFIG.layout, "nested")
+
+    def test_command_config(self):
+        self.assertEqual(COMMAND_CONFIG.type_name, "command")
+        self.assertEqual(COMMAND_CONFIG.dir_name, "commands")
+        self.assertEqual(COMMAND_CONFIG.layout, "flat")
+
+    def test_agent_config(self):
+        self.assertEqual(AGENT_CONFIG.type_name, "agent")
+        self.assertEqual(AGENT_CONFIG.dir_name, "agents")
+        self.assertEqual(AGENT_CONFIG.layout, "flat")
+
+    def test_unique_type_names(self):
+        names = [c.type_name for c in CLAUDE_ITEM_CONFIGS]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_unique_dir_names(self):
+        dirs = [c.dir_name for c in CLAUDE_ITEM_CONFIGS]
+        self.assertEqual(len(dirs), len(set(dirs)))
+
+    def test_all_configs_have_callables(self):
+        for config in CLAUDE_ITEM_CONFIGS:
+            self.assertTrue(callable(config.file_filter))
+            self.assertTrue(callable(config.name_extractor))
+
+
+class TestFindItemProjectRootAgent(unittest.TestCase):
+    """Tests for find_item_project_root with AGENT_CONFIG."""
+
+    def test_standard_project(self):
+        agent_file = Path("/Users/test/myproject/.claude/agents/reviewer.md")
+        result = find_item_project_root(agent_file, AGENT_CONFIG)
+        self.assertEqual(result, Path("/Users/test/myproject"))
+
+    def test_user_level_agent(self):
+        agent_file = Path("/Users/test/.claude/agents/helper.md")
+        result = find_item_project_root(agent_file, AGENT_CONFIG)
+        self.assertEqual(result, Path("/Users/test"))
+
+    def test_nested_project(self):
+        agent_file = Path("/Users/test/work/repos/app/.claude/agents/ci.md")
+        result = find_item_project_root(agent_file, AGENT_CONFIG)
+        self.assertEqual(result, Path("/Users/test/work/repos/app"))
+
+    def test_windows_style_path(self):
+        agent_file = Path("C:/Users/test/project/.claude/agents/deploy.md")
+        result = find_item_project_root(agent_file, AGENT_CONFIG)
+        self.assertEqual(result, Path("C:/Users/test/project"))
+
+
+class TestExtractAgentInfo(unittest.TestCase):
+    """Tests for extract_item_info output fields (agents)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.temp_path = Path(self.temp_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_agent(self, base_path: Path, name: str, content: str = "# Test"):
+        agents_dir = base_path / ".claude" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        agent_file = agents_dir / f"{name}.md"
+        agent_file.write_text(content)
+        return agent_file
+
+    def test_type_is_agent(self):
+        agent_file = self._create_agent(self.temp_path / "proj", "reviewer")
+        result = extract_item_info(agent_file, extract_single_rule_file, "project", AGENT_CONFIG)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["type"], "agent")
+
+    def test_skill_name_from_stem(self):
+        agent_file = self._create_agent(self.temp_path / "proj", "code-reviewer", "# Review")
+        result = extract_item_info(agent_file, extract_single_rule_file, "project", AGENT_CONFIG)
+        self.assertEqual(result["skill_name"], "code-reviewer")
+        self.assertEqual(result["file_name"], "code-reviewer.md")
+
+    def test_project_root_detected(self):
+        project = self.temp_path / "myproject"
+        agent_file = self._create_agent(project, "deploy")
+        result = extract_item_info(agent_file, extract_single_rule_file, "project", AGENT_CONFIG)
+        self.assertEqual(result["project_root"], str(project))
+
+    def test_content_preserved(self):
+        agent_file = self._create_agent(self.temp_path / "proj", "lint", "# Lint\nRun the linter")
+        result = extract_item_info(agent_file, extract_single_rule_file, "project", AGENT_CONFIG)
+        self.assertIn("Lint", result["content"])
+        self.assertIn("Run the linter", result["content"])
+
+    def test_scope_passed_through(self):
+        agent_file = self._create_agent(self.temp_path / "proj", "agent")
+        result = extract_item_info(agent_file, extract_single_rule_file, "user", AGENT_CONFIG)
+        self.assertEqual(result["scope"], "user")
+
+    def test_nonexistent_file_returns_none(self):
+        fake = self.temp_path / ".claude" / "agents" / "ghost.md"
+        result = extract_item_info(fake, extract_single_rule_file, "project", AGENT_CONFIG)
+        self.assertIsNone(result)
+
+
+class TestExtractAgentsFromDirectory(unittest.TestCase):
+    """Tests for extract_items_from_directory populating projects_by_root (agents)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.temp_path = Path(self.temp_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_populates_projects_dict(self):
+        project = self.temp_path / "proj"
+        agents_dir = project / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "reviewer.md").write_text("# Reviewer")
+        (agents_dir / "deployer.md").write_text("# Deployer")
+
+        projects_by_root = {}
+        extract_items_from_directory(
+            agents_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, AGENT_CONFIG
+        )
+
+        self.assertEqual(len(projects_by_root), 1)
+        project_root = str(project)
+        self.assertIn(project_root, projects_by_root)
+        agents = projects_by_root[project_root]
+        self.assertEqual(len(agents), 2)
+        names = {a["skill_name"] for a in agents}
+        self.assertEqual(names, {"reviewer", "deployer"})
+        for agent in agents:
+            self.assertEqual(agent["type"], "agent")
+            self.assertNotIn("project_root", agent)
+
+    def test_empty_agents_dir(self):
+        project = self.temp_path / "proj"
+        agents_dir = project / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+
+        projects_by_root = {}
+        extract_items_from_directory(
+            agents_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, AGENT_CONFIG
+        )
+
+        self.assertEqual(len(projects_by_root), 0)
+
+    def test_ignores_non_md_and_hidden(self):
+        project = self.temp_path / "proj"
+        agents_dir = project / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "valid.md").write_text("# Valid")
+        (agents_dir / ".hidden.md").write_text("# Hidden")
+        (agents_dir / "notes.txt").write_text("notes")
+
+        projects_by_root = {}
+        extract_items_from_directory(
+            agents_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, AGENT_CONFIG
+        )
+
+        agents = projects_by_root[str(project)]
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["skill_name"], "valid")
+
+
+class TestFourthItemTypeExtensibility(unittest.TestCase):
+    """Prove that adding a 4th item type requires zero code changes to generic functions."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.temp_path = Path(self.temp_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_custom_flat_type(self):
+        """A custom flat config works with extract_items_from_directory."""
+        custom_config = ItemTypeConfig(
+            type_name="workflow",
+            dir_name="workflows",
+            layout="flat",
+            file_filter=is_command_md_file,
+            name_extractor=lambda f: f.stem,
+        )
+
+        project = self.temp_path / "proj"
+        workflows_dir = project / ".claude" / "workflows"
+        workflows_dir.mkdir(parents=True)
+        (workflows_dir / "ci.md").write_text("# CI Workflow")
+
+        projects_by_root = {}
+        extract_items_from_directory(
+            workflows_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, custom_config
+        )
+
+        self.assertEqual(len(projects_by_root), 1)
+        items = projects_by_root[str(project)]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "workflow")
+        self.assertEqual(items[0]["skill_name"], "ci")
+
+    def test_custom_nested_type(self):
+        """A custom nested config works with extract_items_from_directory."""
+        custom_config = ItemTypeConfig(
+            type_name="plugin",
+            dir_name="plugins",
+            layout="nested",
+            file_filter=is_skill_md_file,
+            name_extractor=lambda f: f.parent.name,
+        )
+
+        project = self.temp_path / "proj"
+        plugin_dir = project / ".claude" / "plugins" / "my-plugin"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "SKILL.md").write_text("# My Plugin")
+
+        projects_by_root = {}
+        extract_items_from_directory(
+            project / ".claude" / "plugins",
+            projects_by_root, extract_single_rule_file, add_skill_to_project, custom_config
+        )
+
+        self.assertEqual(len(projects_by_root), 1)
+        items = projects_by_root[str(project)]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "plugin")
+        self.assertEqual(items[0]["skill_name"], "my-plugin")
+
+
+class TestMacOSExtractorAgents(unittest.TestCase):
+    """End-to-end tests for macOS extractor with agents."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.temp_path = Path(self.temp_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.is_running_as_root')
+    @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.Path.home')
+    @patch('scripts.coding_discovery_tools.claude_code_skills_helpers.Path.home')
+    def test_user_level_agents(self, mock_helpers_home, mock_extractor_home, mock_root):
+        """Extractor must return user-level agents."""
+        from scripts.coding_discovery_tools.macos.claude_code.skills_extractor import MacOSClaudeSkillsExtractor
+
+        fake_home = self.temp_path / "fakehome"
+        fake_home.mkdir()
+        mock_helpers_home.return_value = fake_home
+        mock_extractor_home.return_value = fake_home
+        mock_root.return_value = False
+
+        # Create user-level agent
+        agents_dir = fake_home / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "reviewer.md").write_text("# Reviewer")
+
+        extractor = MacOSClaudeSkillsExtractor()
+        user_skills = []
+        extractor._extract_user_level_skills(user_skills)
+
+        self.assertEqual(len(user_skills), 1)
+        self.assertEqual(user_skills[0]["type"], "agent")
+        self.assertEqual(user_skills[0]["skill_name"], "reviewer")
+        self.assertNotIn("project_root", user_skills[0])
+
+    @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.is_running_as_root')
+    @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.Path.home')
+    @patch('scripts.coding_discovery_tools.claude_code_skills_helpers.Path.home')
+    def test_user_level_all_three_types(self, mock_helpers_home, mock_extractor_home, mock_root):
+        """Extractor must return skills, commands, and agents from user level."""
+        from scripts.coding_discovery_tools.macos.claude_code.skills_extractor import MacOSClaudeSkillsExtractor
+
+        fake_home = self.temp_path / "fakehome"
+        fake_home.mkdir()
+        mock_helpers_home.return_value = fake_home
+        mock_extractor_home.return_value = fake_home
+        mock_root.return_value = False
+
+        # Create one of each
+        skill_dir = fake_home / ".claude" / "skills" / "my-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# Skill")
+
+        commands_dir = fake_home / ".claude" / "commands"
+        commands_dir.mkdir(parents=True)
+        (commands_dir / "deploy.md").write_text("# Deploy")
+
+        agents_dir = fake_home / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "reviewer.md").write_text("# Reviewer")
+
+        extractor = MacOSClaudeSkillsExtractor()
+        user_skills = []
+        extractor._extract_user_level_skills(user_skills)
+
+        self.assertEqual(len(user_skills), 3)
+        types = {s["type"] for s in user_skills}
+        self.assertEqual(types, {"skill", "command", "agent"})
+
+    @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.should_skip_system_path', return_value=False)
+    @patch('scripts.coding_discovery_tools.macos.claude_code.skills_extractor.should_skip_path', return_value=False)
+    def test_walk_finds_project_agents(self, _mock_skip, _mock_sys_skip):
+        """_walk_for_skills must find agents in project .claude/agents/."""
+        from scripts.coding_discovery_tools.macos.claude_code.skills_extractor import MacOSClaudeSkillsExtractor
+
+        project = self.temp_path / "project"
+        agents_dir = project / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "ci.md").write_text("# CI Agent")
+
+        extractor = MacOSClaudeSkillsExtractor()
+        projects_by_root = {}
+        extractor._walk_for_skills(self.temp_path, self.temp_path, projects_by_root, current_depth=0)
+
+        self.assertIn(str(project), projects_by_root)
+        items = projects_by_root[str(project)]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "agent")
+        self.assertEqual(items[0]["skill_name"], "ci")
 
 
 if __name__ == "__main__":

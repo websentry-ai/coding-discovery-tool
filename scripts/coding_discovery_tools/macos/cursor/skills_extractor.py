@@ -36,7 +36,7 @@ from ...cursor_skills_helpers import (
 from ...claude_code_skills_helpers import (
     build_skills_project_list,
     add_skill_to_project,
-    is_user_level_skills_dir,
+    is_user_level_claude_subdir,
     is_command_md_file,
 )
 
@@ -185,7 +185,7 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
                         if item.name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME):
                             skills_dir = item / SKILLS_DIR_NAME
                             if skills_dir.exists() and skills_dir.is_dir():
-                                if not is_user_level_skills_dir(skills_dir):
+                                if not is_user_level_claude_subdir(skills_dir):
                                     extract_cursor_skills_from_directory(
                                         skills_dir,
                                         projects_by_root,
@@ -196,7 +196,7 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
                             # Also extract commands
                             commands_dir = item / COMMANDS_DIR_NAME
                             if commands_dir.exists() and commands_dir.is_dir():
-                                if not is_user_level_skills_dir(commands_dir):
+                                if not is_user_level_claude_subdir(commands_dir):
                                     extract_cursor_commands_from_directory(
                                         commands_dir,
                                         projects_by_root,

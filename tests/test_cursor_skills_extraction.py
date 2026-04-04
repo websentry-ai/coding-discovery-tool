@@ -24,7 +24,7 @@ from scripts.coding_discovery_tools.claude_code_skills_helpers import (
     is_command_md_file,
     build_skills_project_list,
     add_skill_to_project,
-    is_user_level_skills_dir,
+    is_user_level_claude_subdir,
 )
 from scripts.coding_discovery_tools.macos_extraction_helpers import (
     extract_single_rule_file,
@@ -442,25 +442,25 @@ class TestMacOSCursorSkillsExtractor(unittest.TestCase):
 
 
 class TestCursorSkillsUserLevel(unittest.TestCase):
-    """Tests for is_user_level_skills_dir with .cursor paths."""
+    """Tests for is_user_level_claude_subdir with .cursor paths."""
 
     def test_user_level_cursor_skills(self):
-        # is_user_level_skills_dir checks parent of parent (the dir containing .cursor/skills)
+        # is_user_level_claude_subdir checks parent of parent (the dir containing .cursor/skills)
         # For user level: /Users/john/.cursor/skills -> parent is .cursor, parent.parent is /Users/john
         skills_dir = Path("/Users/john/.cursor/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir, "/Users"))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir, "/Users"))
 
     def test_project_level_cursor_skills(self):
         skills_dir = Path("/Users/john/project/.cursor/skills")
-        self.assertFalse(is_user_level_skills_dir(skills_dir, "/Users"))
+        self.assertFalse(is_user_level_claude_subdir(skills_dir, "/Users"))
 
     def test_windows_user_level_cursor_skills(self):
         skills_dir = Path("C:/Users/john/.cursor/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir, "C:/Users"))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir, "C:/Users"))
 
     def test_windows_project_level_cursor_skills(self):
         skills_dir = Path("C:/Users/john/projects/app/.cursor/skills")
-        self.assertFalse(is_user_level_skills_dir(skills_dir, "C:/Users"))
+        self.assertFalse(is_user_level_claude_subdir(skills_dir, "C:/Users"))
 
 
 class TestFindCursorCommandProjectRoot(unittest.TestCase):
@@ -775,23 +775,23 @@ class TestMacOSCursorSkillsExtractorWithCommands(unittest.TestCase):
 
 
 class TestCursorCommandsUserLevel(unittest.TestCase):
-    """Tests for is_user_level_skills_dir with commands directory paths."""
+    """Tests for is_user_level_claude_subdir with commands directory paths."""
 
     def test_user_level_cursor_commands(self):
         commands_dir = Path("/Users/john/.cursor/commands")
-        self.assertTrue(is_user_level_skills_dir(commands_dir, "/Users"))
+        self.assertTrue(is_user_level_claude_subdir(commands_dir, "/Users"))
 
     def test_project_level_cursor_commands(self):
         commands_dir = Path("/Users/john/project/.cursor/commands")
-        self.assertFalse(is_user_level_skills_dir(commands_dir, "/Users"))
+        self.assertFalse(is_user_level_claude_subdir(commands_dir, "/Users"))
 
     def test_windows_user_level_cursor_commands(self):
         commands_dir = Path("C:/Users/john/.cursor/commands")
-        self.assertTrue(is_user_level_skills_dir(commands_dir, "C:/Users"))
+        self.assertTrue(is_user_level_claude_subdir(commands_dir, "C:/Users"))
 
     def test_windows_project_level_cursor_commands(self):
         commands_dir = Path("C:/Users/john/projects/app/.cursor/commands")
-        self.assertFalse(is_user_level_skills_dir(commands_dir, "C:/Users"))
+        self.assertFalse(is_user_level_claude_subdir(commands_dir, "C:/Users"))
 
 
 if __name__ == "__main__":

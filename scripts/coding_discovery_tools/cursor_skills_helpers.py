@@ -11,7 +11,7 @@ from .claude_code_skills_helpers import (
     is_command_md_file,
     build_skills_project_list,
     add_skill_to_project,
-    is_user_level_skills_dir,
+    is_user_level_claude_subdir,
 )
 
 logger = logging.getLogger(__name__)

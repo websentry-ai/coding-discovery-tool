@@ -1,16 +1,23 @@
 """
-Shared helper functions for Claude Code skills extraction.
+Shared helper functions for Claude Code skills, commands, and agents extraction.
 
 This module contains OS-agnostic functions used by both macOS and Windows
-skills extractors to avoid code duplication.
+skills extractors to avoid code duplication. Uses a config-driven design
+where each item type (skill, command, agent) is described by an ItemTypeConfig,
+and generic functions handle finding project roots, extracting info, and
+iterating directories for any item type.
 """
 
 import logging
 import sys
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
+from typing import Callable, Dict, List, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Constants (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
 
 CLAUDE_DIR_NAME = ".claude"
 SKILLS_DIR_NAME = "skills"
@@ -18,6 +25,10 @@ SKILL_FILE_NAME = "SKILL.md"
 COMMANDS_DIR_NAME = "commands"
 AGENTS_DIR_NAME = "agents"
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File-filter helpers (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
 
 def is_skill_md_file(filename: str) -> bool:
     """
@@ -37,6 +48,60 @@ def is_command_md_file(filename: str) -> bool:
     return filename.lower().endswith(".md") and not filename.startswith(".")
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Config-driven item type definitions
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ItemTypeConfig(NamedTuple):
+    """
+    Describes one category of Claude Code item (skill, command, or agent).
+
+    Attributes:
+        type_name: Identifier used in output dicts, e.g. "skill", "command", "agent".
+        dir_name: Subdirectory name under .claude/, e.g. "skills", "commands", "agents".
+        layout: Either "nested" (items live in named subdirs containing a marker file)
+                or "flat" (items are .md files directly inside the dir).
+        file_filter: Predicate that returns True for filenames belonging to this type.
+        name_extractor: Given the Path of the matched file, returns the item's name.
+    """
+    type_name: str
+    dir_name: str
+    layout: str
+    file_filter: Callable
+    name_extractor: Callable
+
+
+SKILL_CONFIG = ItemTypeConfig(
+    type_name="skill",
+    dir_name=SKILLS_DIR_NAME,
+    layout="nested",
+    file_filter=is_skill_md_file,
+    name_extractor=lambda f: f.parent.name,
+)
+
+COMMAND_CONFIG = ItemTypeConfig(
+    type_name="command",
+    dir_name=COMMANDS_DIR_NAME,
+    layout="flat",
+    file_filter=is_command_md_file,
+    name_extractor=lambda f: f.stem,
+)
+
+AGENT_CONFIG = ItemTypeConfig(
+    type_name="agent",
+    dir_name=AGENTS_DIR_NAME,
+    layout="flat",
+    file_filter=is_command_md_file,
+    name_extractor=lambda f: f.stem,
+)
+
+CLAUDE_ITEM_CONFIGS = [SKILL_CONFIG, COMMAND_CONFIG, AGENT_CONFIG]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Project-list helpers (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
+
 def build_skills_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Dict]:
     """
     Convert projects dictionary to list format with 'skills' key.
@@ -54,263 +119,6 @@ def build_skills_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[D
         }
         for project_root, skills in projects_by_root.items()
     ]
-
-
-def find_skill_project_root(skill_file: Path) -> Path:
-    """
-    Find the project root directory for a Claude Code skill file.
-
-    For skills:
-    - User-level: ~/.claude/skills/<skill-name>/SKILL.md -> home directory
-    - Project-level: <project>/.claude/skills/<skill-name>/SKILL.md -> project directory
-
-    Args:
-        skill_file: Path to the SKILL.md file
-
-    Returns:
-        Project root path
-    """
-    # SKILL.md is inside <skill-name> directory, which is inside skills/, which is inside .claude/
-    # So: skill_file.parent = <skill-name>
-    #     skill_file.parent.parent = skills/
-    #     skill_file.parent.parent.parent = .claude/
-    #     skill_file.parent.parent.parent.parent = project_root
-
-    skill_dir = skill_file.parent  # <skill-name>
-    skills_dir = skill_dir.parent  # skills/
-    claude_dir = skills_dir.parent  # .claude/
-
-    # Verify the directory structure
-    if skills_dir.name == SKILLS_DIR_NAME and claude_dir.name == CLAUDE_DIR_NAME:
-        return claude_dir.parent  # project root
-
-    # Fallback: use the parent of .claude if we can find it
-    for parent in skill_file.parents:
-        if parent.name == CLAUDE_DIR_NAME:
-            return parent.parent
-
-    # Last resort: use the skill file's parent
-    return skill_file.parent
-
-
-def find_command_project_root(command_file: Path) -> Path:
-    """
-    Find the project root directory for a Claude Code command file.
-
-    For commands:
-    - User-level: ~/.claude/commands/<name>.md -> home directory
-    - Project-level: <project>/.claude/commands/<name>.md -> project directory
-
-    Args:
-        command_file: Path to the command .md file
-
-    Returns:
-        Project root path
-    """
-    commands_dir = command_file.parent   # commands/
-    claude_dir = commands_dir.parent     # .claude/
-
-    if commands_dir.name == COMMANDS_DIR_NAME and claude_dir.name == CLAUDE_DIR_NAME:
-        return claude_dir.parent
-
-    for parent in command_file.parents:
-        if parent.name == CLAUDE_DIR_NAME:
-            return parent.parent
-
-    return command_file.parent
-
-
-def extract_command_info(
-    command_file: Path,
-    extract_single_rule_file_func: Callable,
-    scope: str,
-) -> Optional[Dict]:
-    """
-    Extract command information from a command .md file.
-    """
-    rule_info = extract_single_rule_file_func(command_file, find_command_project_root, scope=scope)
-
-    if rule_info:
-        rule_info["skill_name"] = command_file.stem
-        rule_info["type"] = "command"
-
-    return rule_info
-
-
-def find_agent_project_root(agent_file: Path) -> Path:
-    """
-    Find the project root directory for a Claude Code agent file.
-
-    For agents:
-    - User-level: ~/.claude/agents/<name>.md -> home directory
-    - Project-level: <project>/.claude/agents/<name>.md -> project directory
-
-    Args:
-        agent_file: Path to the agent .md file
-
-    Returns:
-        Project root path
-    """
-    agents_dir = agent_file.parent   # agents/
-    claude_dir = agents_dir.parent   # .claude/
-
-    if agents_dir.name == AGENTS_DIR_NAME and claude_dir.name == CLAUDE_DIR_NAME:
-        return claude_dir.parent
-
-    # Fallback: walk up to find .claude ancestor
-    for parent in agent_file.parents:
-        if parent.name == CLAUDE_DIR_NAME:
-            return parent.parent
-
-    return agent_file.parent
-
-
-def extract_agent_info(
-    agent_file: Path,
-    extract_single_rule_file_func: Callable,
-    scope: str,
-) -> Optional[Dict]:
-    """
-    Extract agent information from an agent .md file.
-
-    Returns a dict in the same format as skills, with type='agent'.
-    """
-    rule_info = extract_single_rule_file_func(agent_file, find_agent_project_root, scope=scope)
-
-    if rule_info:
-        rule_info["skill_name"] = agent_file.stem
-        rule_info["type"] = "agent"
-
-    return rule_info
-
-
-def extract_agents_from_directory(
-    agents_dir: Path,
-    projects_by_root: Dict[str, List[Dict]],
-    extract_single_rule_file_func: Callable,
-    add_skill_func: Callable
-) -> None:
-    """
-    Extract all agents from a .claude/agents directory.
-
-    Args:
-        agents_dir: Path to the agents directory
-        projects_by_root: Dictionary to populate with agents
-        extract_single_rule_file_func: OS-specific function to extract rule file info
-        add_skill_func: Function to add agent to project dict (handles thread safety)
-    """
-    try:
-        for item in agents_dir.iterdir():
-            if item.is_file() and is_command_md_file(item.name):
-                agent_info = extract_agent_info(
-                    item,
-                    extract_single_rule_file_func,
-                    scope="project"
-                )
-                if agent_info:
-                    project_root = agent_info.get('project_root')
-                    if project_root:
-                        add_skill_func(agent_info, project_root, projects_by_root)
-    except Exception as e:
-        logger.debug(f"Error extracting agents from {agents_dir}: {e}")
-
-
-def extract_commands_from_directory(
-    commands_dir: Path,
-    projects_by_root: Dict[str, List[Dict]],
-    extract_single_rule_file_func: Callable,
-    add_skill_func: Callable
-) -> None:
-    """
-    Extract all commands from a .claude/commands directory.
-
-    Args:
-        commands_dir: Path to the commands directory
-        projects_by_root: Dictionary to populate with commands
-        extract_single_rule_file_func: OS-specific function to extract rule file info
-        add_skill_func: Function to add command to project dict (handles thread safety)
-    """
-    try:
-        for item in commands_dir.iterdir():
-            if item.is_file() and is_command_md_file(item.name):
-                command_info = extract_command_info(
-                    item,
-                    extract_single_rule_file_func,
-                    scope="project"
-                )
-                if command_info:
-                    project_root = command_info.get('project_root')
-                    if project_root:
-                        add_skill_func(command_info, project_root, projects_by_root)
-    except Exception as e:
-        logger.debug(f"Error extracting commands from {commands_dir}: {e}")
-
-
-def extract_skill_info(
-    skill_file: Path,
-    extract_single_rule_file_func: Callable,
-    scope: str,
-) -> Optional[Dict]:
-    """
-    Extract skill information from a SKILL.md file.
-
-    Returns a dict in the same format as rules, with additional skill-specific fields:
-    - type: "skill" (to distinguish from rules)
-    - skill_name: The skill directory name (e.g., "commit", "review-pr")
-
-    Args:
-        skill_file: Path to the SKILL.md file
-        extract_single_rule_file_func: OS-specific function to extract rule file info
-        scope: Scope of the skill ("user" or "project") - required
-
-    Returns:
-        Dict with skill info in unified rules format, or None if extraction fails
-    """
-    rule_info = extract_single_rule_file_func(skill_file, find_skill_project_root, scope=scope)
-
-    if rule_info:
-        # Add skill-specific fields
-        skill_name = skill_file.parent.name  # The skill directory name
-        rule_info["skill_name"] = skill_name
-        rule_info["type"] = "skill"
-
-    return rule_info
-
-
-def extract_skills_from_directory(
-    skills_dir: Path,
-    projects_by_root: Dict[str, List[Dict]],
-    extract_single_rule_file_func: Callable,
-    add_skill_func: Callable
-) -> None:
-    """
-    Extract all skills from a .claude/skills directory.
-
-    Args:
-        skills_dir: Path to the skills directory
-        projects_by_root: Dictionary to populate with skills
-        extract_single_rule_file_func: OS-specific function to extract rule file info
-        add_skill_func: Function to add skill to project dict (handles thread safety)
-    """
-    try:
-        # Iterate over skill directories inside skills/
-        for skill_dir in skills_dir.iterdir():
-            if skill_dir.is_dir():
-                # Look for SKILL.md (case-insensitive) in skill directory
-                for item in skill_dir.iterdir():
-                    if item.is_file() and is_skill_md_file(item.name):
-                        skill_info = extract_skill_info(
-                            item,
-                            extract_single_rule_file_func,
-                            scope="project"
-                        )
-                        if skill_info:
-                            project_root = skill_info.get('project_root')
-                            if project_root:
-                                add_skill_func(skill_info, project_root, projects_by_root)
-                        break  # Only one SKILL.md per skill directory
-    except Exception as e:
-        logger.debug(f"Error extracting skills from {skills_dir}: {e}")
 
 
 def add_skill_to_project(
@@ -337,21 +145,226 @@ def add_skill_to_project(
     projects_by_root[project_root].append(skill_without_root)
 
 
-def is_user_level_skills_dir(skills_dir: Path, users_root_path: str = None) -> bool:
+# ──────────────────────────────────────────────────────────────────────────────
+# Generic config-driven functions
+# ──────────────────────────────────────────────────────────────────────────────
+
+def find_item_project_root(item_file: Path, config: ItemTypeConfig) -> Path:
     """
-    Check if a skills directory is at the user level (in home directory).
+    Find the project root directory for a Claude Code item file.
+
+    For nested layout (skills):
+        item_file lives at <project>/.claude/skills/<name>/SKILL.md
+        Navigate: parent (name dir) -> parent (skills/) -> parent (.claude/) -> verify -> parent (project root)
+
+    For flat layout (commands, agents):
+        item_file lives at <project>/.claude/commands/<name>.md
+        Navigate: parent (commands/) -> parent (.claude/) -> verify -> parent (project root)
+
+    Falls back to walking up parents to find a .claude directory, and
+    as a last resort returns item_file.parent.
 
     Args:
-        skills_dir: Path to the skills directory
-        users_root_path: Optional path to users root (e.g., "/Users" or "C:\\Users")
-                        If not provided, will be derived from home directory
+        item_file: Path to the item file (e.g. SKILL.md or a command .md)
+        config: ItemTypeConfig describing this item type
 
     Returns:
-        True if this is a user-level skills directory
+        Project root path
+    """
+    if config.layout == "nested":
+        # <skill-name>/SKILL.md  ->  skill_dir / skills_dir / claude_dir / project_root
+        item_name_dir = item_file.parent       # <skill-name>
+        type_dir = item_name_dir.parent        # skills/
+        claude_dir = type_dir.parent           # .claude/
+
+        if type_dir.name == config.dir_name and claude_dir.name == CLAUDE_DIR_NAME:
+            return claude_dir.parent
+    else:
+        # flat: <name>.md  ->  type_dir / claude_dir / project_root
+        type_dir = item_file.parent            # commands/ or agents/
+        claude_dir = type_dir.parent           # .claude/
+
+        if type_dir.name == config.dir_name and claude_dir.name == CLAUDE_DIR_NAME:
+            return claude_dir.parent
+
+    # Fallback: walk up parents to find .claude
+    for parent in item_file.parents:
+        if parent.name == CLAUDE_DIR_NAME:
+            return parent.parent
+
+    # Last resort
+    return item_file.parent
+
+
+def extract_item_info(
+    item_file: Path,
+    extract_single_rule_file_func: Callable,
+    scope: str,
+    config: ItemTypeConfig,
+) -> Optional[Dict]:
+    """
+    Extract information from an item file using the given extraction function.
+
+    Creates a closure that binds `config` to `find_item_project_root`, then
+    delegates to `extract_single_rule_file_func`. On success, annotates the
+    result with `skill_name` (derived via config.name_extractor) and `type`.
+
+    Args:
+        item_file: Path to the item file
+        extract_single_rule_file_func: OS-specific function to extract rule file info.
+            Expected signature: (file_path, find_root_func, scope=...) -> Optional[Dict]
+        scope: Scope of the item ("user" or "project")
+        config: ItemTypeConfig describing this item type
+
+    Returns:
+        Dict with item info in unified rules format, or None if extraction fails
+    """
+    find_root = lambda f: find_item_project_root(f, config)
+    rule_info = extract_single_rule_file_func(item_file, find_root, scope=scope)
+
+    if rule_info:
+        rule_info["skill_name"] = config.name_extractor(item_file)
+        rule_info["type"] = config.type_name
+
+    return rule_info
+
+
+def extract_items_from_directory(
+    type_dir: Path,
+    projects_by_root: Dict[str, List[Dict]],
+    extract_single_rule_file_func: Callable,
+    add_skill_func: Callable,
+    config: ItemTypeConfig,
+) -> None:
+    """
+    Extract all items of a given type from a .claude/<type> directory.
+
+    For nested layout (skills): iterates subdirectories, finds the first
+    matching file in each, extracts info, and adds to projects_by_root.
+
+    For flat layout (commands, agents): iterates files directly, extracts
+    info for each matching file, and adds to projects_by_root.
+
+    Args:
+        type_dir: Path to the type directory (e.g. .claude/skills/)
+        projects_by_root: Dictionary to populate with items
+        extract_single_rule_file_func: OS-specific function to extract rule file info
+        add_skill_func: Function to add item to project dict (handles thread safety)
+        config: ItemTypeConfig describing this item type
     """
     try:
-        # skills_dir is ~/.claude/skills or /Users/<user>/.claude/skills
-        claude_dir = skills_dir.parent
+        if config.layout == "nested":
+            for subdir in type_dir.iterdir():
+                if subdir.is_dir():
+                    for item in subdir.iterdir():
+                        if item.is_file() and config.file_filter(item.name):
+                            item_info = extract_item_info(
+                                item,
+                                extract_single_rule_file_func,
+                                scope="project",
+                                config=config,
+                            )
+                            if item_info:
+                                project_root = item_info.get("project_root")
+                                if project_root:
+                                    add_skill_func(item_info, project_root, projects_by_root)
+                            break  # Only one marker file per subdirectory
+        else:
+            for item in type_dir.iterdir():
+                if item.is_file() and config.file_filter(item.name):
+                    item_info = extract_item_info(
+                        item,
+                        extract_single_rule_file_func,
+                        scope="project",
+                        config=config,
+                    )
+                    if item_info:
+                        project_root = item_info.get("project_root")
+                        if project_root:
+                            add_skill_func(item_info, project_root, projects_by_root)
+    except Exception as e:
+        logger.debug(f"Error extracting {config.type_name}s from {type_dir}: {e}")
+
+
+def extract_user_level_items(
+    user_home: Path,
+    user_skills: List[Dict],
+    extract_single_rule_file_func: Callable,
+    configs: List[ItemTypeConfig],
+) -> None:
+    """
+    Extract user-level items (skills, commands, agents) from a user's home directory.
+
+    Iterates over each config, locates the corresponding directory under
+    ``user_home/.claude/<dir_name>``, and extracts items with scope="user".
+    Each extracted item's ``project_root`` key is renamed to ``project_path``
+    before appending to user_skills.
+
+    Args:
+        user_home: Path to the user's home directory
+        user_skills: List to populate with user-level item dicts
+        extract_single_rule_file_func: OS-specific function to extract rule file info
+        configs: List of ItemTypeConfig instances to process
+    """
+    for config in configs:
+        type_dir = user_home / CLAUDE_DIR_NAME / config.dir_name
+        if not type_dir.exists() or not type_dir.is_dir():
+            continue
+
+        try:
+            if config.layout == "nested":
+                for subdir in type_dir.iterdir():
+                    if subdir.is_dir():
+                        for item in subdir.iterdir():
+                            if item.is_file() and config.file_filter(item.name):
+                                item_info = extract_item_info(
+                                    item,
+                                    extract_single_rule_file_func,
+                                    scope="user",
+                                    config=config,
+                                )
+                                if item_info:
+                                    item_info["project_path"] = item_info.pop("project_root", None)
+                                    user_skills.append(item_info)
+                                break  # Only one marker file per subdirectory
+            else:
+                for item in type_dir.iterdir():
+                    if item.is_file() and config.file_filter(item.name):
+                        item_info = extract_item_info(
+                            item,
+                            extract_single_rule_file_func,
+                            scope="user",
+                            config=config,
+                        )
+                        if item_info:
+                            item_info["project_path"] = item_info.pop("project_root", None)
+                            user_skills.append(item_info)
+        except Exception as e:
+            logger.debug(f"Error extracting user-level {config.type_name}s for {user_home}: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# User-level directory check (renamed from is_user_level_skills_dir)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def is_user_level_claude_subdir(subdir: Path, users_root_path: str = None) -> bool:
+    """
+    Check if a .claude subdirectory is at the user level (in a home directory).
+
+    Works for any .claude subdirectory — skills, commands, or agents.
+    The directory must be of the form ``<home>/.claude/<subdir_name>`` where
+    ``<home>`` is a direct child of the users root (e.g. /Users or C:\\Users).
+
+    Args:
+        subdir: Path to the .claude subdirectory (e.g. ~/.claude/skills)
+        users_root_path: Optional path to users root (e.g., "/Users" or "C:\\Users").
+                         If not provided, will be derived from the current home directory.
+
+    Returns:
+        True if this is a user-level .claude subdirectory
+    """
+    try:
+        claude_dir = subdir.parent
         parent_of_claude = claude_dir.parent
 
         # Check if parent of .claude is the current user's home directory
@@ -386,3 +399,7 @@ def is_user_level_skills_dir(skills_dir: Path, users_root_path: str = None) -> b
         return False
     except Exception:
         return False
+
+
+# Backward-compatible alias — callers that still reference the old name will work.
+is_user_level_skills_dir = is_user_level_claude_subdir

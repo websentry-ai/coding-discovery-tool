@@ -12,6 +12,16 @@ from scripts.coding_discovery_tools.cursor_skills_helpers import (
     SKILLS_DIR_NAME,
     SKILL_FILE_NAME,
     COMMANDS_DIR_NAME,
+    AGENTS_DIR_NAME,
+    CURSOR_PARENT_DIR_NAMES,
+    CURSOR_SKILL_CONFIG,
+    CURSOR_COMMAND_CONFIG,
+    CURSOR_ITEM_CONFIGS,
+    find_cursor_item_project_root,
+    extract_cursor_item_info,
+    extract_cursor_items_from_directory,
+    extract_cursor_user_level_items,
+    # Backward-compatible aliases
     find_cursor_skill_project_root,
     find_cursor_command_project_root,
     extract_cursor_skill_info,
@@ -20,11 +30,12 @@ from scripts.coding_discovery_tools.cursor_skills_helpers import (
     extract_cursor_commands_from_directory,
 )
 from scripts.coding_discovery_tools.claude_code_skills_helpers import (
+    ItemTypeConfig,
     is_skill_md_file,
     is_command_md_file,
     build_skills_project_list,
     add_skill_to_project,
-    is_user_level_skills_dir,
+    is_user_level_claude_subdir,
 )
 from scripts.coding_discovery_tools.macos_extraction_helpers import (
     extract_single_rule_file,
@@ -44,8 +55,202 @@ class TestCursorConstants(unittest.TestCase):
         self.assertEqual(SKILL_FILE_NAME, "SKILL.md")
 
 
+class TestCursorItemConfigIntegrity(unittest.TestCase):
+    """Validate config instances have correct structure and callables."""
+
+    def test_skill_config_type_name(self):
+        self.assertEqual(CURSOR_SKILL_CONFIG.type_name, "skill")
+
+    def test_skill_config_dir_name(self):
+        self.assertEqual(CURSOR_SKILL_CONFIG.dir_name, "skills")
+
+    def test_skill_config_layout(self):
+        self.assertEqual(CURSOR_SKILL_CONFIG.layout, "nested")
+
+    def test_skill_config_file_filter(self):
+        self.assertTrue(CURSOR_SKILL_CONFIG.file_filter("SKILL.md"))
+        self.assertTrue(CURSOR_SKILL_CONFIG.file_filter("skill.md"))
+        self.assertFalse(CURSOR_SKILL_CONFIG.file_filter("README.md"))
+
+    def test_skill_config_name_extractor(self):
+        p = Path("/proj/.cursor/skills/my-skill/SKILL.md")
+        self.assertEqual(CURSOR_SKILL_CONFIG.name_extractor(p), "my-skill")
+
+    def test_command_config_type_name(self):
+        self.assertEqual(CURSOR_COMMAND_CONFIG.type_name, "command")
+
+    def test_command_config_dir_name(self):
+        self.assertEqual(CURSOR_COMMAND_CONFIG.dir_name, "commands")
+
+    def test_command_config_layout(self):
+        self.assertEqual(CURSOR_COMMAND_CONFIG.layout, "flat")
+
+    def test_command_config_file_filter(self):
+        self.assertTrue(CURSOR_COMMAND_CONFIG.file_filter("review.md"))
+        self.assertFalse(CURSOR_COMMAND_CONFIG.file_filter(".hidden.md"))
+        self.assertFalse(CURSOR_COMMAND_CONFIG.file_filter("notes.txt"))
+
+    def test_command_config_name_extractor(self):
+        p = Path("/proj/.cursor/commands/code-review.md")
+        self.assertEqual(CURSOR_COMMAND_CONFIG.name_extractor(p), "code-review")
+
+    def test_item_configs_list(self):
+        self.assertEqual(len(CURSOR_ITEM_CONFIGS), 2)
+        self.assertIs(CURSOR_ITEM_CONFIGS[0], CURSOR_SKILL_CONFIG)
+        self.assertIs(CURSOR_ITEM_CONFIGS[1], CURSOR_COMMAND_CONFIG)
+
+    def test_configs_are_item_type_config_instances(self):
+        for config in CURSOR_ITEM_CONFIGS:
+            self.assertIsInstance(config, ItemTypeConfig)
+
+
+class TestFindCursorItemProjectRootGeneric(unittest.TestCase):
+    """Tests for find_cursor_item_project_root generic function with both configs."""
+
+    def test_skill_standard_project(self):
+        skill_file = Path("/Users/test/myproject/.cursor/skills/commit/SKILL.md")
+        result = find_cursor_item_project_root(skill_file, CURSOR_SKILL_CONFIG)
+        self.assertEqual(result, Path("/Users/test/myproject"))
+
+    def test_skill_agents_directory(self):
+        skill_file = Path("/Users/test/myproject/.agents/skills/commit/SKILL.md")
+        result = find_cursor_item_project_root(skill_file, CURSOR_SKILL_CONFIG)
+        self.assertEqual(result, Path("/Users/test/myproject"))
+
+    def test_command_standard_project(self):
+        command_file = Path("/Users/test/myproject/.cursor/commands/review.md")
+        result = find_cursor_item_project_root(command_file, CURSOR_COMMAND_CONFIG)
+        self.assertEqual(result, Path("/Users/test/myproject"))
+
+    def test_command_agents_directory(self):
+        command_file = Path("/Users/test/myproject/.agents/commands/review.md")
+        result = find_cursor_item_project_root(command_file, CURSOR_COMMAND_CONFIG)
+        self.assertEqual(result, Path("/Users/test/myproject"))
+
+    def test_skill_wrong_directory_falls_back(self):
+        # .claude directory should NOT be recognized
+        skill_file = Path("/Users/test/project/.claude/skills/my-skill/SKILL.md")
+        result = find_cursor_item_project_root(skill_file, CURSOR_SKILL_CONFIG)
+        self.assertNotEqual(result, Path("/Users/test/project"))
+
+    def test_command_wrong_directory_falls_back(self):
+        command_file = Path("/Users/test/project/.claude/commands/test.md")
+        result = find_cursor_item_project_root(command_file, CURSOR_COMMAND_CONFIG)
+        self.assertNotEqual(result, Path("/Users/test/project"))
+
+
+class TestAgentsDirectoryPaths(unittest.TestCase):
+    """Tests for .agents directory resolution (dual parent dir support)."""
+
+    def test_agents_skill_project_root(self):
+        skill_file = Path("/Users/test/work/app/.agents/skills/deploy/SKILL.md")
+        result = find_cursor_item_project_root(skill_file, CURSOR_SKILL_CONFIG)
+        self.assertEqual(result, Path("/Users/test/work/app"))
+
+    def test_agents_command_project_root(self):
+        command_file = Path("/Users/test/work/app/.agents/commands/lint.md")
+        result = find_cursor_item_project_root(command_file, CURSOR_COMMAND_CONFIG)
+        self.assertEqual(result, Path("/Users/test/work/app"))
+
+    def test_agents_user_level_skill(self):
+        skill_file = Path("/Users/test/.agents/skills/global-skill/SKILL.md")
+        result = find_cursor_item_project_root(skill_file, CURSOR_SKILL_CONFIG)
+        self.assertEqual(result, Path("/Users/test"))
+
+    def test_agents_user_level_command(self):
+        command_file = Path("/Users/test/.agents/commands/fmt.md")
+        result = find_cursor_item_project_root(command_file, CURSOR_COMMAND_CONFIG)
+        self.assertEqual(result, Path("/Users/test"))
+
+    def test_parent_dir_names_constant(self):
+        self.assertIn(CURSOR_DIR_NAME, CURSOR_PARENT_DIR_NAMES)
+        self.assertIn(AGENTS_DIR_NAME, CURSOR_PARENT_DIR_NAMES)
+        self.assertEqual(len(CURSOR_PARENT_DIR_NAMES), 2)
+
+
+class TestCursorExtensibility(unittest.TestCase):
+    """Prove a 3rd Cursor item type works without code changes to generic functions."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.temp_path = Path(self.temp_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_custom_flat_config(self):
+        """A custom flat-layout config should work with the generic functions."""
+        custom_config = ItemTypeConfig(
+            type_name="snippet",
+            dir_name="snippets",
+            layout="flat",
+            file_filter=lambda f: f.lower().endswith(".md") and not f.startswith("."),
+            name_extractor=lambda f: f.stem,
+        )
+
+        # Create snippet in .cursor/snippets/
+        project = self.temp_path / "proj"
+        snippets_dir = project / ".cursor" / "snippets"
+        snippets_dir.mkdir(parents=True)
+        (snippets_dir / "my-snippet.md").write_text("# Snippet")
+
+        # find_cursor_item_project_root should work
+        snippet_file = snippets_dir / "my-snippet.md"
+        root = find_cursor_item_project_root(snippet_file, custom_config)
+        self.assertEqual(root, project)
+
+    def test_custom_nested_config(self):
+        """A custom nested-layout config should work with the generic functions."""
+        custom_config = ItemTypeConfig(
+            type_name="workflow",
+            dir_name="workflows",
+            layout="nested",
+            file_filter=lambda f: f.lower() == "workflow.md",
+            name_extractor=lambda f: f.parent.name,
+        )
+
+        # Create workflow in .agents/workflows/
+        project = self.temp_path / "proj"
+        workflow_dir = project / ".agents" / "workflows" / "deploy-pipeline"
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "WORKFLOW.md").write_text("# Deploy Pipeline")
+
+        workflow_file = workflow_dir / "WORKFLOW.md"
+        root = find_cursor_item_project_root(workflow_file, custom_config)
+        self.assertEqual(root, project)
+        self.assertEqual(custom_config.name_extractor(workflow_file), "deploy-pipeline")
+
+    def test_extract_custom_items_from_directory(self):
+        """extract_cursor_items_from_directory should work with a custom config."""
+        custom_config = ItemTypeConfig(
+            type_name="snippet",
+            dir_name="snippets",
+            layout="flat",
+            file_filter=lambda f: f.lower().endswith(".md") and not f.startswith("."),
+            name_extractor=lambda f: f.stem,
+        )
+
+        project = self.temp_path / "proj"
+        snippets_dir = project / ".cursor" / "snippets"
+        snippets_dir.mkdir(parents=True)
+        (snippets_dir / "alpha.md").write_text("# Alpha")
+        (snippets_dir / "beta.md").write_text("# Beta")
+
+        projects_by_root = {}
+        extract_cursor_items_from_directory(
+            snippets_dir, projects_by_root, extract_single_rule_file, add_skill_to_project, custom_config
+        )
+
+        self.assertEqual(len(projects_by_root), 1)
+        items = projects_by_root[str(project)]
+        self.assertEqual(len(items), 2)
+        for item in items:
+            self.assertEqual(item["type"], "snippet")
+
+
 class TestFindCursorSkillProjectRoot(unittest.TestCase):
-    """Tests for find_cursor_skill_project_root function."""
+    """Tests for find_cursor_skill_project_root function (backward-compatible alias)."""
 
     def test_standard_project_structure(self):
         # /Users/test/myproject/.cursor/skills/commit/SKILL.md
@@ -442,29 +647,29 @@ class TestMacOSCursorSkillsExtractor(unittest.TestCase):
 
 
 class TestCursorSkillsUserLevel(unittest.TestCase):
-    """Tests for is_user_level_skills_dir with .cursor paths."""
+    """Tests for is_user_level_claude_subdir with .cursor paths."""
 
     def test_user_level_cursor_skills(self):
-        # is_user_level_skills_dir checks parent of parent (the dir containing .cursor/skills)
+        # is_user_level_claude_subdir checks parent of parent (the dir containing .cursor/skills)
         # For user level: /Users/john/.cursor/skills -> parent is .cursor, parent.parent is /Users/john
         skills_dir = Path("/Users/john/.cursor/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir, "/Users"))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir, "/Users"))
 
     def test_project_level_cursor_skills(self):
         skills_dir = Path("/Users/john/project/.cursor/skills")
-        self.assertFalse(is_user_level_skills_dir(skills_dir, "/Users"))
+        self.assertFalse(is_user_level_claude_subdir(skills_dir, "/Users"))
 
     def test_windows_user_level_cursor_skills(self):
         skills_dir = Path("C:/Users/john/.cursor/skills")
-        self.assertTrue(is_user_level_skills_dir(skills_dir, "C:/Users"))
+        self.assertTrue(is_user_level_claude_subdir(skills_dir, "C:/Users"))
 
     def test_windows_project_level_cursor_skills(self):
         skills_dir = Path("C:/Users/john/projects/app/.cursor/skills")
-        self.assertFalse(is_user_level_skills_dir(skills_dir, "C:/Users"))
+        self.assertFalse(is_user_level_claude_subdir(skills_dir, "C:/Users"))
 
 
 class TestFindCursorCommandProjectRoot(unittest.TestCase):
-    """Tests for find_cursor_command_project_root function."""
+    """Tests for find_cursor_command_project_root function (backward-compatible alias)."""
 
     def test_standard_project_structure(self):
         # /Users/test/myproject/.cursor/commands/code-review.md
@@ -775,23 +980,23 @@ class TestMacOSCursorSkillsExtractorWithCommands(unittest.TestCase):
 
 
 class TestCursorCommandsUserLevel(unittest.TestCase):
-    """Tests for is_user_level_skills_dir with commands directory paths."""
+    """Tests for is_user_level_claude_subdir with commands directory paths."""
 
     def test_user_level_cursor_commands(self):
         commands_dir = Path("/Users/john/.cursor/commands")
-        self.assertTrue(is_user_level_skills_dir(commands_dir, "/Users"))
+        self.assertTrue(is_user_level_claude_subdir(commands_dir, "/Users"))
 
     def test_project_level_cursor_commands(self):
         commands_dir = Path("/Users/john/project/.cursor/commands")
-        self.assertFalse(is_user_level_skills_dir(commands_dir, "/Users"))
+        self.assertFalse(is_user_level_claude_subdir(commands_dir, "/Users"))
 
     def test_windows_user_level_cursor_commands(self):
         commands_dir = Path("C:/Users/john/.cursor/commands")
-        self.assertTrue(is_user_level_skills_dir(commands_dir, "C:/Users"))
+        self.assertTrue(is_user_level_claude_subdir(commands_dir, "C:/Users"))
 
     def test_windows_project_level_cursor_commands(self):
         commands_dir = Path("C:/Users/john/projects/app/.cursor/commands")
-        self.assertFalse(is_user_level_skills_dir(commands_dir, "C:/Users"))
+        self.assertFalse(is_user_level_claude_subdir(commands_dir, "C:/Users"))
 
 
 if __name__ == "__main__":

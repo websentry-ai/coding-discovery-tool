@@ -1,11 +1,12 @@
 """
-Claude Code skills and commands extraction for macOS systems.
+Claude Code skills, commands, and agents extraction for macOS systems.
 
-Extracts Claude Code skills and legacy commands from all projects,
+Extracts Claude Code skills, commands, and agents from all projects,
 grouping them by project root.
 
-Skills:  ~/.claude/skills/<name>/SKILL.md, **/.claude/skills/<name>/SKILL.md
-Commands: ~/.claude/commands/<name>.md, **/.claude/commands/<name>.md
+Skills:   ~/.claude/skills/<name>/SKILL.md, **/.claude/skills/<name>/SKILL.md
+Commands: ~/.claude/commands/<name>.md,     **/.claude/commands/<name>.md
+Agents:   ~/.claude/agents/<name>.md,       **/.claude/agents/<name>.md
 """
 
 import logging
@@ -25,20 +26,12 @@ from ...macos_extraction_helpers import (
 )
 from ...claude_code_skills_helpers import (
     CLAUDE_DIR_NAME,
-    SKILLS_DIR_NAME,
-    COMMANDS_DIR_NAME,
-    AGENTS_DIR_NAME,
-    is_skill_md_file,
-    is_command_md_file,
+    CLAUDE_ITEM_CONFIGS,
     build_skills_project_list,
-    extract_skill_info,
-    extract_command_info,
-    extract_agent_info,
-    extract_skills_from_directory,
-    extract_commands_from_directory,
-    extract_agents_from_directory,
+    extract_items_from_directory,
+    extract_user_level_items,
     add_skill_to_project,
-    is_user_level_skills_dir,
+    is_user_level_claude_subdir,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,13 +49,11 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
             - user_skills: List of user-level skill dicts (global, scope: "user")
             - project_skills: List of project dicts with project_root and skills
         """
-        user_skills = []
-        projects_by_root = {}
+        user_skills: List[Dict] = []
+        projects_by_root: Dict[str, List[Dict]] = {}
 
-        # Extract user-level skills from ~/.claude/skills/
         self._extract_user_level_skills(user_skills)
 
-        # Extract project-level skills from **/.claude/skills/
         root_path = Path("/")
         self._extract_project_level_skills(root_path, projects_by_root)
 
@@ -73,57 +64,14 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
 
     def _extract_user_level_skills(self, user_skills: List[Dict]) -> None:
         """
-        Extract user-level skills from ~/.claude/skills/ directory.
+        Extract user-level skills, commands, and agents from ~/.claude/.
 
         Args:
-            user_skills: List to populate with user-level skills
+            user_skills: List to populate with user-level items
         """
         def extract_for_user(user_home: Path) -> None:
-            """Extract user-level skills and commands for a specific user."""
-            skills_dir = user_home / CLAUDE_DIR_NAME / SKILLS_DIR_NAME
-            if skills_dir.exists() and skills_dir.is_dir():
-                try:
-                    for skill_dir in skills_dir.iterdir():
-                        if skill_dir.is_dir():
-                            for item in skill_dir.iterdir():
-                                if item.is_file() and is_skill_md_file(item.name):
-                                    skill_info = extract_skill_info(
-                                        item,
-                                        extract_single_rule_file,
-                                        scope="user"
-                                    )
-                                    if skill_info:
-                                        skill_info["project_path"] = skill_info.pop("project_root", None)
-                                        user_skills.append(skill_info)
-                                    break
-                except Exception as e:
-                    logger.debug(f"Error extracting user-level skills for {user_home}: {e}")
+            extract_user_level_items(user_home, user_skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS)
 
-            commands_dir = user_home / CLAUDE_DIR_NAME / COMMANDS_DIR_NAME
-            if commands_dir.exists() and commands_dir.is_dir():
-                try:
-                    for item in commands_dir.iterdir():
-                        if item.is_file() and is_command_md_file(item.name):
-                            command_info = extract_command_info(item, extract_single_rule_file, scope="user")
-                            if command_info:
-                                command_info["project_path"] = command_info.pop("project_root", None)
-                                user_skills.append(command_info)
-                except Exception as e:
-                    logger.debug(f"Error extracting user-level commands for {user_home}: {e}")
-
-            agents_dir = user_home / CLAUDE_DIR_NAME / AGENTS_DIR_NAME
-            if agents_dir.exists() and agents_dir.is_dir():
-                try:
-                    for item in agents_dir.iterdir():
-                        if item.is_file() and is_command_md_file(item.name):
-                            agent_info = extract_agent_info(item, extract_single_rule_file, scope="user")
-                            if agent_info:
-                                agent_info["project_path"] = agent_info.pop("project_root", None)
-                                user_skills.append(agent_info)
-                except Exception as e:
-                    logger.debug(f"Error extracting user-level agents for {user_home}: {e}")
-
-        # When running as root, scan all user directories
         if is_running_as_root():
             scan_user_directories(extract_for_user)
         else:
@@ -145,7 +93,6 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                         self._walk_for_skills(root_path, dir_path, projects_by_root, current_depth=1)
             except (PermissionError, OSError) as e:
                 logger.warning(f"Error accessing root directory: {e}")
-                # Fallback to home directory
                 logger.info("Falling back to home directory search for skills")
                 home_path = Path.home()
                 self._walk_for_skills(home_path, home_path, projects_by_root, current_depth=0)
@@ -160,7 +107,7 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
         current_depth: int = 0
     ) -> None:
         """
-        Recursively walk directory tree looking for .claude/skills directories.
+        Recursively walk directory tree looking for .claude directories.
 
         Args:
             root_path: Root search path (for depth calculation)
@@ -177,7 +124,6 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
 
-                    # Check depth for this item
                     try:
                         depth = len(item.relative_to(root_path).parts)
                         if depth > MAX_SEARCH_DEPTH:
@@ -186,44 +132,23 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                         continue
 
                     if item.is_dir():
-                        # Check if this is a .claude directory
                         if item.name == CLAUDE_DIR_NAME:
-                            skills_dir = item / SKILLS_DIR_NAME
-                            if skills_dir.exists() and skills_dir.is_dir():
-                                if not is_user_level_skills_dir(skills_dir):
-                                    extract_skills_from_directory(
-                                        skills_dir,
-                                        projects_by_root,
-                                        extract_single_rule_file,
-                                        add_skill_to_project
-                                    )
-
-                            commands_dir = item / COMMANDS_DIR_NAME
-                            if commands_dir.exists() and commands_dir.is_dir():
-                                if not is_user_level_skills_dir(commands_dir):
-                                    extract_commands_from_directory(
-                                        commands_dir,
-                                        projects_by_root,
-                                        extract_single_rule_file,
-                                        add_skill_to_project
-                                    )
-
-                            agents_dir = item / AGENTS_DIR_NAME
-                            if agents_dir.exists() and agents_dir.is_dir():
-                                if not is_user_level_skills_dir(agents_dir):
-                                    extract_agents_from_directory(
-                                        agents_dir,
-                                        projects_by_root,
-                                        extract_single_rule_file,
-                                        add_skill_to_project
-                                    )
-
+                            for config in CLAUDE_ITEM_CONFIGS:
+                                type_dir = item / config.dir_name
+                                if type_dir.exists() and type_dir.is_dir():
+                                    if not is_user_level_claude_subdir(type_dir):
+                                        extract_items_from_directory(
+                                            type_dir,
+                                            projects_by_root,
+                                            extract_single_rule_file,
+                                            add_skill_to_project,
+                                            config,
+                                        )
                             continue
 
                         if item.is_symlink():
                             continue
 
-                        # Recurse into other directories
                         self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)
 
                 except (PermissionError, OSError):

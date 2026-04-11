@@ -30,9 +30,6 @@ def find_roo_project_root(rule_file: Path) -> Path:
         if parent.parent.name == ".roo":
             return parent.parent.parent
 
-    if parent.name == "Rules":
-        if parent.parent.name == "Roo":
-            return parent.parent.parent
     return parent
 
 
@@ -58,7 +55,7 @@ class MacOSRooRulesExtractor(BaseRooRulesExtractor):
 
     def _extract_global_rules(self, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
-        Extract global Roo Code rules from ~/Documents/Roo/Rules or ~/Roo/Rules.
+        Extract global Roo Code rules from ~/.roo/rules/.
 
         When running as root, scans all user directories.
 
@@ -67,10 +64,7 @@ class MacOSRooRulesExtractor(BaseRooRulesExtractor):
         """
         def extract_for_user(user_home: Path) -> None:
             """Extract global rules for a specific user."""
-            global_rules_path = user_home / "Documents" / "Roo" / "Rules"
-
-            if not global_rules_path.exists():
-                global_rules_path = user_home / "Roo" / "Rules"
+            global_rules_path = user_home / ".roo" / "rules"
 
             if global_rules_path.exists() and global_rules_path.is_dir():
                 try:

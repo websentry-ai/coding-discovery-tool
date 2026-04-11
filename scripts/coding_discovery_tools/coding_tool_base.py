@@ -167,7 +167,7 @@ class BaseRooRulesExtractor(ABC):
         Searches for:
         - Workspace-level rules: **/.roo/rules/*.md (recursive)
         - Mode-specific rules: **/.roo/rules-{mode}/*.md (e.g., rules-architect/)
-        - Global rules: ~/Documents/Roo/Rules/*.md or ~/Roo/Rules/*.md
+        - Global rules: ~/.roo/rules/*.md
         """
         pass
 

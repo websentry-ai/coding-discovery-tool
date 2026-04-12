@@ -1516,6 +1516,10 @@ def main():
         "app_name": args.app_name or "",
     }
 
+    # Initialize variables before try block to avoid NameError in exception handler
+    device_id = None
+    run_id = None
+
     try:
         detector = AIToolsDetector()
 
@@ -1787,11 +1791,13 @@ def main():
                         }
 
                         logger.warning(f"Sending scan failed event for user {user_name}...")
-                        send_scan_event(
+                        success = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
                             sentry_context=sentry_ctx
                         )
+                        if not success:
+                            logger.warning("✗ Failed to send scan failed event")
 
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name, "user": user_name}, level="warning")
                         logger.info("")
@@ -1839,16 +1845,19 @@ def main():
     except Exception as e:
         # Send scan failed event on script crash
         try:
-            logger.error("Sending scan failed event due to error...")
-            scan_error = {
-                "error_type": type(e).__name__,
-                "message": str(e),
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            }
-            send_scan_event(
-                args.domain, args.api_key, device_id, run_id, "failed",
-                args.app_name, scan_error=scan_error, sentry_context=sentry_ctx
-            )
+            if device_id and run_id:
+                logger.error("Sending scan failed event due to error...")
+                scan_error = {
+                    "error_type": type(e).__name__,
+                    "message": str(e),
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }
+                send_scan_event(
+                    args.domain, args.api_key, device_id, run_id, "failed",
+                    args.app_name, scan_error=scan_error, sentry_context=sentry_ctx
+                )
+            else:
+                logger.warning("Skipping scan failed event - device_id or run_id not initialized")
         except:
             pass  # Don't let error reporting crash the error handler
 

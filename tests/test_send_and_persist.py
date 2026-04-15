@@ -18,6 +18,7 @@ from unittest.mock import patch
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
     send_report_to_backend,
+    send_scan_event,
     save_failed_reports,
     load_pending_reports,
     MAX_QUEUE_SIZE,
@@ -314,6 +315,133 @@ class TestPersistence(unittest.TestCase):
 
         loaded = load_pending_reports()
         self.assertEqual(len(loaded), 8)
+
+
+class TestScanEvents(unittest.TestCase):
+    """Tests for scan lifecycle event tracking."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = HTTPServer(("127.0.0.1", 0), _MockHandler)
+        cls.server.requests = []
+        cls.server.response_codes = []
+        cls.server.default_code = 200
+        cls.server.response_body = b""
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever)
+        cls.thread.daemon = True
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        self.server.requests.clear()
+        self.server.response_codes.clear()
+        self.server.default_code = 200
+        self.server.response_body = b""
+        self.base_url = f"http://127.0.0.1:{self.port}"
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_in_progress_event(self, _sleep):
+        """Test sending scan in_progress event."""
+        success, retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "in_progress",
+            app_name="JumpCloud"
+        )
+
+        self.assertTrue(success)
+        self.assertFalse(retryable)
+        self.assertEqual(len(self.server.requests), 1)
+
+        # Verify payload structure
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["device_id"], "DEVICE123")
+        self.assertEqual(payload["run_id"], "run-uuid-1234")
+        self.assertEqual(payload["scan_event"], "in_progress")
+        self.assertEqual(payload["app_name"], "JumpCloud")
+        self.assertNotIn("home_user", payload)
+        self.assertNotIn("scan_error", payload)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_completed_event(self, _sleep):
+        """Test sending scan completed event."""
+        success, retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "completed"
+        )
+
+        self.assertTrue(success)
+        self.assertFalse(retryable)
+
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["scan_event"], "completed")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_failed_with_user_error(self, _sleep):
+        """Test sending scan failed event with user-specific error."""
+        scan_error = {
+            "error_type": "PermissionError",
+            "message": "Access denied to /Users/alice/.cursor",
+            "timestamp": "2024-01-01T00:00:00Z"
+        }
+
+        success, retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "failed",
+            home_user="alice",
+            scan_error=scan_error
+        )
+
+        self.assertTrue(success)
+        self.assertFalse(retryable)
+
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["scan_event"], "failed")
+        self.assertEqual(payload["home_user"], "alice")
+        self.assertEqual(payload["scan_error"]["error_type"], "PermissionError")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_failed_device_level_error(self, _sleep):
+        """Test sending scan failed event for device-level error (no home_user)."""
+        scan_error = {
+            "error_type": "RuntimeError",
+            "message": "Script crashed",
+            "timestamp": "2024-01-01T00:00:00Z"
+        }
+
+        success, retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "failed",
+            scan_error=scan_error
+        )
+
+        self.assertTrue(success)
+        self.assertFalse(retryable)
+
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["scan_event"], "failed")
+        self.assertNotIn("home_user", payload)  # No user context for device-level errors
+        self.assertEqual(payload["scan_error"]["error_type"], "RuntimeError")
 
 
 if __name__ == "__main__":

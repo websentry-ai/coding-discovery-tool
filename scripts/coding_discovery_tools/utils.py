@@ -362,6 +362,58 @@ def normalize_url(domain: str) -> str:
     
     return url.rstrip('/')
 
+def send_scan_event(
+    backend_url: str,
+    api_key: str,
+    device_id: str,
+    run_id: str,
+    scan_event: str,
+    app_name: Optional[str] = None,
+    home_user: Optional[str] = None,
+    scan_error: Optional[Dict] = None,
+    sentry_context: Optional[Dict] = None
+) -> Tuple[bool, bool]:
+    """
+    Send scan lifecycle event to backend (in_progress, completed, failed).
+
+    Args:
+        backend_url: Backend URL to send the event to
+        api_key: API key for authentication
+        device_id: Device identifier
+        run_id: UUID for this scan run (client-generated)
+        scan_event: Event type - "in_progress", "completed", or "failed"
+        app_name: Optional application name (e.g., JumpCloud)
+        home_user: Optional user context (for user-specific failures)
+        scan_error: Optional error data (required when scan_event="failed")
+        sentry_context: Optional context dict forwarded to Sentry on failure
+
+    Returns:
+        Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
+    """
+    payload = {
+        "device_id": device_id,
+        "run_id": run_id,
+        "scan_event": scan_event,
+    }
+
+    if app_name:
+        payload["app_name"] = app_name
+
+    if home_user:
+        payload["home_user"] = home_user
+
+    if scan_error:
+        payload["scan_error"] = scan_error
+
+    return send_report_to_backend(
+        backend_url,
+        api_key,
+        payload,
+        app_name,
+        sentry_context
+    )
+
+
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.

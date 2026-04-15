@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
@@ -53,7 +54,7 @@ try:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from .utils import send_report_to_backend, send_scan_event, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -97,7 +98,7 @@ except ImportError:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -1443,7 +1444,7 @@ class AIToolsDetector:
         
         return tool_dict
 
-    def generate_single_tool_report(self, tool: Dict, device_id: str, home_user: str, system_user: Optional[str] = None) -> Dict:
+    def generate_single_tool_report(self, tool: Dict, device_id: str, home_user: str, system_user: Optional[str] = None, run_id: Optional[str] = None) -> Dict:
         """
         Generate a report for a single tool with user and device info.
 
@@ -1452,6 +1453,7 @@ class AIToolsDetector:
             device_id: Device identifier
             home_user: Home directory username (the user whose data is being processed)
             system_user: Optional system user (the user running the script). If None, uses home_user.
+            run_id: Optional UUID for this scan run (for scan status tracking)
 
         Returns:
             Report dictionary with single tool
@@ -1459,12 +1461,17 @@ class AIToolsDetector:
         # Filter out internal keys (starting with _) before sending to backend
         tool_for_report = {k: v for k, v in tool.items() if not k.startswith('_')}
 
-        return {
+        report = {
             "home_user": home_user,
             "system_user": system_user or home_user,
             "device_id": device_id,
             "tools": [tool_for_report]
         }
+
+        if run_id:
+            report["run_id"] = run_id
+
+        return report
 
     def generate_report(self) -> Dict:
         """
@@ -1509,12 +1516,21 @@ def main():
         "app_name": args.app_name or "",
     }
 
+    # Initialize variables before try block to avoid NameError in exception handler
+    device_id = None
+    run_id = None
+
     try:
         detector = AIToolsDetector()
 
         # Get device ID once (shared across all user reports)
         device_id = detector.get_device_id()
         sentry_ctx["device_id"] = device_id
+
+        # Generate run_id for this scan (client-side UUID generation)
+        run_id = str(uuid.uuid4())
+        sentry_ctx["run_id"] = run_id
+        logger.info(f"Scan run_id: {run_id}")
 
         # Track failed reports for persistence
         failed_reports = []
@@ -1568,6 +1584,18 @@ def main():
         # Get system_user once (who is running the script) for audit purposes
         system_user = get_user_info()
         sentry_ctx["system_user"] = system_user
+
+        # Send scan in_progress event BEFORE scanning
+        logger.info("Sending scan in_progress event...")
+        success, _ = send_scan_event(
+            args.domain, args.api_key, device_id, run_id, "in_progress",
+            args.app_name, sentry_context=sentry_ctx
+        )
+        if success:
+            logger.info("✓ Scan in_progress event sent successfully")
+        else:
+            logger.warning("✗ Failed to send scan in_progress event (continuing scan anyway)")
+        logger.info("")
 
         # Detect all unique tools across all users first (to know which tools to process)
         logger.info("Detecting AI tools...")
@@ -1671,7 +1699,7 @@ def main():
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
                         single_tool_report = detector.generate_single_tool_report(
-                            tool_filtered, device_id, user_name, system_user
+                            tool_filtered, device_id, user_name, system_user, run_id
                         )
 
                         # Log tool summary for this user
@@ -1751,6 +1779,29 @@ def main():
 
                         logger.info("")
 
+                    except PermissionError as e:
+                        # User-specific permission error - send scan_event=failed with home_user
+                        logger.error(f"Permission error processing {tool_name} for user {user_name}: {e}", exc_info=True)
+
+                        scan_error = {
+                            "error_type": "PermissionError",
+                            "message": str(e),
+                            "tool_name": tool_name,
+                            "timestamp": datetime.utcnow().isoformat() + "Z"
+                        }
+
+                        logger.warning(f"Sending scan failed event for user {user_name}...")
+                        success, _ = send_scan_event(
+                            args.domain, args.api_key, device_id, run_id, "failed",
+                            args.app_name, home_user=user_name, scan_error=scan_error,
+                            sentry_context=sentry_ctx
+                        )
+                        if not success:
+                            logger.warning("✗ Failed to send scan failed event")
+
+                        report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name, "user": user_name}, level="warning")
+                        logger.info("")
+
                     except Exception as e:
                         logger.error(f"Error processing {tool_name} for user {user_name}: {e}", exc_info=True)
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name}, level="warning")
@@ -1779,7 +1830,37 @@ def main():
             # All queued reports succeeded and no new failures — clean up
             QUEUE_FILE.unlink(missing_ok=True)
 
+        # Send scan completed event AFTER all scanning
+        logger.info("Sending scan completed event...")
+        success, _ = send_scan_event(
+            args.domain, args.api_key, device_id, run_id, "completed",
+            args.app_name, sentry_context=sentry_ctx
+        )
+        if success:
+            logger.info("✓ Scan completed event sent successfully")
+        else:
+            logger.warning("✗ Failed to send scan completed event")
+        logger.info("")
+
     except Exception as e:
+        # Send scan failed event on script crash
+        try:
+            if device_id and run_id:
+                logger.error("Sending scan failed event due to error...")
+                scan_error = {
+                    "error_type": type(e).__name__,
+                    "message": str(e),
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }
+                send_scan_event(
+                    args.domain, args.api_key, device_id, run_id, "failed",
+                    args.app_name, scan_error=scan_error, sentry_context=sentry_ctx
+                )
+            else:
+                logger.warning("Skipping scan failed event - device_id or run_id not initialized")
+        except Exception:
+            pass  # Don't let error reporting crash the error handler
+
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)

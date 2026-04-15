@@ -1791,7 +1791,7 @@ def main():
                         }
 
                         logger.warning(f"Sending scan failed event for user {user_name}...")
-                        success = send_scan_event(
+                        success, _ = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
                             sentry_context=sentry_ctx
@@ -1858,7 +1858,7 @@ def main():
                 )
             else:
                 logger.warning("Skipping scan failed event - device_id or run_id not initialized")
-        except:
+        except Exception:
             pass  # Don't let error reporting crash the error handler
 
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})

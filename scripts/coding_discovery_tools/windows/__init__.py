@@ -6,6 +6,7 @@ from .device_id import WindowsDeviceIdExtractor
 from .cursor import WindowsCursorDetector
 from .cursor_cli import WindowsCursorCliDetector
 from .claude_code import WindowsClaudeDetector
+from .claude_cowork import WindowsClaudeCoworkDetector, WindowsClaudeCoworkSkillsExtractor
 from .windsurf import WindowsWindsurfDetector
 from .cline import WindowsClineDetector
 from .kilocode import WindowsKiloCodeDetector
@@ -26,6 +27,8 @@ __all__ = [
     'WindowsCursorDetector',
     'WindowsCursorCliDetector',
     'WindowsClaudeDetector',
+    'WindowsClaudeCoworkDetector',
+    'WindowsClaudeCoworkSkillsExtractor',
     'WindowsWindsurfDetector',
     'WindowsClineDetector',
     'WindowsKiloCodeDetector',

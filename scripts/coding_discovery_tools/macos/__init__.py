@@ -6,6 +6,7 @@ from .device_id import MacOSDeviceIdExtractor
 from .cursor import MacOSCursorDetector
 from .cursor_cli import MacOSCursorCliDetector
 from .claude_code import MacOSClaudeDetector
+from .claude_cowork import MacOSClaudeCoworkDetector, MacOSClaudeCoworkSkillsExtractor
 from .windsurf import MacOSWindsurfDetector
 from .roo_code import MacOSRooDetector
 from .cline import MacOSClineDetector
@@ -20,6 +21,8 @@ __all__ = [
     'MacOSCursorDetector',
     'MacOSCursorCliDetector',
     'MacOSClaudeDetector',
+    'MacOSClaudeCoworkDetector',
+    'MacOSClaudeCoworkSkillsExtractor',
     'MacOSWindsurfDetector',
     'MacOSRooDetector',
     'MacOSClineDetector',

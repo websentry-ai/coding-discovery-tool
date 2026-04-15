@@ -30,11 +30,13 @@ from .coding_tool_base import (
     BaseCopilotDetector,
     BaseJunieRulesExtractor,
     BaseClaudeSkillsExtractor,
+    BaseClaudeCoworkSkillsExtractor,
     BaseCursorSkillsExtractor,
 )
 
 # macOS - Shared
 from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetector
+from .macos import MacOSClaudeCoworkDetector, MacOSClaudeCoworkSkillsExtractor
 
 # macOS - Cursor
 from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
@@ -156,6 +158,7 @@ from .windows.cursor_cli.mcp_config_extractor import WindowsCursorCliMCPConfigEx
 
 # Windows - Shared
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
+from .windows import WindowsClaudeCoworkDetector, WindowsClaudeCoworkSkillsExtractor
 
 # Windows - Cursor
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
@@ -268,6 +271,27 @@ class ToolDetectorFactory:
             return WindowsClaudeDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
+
+    @staticmethod
+    def create_claude_cowork_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Claude Cowork detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSClaudeCoworkDetector()
+        elif os_name == "Windows":
+            return WindowsClaudeCoworkDetector()
+        else:
+            return None
 
     @staticmethod
     def create_windsurf_detector(os_name: Optional[str] = None) -> BaseToolDetector:
@@ -565,6 +589,11 @@ class ToolDetectorFactory:
             ToolDetectorFactory.create_windsurf_detector(os_name),
             ToolDetectorFactory.create_roo_detector(os_name),
         ]
+
+        # Add Claude Cowork detector for macOS and Windows
+        claude_cowork_detector = ToolDetectorFactory.create_claude_cowork_detector(os_name)
+        if claude_cowork_detector is not None:
+            detectors.append(claude_cowork_detector)
         
         # Add Cline detector for macOS and Windows
         cline_detector = ToolDetectorFactory.create_cline_detector(os_name)
@@ -1409,5 +1438,30 @@ class CursorSkillsExtractorFactory:
             return MacOSCursorSkillsExtractor()
         elif os_name == "Windows":
             return WindowsCursorSkillsExtractor()
+        else:
+            return None
+
+
+class ClaudeCoworkSkillsExtractorFactory:
+    """Factory for creating OS-specific Claude Cowork skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseClaudeCoworkSkillsExtractor]:
+        """
+        Create appropriate Claude Cowork skills extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseClaudeCoworkSkillsExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSClaudeCoworkSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsClaudeCoworkSkillsExtractor()
         else:
             return None

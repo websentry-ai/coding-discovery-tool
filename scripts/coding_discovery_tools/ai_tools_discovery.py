@@ -35,6 +35,7 @@ try:
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
         ClaudeSkillsExtractorFactory,
+        ClaudeCoworkSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -79,6 +80,7 @@ except ImportError:
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
         ClaudeSkillsExtractorFactory,
+        ClaudeCoworkSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -141,6 +143,9 @@ class AIToolsDetector:
             self._claude_mcp_extractor = ClaudeMCPConfigExtractorFactory.create(self.system)
             self._claude_settings_extractor = ClaudeSettingsExtractorFactory.create(self.system)
             self._claude_skills_extractor = ClaudeSkillsExtractorFactory.create(self.system)
+
+            # Initialize Claude Cowork extractor (skills only; Cowork has no rules/MCP/settings)
+            self._cowork_skills_extractor = ClaudeCoworkSkillsExtractorFactory.create(self.system)
             
             # Initialize Windsurf extractors
             self._windsurf_rules_extractor = WindsurfRulesExtractorFactory.create(self.system)
@@ -299,6 +304,24 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude skills: {e}", exc_info=True)
+            return None
+
+    def extract_all_cowork_skills(self) -> Optional[Dict]:
+        """
+        Extract all Claude Cowork skills from Claude Desktop's sessions tree.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope: "user")
+            - project_skills: Always empty — Cowork has no project concept.
+            Returns None if extractor not available or on error.
+        """
+        try:
+            if self._cowork_skills_extractor:
+                return self._cowork_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Cowork skills: {e}", exc_info=True)
             return None
 
     def extract_all_cursor_skills(self) -> Optional[Dict]:
@@ -1270,6 +1293,29 @@ class AIToolsDetector:
 
         elif tool_name == "claude code":
             projects_dict = self._process_claude_code_tool(tool)
+
+        elif tool_name == "claude cowork":
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"Processing: {tool.get('name', 'Claude Cowork')}")
+            logger.info("=" * 70)
+            logger.info(f"  Extracting Claude Cowork skills...")
+            try:
+                skills_result = self.extract_all_cowork_skills()
+                user_skills = skills_result.get("user_skills", []) if skills_result else []
+                if user_skills:
+                    logger.info(f"  ✓ Found {len(user_skills)} Claude Cowork skill(s)")
+                    user_home = str(Path.home())
+                    projects_dict[user_home] = {
+                        "path": user_home,
+                        "rules": [],
+                        "skills": user_skills,
+                        "mcpServers": [],
+                    }
+                else:
+                    logger.info("  ℹ No Claude Cowork skills found")
+            except Exception as e:
+                logger.error(f"Error extracting Claude Cowork skills: {e}", exc_info=True)
 
         elif tool_name == "windsurf":
             projects_dict = self._process_tool_with_rules_and_mcp(

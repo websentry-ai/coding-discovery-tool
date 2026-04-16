@@ -4,12 +4,9 @@ Claude Cowork skills extraction for macOS.
 Walks Claude Desktop's on-disk session tree at
 ``~/Library/Application Support/Claude/local-agent-mode-sessions/`` looking
 for SKILL.md files. Cowork bundles each downloaded skill under a versioned
-UUID directory, so the same ``user``-scope skill typically appears multiple
-times — we deduplicate by ``(scope, skill_name)`` keeping the newest copy.
-
-Ephemeral session skills (``local_<uuid>/.claude/skills/...``) are kept and
-reported with ``scope="session_ephemeral"`` so operators can distinguish
-them from persistent user-level skills.
+UUID directory, so the same skill typically appears multiple times — we
+deduplicate by name keeping the newest copy. Ephemeral session skills
+(under ``local_<uuid>/``) are skipped entirely.
 """
 
 import logging
@@ -22,6 +19,7 @@ from ...claude_cowork_skills_helpers import (
     build_cowork_skill_dict,
     deduplicate_skills,
     is_claude_code_path,
+    is_ephemeral_session_path,
 )
 from .claude_cowork import _get_cowork_sessions_dir
 
@@ -57,9 +55,8 @@ class MacOSClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
                         continue
                     if candidate.name.lower() != SKILL_FILE_NAME_LOWER:
                         continue
-                    # NB: ephemeral session skills under ``local_<uuid>/`` are
-                    # intentionally kept here — ``build_cowork_skill_dict``
-                    # tags them with ``scope="session_ephemeral"``.
+                    if is_ephemeral_session_path(candidate):
+                        continue
                     if is_claude_code_path(candidate):
                         continue
                     skill_dict = build_cowork_skill_dict(candidate)

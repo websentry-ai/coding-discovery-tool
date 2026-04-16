@@ -73,7 +73,7 @@ RUNTIME_ONLY_NAMES = frozenset({"context"})
 
 # Directories under the sessions root that represent ephemeral per-session
 # scratch space. They appear and disappear unpredictably as sessions start
-# and end, so we exclude any SKILL.md found beneath them.
+# and end, so we skip any SKILL.md found beneath them entirely.
 EPHEMERAL_SESSION_PREFIX = "local_"
 
 # Defensive: never report a skill whose path is under the user's ~/.claude/
@@ -162,27 +162,12 @@ def is_ephemeral_session_path(md_path: Path) -> bool:
     """
     Return True if any parent directory in the path is an ephemeral session
     directory (e.g. ``local_<uuid>/``). Skills under these directories are
-    tied to a single Cowork session and get wiped when the session ends —
-    we tag them with ``scope="session_ephemeral"`` to distinguish them from
-    persistent user-level skills.
+    tied to a single Cowork session and vanish when the session ends, so
+    we skip them entirely.
     """
     return any(
         part.startswith(EPHEMERAL_SESSION_PREFIX) for part in md_path.parts
     )
-
-
-def resolve_cowork_scope(md_path: Path) -> str:
-    """
-    Determine the appropriate Cowork scope for a SKILL.md path.
-
-    Cowork has two persistence tiers:
-        * ``session_ephemeral`` — lives under ``local_<uuid>/`` and dies with
-          the session. Typically created on the fly via ``/skill-creator``.
-        * ``user`` — lives under ``skills-plugin/<bundle-uuid>/...`` and
-          survives across sessions. Covers built-in, core, and personal
-          skills that have been permanently installed.
-    """
-    return "session_ephemeral" if is_ephemeral_session_path(md_path) else "user"
 
 
 def is_claude_code_path(md_path: Path) -> bool:
@@ -211,29 +196,15 @@ def is_claude_code_path(md_path: Path) -> bool:
 
 def deduplicate_skills(skills: List[Dict]) -> List[Dict]:
     """
-    Collapse duplicate ``user``-scope skills down to one entry per name,
-    keeping the most recent ``last_modified``. Cowork stores several
-    versioned bundle UUIDs side-by-side under ``skills-plugin/``, so the
-    same persistent skill typically appears 2-N times.
-
-    ``session_ephemeral`` skills are passed through untouched: each lives
-    under its own ``local_<uuid>/`` session directory and is a genuinely
-    distinct installation that the backend keys on ``file_path``.
-
-    Skills without a scope are treated like ``user`` scope for dedup
-    purposes (keeps prior call-site behavior for tests and any legacy
-    callers).
+    Collapse duplicate skills down to one entry per name, keeping the most
+    recent ``last_modified``. Cowork stores several versioned bundle UUIDs
+    side-by-side under ``skills-plugin/``, so the same skill typically
+    appears 2-N times.
     """
-    SESSION_EPHEMERAL = "session_ephemeral"
     by_name: Dict[str, Dict] = {}
-    pass_through: List[Dict] = []
     for skill in skills:
         name = (skill.get("skill_name") or "").strip().lower()
         if not name:
-            continue
-        scope = (skill.get("scope") or "").strip().lower()
-        if scope == SESSION_EPHEMERAL:
-            pass_through.append(skill)
             continue
         existing = by_name.get(name)
         if existing is None:
@@ -244,7 +215,7 @@ def deduplicate_skills(skills: List[Dict]) -> List[Dict]:
         # comparison gives correct chronological ordering.
         if (skill.get("last_modified") or "") > (existing.get("last_modified") or ""):
             by_name[name] = skill
-    return list(by_name.values()) + pass_through
+    return list(by_name.values())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -257,10 +228,7 @@ def build_cowork_skill_dict(md_path: Path) -> Optional[Dict]:
 
     The returned shape conforms to the backend's ``ALLOWED_SKILL_FIELDS``
     contract so it routes through the existing ingestion code path
-    unchanged. Scope is derived from the on-disk location:
-        * ``user`` — under ``skills-plugin/...`` (persistent).
-        * ``session_ephemeral`` — under ``local_<uuid>/...`` (lives for
-          one Cowork session only).
+    unchanged. All Cowork skills are reported with ``scope="user"``.
 
     Returns:
         Skill dict, or ``None`` if the file should be skipped (unreadable,
@@ -288,7 +256,7 @@ def build_cowork_skill_dict(md_path: Path) -> Optional[Dict]:
             "size": metadata["size"],
             "last_modified": metadata["last_modified"],
             "truncated": truncated,
-            "scope": resolve_cowork_scope(md_path),
+            "scope": "user",
             "skill_name": skill_name,
             "type": "skill",
         }
@@ -316,7 +284,6 @@ __all__ = [
     "extract_skill_name",
     "is_ephemeral_session_path",
     "is_claude_code_path",
-    "resolve_cowork_scope",
     "deduplicate_skills",
     "build_cowork_skill_dict",
 ]

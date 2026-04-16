@@ -6,7 +6,7 @@ Covers:
 - skill name resolution priority (frontmatter > H1 > folder)
 - deduplication across versioned bundles
 - end-to-end macOS extractor (tempdir mirroring the real on-disk shape)
-- ephemeral session path exclusion
+- ephemeral session path skipping
 - claude-code path exclusion (defensive)
 - runtime-only skill name exclusion (``context``)
 """
@@ -27,7 +27,6 @@ from scripts.coding_discovery_tools.claude_cowork_skills_helpers import (
     is_claude_code_path,
     is_ephemeral_session_path,
     parse_skill_frontmatter,
-    resolve_cowork_scope,
 )
 from scripts.coding_discovery_tools.macos.claude_cowork import (
     MacOSClaudeCoworkSkillsExtractor,
@@ -221,24 +220,6 @@ class TestBuildCoworkSkillDict(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["skill_name"], "folder-named-skill")
 
-    def test_tags_ephemeral_session_skill_with_session_ephemeral_scope(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            skill_dir = (
-                Path(tmp)
-                / f"{EPHEMERAL_SESSION_PREFIX}deadbeef"
-                / "skills"
-                / "scratchpad"
-            )
-            skill_file = _write_skill(
-                skill_dir,
-                "---\nname: scratchpad\n---\n# scratchpad\nbody\n",
-            )
-            result = build_cowork_skill_dict(skill_file)
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result["scope"], "session_ephemeral")
-        self.assertEqual(result["skill_name"], "scratchpad")
-
     def test_tags_persistent_skill_with_user_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = (
@@ -257,22 +238,6 @@ class TestBuildCoworkSkillDict(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["scope"], "user")
-
-
-class TestResolveCoworkScope(unittest.TestCase):
-    def test_persistent_path_returns_user(self):
-        p = Path(
-            "/Users/x/Library/Application Support/Claude/local-agent-mode-sessions/"
-            "skills-plugin/bundle/version/skills/my-skill/SKILL.md"
-        )
-        self.assertEqual(resolve_cowork_scope(p), "user")
-
-    def test_ephemeral_path_returns_session_ephemeral(self):
-        p = Path(
-            "/Users/x/Library/Application Support/Claude/local-agent-mode-sessions/"
-            "local_deadbeef/.claude/skills/scratchpad/SKILL.md"
-        )
-        self.assertEqual(resolve_cowork_scope(p), "session_ephemeral")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,8 +278,7 @@ class TestMacOSClaudeCoworkSkillsExtractor(unittest.TestCase):
             "---\nname: skill-creator\n---\nbody\n", encoding="utf-8"
         )
 
-        # Ephemeral session skill — kept, tagged scope=session_ephemeral.
-        # Real Cowork ephemeral sessions nest skills under .claude/skills/.
+        # Ephemeral session skill — must be skipped entirely.
         ephemeral = sessions / f"{EPHEMERAL_SESSION_PREFIX}deadbeef" / ".claude" / "skills" / "scratchpad"
         ephemeral.mkdir(parents=True)
         (ephemeral / "SKILL.md").write_text(
@@ -326,7 +290,7 @@ class TestMacOSClaudeCoworkSkillsExtractor(unittest.TestCase):
         runtime.mkdir(parents=True)
         (runtime / "SKILL.md").write_text("---\nname: context\n---\nbody\n", encoding="utf-8")
 
-    def test_end_to_end_dedup_and_scope_tagging(self):
+    def test_end_to_end_dedup_and_ephemeral_skipping(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._layout(root)
@@ -334,33 +298,26 @@ class TestMacOSClaudeCoworkSkillsExtractor(unittest.TestCase):
             result = extractor.extract_all_skills()
 
         self.assertEqual(result["project_skills"], [])
-        names_by_scope = {
-            (s["scope"], s["skill_name"]) for s in result["user_skills"]
-        }
-        self.assertEqual(
-            names_by_scope,
-            {
-                ("user", "schedule"),
-                ("user", "skill-creator"),
-                ("session_ephemeral", "scratchpad"),
-            },
-        )
+        skill_names = {s["skill_name"] for s in result["user_skills"]}
+        self.assertEqual(skill_names, {"schedule", "skill-creator"})
 
         # Verify dedup kept the newer schedule copy (its content says "new").
         schedule = next(
-            s for s in result["user_skills"]
-            if s["skill_name"] == "schedule" and s["scope"] == "user"
+            s for s in result["user_skills"] if s["skill_name"] == "schedule"
         )
         self.assertIn("new", schedule["content"])
 
+        # Ephemeral session skill must be skipped.
+        self.assertNotIn("scratchpad", skill_names)
+
         # Runtime-only name must still be excluded.
-        self.assertNotIn("context", {s["skill_name"] for s in result["user_skills"]})
+        self.assertNotIn("context", skill_names)
 
         # Common envelope fields must be set on every skill.
         for skill in result["user_skills"]:
             self.assertEqual(skill["type"], "skill")
             self.assertEqual(skill["file_name"], "SKILL.md")
-            self.assertIn(skill["scope"], {"user", "session_ephemeral"})
+            self.assertEqual(skill["scope"], "user")
 
     def test_missing_root_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmp:

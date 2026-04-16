@@ -16,6 +16,7 @@ from ...claude_cowork_skills_helpers import (
     build_cowork_skill_dict,
     deduplicate_skills,
     is_claude_code_path,
+    is_ephemeral_session_path,
 )
 from .claude_cowork import _get_cowork_sessions_dir
 
@@ -51,8 +52,8 @@ class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
                         continue
                     if candidate.name.lower() != SKILL_FILE_NAME_LOWER:
                         continue
-                    # Ephemeral session skills are kept; build_cowork_skill_dict
-                    # tags them with ``scope="session_ephemeral"``.
+                    if is_ephemeral_session_path(candidate):
+                        continue
                     if is_claude_code_path(candidate):
                         continue
                     skill_dict = build_cowork_skill_dict(candidate)

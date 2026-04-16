@@ -166,8 +166,6 @@ def is_ephemeral_session_path(md_path: Path) -> bool:
     we tag them with ``scope="session_ephemeral"`` to distinguish them from
     persistent user-level skills.
     """
-    # Assumes local_ prefix only appears in session dirs directly under
-    # local-agent-mode-sessions/, not in bundle names under skills-plugin/
     return any(
         part.startswith(EPHEMERAL_SESSION_PREFIX) for part in md_path.parts
     )

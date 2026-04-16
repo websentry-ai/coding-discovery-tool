@@ -159,11 +159,20 @@ class TestPathFilters(unittest.TestCase):
         self.assertFalse(is_ephemeral_session_path(p))
 
     def test_claude_code_path_detected(self):
-        p = Path("/Users/x/.claude/skills/mine/SKILL.md")
+        home = str(Path.home())
+        p = Path(home) / ".claude" / "skills" / "mine" / "SKILL.md"
         self.assertTrue(is_claude_code_path(p))
 
     def test_non_claude_code_path_not_detected(self):
         p = Path("/Users/x/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/uuid/skills/mine/SKILL.md")
+        self.assertFalse(is_claude_code_path(p))
+
+    def test_ephemeral_session_claude_dir_not_excluded(self):
+        """A .claude segment inside a Cowork session dir must NOT be treated as Claude Code."""
+        p = Path(
+            "/Users/x/Library/Application Support/Claude/local-agent-mode-sessions/"
+            "local_abc123/.claude/skills/my-skill/SKILL.md"
+        )
         self.assertFalse(is_claude_code_path(p))
 
 
@@ -305,7 +314,8 @@ class TestMacOSClaudeCoworkSkillsExtractor(unittest.TestCase):
         )
 
         # Ephemeral session skill — kept, tagged scope=session_ephemeral.
-        ephemeral = sessions / f"{EPHEMERAL_SESSION_PREFIX}deadbeef" / "skills" / "scratchpad"
+        # Real Cowork ephemeral sessions nest skills under .claude/skills/.
+        ephemeral = sessions / f"{EPHEMERAL_SESSION_PREFIX}deadbeef" / ".claude" / "skills" / "scratchpad"
         ephemeral.mkdir(parents=True)
         (ephemeral / "SKILL.md").write_text(
             "---\nname: scratchpad\n---\nbody\n", encoding="utf-8"

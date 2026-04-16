@@ -166,6 +166,8 @@ def is_ephemeral_session_path(md_path: Path) -> bool:
     we tag them with ``scope="session_ephemeral"`` to distinguish them from
     persistent user-level skills.
     """
+    # Assumes local_ prefix only appears in session dirs directly under
+    # local-agent-mode-sessions/, not in bundle names under skills-plugin/
     return any(
         part.startswith(EPHEMERAL_SESSION_PREFIX) for part in md_path.parts
     )
@@ -187,11 +189,22 @@ def resolve_cowork_scope(md_path: Path) -> str:
 
 def is_claude_code_path(md_path: Path) -> bool:
     """
-    Return True if the path is under a ``.claude/`` directory. Used as a
-    defensive cross-check so we never accidentally classify a Claude Code
-    skill as a Cowork skill.
+    Return True if the resolved path lives under the user's home-level
+    ``~/.claude/`` directory (Claude Code's territory). Used as a defensive
+    cross-check so we never accidentally classify a Claude Code skill as a
+    Cowork skill.
+
+    Only the home-level ``.claude/`` is checked — ``.claude`` segments that
+    appear deeper in the Cowork Application Support tree (e.g. inside
+    ``local_<uuid>/.claude/skills/...``) are legitimate Cowork session paths
+    and must NOT be excluded.
     """
-    return CLAUDE_CODE_DIR_NAME in md_path.parts
+    try:
+        resolved = md_path.resolve()
+        claude_code_root = Path.home() / CLAUDE_CODE_DIR_NAME
+        return resolved == claude_code_root or claude_code_root in resolved.parents
+    except (OSError, ValueError):
+        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ them from persistent user-level skills.
 
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseClaudeCoworkSkillsExtractor
 from ...claude_cowork_skills_helpers import (
@@ -31,14 +31,17 @@ logger = logging.getLogger(__name__)
 class MacOSClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
     """Extractor for Claude Cowork skills on macOS."""
 
-    def __init__(self, sessions_root: Path = None):
+    def __init__(self, sessions_root: Optional[Path] = None):
         # ``sessions_root`` is overridable so tests can point at a tempdir.
-        self._sessions_root = sessions_root or _get_cowork_sessions_dir()
+        self._sessions_root = sessions_root if sessions_root is not None else _get_cowork_sessions_dir()
 
     def extract_all_skills(self) -> Dict:
         empty: Dict = {"user_skills": [], "project_skills": []}
 
         sessions_root = self._sessions_root
+        if sessions_root is None:
+            return empty
+
         try:
             if not sessions_root.exists() or not sessions_root.is_dir():
                 return empty

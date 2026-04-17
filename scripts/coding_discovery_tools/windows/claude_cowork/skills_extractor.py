@@ -1,9 +1,9 @@
 """
 Claude Cowork skills extraction for Windows.
 
-Walks Claude Desktop's on-disk session tree at
-``%APPDATA%\\Claude\\local-agent-mode-sessions\\`` looking for SKILL.md files.
-Mirrors the macOS extractor — see that module for the design rationale.
+Walks Claude Desktop's on-disk session tree looking for SKILL.md files.
+When running as administrator, walks every user's sessions tree.
+Otherwise walks only the current user's tree.
 """
 
 import logging
@@ -12,39 +12,53 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseClaudeCoworkSkillsExtractor
 from ...claude_cowork_skills_helpers import (
+    COWORK_SESSIONS_DIR,
     SKILL_FILE_NAME_LOWER,
     build_cowork_skill_dict,
     deduplicate_skills,
     is_claude_code_path,
     is_ephemeral_session_path,
 )
-from .claude_cowork import _get_cowork_sessions_dir
+from ...windows_extraction_helpers import scan_windows_user_directories
 
 logger = logging.getLogger(__name__)
+
+
+def _sessions_dir_for_user(user_home: Path) -> Path:
+    """Cowork sessions tree for a specific Windows user."""
+    return user_home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
 
 
 class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
     """Extractor for Claude Cowork skills on Windows."""
 
     def __init__(self, sessions_root: Optional[Path] = None):
-        # ``sessions_root`` is overridable so tests can point at a tempdir.
-        self._sessions_root = sessions_root or _get_cowork_sessions_dir()
+        # Overridable so tests can point at a tempdir.
+        self._explicit_sessions_root = sessions_root
 
     def extract_all_skills(self) -> Dict:
-        empty: Dict = {"user_skills": [], "project_skills": []}
+        collected: List[Dict] = []
 
-        sessions_root = self._sessions_root
-        if sessions_root is None:
-            return empty
+        if self._explicit_sessions_root is not None:
+            # Explicit root (tests).
+            self._collect_from(self._explicit_sessions_root, Path.home(), collected)
+        else:
+            # scan_windows_user_directories handles admin vs non-admin internally.
+            def _extract_for_user(user_home: Path) -> None:
+                self._collect_from(_sessions_dir_for_user(user_home), user_home, collected)
+            scan_windows_user_directories(_extract_for_user)
 
+        return {"user_skills": deduplicate_skills(collected), "project_skills": []}
+
+    def _collect_from(self, sessions_root: Path, user_home: Path, collected: List[Dict]) -> None:
+        """Walk one user's sessions tree, appending skill dicts to *collected*."""
         try:
             if not sessions_root.exists() or not sessions_root.is_dir():
-                return empty
+                return
         except OSError as e:
             logger.debug(f"Error accessing Cowork sessions dir {sessions_root}: {e}")
-            return empty
+            return
 
-        collected: List[Dict] = []
         try:
             for candidate in sessions_root.rglob("*"):
                 try:
@@ -56,7 +70,7 @@ class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
                         continue
                     if is_claude_code_path(candidate):
                         continue
-                    skill_dict = build_cowork_skill_dict(candidate)
+                    skill_dict = build_cowork_skill_dict(candidate, user_home=user_home)
                     if skill_dict is not None:
                         collected.append(skill_dict)
                 except (PermissionError, OSError) as e:
@@ -67,7 +81,3 @@ class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
                     continue
         except (PermissionError, OSError) as e:
             logger.warning(f"Error walking Cowork sessions dir {sessions_root}: {e}")
-            return empty
-
-        deduped = deduplicate_skills(collected)
-        return {"user_skills": deduped, "project_skills": []}

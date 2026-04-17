@@ -222,7 +222,7 @@ def deduplicate_skills(skills: List[Dict]) -> List[Dict]:
 # Skill dict construction
 # ──────────────────────────────────────────────────────────────────────────────
 
-def build_cowork_skill_dict(md_path: Path) -> Optional[Dict]:
+def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> Optional[Dict]:
     """
     Build a single Cowork skill payload dict from a SKILL.md path.
 
@@ -251,7 +251,7 @@ def build_cowork_skill_dict(md_path: Path) -> Optional[Dict]:
         return {
             "file_path": str(md_path),
             "file_name": md_path.name,
-            "project_path": str(Path.home()),
+            "project_path": str(user_home or Path.home()),
             "content": content,
             "size": metadata["size"],
             "last_modified": metadata["last_modified"],

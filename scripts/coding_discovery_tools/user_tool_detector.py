@@ -69,6 +69,10 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     elif tool_name == "cursor cli":
         return _detect_cursor_cli(detector, user_home)
 
+    # Claude Cowork detection
+    elif tool_name == "claude cowork":
+        return _detect_claude_cowork(detector, user_home)
+
     # Default: Use detector's standard detection
     return detector.detect()
 
@@ -259,6 +263,34 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
         }
 
     return detector.detect()
+
+
+def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect Claude Cowork installation for a user."""
+    # Claude Desktop app must be present (system-wide on macOS)
+    if platform.system() == "Darwin":
+        app_path = Path("/Applications/Claude.app")
+        try:
+            if not app_path.exists():
+                return None
+        except OSError:
+            return None
+        sessions_dir = user_home / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+    else:
+        # Windows
+        sessions_dir = user_home / "AppData" / "Roaming" / "Claude" / "local-agent-mode-sessions"
+
+    try:
+        if sessions_dir.exists() and sessions_dir.is_dir():
+            return {
+                "name": detector.tool_name,
+                "version": detector.get_version(),
+                "install_path": str(sessions_dir)
+            }
+    except (PermissionError, OSError):
+        pass
+
+    return None
 
 
 def find_claude_binary_for_user(user_home: Path) -> Optional[str]:

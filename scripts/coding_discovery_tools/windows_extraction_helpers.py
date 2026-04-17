@@ -238,7 +238,7 @@ def get_file_metadata(rule_file: Path) -> Dict[str, int]:
     stat = rule_file.stat()
     return {
         'size': stat.st_size,
-        'last_modified': datetime.fromtimestamp(stat.st_mtime).isoformat() + "Z"
+        'last_modified': datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z"
     }
 
 

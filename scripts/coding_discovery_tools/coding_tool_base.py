@@ -357,6 +357,34 @@ class BaseClaudeSkillsExtractor(ABC):
         pass
 
 
+class BaseClaudeCoworkSkillsExtractor(ABC):
+    """Abstract base class for extracting Claude Cowork skills from Claude Desktop.
+
+    Claude Cowork skills live in Claude Desktop's Application Support tree
+    (macOS) or AppData tree (Windows), under ``local-agent-mode-sessions/``.
+    They are distinct from Claude Code skills (which live under ``~/.claude/``).
+    """
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all Claude Cowork skills discoverable on disk.
+
+        Cowork has no concept of a "project" — all skills are effectively
+        user-level. The returned shape still mirrors the Claude Code extractor
+        so the rest of the pipeline (``process_single_tool`` orchestration,
+        backend ingestion) can reuse a single code path.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope: "user").
+              Each entry has: skill_name, file_path, file_name, project_path,
+              content, size, last_modified, truncated, scope, type.
+            - project_skills: Always an empty list — Cowork has no project scope.
+        """
+        pass
+
+
 class BaseCursorSkillsExtractor(ABC):
     """Abstract base class for extracting Cursor skills from all projects."""
 

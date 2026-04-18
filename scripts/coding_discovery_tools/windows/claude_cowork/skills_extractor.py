@@ -44,11 +44,14 @@ class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
             self._collect_from(self._explicit_sessions_root, Path.home(), collected)
         else:
             # scan_windows_user_directories handles admin vs non-admin internally.
+            # Deduplicate per-user to avoid cross-user skill name collisions.
             def _extract_for_user(user_home: Path) -> None:
-                self._collect_from(_sessions_dir_for_user(user_home), user_home, collected)
+                user_collected: List[Dict] = []
+                self._collect_from(_sessions_dir_for_user(user_home), user_home, user_collected)
+                collected.extend(deduplicate_skills(user_collected))
             scan_windows_user_directories(_extract_for_user)
 
-        return {"user_skills": deduplicate_skills(collected), "project_skills": []}
+        return {"user_skills": collected, "project_skills": []}
 
     def _collect_from(self, sessions_root: Path, user_home: Path, collected: List[Dict]) -> None:
         """Walk one user's sessions tree, appending skill dicts to *collected*."""

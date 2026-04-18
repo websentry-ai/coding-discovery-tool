@@ -11,6 +11,7 @@ import platform
 from pathlib import Path
 from typing import Dict, Optional
 
+from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
 
 logger = logging.getLogger(__name__)
@@ -275,10 +276,10 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
                 return None
         except OSError:
             return None
-        sessions_dir = user_home / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+        sessions_dir = user_home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
     else:
         # Windows
-        sessions_dir = user_home / "AppData" / "Roaming" / "Claude" / "local-agent-mode-sessions"
+        sessions_dir = user_home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
 
     try:
         if sessions_dir.exists() and sessions_dir.is_dir():

@@ -46,14 +46,17 @@ class MacOSClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
             self._collect_from(self._explicit_sessions_root, Path.home(), collected)
         elif is_running_as_root():
             # MDM / root — walk every user's sessions tree.
+            # Deduplicate per-user to avoid cross-user skill name collisions.
             def _extract_for_user(user_home: Path) -> None:
-                self._collect_from(_sessions_dir_for_user(user_home), user_home, collected)
+                user_collected: List[Dict] = []
+                self._collect_from(_sessions_dir_for_user(user_home), user_home, user_collected)
+                collected.extend(deduplicate_skills(user_collected))
             scan_user_directories(_extract_for_user)
         else:
             # Normal user.
             self._collect_from(_sessions_dir_for_user(Path.home()), Path.home(), collected)
 
-        return {"user_skills": deduplicate_skills(collected), "project_skills": []}
+        return {"user_skills": collected if is_running_as_root() else deduplicate_skills(collected), "project_skills": []}
 
     def _collect_from(self, sessions_root: Path, user_home: Path, collected: List[Dict]) -> None:
         """Walk one user's sessions tree, appending skill dicts to *collected*."""

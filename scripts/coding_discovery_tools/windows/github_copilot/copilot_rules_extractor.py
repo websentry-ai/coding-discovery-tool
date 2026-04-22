@@ -29,7 +29,7 @@ def find_github_copilot_project_root(rule_file: Path) -> Path:
     - Global JetBrains rules in %LOCALAPPDATA%\\github-copilot\\intellij\\ -> User AppData\\Local
     - Workspace rules in .github\\ -> parent of .github (project root)
     - Path-specific instructions in .github\\copilot\\ -> parent of .github (project root)
-    - AGENTS.md at project root -> same directory as AGENTS.md
+    - AGENTS.md at project root -> parent directory (via default fallback)
 
     Args:
         rule_file: Path to the rule file
@@ -57,10 +57,6 @@ def find_github_copilot_project_root(rule_file: Path) -> Path:
     # Workspace rules in .github/ directory
     if parent.name == ".github":
         return parent.parent
-
-    # AGENTS.md at project root level
-    if rule_file.name == "AGENTS.md":
-        return parent
 
     return parent
 

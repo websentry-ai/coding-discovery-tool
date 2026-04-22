@@ -178,6 +178,8 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                         if item.name == ".vscode":
                             self._check_vscode_mcp(item, configs)
                             continue
+                        if item.is_symlink():
+                            continue
                         self._walk_for_workspace_mcp(root_path, item, configs, system_dirs, current_depth + 1)
 
                 except (PermissionError, OSError):

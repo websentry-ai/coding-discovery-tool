@@ -492,6 +492,8 @@ class WindowsCodexMCPConfigExtractor(BaseMCPConfigExtractor):
                                 continue
                             self._extract_config_from_codex_dir(item, configs)
                             continue
+                        if item.is_symlink():
+                            continue
                         self._walk_for_codex_configs(
                             root_path, item, configs, system_dirs, global_codex_dir, current_depth + 1
                         )

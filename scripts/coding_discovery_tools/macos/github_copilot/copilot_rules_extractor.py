@@ -28,6 +28,8 @@ def find_github_copilot_project_root(rule_file: Path) -> Path:
     - Global VS Code rules in ~/Library/Application Support/Code/User/prompts/ -> User directory
     - Global JetBrains rules in ~/.config/github-copilot/intellij/ -> User home directory
     - Workspace rules in .github/ -> parent of .github (project root)
+    - Path-specific instructions in .github/copilot/ -> parent of .github (project root)
+    - AGENTS.md at project root -> same directory as AGENTS.md
     """
     parent = rule_file.parent
 
@@ -39,9 +41,18 @@ def find_github_copilot_project_root(rule_file: Path) -> Path:
         if parent.parent.name == "github-copilot":
             return parent.parent.parent.parent
 
+    # Path-specific instructions in .github/copilot/ directory
+    if parent.name == "copilot":
+        if parent.parent.name == ".github":
+            return parent.parent.parent
+
     # Workspace rules in .github/ directory
     if parent.name == ".github":
         return parent.parent
+
+    # AGENTS.md at project root level
+    if rule_file.name == "AGENTS.md":
+        return parent
 
     return parent
 
@@ -226,6 +237,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
 
                     if item.is_dir():
                         if item.name == ".github":
+                            # Check copilot-instructions.md
                             copilot_instructions = item / "copilot-instructions.md"
                             if copilot_instructions.exists() and copilot_instructions.is_file():
                                 rule_info = self._extract_rule_with_scope(
@@ -237,7 +249,23 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                                     project_root = rule_info.get('project_root')
                                     if project_root:
                                         add_rule_to_project(rule_info, project_root, projects_by_root)
+                            # Check path-specific instructions in .github/copilot/
+                            self._extract_path_specific_instructions(item, projects_by_root)
                             continue
+
+                        # Check AGENTS.md at project root level
+                        agents_md = item / "AGENTS.md"
+                        if agents_md.exists() and agents_md.is_file():
+                            rule_info = self._extract_rule_with_scope(
+                                agents_md,
+                                find_github_copilot_project_root,
+                                scope="project"
+                            )
+                            if rule_info:
+                                project_root = rule_info.get('project_root')
+                                if project_root:
+                                    add_rule_to_project(rule_info, project_root, projects_by_root)
+
                         if item.is_symlink():
                             continue
                         self._walk_for_github_directories(root_path, item, projects_by_root, current_depth + 1)
@@ -252,6 +280,38 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             pass
         except Exception as e:
             logger.debug(f"Error walking {current_dir}: {e}")
+
+    def _extract_path_specific_instructions(
+        self, github_dir: Path, projects_by_root: Dict[str, List[Dict]]
+    ) -> None:
+        """
+        Extract path-specific instructions from .github/copilot/*.md files.
+
+        These are VS Code path-scoped custom instructions that apply to specific
+        file patterns within a project.
+
+        Args:
+            github_dir: Path to the .github directory
+            projects_by_root: Dict to populate with rule info
+        """
+        copilot_dir = github_dir / "copilot"
+        if not copilot_dir.exists() or not copilot_dir.is_dir():
+            return
+
+        try:
+            for md_file in copilot_dir.glob("*.md"):
+                if md_file.is_file():
+                    rule_info = self._extract_rule_with_scope(
+                        md_file,
+                        find_github_copilot_project_root,
+                        scope="project"
+                    )
+                    if rule_info:
+                        project_root = rule_info.get('project_root')
+                        if project_root:
+                            add_rule_to_project(rule_info, project_root, projects_by_root)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error reading copilot directory {copilot_dir}: {e}")
 
     def _extract_rule_with_scope(
         self,

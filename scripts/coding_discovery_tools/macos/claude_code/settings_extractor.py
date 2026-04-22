@@ -1,11 +1,13 @@
 """
 Claude Code settings extraction for macOS systems.
 
-Extracts permission settings from 4 scopes (in priority order, highest to lowest):
-1. Managed Scope: /Library/Application Support/ClaudeCode/managed-settings.json
-2. Local Scope: **/.claude/settings.local.json (project-specific, not committed)
-3. Project Scope: **/.claude/settings.json (project-specific, committed)
-4. User Scope: ~/.claude/settings.json (global user settings)
+Extracts permission settings from 6 scopes (in priority order, highest to lowest):
+1. Managed Plist Scope: com.anthropic.claudecode macOS managed preferences (MDM)
+2. Managed Drop-in Scope: /Library/Application Support/ClaudeCode/managed-settings.d/*.json
+3. Managed Scope: /Library/Application Support/ClaudeCode/managed-settings.json
+4. Local Scope: **/.claude/settings.local.json (project-specific, not committed)
+5. Project Scope: **/.claude/settings.json (project-specific, committed)
+6. User Scope: ~/.claude/settings.json (global user settings)
 
 For each settings file found, extracts:
 - Permissions: allow, deny, ask lists
@@ -15,6 +17,8 @@ For each settings file found, extracts:
 
 import json
 import logging
+import plistlib
+import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -40,30 +44,46 @@ class MacOSClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
     # Managed settings path
     MANAGED_SETTINGS_PATH = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
 
+    # Managed drop-in settings directory
+    MANAGED_DROPIN_DIR = Path("/Library/Application Support/ClaudeCode/managed-settings.d")
+
+    # macOS managed preferences plist domain
+    PLIST_DOMAIN = "com.anthropic.claudecode"
+
     def extract_settings(self) -> Optional[List[Dict]]:
         """
         Extract Claude Code permission settings from all sources.
-        
+
         Returns:
             List of settings dicts or None if no settings found
         """
         all_settings = []
-        
+
         # Extract user settings (global)
         user_settings = self._extract_user_settings()
         if user_settings:
             all_settings.extend(user_settings)
-        
+
         # Extract project settings
         project_settings = self._extract_project_settings()
         if project_settings:
             all_settings.extend(project_settings)
-        
-        # Extract managed settings (enterprise)
+
+        # Extract managed settings (enterprise base)
         managed_settings = self._extract_managed_settings()
         if managed_settings:
             all_settings.extend(managed_settings)
-        
+
+        # Extract managed drop-in settings (overrides base managed)
+        managed_dropin_settings = self._extract_managed_dropin_settings()
+        if managed_dropin_settings:
+            all_settings.extend(managed_dropin_settings)
+
+        # Extract plist managed preferences (highest priority, MDM-deployed)
+        plist_settings = self._extract_plist_settings()
+        if plist_settings:
+            all_settings.extend(plist_settings)
+
         return all_settings if all_settings else None
 
     def _extract_user_settings(self) -> List[Dict]:
@@ -222,12 +242,12 @@ class MacOSClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
     def _extract_managed_settings(self) -> List[Dict]:
         """
         Extract managed settings from /Library/Application Support/ClaudeCode/managed-settings.json.
-        
+
         Returns:
             List of settings dicts (usually one or zero)
         """
         settings_list = []
-        
+
         if self.MANAGED_SETTINGS_PATH.exists() and self.MANAGED_SETTINGS_PATH.is_file():
             try:
                 settings_dict = self._parse_settings_file(
@@ -238,7 +258,107 @@ class MacOSClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
                     settings_list.append(settings_dict)
             except Exception as e:
                 logger.debug(f"Error extracting managed settings from {self.MANAGED_SETTINGS_PATH}: {e}")
-        
+
+        return settings_list
+
+    def _extract_managed_dropin_settings(self) -> List[Dict]:
+        """
+        Extract managed drop-in settings from /Library/Application Support/ClaudeCode/managed-settings.d/*.json.
+
+        Drop-in files override the base managed-settings.json. Each JSON file in this
+        directory is treated as an independent settings source with scope "managed_dropin".
+
+        Returns:
+            List of settings dicts
+        """
+        settings_list = []
+
+        if not self.MANAGED_DROPIN_DIR.exists() or not self.MANAGED_DROPIN_DIR.is_dir():
+            return settings_list
+
+        try:
+            for dropin_file in sorted(self.MANAGED_DROPIN_DIR.glob("*.json")):
+                if dropin_file.is_file():
+                    try:
+                        settings_dict = self._parse_settings_file(
+                            dropin_file,
+                            "managed_dropin"
+                        )
+                        if settings_dict:
+                            settings_list.append(settings_dict)
+                    except Exception as e:
+                        logger.debug(f"Error extracting managed drop-in settings from {dropin_file}: {e}")
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error reading managed drop-in directory {self.MANAGED_DROPIN_DIR}: {e}")
+
+        return settings_list
+
+    def _extract_plist_settings(self) -> List[Dict]:
+        """
+        Extract managed preferences from the com.anthropic.claudecode plist domain.
+
+        On macOS, MDM solutions deploy configuration profiles that populate managed
+        preferences. This reads the plist using `defaults export` and parses it
+        with plistlib (both stdlib). The plist tier is the highest priority and
+        completely overrides file-based managed settings when present.
+
+        Returns:
+            List of settings dicts (one or zero)
+        """
+        settings_list = []
+
+        try:
+            result = subprocess.run(
+                ["defaults", "export", self.PLIST_DOMAIN, "-"],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                logger.debug(f"No plist found for domain {self.PLIST_DOMAIN}")
+                return settings_list
+
+            plist_data = plistlib.loads(result.stdout)
+            if not isinstance(plist_data, dict) or not plist_data:
+                return settings_list
+
+            # Extract permissions and sandbox from plist data
+            permissions = plist_data.get("permissions", {})
+            sandbox = plist_data.get("sandbox", {})
+            mcp_servers = plist_data.get("mcpServers", {})
+            mcp_server_names = list(mcp_servers.keys()) if isinstance(mcp_servers, dict) else []
+            allowed_mcp_servers = plist_data.get("allowedMcpServers", [])
+            denied_mcp_servers = plist_data.get("deniedMcpServers", [])
+
+            settings_dict = {
+                "tool_name": "Claude Code",
+                "scope": "managed_plist",
+                "settings_path": f"plist:{self.PLIST_DOMAIN}",
+                "raw_settings": plist_data,
+                "permissions": {
+                    "defaultMode": permissions.get("defaultMode"),
+                    "allow": permissions.get("allow", []),
+                    "deny": permissions.get("deny", []),
+                    "ask": permissions.get("ask", []),
+                    "additionalDirectories": permissions.get("additionalDirectories", [])
+                },
+                "mcp_servers": mcp_server_names,
+                "mcp_policies": {
+                    "allowedMcpServers": allowed_mcp_servers,
+                    "deniedMcpServers": denied_mcp_servers
+                },
+                "sandbox": {
+                    "enabled": sandbox.get("enabled")
+                }
+            }
+
+            logger.info(f"  ✓ Extracted plist managed preferences from {self.PLIST_DOMAIN}")
+            settings_list.append(settings_dict)
+
+        except subprocess.TimeoutExpired:
+            logger.debug(f"Timeout reading plist domain {self.PLIST_DOMAIN}")
+        except Exception as e:
+            logger.debug(f"Error reading plist domain {self.PLIST_DOMAIN}: {e}")
+
         return settings_list
 
     def _parse_settings_file(self, settings_path: Path, scope: str) -> Optional[Dict]:
@@ -248,7 +368,9 @@ class MacOSClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
         Args:
             settings_path: Path to the settings.json file
             scope: Scope type - one of:
-                   - "managed": Enterprise managed settings (highest priority)
+                   - "managed_plist": macOS managed preferences via MDM (highest priority)
+                   - "managed_dropin": Managed drop-in settings (managed-settings.d/*.json)
+                   - "managed": Enterprise managed settings
                    - "local": Project-local settings (.claude/settings.local.json)
                    - "project": Project settings (.claude/settings.json)
                    - "user": User global settings (~/.claude/settings.json)

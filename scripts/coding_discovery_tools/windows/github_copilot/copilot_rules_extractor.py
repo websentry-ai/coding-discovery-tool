@@ -314,6 +314,8 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                                 if project_root:
                                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
+                        if item.is_symlink():
+                            continue
                         self._walk_for_github_directories(root_path, item, projects_by_root, current_depth + 1)
 
                 except (PermissionError, OSError):

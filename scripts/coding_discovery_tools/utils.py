@@ -1207,7 +1207,20 @@ def send_discovery_metrics(
     if app_name:
         payload["app_name"] = app_name
 
+    # Write payload to a temp file and pass via -d @path to avoid OSError when
+    # payload exceeds ARG_MAX (matches the mitigation in send_report_to_backend).
     try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-metrics-", suffix=".json")
+    except OSError as e:
+        logger.debug(f"Discovery metrics tempfile failed: {e}")
+        return False
+
+    try:
+        try:
+            os.write(fd, json.dumps(payload).encode("utf-8"))
+        finally:
+            os.close(fd)
+
         result = subprocess.run(
             [
                 "curl", "-s",
@@ -1215,7 +1228,7 @@ def send_discovery_metrics(
                 "-H", f"Authorization: Bearer {api_key}",
                 "-H", "Content-Type: application/json",
                 "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                "-d", json.dumps(payload),
+                "-d", f"@{tmp_path}",
                 "--max-time", "10",
                 "-w", "\n%{http_code}",
                 url,
@@ -1237,3 +1250,8 @@ def send_discovery_metrics(
     except Exception as e:
         logger.debug(f"Discovery metrics send raised: {e}")
         return False
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass

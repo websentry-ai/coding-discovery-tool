@@ -1908,13 +1908,13 @@ def main():
                     f" (owned by another user)"
                 )
 
-        # Forward client-side timing metrics to backend (best-effort).
+        # Forward client-side timing metrics to backend (best-effort, success path only).
         # Backend emits these as Sentry distributions via emit_discovery_metrics.
         try:
             sentry_metrics_payload = {
-                "total_duration_ms": int((time.monotonic() - t_start) * 1000),
+                "total_duration_ms": round((time.monotonic() - t_start) * 1000),
                 "steps": [
-                    {"name": name, "duration_ms": int(duration)}
+                    {"name": name, "duration_ms": round(duration)}
                     for name, duration in step_durations_ms.items()
                 ],
                 "metadata": {

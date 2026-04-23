@@ -600,10 +600,7 @@ def _get_queue_file_path() -> Path:
     """
     if platform.system() == "Windows":
         return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
-    try:
-        uid = os.getuid()
-    except AttributeError:
-        uid = 0
+    uid = os.getuid()
     return Path(f"/var/tmp/ai-discovery-queue-{uid}.json")
 
 

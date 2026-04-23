@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...constants import MAX_SEARCH_DEPTH
 from ...mcp_extraction_helpers import transform_mcp_servers_to_array
+from ...macos_extraction_helpers import (
+    get_top_level_directories,
+    should_skip_path,
+    should_skip_system_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -378,30 +384,42 @@ class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
 
     GLOBAL_MCP_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 
+    # Project-level config uses parent_levels=2: <project>/.codex/config.toml -> 2 levels up = <project>
+    _PROJECT_PARENT_LEVELS = 2
+
     def extract_mcp_config(self) -> Optional[Dict[str, List[Dict[str, Any]]]]:
         """
         Extract Codex MCP configuration on macOS.
-        
-        Extracts global MCP config from ~/.codex/config.toml.
-        
+
+        Extracts global MCP config from ~/.codex/config.toml and
+        project-level configs from **/.codex/config.toml.
+
         Returns:
             Dict with projects array containing MCP configs, or None if no configs found
         """
+        projects = []
+
         global_config = self._extract_global_config()
-        if not global_config:
+        if global_config:
+            projects.append(global_config)
+
+        project_configs = self._extract_project_level_configs()
+        projects.extend(project_configs)
+
+        if not projects:
             return None
-        
+
         return {
-            "projects": [global_config]
+            "projects": projects
         }
 
     def _extract_global_config(self) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
         """
         Extract global MCP config from ~/.codex/config.toml.
-        
+
         When running as root, collects global configs from ALL users.
         Returns the first non-empty config found, or None if none found.
-        
+
         Returns:
             Dict with 'path' and 'mcpServers' keys, or None if not found
         """
@@ -410,3 +428,113 @@ class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
             tool_name=_TOOL_NAME,
             parent_levels=_PARENT_LEVELS
         )
+
+    def _extract_project_level_configs(self) -> List[Dict]:
+        """
+        Extract project-level MCP configs from **/.codex/config.toml.
+
+        Walks the filesystem looking for .codex directories at project level,
+        skipping the global ~/.codex directory to avoid duplicates.
+
+        Returns:
+            List of MCP config dicts
+        """
+        configs = []
+        root_path = Path("/")
+
+        # Global .codex directory to skip (already handled by _extract_global_config)
+        global_codex_dir = Path.home() / ".codex"
+
+        try:
+            top_level_dirs = get_top_level_directories(root_path)
+            for top_dir in top_level_dirs:
+                try:
+                    self._walk_for_codex_configs(
+                        root_path, top_dir, configs, global_codex_dir, current_depth=1
+                    )
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Skipping {top_dir}: {e}")
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error accessing root for Codex project scan: {e}")
+
+        return configs
+
+    def _walk_for_codex_configs(
+        self,
+        root_path: Path,
+        current_dir: Path,
+        configs: List[Dict],
+        global_codex_dir: Path,
+        current_depth: int = 0
+    ) -> None:
+        """
+        Recursively walk directories looking for .codex/config.toml files.
+
+        Args:
+            root_path: Root search path
+            current_dir: Current directory being processed
+            configs: List to populate with MCP configs
+            global_codex_dir: Global ~/.codex directory to skip
+            current_depth: Current recursion depth
+        """
+        if current_depth > MAX_SEARCH_DEPTH:
+            return
+
+        try:
+            for item in current_dir.iterdir():
+                try:
+                    if should_skip_path(item) or should_skip_system_path(item):
+                        continue
+
+                    try:
+                        depth = len(item.relative_to(root_path).parts)
+                        if depth > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
+
+                    if item.is_dir():
+                        if item.name == ".codex":
+                            # Skip the global ~/.codex directory
+                            if item == global_codex_dir:
+                                continue
+                            self._extract_config_from_codex_dir(item, configs)
+                            continue
+                        if item.is_symlink():
+                            continue
+                        self._walk_for_codex_configs(
+                            root_path, item, configs, global_codex_dir, current_depth + 1
+                        )
+
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {item}: {e}")
+                    continue
+
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error walking {current_dir}: {e}")
+
+    def _extract_config_from_codex_dir(self, codex_dir: Path, configs: List[Dict]) -> None:
+        """
+        Extract MCP config from a .codex directory's config.toml.
+
+        Uses parent_levels=2 to resolve the project root:
+        <project>/.codex/config.toml -> 2 levels up -> <project>
+
+        Args:
+            codex_dir: Path to the .codex directory
+            configs: List to populate with MCP configs
+        """
+        config_toml = codex_dir / "config.toml"
+        if config_toml.exists() and config_toml.is_file():
+            config = read_codex_toml_mcp_config(
+                config_toml,
+                tool_name=_TOOL_NAME,
+                parent_levels=self._PROJECT_PARENT_LEVELS
+            )
+            if config:
+                configs.append(config)

@@ -1,11 +1,12 @@
 """
 Claude Code settings extraction for Windows systems.
 
-Extracts permission settings from 4 scopes (in priority order, highest to lowest):
-1. Managed Scope: C:\\Program Files\\ClaudeCode\\managed-settings.json
-2. Local Scope: **\\.claude\\settings.local.json (project-specific, not committed)
-3. Project Scope: **\\.claude\\settings.json (project-specific, committed)
-4. User Scope: %USERPROFILE%\\.claude\\settings.json (global user settings)
+Extracts permission settings from 5 scopes (in priority order, highest to lowest):
+1. Managed Drop-in Scope: C:\\Program Files\\ClaudeCode\\managed-settings.d\\*.json
+2. Managed Scope: C:\\Program Files\\ClaudeCode\\managed-settings.json
+3. Local Scope: **\\.claude\\settings.local.json (project-specific, not committed)
+4. Project Scope: **\\.claude\\settings.json (project-specific, committed)
+5. User Scope: %USERPROFILE%\\.claude\\settings.json (global user settings)
 
 For each settings file found, extracts:
 - Permissions: allow, deny, ask lists
@@ -39,6 +40,9 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
     # Managed settings path
     MANAGED_SETTINGS_PATH = Path("C:\\Program Files\\ClaudeCode\\managed-settings.json")
 
+    # Managed drop-in settings directory
+    MANAGED_DROPIN_DIR = Path("C:\\Program Files\\ClaudeCode\\managed-settings.d")
+
     def extract_settings(self) -> Optional[List[Dict]]:
         """
         Extract Claude Code permission settings from all sources.
@@ -58,11 +62,16 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
         if project_settings:
             all_settings.extend(project_settings)
         
-        # Extract managed settings (enterprise)
+        # Extract managed settings (enterprise base)
         managed_settings = self._extract_managed_settings()
         if managed_settings:
             all_settings.extend(managed_settings)
-        
+
+        # Extract managed drop-in settings (overrides base managed)
+        managed_dropin_settings = self._extract_managed_dropin_settings()
+        if managed_dropin_settings:
+            all_settings.extend(managed_dropin_settings)
+
         return all_settings if all_settings else None
 
     def _extract_user_settings(self) -> List[Dict]:
@@ -267,13 +276,13 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
 
     def _extract_managed_settings(self) -> List[Dict]:
         """
-        Extract managed settings from C:\Program Files\ClaudeCode\managed-settings.json.
-        
+        Extract managed settings from C:\\Program Files\\ClaudeCode\\managed-settings.json.
+
         Returns:
             List of settings dicts (usually one or zero)
         """
         settings_list = []
-        
+
         if self.MANAGED_SETTINGS_PATH.exists() and self.MANAGED_SETTINGS_PATH.is_file():
             try:
                 settings_dict = self._parse_settings_file(
@@ -284,7 +293,39 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
                     settings_list.append(settings_dict)
             except Exception as e:
                 logger.debug(f"Error extracting managed settings from {self.MANAGED_SETTINGS_PATH}: {e}")
-        
+
+        return settings_list
+
+    def _extract_managed_dropin_settings(self) -> List[Dict]:
+        """
+        Extract managed drop-in settings from C:\\Program Files\\ClaudeCode\\managed-settings.d\\*.json.
+
+        Drop-in files override the base managed-settings.json. Each JSON file in this
+        directory is treated as an independent settings source with scope "managed_dropin".
+
+        Returns:
+            List of settings dicts
+        """
+        settings_list = []
+
+        if not self.MANAGED_DROPIN_DIR.exists() or not self.MANAGED_DROPIN_DIR.is_dir():
+            return settings_list
+
+        try:
+            for dropin_file in sorted(self.MANAGED_DROPIN_DIR.glob("*.json")):
+                if dropin_file.is_file():
+                    try:
+                        settings_dict = self._parse_settings_file(
+                            dropin_file,
+                            "managed_dropin"
+                        )
+                        if settings_dict:
+                            settings_list.append(settings_dict)
+                    except Exception as e:
+                        logger.debug(f"Error extracting managed drop-in settings from {dropin_file}: {e}")
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error reading managed drop-in directory {self.MANAGED_DROPIN_DIR}: {e}")
+
         return settings_list
 
     def _parse_settings_file(self, settings_path: Path, scope: str) -> Optional[Dict]:
@@ -294,7 +335,8 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
         Args:
             settings_path: Path to the settings.json file
             scope: Scope type - one of:
-                   - "managed": Enterprise managed settings (highest priority)
+                   - "managed_dropin": Managed drop-in settings (managed-settings.d/*.json, highest priority)
+                   - "managed": Enterprise managed settings
                    - "local": Project-local settings (.claude/settings.local.json)
                    - "project": Project settings (.claude/settings.json)
                    - "user": User global settings (~/.claude/settings.json)

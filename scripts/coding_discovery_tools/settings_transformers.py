@@ -6,10 +6,12 @@ Settings are extracted from multiple sources, and we send the highest precedence
 to the backend.
 
 Precedence order (highest to lowest):
-    1. managed - Enterprise/MDM deployed settings (highest priority)
-    2. local - User's local overrides (not synced)
-    3. project - Project-specific settings
-    4. user - Global user settings (lowest priority)
+    1. managed_plist - macOS MDM plist settings (highest priority)
+    2. managed_dropin - Enterprise drop-in override settings
+    3. managed - Enterprise/MDM deployed settings
+    4. local - User's local overrides (not synced)
+    5. project - Project-specific settings
+    6. user - Global user settings (lowest priority)
 """
 
 import json
@@ -22,10 +24,12 @@ logger = logging.getLogger(__name__)
 # Constants for settings source precedence
 # Higher number = higher precedence
 SETTINGS_PRECEDENCE = {
-    "managed": 4,   # Highest priority - enterprise/MDM settings
-    "local": 3,     # Second priority - local user overrides
-    "project": 2,   # Third priority - project settings
-    "user": 1,      # Lowest priority - global user settings
+    "managed_plist": 6,   # Highest priority - macOS MDM plist settings
+    "managed_dropin": 5,  # Second priority - enterprise drop-in overrides
+    "managed": 4,         # Third priority - enterprise/MDM base settings
+    "local": 3,           # Fourth priority - local user overrides
+    "project": 2,         # Fifth priority - project settings
+    "user": 1,            # Lowest priority - global user settings
 }
 
 # Default precedence for unknown sources
@@ -191,7 +195,13 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
 
     scope_value = _get_scope_value(highest_precedence)
 
-    settings_source_value = "user" if scope_value == "local" else scope_value
+    # Map internal scope values to backend-compatible settings_source values
+    if scope_value == "local":
+        settings_source_value = "user"
+    elif scope_value in ("managed_plist", "managed_dropin"):
+        settings_source_value = "managed"
+    else:
+        settings_source_value = scope_value
 
     backend_permissions = {
         "settings_source": settings_source_value,

@@ -593,11 +593,15 @@ def _get_queue_file_path() -> Path:
     """Return platform-appropriate queue file path.
 
     On Unix, /var/tmp persists across reboots (unlike /tmp).
-    On Windows, fall back to the standard temp directory.
+    The filename includes the current UID so that different users
+    (e.g. root via MDM vs. a regular login user) each get their own
+    queue file, avoiding PermissionError on files created with 0600.
+    On Windows, fall back to the standard temp directory (already per-user).
     """
     if platform.system() == "Windows":
         return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
-    return Path("/var/tmp/ai-discovery-queue.json")
+    uid = os.getuid()
+    return Path(f"/var/tmp/ai-discovery-queue-{uid}.json")
 
 
 QUEUE_FILE = _get_queue_file_path()
@@ -626,6 +630,13 @@ def load_pending_reports() -> List[Dict]:
 
     Reports older than 24 hours are silently discarded.
     """
+    old_shared = Path("/var/tmp/ai-discovery-queue.json")
+    if platform.system() != "Windows" and old_shared.exists():
+        logger.info(
+            f"Legacy shared queue file detected at {old_shared}"
+            f" -- can be removed with: sudo rm {old_shared}"
+        )
+
     if not QUEUE_FILE.exists():
         return []
 

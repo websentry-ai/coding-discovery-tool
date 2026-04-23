@@ -1874,7 +1874,13 @@ def main():
             save_failed_reports(failed_reports)
         elif QUEUE_FILE.exists():
             # All queued reports succeeded and no new failures — clean up
-            QUEUE_FILE.unlink(missing_ok=True)
+            try:
+                QUEUE_FILE.unlink(missing_ok=True)
+            except PermissionError:
+                logger.warning(
+                    f"Could not remove queue file {QUEUE_FILE}"
+                    f" (owned by another user)"
+                )
 
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")

@@ -11,10 +11,14 @@ import logging
 import os
 import platform
 import sys
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, Iterator, List, Optional, Callable
+
+SCRIPT_VERSION = "1.0.0"
 
 try:
     from .coding_tool_base import BaseMCPConfigExtractor
@@ -55,7 +59,7 @@ try:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -100,7 +104,7 @@ except ImportError:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -1566,6 +1570,21 @@ def main():
     device_id = None
     run_id = None
 
+    # Client-side timing metrics, forwarded to backend once at end of run.
+    # Step names must match webapp.services.discovery_metrics_service.ALLOWED_STEP_NAMES.
+    t_start = time.monotonic()
+    step_durations_ms: Dict[str, float] = {}
+
+    @contextmanager
+    def time_step(name: str) -> Iterator[None]:
+        _t = time.monotonic()
+        try:
+            yield
+        finally:
+            step_durations_ms[name] = (
+                step_durations_ms.get(name, 0.0) + (time.monotonic() - _t) * 1000.0
+            )
+
     try:
         detector = AIToolsDetector()
 
@@ -1656,7 +1675,8 @@ def main():
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
-            user_tools = detector.detect_all_tools(user_home=user_home)
+            with time_step("detect_tools"):
+                user_tools = detector.detect_all_tools(user_home=user_home)
 
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
@@ -1712,28 +1732,33 @@ def main():
 
                     try:
                         # Filter projects to only include this user's projects
-                        tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+                        with time_step("filter_projects"):
+                            tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
 
                         # Detect subscription plan for Claude Code
                         if tool_name.lower() == "claude code":
                             try:
-                                claude_bin = find_claude_binary_for_user(user_home)
-                                if claude_bin:
-                                    subscription = get_claude_subscription_type(user_name, claude_bin)
-                                    if subscription:
-                                        tool_filtered["plan"] = subscription
-                                        logger.info(f"    Plan: {subscription}")
-                                    else:
-                                        logger.debug(f"    Could not detect plan for {user_name}")
-                                else:
+                                with time_step("detect_subscriptions"):
+                                    claude_bin = find_claude_binary_for_user(user_home)
+                                    subscription = (
+                                        get_claude_subscription_type(user_name, claude_bin)
+                                        if claude_bin else None
+                                    )
+                                if claude_bin is None:
                                     logger.debug(f"    Claude binary not found for {user_name}")
+                                elif subscription:
+                                    tool_filtered["plan"] = subscription
+                                    logger.info(f"    Plan: {subscription}")
+                                else:
+                                    logger.debug(f"    Could not detect plan for {user_name}")
                             except (PermissionError, OSError) as e:
                                 logger.warning(f"    Could not detect plan for {user_name}: {e}")
 
                         # Detect subscription plan for Cursor / Cursor CLI
                         if tool_name.lower() in ("cursor", "cursor cli"):
                             try:
-                                subscription = get_cursor_subscription_type(user_home)
+                                with time_step("detect_subscriptions"):
+                                    subscription = get_cursor_subscription_type(user_home)
                                 if subscription:
                                     tool_filtered["plan"] = subscription
                                     logger.info(f"    Plan: {subscription}")
@@ -1744,9 +1769,10 @@ def main():
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
-                        single_tool_report = detector.generate_single_tool_report(
-                            tool_filtered, device_id, user_name, system_user, run_id
-                        )
+                        with time_step("prepare_payload"):
+                            single_tool_report = detector.generate_single_tool_report(
+                                tool_filtered, device_id, user_name, system_user, run_id
+                            )
 
                         # Log tool summary for this user
                         projects = tool_filtered.get('projects', [])
@@ -1881,6 +1907,30 @@ def main():
                     f"Could not remove queue file {QUEUE_FILE}"
                     f" (owned by another user)"
                 )
+
+        # Forward client-side timing metrics to backend (best-effort, success path only).
+        # Backend emits these as Sentry distributions via emit_discovery_metrics.
+        try:
+            sentry_metrics_payload = {
+                "total_duration_ms": round((time.monotonic() - t_start) * 1000),
+                "steps": [
+                    {"name": name, "duration_ms": round(duration)}
+                    for name, duration in step_durations_ms.items()
+                ],
+                "metadata": {
+                    "os": platform.system(),
+                    "tool_count": len(tools),
+                    "user_count": len(all_users),
+                    "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+                    "script_version": SCRIPT_VERSION,
+                },
+            }
+            send_discovery_metrics(
+                args.domain, args.api_key, device_id,
+                sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
+            )
+        except Exception as metrics_err:
+            logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")

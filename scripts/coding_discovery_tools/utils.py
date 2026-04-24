@@ -1177,3 +1177,81 @@ def _extract_frames(exception: Exception) -> List[Dict]:
         }
         for frame in traceback.extract_tb(exception.__traceback__)
     ]
+
+
+def send_discovery_metrics(
+    backend_url: str,
+    api_key: str,
+    device_id: str,
+    sentry_metrics: Dict[str, Any],
+    run_id: Optional[str] = None,
+    app_name: Optional[str] = None,
+) -> bool:
+    """Fire-and-forget POST of client-side timing metrics to the backend.
+
+    Piggybacks on /api/v1/ai-tools/report/ with ``tools=[]`` so the backend's
+    ``emit_discovery_metrics`` runs. Short timeout, no retries — metrics
+    failures must never crash or slow down the discovery run.
+    """
+    if not backend_url or not api_key:
+        return False
+
+    url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
+    payload: Dict[str, Any] = {
+        "device_id": device_id,
+        "tools": [],
+        "sentry_metrics": sentry_metrics,
+    }
+    if run_id:
+        payload["run_id"] = run_id
+    if app_name:
+        payload["app_name"] = app_name
+
+    # Write payload to a temp file and pass via -d @path to avoid OSError when
+    # payload exceeds ARG_MAX (matches the mitigation in send_report_to_backend).
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-metrics-", suffix=".json")
+    except OSError as e:
+        logger.debug(f"Discovery metrics tempfile failed: {e}")
+        return False
+
+    try:
+        try:
+            os.write(fd, json.dumps(payload).encode("utf-8"))
+        finally:
+            os.close(fd)
+
+        result = subprocess.run(
+            [
+                "curl", "-s",
+                "-X", "POST",
+                "-H", f"Authorization: Bearer {api_key}",
+                "-H", "Content-Type: application/json",
+                "-H", "User-Agent: AI-Tools-Discovery/1.0",
+                "-d", f"@{tmp_path}",
+                "--max-time", "10",
+                "-w", "\n%{http_code}",
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        status = result.stdout.rsplit("\n", 1)[-1].strip()
+        ok = result.returncode == 0 and status.isdigit() and status.startswith("2")
+        if ok:
+            logger.debug(f"Discovery metrics sent (HTTP {status})")
+        else:
+            logger.debug(
+                f"Discovery metrics send failed: rc={result.returncode} "
+                f"status={status!r} stderr={result.stderr.strip()!r}"
+            )
+        return ok
+    except Exception as e:
+        logger.debug(f"Discovery metrics send raised: {e}")
+        return False
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass

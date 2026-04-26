@@ -1571,12 +1571,17 @@ def main():
     run_id = None
 
     # Client-side timing metrics, forwarded to backend once at end of run.
-    # Step names must match webapp.services.discovery_metrics_service.ALLOWED_STEP_NAMES.
+    # Backend (webapp.services.discovery_metrics_service) emits each step as a
+    # `discovery.step.<name>` distribution; there is no name allowlist, but the
+    # name must match Sentry's metric-key pattern [a-zA-Z_][a-zA-Z0-9_.\-]*.
+    # Each step is tagged with a phase (detect|process|send|queue) so Sentry can
+    # group leaves into broader buckets via the `phase` attribute.
     t_start = time.monotonic()
     step_durations_ms: Dict[str, float] = {}
+    step_phases: Dict[str, str] = {}
 
     @contextmanager
-    def time_step(name: str) -> Iterator[None]:
+    def time_step(name: str, phase: str) -> Iterator[None]:
         _t = time.monotonic()
         try:
             yield
@@ -1584,12 +1589,14 @@ def main():
             step_durations_ms[name] = (
                 step_durations_ms.get(name, 0.0) + (time.monotonic() - _t) * 1000.0
             )
+            step_phases[name] = phase
 
     try:
         detector = AIToolsDetector()
 
         # Get device ID once (shared across all user reports)
-        device_id = detector.get_device_id()
+        with time_step("get_device_id", "detect"):
+            device_id = detector.get_device_id()
         sentry_ctx["device_id"] = device_id
 
         # Generate run_id for this scan (client-side UUID generation)
@@ -1601,33 +1608,35 @@ def main():
         failed_reports = []
 
         # --- Drain pending reports from previous run ---
-        pending = load_pending_reports()
-        if pending:
-            logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
-            for queued_report in pending:
-                success, retryable = send_report_to_backend(
-                    args.domain, args.api_key, queued_report, args.app_name,
-                    sentry_context=sentry_ctx,
-                )
-                if success:
-                    logger.info("  ✓ Queued report sent successfully")
-                elif retryable:
-                    failed_reports.append(queued_report)
-                else:
-                    logger.warning("  ✗ Queued report discarded (non-retryable error)")
-            logger.info("")
+        with time_step("drain_pending_queue", "queue"):
+            pending = load_pending_reports()
+            if pending:
+                logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
+                for queued_report in pending:
+                    success, retryable = send_report_to_backend(
+                        args.domain, args.api_key, queued_report, args.app_name,
+                        sentry_context=sentry_ctx,
+                    )
+                    if success:
+                        logger.info("  ✓ Queued report sent successfully")
+                    elif retryable:
+                        failed_reports.append(queued_report)
+                    else:
+                        logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                logger.info("")
 
         # Get all users for macOS/Windows, or use current user for other platforms
-        if platform.system() == "Darwin":
-            all_users = get_all_users_macos()
-        elif platform.system() == "Windows":
-            all_users = get_all_users_windows()
-        else:
-            all_users = []
+        with time_step("enumerate_users", "detect"):
+            if platform.system() == "Darwin":
+                all_users = get_all_users_macos()
+            elif platform.system() == "Windows":
+                all_users = get_all_users_windows()
+            else:
+                all_users = []
 
-        # If no users found, fall back to current user
-        if not all_users:
-            all_users = [get_user_info()]
+            # If no users found, fall back to current user
+            if not all_users:
+                all_users = [get_user_info()]
 
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
@@ -1647,15 +1656,17 @@ def main():
         logger.info("")
 
         # Get system_user once (who is running the script) for audit purposes
-        system_user = get_user_info()
+        with time_step("get_system_user", "detect"):
+            system_user = get_user_info()
         sentry_ctx["system_user"] = system_user
 
         # Send scan in_progress event BEFORE scanning
         logger.info("Sending scan in_progress event...")
-        success, _ = send_scan_event(
-            args.domain, args.api_key, device_id, run_id, "in_progress",
-            args.app_name, sentry_context=sentry_ctx
-        )
+        with time_step("send_in_progress", "send"):
+            success, _ = send_scan_event(
+                args.domain, args.api_key, device_id, run_id, "in_progress",
+                args.app_name, sentry_context=sentry_ctx
+            )
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
         else:
@@ -1675,7 +1686,7 @@ def main():
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
-            with time_step("detect_tools"):
+            with time_step("detect_tools", "detect"):
                 user_tools = detector.detect_all_tools(user_home=user_home)
 
             if user_tools:
@@ -1713,7 +1724,8 @@ def main():
             try:
                 # Process this tool once (extract all rules and MCP configs for all users)
                 logger.info(f"  Extracting rules and MCP configs for {tool_name}...")
-                tool_with_projects = detector.process_single_tool(tool)
+                with time_step("process_single_tool", "process"):
+                    tool_with_projects = detector.process_single_tool(tool)
                 logger.info(f"  ✓ Processing complete for {tool_name}")
                 logger.info("")
 
@@ -1732,14 +1744,15 @@ def main():
 
                     try:
                         # Filter projects to only include this user's projects
-                        with time_step("filter_projects"):
+                        with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
 
                         # Detect subscription plan for Claude Code
                         if tool_name.lower() == "claude code":
                             try:
-                                with time_step("detect_subscriptions"):
+                                with time_step("find_subscription_binary", "detect"):
                                     claude_bin = find_claude_binary_for_user(user_home)
+                                with time_step("detect_subscriptions", "process"):
                                     subscription = (
                                         get_claude_subscription_type(user_name, claude_bin)
                                         if claude_bin else None
@@ -1757,7 +1770,7 @@ def main():
                         # Detect subscription plan for Cursor / Cursor CLI
                         if tool_name.lower() in ("cursor", "cursor cli"):
                             try:
-                                with time_step("detect_subscriptions"):
+                                with time_step("detect_subscriptions", "process"):
                                     subscription = get_cursor_subscription_type(user_home)
                                 if subscription:
                                     tool_filtered["plan"] = subscription
@@ -1769,7 +1782,7 @@ def main():
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
-                        with time_step("prepare_payload"):
+                        with time_step("prepare_payload", "process"):
                             single_tool_report = detector.generate_single_tool_report(
                                 tool_filtered, device_id, user_name, system_user, run_id
                             )
@@ -1828,20 +1841,22 @@ def main():
                         # Log the complete JSON being sent to backend
                         logger.info("  Complete JSON payload being sent to backend:")
                         logger.info("  " + "=" * 70)
-                        try:
-                            report_json = json.dumps(single_tool_report, indent=2)
-                            for line in report_json.split('\n'):
-                                logger.info(f"  {line}")
-                        except Exception as e:
-                            logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                            logger.info(f"  Report structure: {single_tool_report}")
+                        with time_step("log_payload", "process"):
+                            try:
+                                report_json = json.dumps(single_tool_report, indent=2)
+                                for line in report_json.split('\n'):
+                                    logger.info(f"  {line}")
+                            except Exception as e:
+                                logger.warning(f"  Could not serialize report to JSON for logging: {e}")
+                                logger.info(f"  Report structure: {single_tool_report}")
                         logger.info("  " + "=" * 70)
                         logger.info("")
 
                         # Send report to backend
                         logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
-                        success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                        with time_step("send_report_per_tool_user", "send"):
+                            success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                         if success:
                             logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                         else:
@@ -1896,17 +1911,18 @@ def main():
                 logger.info("")
 
         # --- Persist any failed reports for the next run ---
-        if failed_reports:
-            save_failed_reports(failed_reports)
-        elif QUEUE_FILE.exists():
-            # All queued reports succeeded and no new failures — clean up
-            try:
-                QUEUE_FILE.unlink(missing_ok=True)
-            except PermissionError:
-                logger.warning(
-                    f"Could not remove queue file {QUEUE_FILE}"
-                    f" (owned by another user)"
-                )
+        with time_step("persist_failed_reports", "queue"):
+            if failed_reports:
+                save_failed_reports(failed_reports)
+            elif QUEUE_FILE.exists():
+                # All queued reports succeeded and no new failures — clean up
+                try:
+                    QUEUE_FILE.unlink(missing_ok=True)
+                except PermissionError:
+                    logger.warning(
+                        f"Could not remove queue file {QUEUE_FILE}"
+                        f" (owned by another user)"
+                    )
 
         # Forward client-side timing metrics to backend (best-effort, success path only).
         # Backend emits these as Sentry distributions via emit_discovery_metrics.
@@ -1914,7 +1930,11 @@ def main():
             sentry_metrics_payload = {
                 "total_duration_ms": round((time.monotonic() - t_start) * 1000),
                 "steps": [
-                    {"name": name, "duration_ms": round(duration)}
+                    {
+                        "name": name,
+                        "duration_ms": round(duration),
+                        "phase": step_phases.get(name),
+                    }
                     for name, duration in step_durations_ms.items()
                 ],
                 "metadata": {

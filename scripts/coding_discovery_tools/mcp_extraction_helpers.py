@@ -5,14 +5,301 @@ These functions are used by both Cursor and Claude Code MCP extractors
 on Windows and macOS to avoid code duplication.
 """
 
+import datetime
 import json
 import logging
+import os
+import platform
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Dict, Optional, Callable, Union
+from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 
 from .constants import MAX_SEARCH_DEPTH
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# MCP tool-list scanning
+# ---------------------------------------------------------------------------
+# Every call to transform_mcp_servers_to_array also connects to each MCP server
+# and captures its tool list (name / title / description per tool). The scan
+# result is attached as a `scan` field on each server entry — either:
+#   { "tools": [...], "tool_count": N, "server_info": {...}, "error": null }
+# or:
+#   { "tools": null, "error": { "code", "message", "details" } }
+
+_SCAN_MAX_WORKERS = 4
+
+# Module-level caches: OAuth tokens are fetched at most once per process,
+# and scan results are memoized by (url, command, args) so multiple extractors
+# finding the same server (e.g. Claude global + Cursor global) scan it once.
+_OAUTH_INDEX_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+_OAUTH_INDEX_BUILT = False
+_SCAN_CACHE: Dict[Tuple[str, str, Tuple[str, ...]], Dict[str, Any]] = {}
+
+
+def _read_claude_oauth_blob() -> Optional[Dict[str, Any]]:
+    """Fetch the Claude Code credentials JSON blob.
+      macOS: keychain service "Claude Code-credentials" (prompts on first access).
+      Linux/Windows: ~/.claude/.credentials.json (plaintext, mode 0600)."""
+    if platform.system() == "Darwin":
+        try:
+            result = subprocess.run(
+                [
+                    "security", "find-generic-password",
+                    "-s", "Claude Code-credentials",
+                    "-a", os.environ.get("USER", ""),
+                    "-w",
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+        except Exception as exc:
+            logger.debug("keychain read failed: %s", exc)
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            return json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            return None
+
+    candidates = [Path.home() / ".claude" / ".credentials.json"]
+    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg_dir:
+        candidates.insert(0, Path(cfg_dir) / ".credentials.json")
+    for p in candidates:
+        try:
+            return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def _get_claude_oauth_index() -> Dict[str, Dict[str, Any]]:
+    """Build { serverUrl -> {access_token, expires_at_ms, ...} }, memoized."""
+    global _OAUTH_INDEX_CACHE, _OAUTH_INDEX_BUILT
+    if _OAUTH_INDEX_BUILT:
+        return _OAUTH_INDEX_CACHE or {}
+    _OAUTH_INDEX_BUILT = True
+    blob = _read_claude_oauth_blob() or {}
+    mcp = blob.get("mcpOAuth") or {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for entry in mcp.values():
+        url = entry.get("serverUrl")
+        if not isinstance(url, str):
+            continue
+        compact = {
+            "access_token": entry.get("accessToken"),
+            "refresh_token": entry.get("refreshToken"),
+            "expires_at_ms": int(entry.get("expiresAt") or 0),
+            "client_id": entry.get("clientId"),
+            "scope": entry.get("scope"),
+        }
+        existing = out.get(url)
+        if existing is None or compact["expires_at_ms"] > existing.get("expires_at_ms", 0):
+            out[url] = compact
+    _OAUTH_INDEX_CACHE = out
+    return out
+
+
+def _maybe_inject_bearer(cfg: Dict[str, Any], now_ms: int) -> Dict[str, Any]:
+    """If the config's URL matches a fresh Claude-Code-cached token, return a
+    copy of cfg with Authorization: Bearer injected. Never overrides an
+    existing Authorization header the config may already set."""
+    url = cfg.get("url")
+    if not url:
+        return cfg
+    existing_headers = cfg.get("headers") or {}
+    if any(isinstance(k, str) and k.lower() == "authorization" for k in existing_headers):
+        return cfg
+    token = _get_claude_oauth_index().get(url)
+    if not token or not token.get("access_token"):
+        return cfg
+    if token["expires_at_ms"] and token["expires_at_ms"] < now_ms + 60_000:
+        return cfg  # expired — user needs to re-auth via Claude Code
+    return {
+        **cfg,
+        "headers": {**existing_headers, "Authorization": f"Bearer {token['access_token']}"},
+    }
+
+
+def _scan_cache_key(cfg: Dict[str, Any]) -> Tuple[str, str, Tuple[str, ...]]:
+    return (
+        cfg.get("url") or "",
+        cfg.get("command") or "",
+        tuple(cfg.get("args") or []),
+    )
+
+
+def _trim_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    """Project each tool to just {name, title, description}."""
+    if not tools:
+        return None
+    return [
+        {k: t.get(k) for k in ("name", "title", "description")}
+        for t in tools
+        if isinstance(t, dict)
+    ]
+
+
+# Scanner-output fields surfaced under error.details. Only fields whose values
+# come from the actual server / subprocess — no fabricated text. Consumers
+# that want a UI string derive it from `error.code` themselves.
+_DETAIL_FIELDS = (
+    "http_status",        # HTTP status code observed from the server
+    "www_authenticate",   # WWW-Authenticate header verbatim
+    "oauth",              # data fetched from the server's .well-known endpoints
+    "content_type",       # Content-Type header from the server
+    "body_excerpt",       # truncated server response body
+    "parsed",             # server response parsed as JSON-RPC but missing required fields
+    "stderr_tail",        # tail of subprocess stderr
+    "exit_code",          # subprocess exit code
+    "package",            # npm package name extracted from registry-404 stderr
+    "path",               # filesystem path extracted from ENOENT stderr
+    "errors",             # per-RPC observed errors during pagination
+)
+
+
+def _translate_scan_result(scanner_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate the scanner module's internal {status, ...} dict into the
+    public {tools | error} shape that lands in the discovery payload."""
+    status = scanner_result.get("status")
+    scanned_at = scanner_result.get("scanned_at")
+
+    if status in ("scanned", "scanned_partial"):
+        return {
+            "scanned_at": scanned_at,
+            "tools": _trim_tools(scanner_result.get("tools")),
+            "tool_count": scanner_result.get("tool_count"),
+            "server_info": scanner_result.get("server_info"),
+            "error": None,
+        }
+
+    details: Dict[str, Any] = {}
+    for field in _DETAIL_FIELDS:
+        value = scanner_result.get(field)
+        if value is not None:
+            details[field] = value
+    raw_error = scanner_result.get("error")
+    if raw_error is not None:
+        details["raw_error"] = raw_error
+
+    return {
+        "scanned_at": scanned_at,
+        "tools": None,
+        "tool_count": None,
+        "server_info": scanner_result.get("server_info"),
+        "error": {
+            "code": status or "scanner_error",
+            "details": details or None,
+        },
+    }
+
+
+def _run_one_scan(cfg_with_auth: Dict[str, Any]) -> Dict[str, Any]:
+    from .mcp_tool_scanner import scan_mcp_server
+    try:
+        result = scan_mcp_server(cfg_with_auth)
+    except Exception as exc:
+        logger.warning("scan_mcp_server raised: %s", exc, exc_info=True)
+        return {
+            "scanned_at": None,
+            "tools": None,
+            "tool_count": None,
+            "server_info": None,
+            "error": {
+                "code": "scanner_error",
+                "details": {"raw_error": f"{type(exc).__name__}: {exc}"},
+            },
+        }
+    return _translate_scan_result(result)
+
+
+def _check_expired_token(cfg: Dict[str, Any], now_ms: int) -> Optional[Dict[str, Any]]:
+    """Return an auth_expired scan result if this config's URL has a Claude
+    Code OAuth token in the keychain but the token is past its expiry. Else None.
+
+    Short-circuits before the scan so we don't fall through to a misleading
+    auth_required from the server itself."""
+    url = cfg.get("url")
+    if not url:
+        return None
+    existing_headers = cfg.get("headers") or {}
+    if any(isinstance(k, str) and k.lower() == "authorization" for k in existing_headers):
+        return None  # caller already provides explicit auth
+    token = _get_claude_oauth_index().get(url)
+    if not token or not token.get("access_token"):
+        return None
+    expires_at_ms = token.get("expires_at_ms") or 0
+    if not expires_at_ms or expires_at_ms >= now_ms + 60_000:
+        return None  # token still good (or no expiry recorded)
+
+    expired_at_iso = (
+        datetime.datetime.fromtimestamp(expires_at_ms / 1000.0, tz=datetime.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+    )
+    scanned_at = (
+        datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+    )
+    return {
+        "scanned_at": scanned_at,
+        "tools": None,
+        "tool_count": None,
+        "server_info": None,
+        "error": {
+            "code": "auth_expired",
+            "details": {"expired_at": expired_at_iso},
+        },
+    }
+
+
+def _scan_servers_in_mapping(
+    mcp_servers: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Scan every server in the {name: cfg} mapping in parallel. Returns a
+    parallel {name: scan_result} mapping. Unmodified when scanning is off."""
+    now_ms = int(time.time() * 1000)
+    results: Dict[str, Dict[str, Any]] = {}
+    pending: List[Tuple[str, Dict[str, Any], Tuple[str, str, Tuple[str, ...]]]] = []
+
+    for name, cfg in mcp_servers.items():
+        if not isinstance(cfg, dict):
+            continue
+        key = _scan_cache_key(cfg)
+        if key in _SCAN_CACHE:
+            results[name] = _SCAN_CACHE[key]
+            continue
+        # Short-circuit known-expired Claude OAuth tokens — skip the scan and
+        # report auth_expired up front instead of waiting for a 401 from the
+        # server (which would be reported, less helpfully, as auth_required).
+        expired = _check_expired_token(cfg, now_ms)
+        if expired is not None:
+            _SCAN_CACHE[key] = expired
+            results[name] = expired
+            continue
+        pending.append((name, _maybe_inject_bearer(cfg, now_ms), key))
+
+    if not pending:
+        return results
+
+    worker_count = min(_SCAN_MAX_WORKERS, len(pending))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = {pool.submit(_run_one_scan, cfg): (name, key) for name, cfg, key in pending}
+        for fut in as_completed(futures):
+            name, key = futures[fut]
+            try:
+                res = fut.result()
+            except Exception as exc:
+                res = {"status": "scanner_error", "error": f"{type(exc).__name__}: {exc}"}
+            _SCAN_CACHE[key] = res
+            results[name] = res
+    return results
 
 # Claude Code (project-level)
 MCP_CLAUDE_PROJECT_FILENAMES = [".mcp.json"]
@@ -27,32 +314,55 @@ MCP_JSON_FILENAMES = ["mcp.json"]
 def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     """
     Transform mcpServers from object format to array format.
-    
-    Excludes 'env' and 'headers' fields from server configs as they're not needed in the output.
-    
+
+    Excludes 'env' and 'headers' fields from server configs as they're not
+    needed in the output. Each server is also scanned for its live tool list
+    (parallel, memoized across calls) and a `scan` field is attached:
+
+      - on success: { "scanned_at", "tools": [...], "tool_count", "server_info", "error": null }
+      - on failure: { "scanned_at", "tools": null, "tool_count": null, "server_info",
+                      "error": { "code", "message", "details" } }
+
+    Tool entries are trimmed to {name, title, description}. The scanner
+    re-uses Claude Code's keychain OAuth tokens (macOS) or
+    ~/.claude/.credentials.json (Linux/Windows) for URLs that match.
+
     Args:
         mcp_servers: Dictionary mapping server names to server configs
-        
+
     Returns:
-        List of server config objects with 'name' field added (env and headers fields excluded)
+        List of server config objects with 'name' field added (env and
+        headers excluded; 'scan' field always present when the input is a
+        dict).
     """
     if not isinstance(mcp_servers, dict):
         return []
-    
+
     # Fields to exclude from server configs
     excluded_fields = {"env", "headers"}
-    
+
+    # Scan each server for its tool list before we strip credentials.
+    scan_results: Dict[str, Dict[str, Any]] = {}
+    try:
+        scan_results = _scan_servers_in_mapping(mcp_servers)
+    except Exception as exc:
+        logger.warning("MCP scan pass failed: %s", exc, exc_info=True)
+        scan_results = {}
+
     servers_array = []
     for server_name, server_config in mcp_servers.items():
         if isinstance(server_config, dict):
             # Create server object excluding 'env' and 'headers' fields
             server_obj = {
                 "name": server_name,
-                **{field_name: field_value for field_name, field_value in server_config.items() 
+                **{field_name: field_value for field_name, field_value in server_config.items()
                     if field_name not in excluded_fields}
             }
+            scan = scan_results.get(server_name)
+            if scan:
+                server_obj["scan"] = scan
             servers_array.append(server_obj)
-    
+
     return servers_array
 
 

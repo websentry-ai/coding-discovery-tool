@@ -171,7 +171,7 @@ def _translate_scan_result(scanner_result: Dict[str, Any]) -> Dict[str, Any]:
     status = scanner_result.get("status")
     scanned_at = scanner_result.get("scanned_at")
 
-    if status in ("scanned", "scanned_partial"):
+    if status in ("scanned", "scanned_partial", "scanned_empty"):
         return {
             "scanned_at": scanned_at,
             "tools": _trim_tools(scanner_result.get("tools")),
@@ -296,7 +296,16 @@ def _scan_servers_in_mapping(
             try:
                 res = fut.result()
             except Exception as exc:
-                res = {"status": "scanner_error", "error": f"{type(exc).__name__}: {exc}"}
+                res = {
+                    "scanned_at": None,
+                    "tools": None,
+                    "tool_count": None,
+                    "server_info": None,
+                    "error": {
+                        "code": "scanner_error",
+                        "details": {"raw_error": f"{type(exc).__name__}: {exc}"},
+                    },
+                }
             _SCAN_CACHE[key] = res
             results[name] = res
     return results

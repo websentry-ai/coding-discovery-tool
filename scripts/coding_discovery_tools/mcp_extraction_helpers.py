@@ -147,9 +147,7 @@ def _trim_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str
     ]
 
 
-# Scanner-output fields surfaced under error.details. Only fields whose values
-# come from the actual server / subprocess — no fabricated text. Consumers
-# that want a UI string derive it from `error.code` themselves.
+# Scanner-output fields surfaced under error.details
 _DETAIL_FIELDS = (
     "http_status",        # HTTP status code observed from the server
     "www_authenticate",   # WWW-Authenticate header verbatim

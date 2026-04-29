@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # result is attached as a `scan` field on each server entry — either:
 #   { "tools": [...], "tool_count": N, "server_info": {...}, "error": null }
 # or:
-#   { "tools": null, "error": { "code", "message", "details" } }
+#   { "tools": null, "error": { "code", "details" } }
 
 _SCAN_MAX_WORKERS = 4
 
@@ -330,7 +330,7 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
 
       - on success: { "scanned_at", "tools": [...], "tool_count", "server_info", "error": null }
       - on failure: { "scanned_at", "tools": null, "tool_count": null, "server_info",
-                      "error": { "code", "message", "details" } }
+                      "error": { "code", "details" } }
 
     Tool entries are trimmed to {name, title, description}. The scanner
     re-uses Claude Code's keychain OAuth tokens (macOS) or

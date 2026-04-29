@@ -149,14 +149,28 @@ _TOOL_FIELDS = (
 def _trim_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
     """Project each tool to the fields the backend cares about. Drops any
     server-supplied keys we don't consume (vendor extensions, internal flags)
-    so the payload stays bounded."""
+    so the payload stays bounded.
+
+    `title` is also backfilled from `annotations.title` when the server
+    declared it there but not at the top level — MCP's spec allows either
+    placement and several real servers (e.g. Pencil) only set the nested one.
+    Backfilling here means downstream consumers can read `tool.title` without
+    knowing the server quirk."""
     if not tools:
         return None
-    return [
-        {k: t.get(k) for k in _TOOL_FIELDS if k in t}
-        for t in tools
-        if isinstance(t, dict)
-    ]
+    projected: List[Dict[str, Any]] = []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        out = {k: t.get(k) for k in _TOOL_FIELDS if k in t}
+        if not out.get("title"):
+            ann = t.get("annotations")
+            if isinstance(ann, dict):
+                ann_title = ann.get("title")
+                if isinstance(ann_title, str) and ann_title:
+                    out["title"] = ann_title
+        projected.append(out)
+    return projected
 
 
 # Scanner-output fields surfaced under error.details

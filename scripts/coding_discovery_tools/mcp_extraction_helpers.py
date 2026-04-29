@@ -136,12 +136,24 @@ def _scan_cache_key(cfg: Dict[str, Any]) -> Tuple[str, str, Tuple[str, ...]]:
     )
 
 
+_TOOL_FIELDS = (
+    "name",
+    "title",
+    "description",
+    "inputSchema",
+    "outputSchema",
+    "annotations",
+)
+
+
 def _trim_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
-    """Project each tool to just {name, title, description}."""
+    """Project each tool to the fields the backend cares about. Drops any
+    server-supplied keys we don't consume (vendor extensions, internal flags)
+    so the payload stays bounded."""
     if not tools:
         return None
     return [
-        {k: t.get(k) for k in ("name", "title", "description")}
+        {k: t.get(k) for k in _TOOL_FIELDS if k in t}
         for t in tools
         if isinstance(t, dict)
     ]

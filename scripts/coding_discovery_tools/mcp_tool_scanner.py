@@ -66,8 +66,9 @@ def scan_mcp_server(
     (url + headers) and stdio-style (command + args + env) shapes.
 
     Returns a dict with at least:
-      - status       : "scanned" | "scanned_empty" | "auth_required" |
-                       "http_error" | "transport_error" | "package_not_found" |
+      - status       : "scanned" | "scanned_partial" | "scanned_empty" |
+                       "tools_list_failed" | "auth_required" | "http_error" |
+                       "transport_error" | "package_not_found" |
                        "startup_error" | "missing_credentials" |
                        "process_exited" | "protocol_error" | "timeout" |
                        "command_not_found" | "spawn_error" | "scanner_error" |
@@ -419,6 +420,11 @@ def _scan_stdio(
             status = "scanned"
         elif tools:
             status = "scanned_partial"
+        elif errors:
+            # No tools AND tools/list reported errors — this is a failure,
+            # not a server with an empty catalog. Surface it so consumers
+            # don't treat it as a successful zero-tool scan.
+            status = "tools_list_failed"
         else:
             status = "scanned_empty"
 
@@ -466,17 +472,26 @@ def _curl_request(
 ) -> Tuple[Optional[int], Optional[Dict[str, str]], Optional[str], Optional[str]]:
     """Run a curl request. Returns (status_code, headers_lowercased, body, error).
 
-    Uses `-i` so status+headers+body come through stdout. No redirect follow."""
-    args = ["curl", "-sS", "-i", "-X", method, "--max-time", str(timeout)]
-    for k, v in headers.items():
-        args += ["-H", f"{k}: {v}"]
+    Uses `-i` so status+headers+body come through stdout. No redirect follow.
+    Headers are piped to curl via `-K -` (config-file mode read from stdin)
+    rather than `-H` flags so bearer tokens never appear in the OS process
+    table where any local user could read them with `ps`."""
+    args = ["curl", "-sS", "-i", "-X", method, "--max-time", str(timeout), "-K", "-"]
     if body is not None:
         args += ["--data-binary", body]
     args.append(url)
 
+    config = "".join(
+        f'header = "{_curl_config_quote(f"{k}: {v}")}"\n'
+        for k, v in headers.items()
+    )
+
     try:
         completed = subprocess.run(
-            args, capture_output=True, timeout=timeout + 5,
+            args,
+            input=config.encode("utf-8"),
+            capture_output=True,
+            timeout=timeout + 5,
         )
     except subprocess.TimeoutExpired:
         return None, None, None, "timeout"
@@ -489,6 +504,19 @@ def _curl_request(
 
     raw = completed.stdout.decode("utf-8", errors="replace")
     return _parse_curl_response(raw)
+
+
+def _curl_config_quote(value: str) -> str:
+    """Escape a string for inclusion inside a curl `-K` config-file double-
+    quoted value. curl supports backslash escapes for `\\`, `"`, `\\t`, `\\n`,
+    `\\r`, `\\v` — anything else we leave as-is."""
+    return (
+        value.replace("\\", "\\\\")
+             .replace('"', '\\"')
+             .replace("\n", "\\n")
+             .replace("\r", "\\r")
+             .replace("\t", "\\t")
+    )
 
 
 def _parse_curl_response(
@@ -652,6 +680,8 @@ def _scan_http(
         status_out = "scanned"
     elif tools:
         status_out = "scanned_partial"
+    elif errors:
+        status_out = "tools_list_failed"
     else:
         status_out = "scanned_empty"
 

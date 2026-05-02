@@ -376,11 +376,24 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
 
     # Scan each server for its tool list before we strip credentials.
     scan_results: Dict[str, Dict[str, Any]] = {}
+    batch_error: Optional[Dict[str, Any]] = None
     try:
         scan_results = _scan_servers_in_mapping(mcp_servers)
     except Exception as exc:
         logger.warning("MCP scan pass failed: %s", exc, exc_info=True)
-        scan_results = {}
+        batch_error = {
+            "scanned_at": (
+                datetime.datetime.now(datetime.timezone.utc)
+                .replace(microsecond=0).isoformat()
+            ),
+            "tools": None,
+            "tool_count": None,
+            "server_info": None,
+            "error": {
+                "code": "scanner_error",
+                "details": {"raw_error": f"{type(exc).__name__}: {exc}"},
+            },
+        }
 
     servers_array = []
     for server_name, server_config in mcp_servers.items():
@@ -391,9 +404,7 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
                 **{field_name: field_value for field_name, field_value in server_config.items()
                     if field_name not in excluded_fields}
             }
-            scan = scan_results.get(server_name)
-            if scan:
-                server_obj["scan"] = scan
+            server_obj["scan"] = scan_results.get(server_name) or batch_error
             servers_array.append(server_obj)
 
     return servers_array

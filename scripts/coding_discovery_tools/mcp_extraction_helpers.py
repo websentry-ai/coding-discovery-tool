@@ -80,8 +80,42 @@ def _read_claude_oauth_blob() -> Optional[Dict[str, Any]]:
     return None
 
 
+def _normalize_oauth_url(url: str) -> str:
+    """Lowercase scheme+host and strip trailing slash so config URLs that
+    differ only in casing or trailing `/` map to the same OAuth entry."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        s = urlsplit(url)
+    except Exception:
+        return url
+    if not s.scheme or not s.netloc:
+        return url
+    path = (s.path or "").rstrip("/") or ""
+    return urlunsplit((s.scheme.lower(), s.netloc.lower(), path, s.query, ""))
+
+
+def _oauth_origin(url: str) -> Optional[str]:
+    """`scheme://host` — used as a fallback OAuth lookup key when the config
+    URL's path differs from the keychain's serverUrl path (e.g. keychain has
+    `/sse`, config now uses `/mcp` against the same OAuth issuer). OAuth
+    credentials are issued per origin, so origin-level fallback is correct."""
+    from urllib.parse import urlsplit
+    try:
+        s = urlsplit(url)
+    except Exception:
+        return None
+    if not s.scheme or not s.netloc:
+        return None
+    return f"{s.scheme.lower()}://{s.netloc.lower()}"
+
+
 def _get_claude_oauth_index() -> Dict[str, Dict[str, Any]]:
-    """Build { serverUrl -> {access_token, expires_at_ms, ...} }, memoized."""
+    """Build the OAuth-token lookup map, memoized.
+
+    Each token registers under (a) exact serverUrl, (b) normalized URL,
+    (c) origin (scheme+host). Lookups try them in that order so a keychain
+    entry for `mcp.linear.app/sse` still serves a config that points at
+    `mcp.linear.app/mcp` for the same OAuth issuer."""
     global _OAUTH_INDEX_CACHE, _OAUTH_INDEX_BUILT
     if _OAUTH_INDEX_BUILT:
         return _OAUTH_INDEX_CACHE or {}
@@ -89,6 +123,14 @@ def _get_claude_oauth_index() -> Dict[str, Dict[str, Any]]:
     blob = _read_claude_oauth_blob() or {}
     mcp = blob.get("mcpOAuth") or {}
     out: Dict[str, Dict[str, Any]] = {}
+
+    def _register(key: Optional[str], compact: Dict[str, Any]) -> None:
+        if not key:
+            return
+        existing = out.get(key)
+        if existing is None or compact["expires_at_ms"] > existing.get("expires_at_ms", 0):
+            out[key] = compact
+
     for entry in mcp.values():
         url = entry.get("serverUrl")
         if not isinstance(url, str):
@@ -100,11 +142,23 @@ def _get_claude_oauth_index() -> Dict[str, Dict[str, Any]]:
             "client_id": entry.get("clientId"),
             "scope": entry.get("scope"),
         }
-        existing = out.get(url)
-        if existing is None or compact["expires_at_ms"] > existing.get("expires_at_ms", 0):
-            out[url] = compact
+        _register(url, compact)
+        _register(_normalize_oauth_url(url), compact)
+        _register(_oauth_origin(url), compact)
     _OAUTH_INDEX_CACHE = out
     return out
+
+
+def _lookup_oauth_token(url: str) -> Optional[Dict[str, Any]]:
+    """Find a cached OAuth token for `url`. Tries exact, normalized, and
+    origin-only lookups so the keychain's path doesn't have to exactly match
+    the config's path."""
+    index = _get_claude_oauth_index()
+    return (
+        index.get(url)
+        or index.get(_normalize_oauth_url(url))
+        or index.get(_oauth_origin(url) or "")
+    )
 
 
 def _maybe_inject_bearer(cfg: Dict[str, Any], now_ms: int) -> Dict[str, Any]:
@@ -117,7 +171,7 @@ def _maybe_inject_bearer(cfg: Dict[str, Any], now_ms: int) -> Dict[str, Any]:
     existing_headers = cfg.get("headers") or {}
     if any(isinstance(k, str) and k.lower() == "authorization" for k in existing_headers):
         return cfg
-    token = _get_claude_oauth_index().get(url)
+    token = _lookup_oauth_token(url)
     if not token or not token.get("access_token"):
         return cfg
     if token["expires_at_ms"] and token["expires_at_ms"] < now_ms + 60_000:
@@ -256,7 +310,7 @@ def _check_expired_token(cfg: Dict[str, Any], now_ms: int) -> Optional[Dict[str,
     existing_headers = cfg.get("headers") or {}
     if any(isinstance(k, str) and k.lower() == "authorization" for k in existing_headers):
         return None  # caller already provides explicit auth
-    token = _get_claude_oauth_index().get(url)
+    token = _lookup_oauth_token(url)
     if not token or not token.get("access_token"):
         return None
     expires_at_ms = token.get("expires_at_ms") or 0

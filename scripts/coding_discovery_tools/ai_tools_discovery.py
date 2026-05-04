@@ -1110,13 +1110,23 @@ class AIToolsDetector:
         Returns:
             Tool dict with filtered projects and permissions
         """
-        user_home_str = str(user_home)
+        # Normalise to forward slashes + lowercase drive on Windows
+        def _normalise(p: str) -> str:
+            if not p:
+                return p
+            n = p.replace('\\', '/')
+            if len(n) >= 2 and n[1] == ':':
+                n = n[0].upper() + n[1:]
+            n = n.rstrip('/')
+            return n
+
+        user_home_norm = _normalise(str(user_home))
         filtered_projects = []
         
         for project in tool.get('projects', []):
-            project_path = project.get('path', '')
+            project_path_norm = _normalise(project.get('path', ''))
             # Checking if project path is under the user's home directory
-            if project_path == user_home_str or project_path.startswith(user_home_str + os.sep):
+            if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/'):
                 filtered_projects.append(project)
 
         filtered_tool = tool.copy()
@@ -1125,8 +1135,11 @@ class AIToolsDetector:
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
-            settings_path = perms.get('settings_path', '')
-            if settings_source != 'managed' and settings_path and not (settings_path == user_home_str or settings_path.startswith(user_home_str + os.sep)):
+            settings_path_norm = _normalise(perms.get('settings_path', ''))
+            if (settings_source != 'managed'
+                    and settings_path_norm
+                    and not (settings_path_norm == user_home_norm
+                             or settings_path_norm.startswith(user_home_norm + '/'))):
                 del filtered_tool['permissions']
         
         return filtered_tool

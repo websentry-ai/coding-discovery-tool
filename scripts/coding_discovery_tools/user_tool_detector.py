@@ -157,8 +157,8 @@ def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
             "version": detector.get_version(),
             "install_path": str(bun_bin)
         }
-    
-    return None
+
+    return detector.detect()
 
 
 def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
@@ -187,8 +187,8 @@ def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Di
             "version": detector.get_version(),
             "install_path": str(bun_bin)
         }
-    
-    return None
+
+    return detector.detect()
 
 
 def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:

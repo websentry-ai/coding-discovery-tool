@@ -72,7 +72,7 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
         True if path should be skipped, False otherwise
     """
     # Skip common project directories (check all path parts for nested matches)
-    if SKIP_PATTERN.search(str(path)) is not None:
+    if SKIP_PATTERN.search(path) is not None:
         return True
     
     # Skip system directories if provided (Windows-specific)

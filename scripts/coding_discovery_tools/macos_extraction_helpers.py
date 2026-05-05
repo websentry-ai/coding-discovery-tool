@@ -9,12 +9,13 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import List, Dict, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
 
 logger = logging.getLogger(__name__)
-
+SKIP_PATTERN = re.compile("|".join(map(str, map(re.escape, SKIP_DIRS))), re.IGNORECASE)
 
 def is_running_as_root() -> bool:
     """
@@ -87,7 +88,7 @@ def should_skip_path(path: Path) -> bool:
     Returns:
         True if path should be skipped, False otherwise
     """
-    return any(part in SKIP_DIRS for part in path.parts)
+    return any(SKIP_PATTERN.search(part) for part in path.parts)
 
 
 def should_skip_system_path(path: Path) -> bool:

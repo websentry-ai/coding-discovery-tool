@@ -10,7 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
 
-from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
+from scripts.coding_discovery_tools.macos_extraction_helpers import SKIP_PATTERN
+
+from .constants import MAX_CONFIG_FILE_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +72,7 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
         True if path should be skipped, False otherwise
     """
     # Skip common project directories (check all path parts for nested matches)
-    if any(part in SKIP_DIRS for part in path.parts):
+    if any(path for path in path.parts if SKIP_PATTERN.search(path) is not None):
         return True
     
     # Skip system directories if provided (Windows-specific)

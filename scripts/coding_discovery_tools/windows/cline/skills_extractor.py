@@ -45,6 +45,7 @@ class WindowsClineSkillsExtractor(BaseClineSkillsExtractor):
         """Initialize the extractor with thread synchronization."""
         super().__init__()
         self._lock = threading.Lock()
+        self._users_directory = str(Path.home().parent)
 
     def extract_all_skills(self) -> Dict:
         """
@@ -71,14 +72,14 @@ class WindowsClineSkillsExtractor(BaseClineSkillsExtractor):
             "project_skills": build_skills_project_list(projects_by_root)
         }
 
-    def _get_users_directory(self) -> Path:
+    def _get_users_directory(self) -> str:
         """
-        Get the Users directory dynamically based on home directory.
+        Get the cached Users directory path.
 
         Returns:
-            Path to the Users directory (e.g., C:\\Users or D:\\Users)
+            String path to the Users directory (e.g., C:\\Users or D:\\Users)
         """
-        return Path.home().parent
+        return self._users_directory
 
     def _extract_user_level_skills(self, user_skills: List[Dict]) -> None:
         """
@@ -152,12 +153,11 @@ class WindowsClineSkillsExtractor(BaseClineSkillsExtractor):
 
                     if item.is_dir():
                         if item.name in CLINE_PARENT_DIR_NAMES:
-                            users_root = str(self._get_users_directory())
-
                             for config in CLINE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
                                 if type_dir.exists() and type_dir.is_dir():
-                                    if not is_user_level_claude_subdir(type_dir, users_root):
+                                    # is_user_level_claude_subdir works generically for any tool dir
+                                    if not is_user_level_claude_subdir(type_dir, self._users_directory):
                                         extract_cline_items_from_directory(
                                             type_dir,
                                             projects_by_root,

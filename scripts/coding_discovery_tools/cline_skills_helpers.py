@@ -34,7 +34,9 @@ CLAUDE_DIR_NAME = ".claude"
 SKILLS_DIR_NAME = "skills"
 SKILL_FILE_NAME = "SKILL.md"
 
-# All directories that can contain project-level Cline skills
+# All directories that can contain project-level Cline skills.
+# Note: .claude is intentionally included per Cline docs. Skills in .claude/skills/
+# may also be reported by the Claude Code extractor — deduplication happens downstream.
 CLINE_PARENT_DIR_NAMES = (CLINE_DIR_NAME, CLINERULES_DIR_NAME, CLAUDE_DIR_NAME)
 
 # Only .cline for user-level (global) skills

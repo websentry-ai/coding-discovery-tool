@@ -140,6 +140,7 @@ class MacOSClineSkillsExtractor(BaseClineSkillsExtractor):
                             for config in CLINE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
                                 if type_dir.exists() and type_dir.is_dir():
+                                    # is_user_level_claude_subdir works generically for any tool dir
                                     if not is_user_level_claude_subdir(type_dir):
                                         extract_cline_items_from_directory(
                                             type_dir,

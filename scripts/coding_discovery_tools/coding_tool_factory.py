@@ -32,6 +32,7 @@ from .coding_tool_base import (
     BaseClaudeSkillsExtractor,
     BaseClaudeCoworkSkillsExtractor,
     BaseCursorSkillsExtractor,
+    BaseClineSkillsExtractor,
 )
 
 # macOS - Shared
@@ -69,6 +70,7 @@ from .windows.roo_code.roo_code_rules_extractor import WindowsRooRulesExtractor
 from .macos.cline.cline import MacOSClineDetector
 from .macos.cline.cline_rules_extractor import MacOSClineRulesExtractor
 from .macos.cline.mcp_config_extractor import MacOSClineMCPConfigExtractor
+from .macos.cline.skills_extractor import MacOSClineSkillsExtractor
 
 # macOS - Antigravity
 from .macos.antigravity.antigravity import MacOSAntigravityDetector
@@ -186,6 +188,7 @@ from .windows.antigravity.mcp_config_extractor import WindowsAntigravityMCPConfi
 from .windows.cline.cline import WindowsClineDetector
 from .windows.cline.cline_rules_extractor import WindowsClineRulesExtractor
 from .windows.cline.mcp_config_extractor import WindowsClineMCPConfigExtractor
+from .windows.cline.skills_extractor import WindowsClineSkillsExtractor
 
 # Windows - Kilo Code
 from .windows.kilocode.kilocode import WindowsKiloCodeDetector
@@ -1438,6 +1441,31 @@ class CursorSkillsExtractorFactory:
             return MacOSCursorSkillsExtractor()
         elif os_name == "Windows":
             return WindowsCursorSkillsExtractor()
+        else:
+            return None
+
+
+class ClineSkillsExtractorFactory:
+    """Factory for creating OS-specific Cline skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseClineSkillsExtractor]:
+        """
+        Create appropriate Cline skills extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseClineSkillsExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSClineSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsClineSkillsExtractor()
         else:
             return None
 

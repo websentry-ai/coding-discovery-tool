@@ -410,6 +410,31 @@ class BaseCursorSkillsExtractor(ABC):
         pass
 
 
+class BaseClineSkillsExtractor(ABC):
+    """Abstract base class for extracting Cline skills from all projects."""
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all Cline skills from all projects on the machine.
+
+        Searches for:
+        - User-level skills: ~/.cline/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.cline/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.clinerules/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.claude/skills/<skill-name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+              Each entry has: skill_name, file_path, content, size, last_modified, truncated, scope, type
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
 class BaseClaudeSettingsExtractor(ABC):
     """Abstract base class for extracting Claude Code settings (permissions)."""
 

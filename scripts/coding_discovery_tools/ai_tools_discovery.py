@@ -58,6 +58,7 @@ try:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
+        ClineSkillsExtractorFactory,
     )
     from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -103,6 +104,7 @@ except ImportError:
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
+        ClineSkillsExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
@@ -158,9 +160,10 @@ class AIToolsDetector:
             self._roo_rules_extractor = RooRulesExtractorFactory.create(self.system)
             self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
             
-            # Initialize Cline extractors (macOS only, returns None for unsupported OS)
+            # Initialize Cline extractors (macOS and Windows)
             self._cline_rules_extractor = ClineRulesExtractorFactory.create(self.system)
             self._cline_mcp_extractor = ClineMCPConfigExtractorFactory.create(self.system)
+            self._cline_skills_extractor = ClineSkillsExtractorFactory.create(self.system)
             
             # Initialize Antigravity extractors (macOS and Windows)
             self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
@@ -344,6 +347,24 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Cursor skills: {e}", exc_info=True)
+            return None
+
+    def extract_all_cline_skills(self) -> Optional[Dict]:
+        """
+        Extract all Cline skills from all projects.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+            - project_skills: List of project dicts with project_root and skills
+            Returns None if extractor not available or on error.
+        """
+        try:
+            if self._cline_skills_extractor:
+                return self._cline_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Cline skills: {e}", exc_info=True)
             return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
@@ -1357,7 +1378,43 @@ class AIToolsDetector:
                 self._cline_mcp_extractor,
                 lambda: self._cline_rules_extractor.extract_all_cline_rules() if self._cline_rules_extractor else []
             )
-        
+
+            # Extract Cline skills
+            logger.info(f"  Extracting {tool_name} skills...")
+            if self._cline_skills_extractor:
+                try:
+                    skills_result = self.extract_all_cline_skills()
+                    user_skills = skills_result.get("user_skills", []) if skills_result else []
+                    project_skills = skills_result.get("project_skills", []) if skills_result else []
+
+                    if user_skills:
+                        logger.info(f"  ✓ Found {len(user_skills)} user-level Cline skill(s)")
+                        for skill in user_skills:
+                            user_home = skill.get("project_path") or str(Path.home())
+                            if user_home not in projects_dict:
+                                projects_dict[user_home] = {
+                                    "path": user_home,
+                                    "rules": [],
+                                    "skills": [],
+                                    "mcpServers": []
+                                }
+                            if "skills" not in projects_dict[user_home]:
+                                projects_dict[user_home]["skills"] = []
+                            projects_dict[user_home]["skills"].append(skill)
+
+                    if project_skills:
+                        num_skills_projects = len(project_skills)
+                        total_skills = sum(len(project.get("skills", [])) for project in project_skills)
+                        logger.info(f"  ✓ Found {num_skills_projects} project(s) with {total_skills} project-level Cline skill(s)")
+                        self._merge_skills_into_projects(project_skills, projects_dict)
+
+                    if not user_skills and not project_skills:
+                        logger.info("  ℹ No Cline skills found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+            else:
+                logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,

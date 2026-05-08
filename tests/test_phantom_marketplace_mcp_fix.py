@@ -133,7 +133,7 @@ class TestProjectScopeWalkerSkipsPlugins(unittest.TestCase):
         self.assertEqual(len(projects), 1, "Should find only the legitimate project, not the plugin")
 
         for project in projects:
-            project_path = project.get("project_root", project.get("config_path", ""))
+            project_path = project.get("path", "")
             self.assertNotIn("plugins", project_path)
 
     def test_walker_skips_mcp_json_directly_in_plugins_dir(self):

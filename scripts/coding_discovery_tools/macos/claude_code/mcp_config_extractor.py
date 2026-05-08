@@ -20,6 +20,7 @@ from ...mcp_extraction_helpers import (
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
     extract_claudeai_mcp_servers_with_root_support,
+    is_claude_plugins_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,9 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         root_path = Path("/")
 
         def should_skip(item: Path) -> bool:
-            return should_skip_path(item) or should_skip_system_path(item)
+            return (should_skip_path(item)
+                    or should_skip_system_path(item)
+                    or is_claude_plugins_path(item))
 
         try:
             top_level_dirs = get_top_level_directories(root_path)

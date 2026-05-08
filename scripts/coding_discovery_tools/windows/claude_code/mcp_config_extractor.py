@@ -16,6 +16,7 @@ from ...mcp_extraction_helpers import (
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
     extract_claudeai_mcp_servers_with_root_support,
+    is_claude_plugins_path,
 )
 from ...windows_extraction_helpers import should_skip_path
 
@@ -88,7 +89,7 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         system_dirs = self._get_system_directories()
 
         def should_skip(item: Path) -> bool:
-            return should_skip_path(item, system_dirs)
+            return should_skip_path(item, system_dirs) or is_claude_plugins_path(item)
 
         try:
             top_level_dirs = [

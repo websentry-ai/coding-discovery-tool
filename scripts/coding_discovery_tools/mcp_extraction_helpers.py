@@ -21,6 +21,16 @@ from .constants import MAX_SEARCH_DEPTH
 logger = logging.getLogger(__name__)
 
 
+def is_claude_plugins_path(path: Path) -> bool:
+    """Check if a path is inside a .claude/plugins/ directory.
+
+    Plugin catalog entries are already handled by _scan_plugin_cache_dir
+    and must not be picked up again by the project-scope walker.
+    """
+    parts = path.parts
+    return (".claude", "plugins") in zip(parts, parts[1:])
+
+
 # ---------------------------------------------------------------------------
 # MCP tool-list scanning
 # ---------------------------------------------------------------------------

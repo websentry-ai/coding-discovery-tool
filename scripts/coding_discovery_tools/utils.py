@@ -422,6 +422,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
     Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
 
+    For data reports (payloads carrying a non-empty ``tools`` list), tries the
+    S3 presigned-upload path first (3-step: upload-url → S3 PUT → from-s3). On
+    any failure, falls through to this legacy direct-POST endpoint, which has
+    its own retry/queue logic. Scan-lifecycle events bypass S3 and use the
+    legacy endpoint directly — they are tiny.
+
     Args:
         backend_url: Backend URL to send the report to
         api_key: API key for authentication
@@ -446,6 +452,18 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     payload = dict(report)
     if app_name:
         payload["app_name"] = app_name
+
+    # Try S3 path first for data reports. Any failure → fall through to legacy POST.
+    # `payload` already carries `app_name` (added above), so the S3 uploader reads
+    # it from there for both the S3 PUT body and the /from-s3/ notification.
+    from .s3_uploader import should_use_s3, try_s3_upload
+    if should_use_s3(payload):
+        s3_success, _ = try_s3_upload(
+            backend_url, api_key, payload, sentry_context=ctx,
+        )
+        if s3_success:
+            return (True, False)
+        logger.info("S3 upload path failed; falling back to legacy /api/v1/ai-tools/report/")
 
     payload_json = json.dumps(payload)
     ctx = {

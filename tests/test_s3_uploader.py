@@ -134,6 +134,32 @@ class TestS3UploadFlow(_ServerMixin, unittest.TestCase):
         self.assertEqual(from_s3_body["device_id"], "DEV-1")
 
     @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_app_name_forwarded_to_step3(self):
+        """app_name on the payload must reach the /from-s3/ notification body."""
+        upload_url = f"{self.base_url}/s3-bucket/object-key.json"
+        upload_response = json.dumps({
+            "upload_url": upload_url,
+            "object_key": "org/1/run/abc.json",
+        }).encode()
+
+        self._set_path_response("/api/v1/ai-tools/report/upload-url/", 200, upload_response)
+        self._set_path_response("/s3-bucket/object-key.json", 200, b"")
+        self._set_path_response("/api/v1/ai-tools/report/from-s3/", 202, b"")
+
+        payload = self._payload()
+        payload["app_name"] = "JumpCloud"
+
+        success, _ = try_s3_upload(self.base_url, "k", payload)
+        self.assertTrue(success)
+
+        from_s3_request = next(
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/from-s3/"
+        )
+        body = json.loads(from_s3_request["body"])
+        self.assertEqual(body["app_name"], "JumpCloud")
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_step1_503_signals_fallback(self):
         """503 from upload-url means S3 not configured backend-side."""
         self._set_path_response("/api/v1/ai-tools/report/upload-url/", 503, b'{"error":"S3 not configured"}')

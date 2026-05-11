@@ -55,11 +55,14 @@ def try_s3_upload(
     backend_url: str,
     api_key: str,
     payload: Dict,
-    app_name: Optional[str] = None,
     sentry_context: Optional[Dict] = None,
 ) -> Tuple[bool, bool]:
     """
     Run the 3-step flow. Returns (success, retryable).
+
+    `payload` is the full report dict and is expected to already carry any
+    optional fields (``app_name``, ``sentry_metrics``) — the caller in
+    ``utils.send_report_to_backend`` adds them before invoking us.
 
     On any failure, returns (False, True) — the caller treats this as
     "fall back to legacy endpoint and let the legacy retry/queue logic handle it".
@@ -96,10 +99,7 @@ def try_s3_upload(
 
     # ─── Step 2: PUT to S3 ──────────────────────────────────────────────
     try:
-        s3_payload = dict(payload)
-        if app_name:
-            s3_payload["app_name"] = app_name
-        s3_payload_json = json.dumps(s3_payload)
+        s3_payload_json = json.dumps(payload)
     except (TypeError, ValueError) as e:
         logger.error(f"S3 step 2: failed to serialize payload: {e}")
         report_to_sentry(e, {**ctx, "phase": "upload_serialize"}, level="warning")
@@ -111,17 +111,18 @@ def try_s3_upload(
         return False, True
 
     # ─── Step 3: notify backend ─────────────────────────────────────────
+    # Mirror exactly what the legacy POST sends as top-level metadata so the
+    # backend's /from-s3/ handler receives the same context (including
+    # `app_name` for MDM-tagged scans like JumpCloud).
     notify_body = {
         "device_id": payload.get("device_id"),
         "object_key": object_key,
         "system_user": payload.get("system_user"),
         "home_user": payload.get("home_user"),
         "run_id": payload.get("run_id"),
+        "app_name": payload.get("app_name"),
+        "sentry_metrics": payload.get("sentry_metrics"),
     }
-    if app_name:
-        notify_body["app_name"] = app_name
-    if payload.get("sentry_metrics"):
-        notify_body["sentry_metrics"] = payload["sentry_metrics"]
     # Strip None values to avoid sending bogus keys.
     notify_body = {k: v for k, v in notify_body.items() if v is not None}
 

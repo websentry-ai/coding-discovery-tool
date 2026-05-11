@@ -454,10 +454,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         payload["app_name"] = app_name
 
     # Try S3 path first for data reports. Any failure → fall through to legacy POST.
+    # `payload` already carries `app_name` (added above), so the S3 uploader reads
+    # it from there for both the S3 PUT body and the /from-s3/ notification.
     from .s3_uploader import should_use_s3, try_s3_upload
     if should_use_s3(payload):
         s3_success, _ = try_s3_upload(
-            backend_url, api_key, payload, app_name=None, sentry_context=ctx,
+            backend_url, api_key, payload, sentry_context=ctx,
         )
         if s3_success:
             return (True, False)

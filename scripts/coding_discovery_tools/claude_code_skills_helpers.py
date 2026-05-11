@@ -1,17 +1,19 @@
 """
-Shared helper functions for Claude Code skills, commands, and agents extraction.
+Shared helper functions for AI tool skills, commands, and agents extraction.
 
-This module contains OS-agnostic functions used by both macOS and Windows
-skills extractors to avoid code duplication. Uses a config-driven design
-where each item type (skill, command, agent) is described by an ItemTypeConfig,
-and generic functions handle finding project roots, extracting info, and
-iterating directories for any item type.
+This module contains the generic, OS-agnostic functions used by Claude Code,
+Cursor, and Cline skills extractors on both macOS and Windows. Uses a
+config-driven design where each item type (skill, command, agent) is described
+by an ItemTypeConfig, and generic functions handle finding project roots,
+extracting info, and iterating directories for any item type. Tool-specific
+modules (cursor_skills_helpers, cline_skills_helpers) delegate here, passing
+their own parent directory names via the ``parent_dir_names`` parameter.
 """
 
 import logging
 import sys
 from pathlib import Path
-from typing import Callable, Dict, List, NamedTuple, Optional
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +56,11 @@ def is_command_md_file(filename: str) -> bool:
 
 class ItemTypeConfig(NamedTuple):
     """
-    Describes one category of Claude Code item (skill, command, or agent).
+    Describes one category of AI tool item (skill, command, or agent).
 
     Attributes:
         type_name: Identifier used in output dicts, e.g. "skill", "command", "agent".
-        dir_name: Subdirectory name under .claude/, e.g. "skills", "commands", "agents".
+        dir_name: Subdirectory name under the tool directory, e.g. "skills", "commands", "agents".
         layout: Either "nested" (items live in named subdirs containing a marker file)
                 or "flat" (items are .md files directly inside the dir).
         file_filter: Predicate that returns True for filenames belonging to this type.
@@ -149,47 +151,53 @@ def add_skill_to_project(
 # Generic config-driven functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-def find_item_project_root(item_file: Path, config: ItemTypeConfig) -> Path:
+def find_item_project_root(
+    item_file: Path,
+    config: ItemTypeConfig,
+    parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
+) -> Path:
     """
-    Find the project root directory for a Claude Code item file.
+    Find the project root directory for an item file.
 
     For nested layout (skills):
-        item_file lives at <project>/.claude/skills/<name>/SKILL.md
-        Navigate: parent (name dir) -> parent (skills/) -> parent (.claude/) -> verify -> parent (project root)
+        item_file lives at <project>/<tool_dir>/skills/<name>/SKILL.md
+        Navigate: parent (name dir) -> parent (skills/) -> parent (tool_dir) -> verify -> parent (project root)
 
     For flat layout (commands, agents):
-        item_file lives at <project>/.claude/commands/<name>.md
-        Navigate: parent (commands/) -> parent (.claude/) -> verify -> parent (project root)
+        item_file lives at <project>/<tool_dir>/commands/<name>.md
+        Navigate: parent (commands/) -> parent (tool_dir) -> verify -> parent (project root)
 
-    Falls back to walking up parents to find a .claude directory, and
+    Falls back to walking up parents to find a matching tool directory, and
     as a last resort returns item_file.parent.
 
     Args:
         item_file: Path to the item file (e.g. SKILL.md or a command .md)
         config: ItemTypeConfig describing this item type
+        parent_dir_names: Tuple of directory names to recognise as the tool root
+                          (e.g. (".claude",) or (".cursor", ".agents"))
 
     Returns:
         Project root path
     """
     if config.layout == "nested":
-        # <skill-name>/SKILL.md  ->  skill_dir / skills_dir / claude_dir / project_root
+        # <skill-name>/SKILL.md  ->  skill_dir / skills_dir / tool_dir / project_root
         item_name_dir = item_file.parent       # <skill-name>
         type_dir = item_name_dir.parent        # skills/
-        claude_dir = type_dir.parent           # .claude/
+        tool_dir = type_dir.parent             # .claude/ or .cursor/ etc.
 
-        if type_dir.name == config.dir_name and claude_dir.name == CLAUDE_DIR_NAME:
-            return claude_dir.parent
+        if type_dir.name == config.dir_name and tool_dir.name in parent_dir_names:
+            return tool_dir.parent
     else:
-        # flat: <name>.md  ->  type_dir / claude_dir / project_root
+        # flat: <name>.md  ->  type_dir / tool_dir / project_root
         type_dir = item_file.parent            # commands/ or agents/
-        claude_dir = type_dir.parent           # .claude/
+        tool_dir = type_dir.parent             # .claude/ or .cursor/ etc.
 
-        if type_dir.name == config.dir_name and claude_dir.name == CLAUDE_DIR_NAME:
-            return claude_dir.parent
+        if type_dir.name == config.dir_name and tool_dir.name in parent_dir_names:
+            return tool_dir.parent
 
-    # Fallback: walk up parents to find .claude
+    # Fallback: walk up parents to find a matching tool directory
     for parent in item_file.parents:
-        if parent.name == CLAUDE_DIR_NAME:
+        if parent.name in parent_dir_names:
             return parent.parent
 
     # Last resort
@@ -201,13 +209,15 @@ def extract_item_info(
     extract_single_rule_file_func: Callable,
     scope: str,
     config: ItemTypeConfig,
+    parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
 ) -> Optional[Dict]:
     """
     Extract information from an item file using the given extraction function.
 
-    Creates a closure that binds `config` to `find_item_project_root`, then
-    delegates to `extract_single_rule_file_func`. On success, annotates the
-    result with `skill_name` (derived via config.name_extractor) and `type`.
+    Creates a closure that binds `config` and `parent_dir_names` to
+    `find_item_project_root`, then delegates to `extract_single_rule_file_func`.
+    On success, annotates the result with `skill_name` (derived via
+    config.name_extractor) and `type`.
 
     Args:
         item_file: Path to the item file
@@ -215,11 +225,12 @@ def extract_item_info(
             Expected signature: (file_path, find_root_func, scope=...) -> Optional[Dict]
         scope: Scope of the item ("user" or "project")
         config: ItemTypeConfig describing this item type
+        parent_dir_names: Tuple of directory names to recognise as the tool root
 
     Returns:
         Dict with item info in unified rules format, or None if extraction fails
     """
-    find_root = lambda f: find_item_project_root(f, config)
+    find_root = lambda f: find_item_project_root(f, config, parent_dir_names=parent_dir_names)
     rule_info = extract_single_rule_file_func(item_file, find_root, scope=scope)
 
     if rule_info:
@@ -235,9 +246,10 @@ def extract_items_from_directory(
     extract_single_rule_file_func: Callable,
     add_skill_func: Callable,
     config: ItemTypeConfig,
+    parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
 ) -> None:
     """
-    Extract all items of a given type from a .claude/<type> directory.
+    Extract all items of a given type from a <tool_dir>/<type> directory.
 
     For nested layout (skills): iterates subdirectories, finds the first
     matching file in each, extracts info, and adds to projects_by_root.
@@ -251,6 +263,7 @@ def extract_items_from_directory(
         extract_single_rule_file_func: OS-specific function to extract rule file info
         add_skill_func: Function to add item to project dict (handles thread safety)
         config: ItemTypeConfig describing this item type
+        parent_dir_names: Tuple of directory names to recognise as the tool root
     """
     try:
         if config.layout == "nested":
@@ -263,6 +276,7 @@ def extract_items_from_directory(
                                 extract_single_rule_file_func,
                                 scope="project",
                                 config=config,
+                                parent_dir_names=parent_dir_names,
                             )
                             if item_info:
                                 project_root = item_info.get("project_root")
@@ -277,6 +291,7 @@ def extract_items_from_directory(
                         extract_single_rule_file_func,
                         scope="project",
                         config=config,
+                        parent_dir_names=parent_dir_names,
                     )
                     if item_info:
                         project_root = item_info.get("project_root")
@@ -291,12 +306,15 @@ def extract_user_level_items(
     user_skills: List[Dict],
     extract_single_rule_file_func: Callable,
     configs: List[ItemTypeConfig],
+    user_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
+    parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
 ) -> None:
     """
     Extract user-level items (skills, commands, agents) from a user's home directory.
 
-    Iterates over each config, locates the corresponding directory under
-    ``user_home/.claude/<dir_name>``, and extracts items with scope="user".
+    Iterates over each tool directory name in ``user_dir_names``, then over
+    each config, locates the corresponding directory under
+    ``user_home/<tool_dir>/<dir_name>``, and extracts items with scope="user".
     Each extracted item's ``project_root`` key is renamed to ``project_path``
     before appending to user_skills.
 
@@ -305,42 +323,49 @@ def extract_user_level_items(
         user_skills: List to populate with user-level item dicts
         extract_single_rule_file_func: OS-specific function to extract rule file info
         configs: List of ItemTypeConfig instances to process
+        user_dir_names: Tuple of directory names to search under user_home
+                        (e.g. (".claude",) or (".cursor", ".agents"))
+        parent_dir_names: Tuple of directory names to recognise as the tool root
+                          when resolving project roots
     """
-    for config in configs:
-        type_dir = user_home / CLAUDE_DIR_NAME / config.dir_name
-        if not type_dir.exists() or not type_dir.is_dir():
-            continue
+    for tool_dir_name in user_dir_names:
+        for config in configs:
+            type_dir = user_home / tool_dir_name / config.dir_name
+            if not type_dir.exists() or not type_dir.is_dir():
+                continue
 
-        try:
-            if config.layout == "nested":
-                for subdir in type_dir.iterdir():
-                    if subdir.is_dir():
-                        for item in subdir.iterdir():
-                            if item.is_file() and config.file_filter(item.name):
-                                item_info = extract_item_info(
-                                    item,
-                                    extract_single_rule_file_func,
-                                    scope="user",
-                                    config=config,
-                                )
-                                if item_info:
-                                    item_info["project_path"] = item_info.pop("project_root", None)
-                                    user_skills.append(item_info)
-                                break  # Only one marker file per subdirectory
-            else:
-                for item in type_dir.iterdir():
-                    if item.is_file() and config.file_filter(item.name):
-                        item_info = extract_item_info(
-                            item,
-                            extract_single_rule_file_func,
-                            scope="user",
-                            config=config,
-                        )
-                        if item_info:
-                            item_info["project_path"] = item_info.pop("project_root", None)
-                            user_skills.append(item_info)
-        except Exception as e:
-            logger.debug(f"Error extracting user-level {config.type_name}s for {user_home}: {e}")
+            try:
+                if config.layout == "nested":
+                    for subdir in type_dir.iterdir():
+                        if subdir.is_dir():
+                            for item in subdir.iterdir():
+                                if item.is_file() and config.file_filter(item.name):
+                                    item_info = extract_item_info(
+                                        item,
+                                        extract_single_rule_file_func,
+                                        scope="user",
+                                        config=config,
+                                        parent_dir_names=parent_dir_names,
+                                    )
+                                    if item_info:
+                                        item_info["project_path"] = item_info.pop("project_root", None)
+                                        user_skills.append(item_info)
+                                    break  # Only one marker file per subdirectory
+                else:
+                    for item in type_dir.iterdir():
+                        if item.is_file() and config.file_filter(item.name):
+                            item_info = extract_item_info(
+                                item,
+                                extract_single_rule_file_func,
+                                scope="user",
+                                config=config,
+                                parent_dir_names=parent_dir_names,
+                            )
+                            if item_info:
+                                item_info["project_path"] = item_info.pop("project_root", None)
+                                user_skills.append(item_info)
+            except Exception as e:
+                logger.debug(f"Error extracting user-level {config.type_name}s from {type_dir} for {user_home}: {e}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

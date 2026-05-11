@@ -175,7 +175,12 @@ class TestSendReport(unittest.TestCase):
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_large_payload_succeeds(self, _sleep):
-        """Payloads exceeding ARG_MAX (~262KB) must not cause OSError."""
+        """Payloads exceeding ARG_MAX (~262KB) must not cause OSError.
+
+        The S3 path is tried first, fails to parse the mock server's empty body,
+        and falls back to the legacy /api/v1/ai-tools/report/ endpoint — which
+        is what this test verifies still works under big payloads.
+        """
         large_report = {
             "home_user": "test",
             "device_id": "TEST123",
@@ -188,9 +193,12 @@ class TestSendReport(unittest.TestCase):
         )
         self.assertTrue(success)
         self.assertFalse(retryable)
-        # Verify the server received the correct payload
-        self.assertEqual(len(self.server.requests), 1)
-        received = json.loads(self.server.requests[0]["body"])
+        legacy_requests = [
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/"
+        ]
+        self.assertEqual(len(legacy_requests), 1)
+        received = json.loads(legacy_requests[0]["body"])
         self.assertEqual(received["device_id"], "TEST123")
 
 

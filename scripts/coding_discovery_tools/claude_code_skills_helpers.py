@@ -1,11 +1,13 @@
 """
-Shared helper functions for Claude Code skills, commands, and agents extraction.
+Shared helper functions for AI tool skills, commands, and agents extraction.
 
-This module contains OS-agnostic functions used by both macOS and Windows
-skills extractors to avoid code duplication. Uses a config-driven design
-where each item type (skill, command, agent) is described by an ItemTypeConfig,
-and generic functions handle finding project roots, extracting info, and
-iterating directories for any item type.
+This module contains the generic, OS-agnostic functions used by Claude Code,
+Cursor, and Cline skills extractors on both macOS and Windows. Uses a
+config-driven design where each item type (skill, command, agent) is described
+by an ItemTypeConfig, and generic functions handle finding project roots,
+extracting info, and iterating directories for any item type. Tool-specific
+modules (cursor_skills_helpers, cline_skills_helpers) delegate here, passing
+their own parent directory names via the ``parent_dir_names`` parameter.
 """
 
 import logging
@@ -54,11 +56,11 @@ def is_command_md_file(filename: str) -> bool:
 
 class ItemTypeConfig(NamedTuple):
     """
-    Describes one category of Claude Code item (skill, command, or agent).
+    Describes one category of AI tool item (skill, command, or agent).
 
     Attributes:
         type_name: Identifier used in output dicts, e.g. "skill", "command", "agent".
-        dir_name: Subdirectory name under .claude/, e.g. "skills", "commands", "agents".
+        dir_name: Subdirectory name under the tool directory, e.g. "skills", "commands", "agents".
         layout: Either "nested" (items live in named subdirs containing a marker file)
                 or "flat" (items are .md files directly inside the dir).
         file_filter: Predicate that returns True for filenames belonging to this type.

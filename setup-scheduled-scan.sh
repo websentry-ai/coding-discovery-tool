@@ -120,10 +120,10 @@ remove_credentials_macos() {
 
 store_credentials_linux() {
     echo "Storing credentials in $CREDS_FILE_LINUX (mode 0600)..."
-    mkdir -p "$(dirname "$CREDS_FILE_LINUX")"
-    # Escape JSON special chars (\, ") in each value. Run in a subshell so
-    # the tightened umask is scoped to this function and doesn't leak into
-    # subsequent file creation (wrapper script, logs).
+    # Escape JSON special chars (\, ") in each value. Run dir-creation +
+    # file-write in a subshell with umask 077 so both the parent directory
+    # and the file get tight permissions (dir 0700, file 0600), and the
+    # umask change doesn't leak into subsequent file creation (wrapper, logs).
     json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
     local cmd_e key_e disc_e dom_e
     cmd_e=$(json_escape "$COMMAND")
@@ -132,6 +132,7 @@ store_credentials_linux() {
     dom_e=$(json_escape "${DOMAIN:-}")
     (
         umask 077
+        mkdir -p "$(dirname "$CREDS_FILE_LINUX")"
         cat > "$CREDS_FILE_LINUX" <<EOF
 {
   "command": "$cmd_e",
@@ -232,6 +233,10 @@ fi
 case "\$COMMAND" in
     discover)
         # Backward-compat path: download install.sh and run it.
+        if [ -z "\$DOMAIN" ]; then
+            log "ERROR: domain missing from stored credentials (required for discover)"
+            exit 1
+        fi
         SCRIPT_PATH="$INSTALL_DIR/install.sh"
         log "Downloading install script to: \$SCRIPT_PATH"
         if ! curl -fsSL -o "\$SCRIPT_PATH" "$SCAN_SCRIPT_URL"; then

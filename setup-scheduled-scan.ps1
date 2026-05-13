@@ -152,6 +152,19 @@ switch ($Command) {
         try {
             Write-Log "Refreshing $installScript from $installPs1"
             Invoke-WebRequest -Uri $installPs1 -OutFile $installScript -UseBasicParsing
+            # Sanity-check the downloaded content before executing (mirrors
+            # the shell wrapper's shebang + size check). A 200 response with
+            # an HTML error body would otherwise be passed to powershell.
+            $fi = Get-Item $installScript
+            if ($fi.Length -lt 100) {
+                Write-Log ("ERROR: Downloaded install.ps1 too small ({0} bytes)" -f $fi.Length)
+                exit 1
+            }
+            $firstLine = (Get-Content $installScript -TotalCount 1)
+            if ($firstLine -notmatch '^(<#|#|\[)' ) {
+                Write-Log ("ERROR: Downloaded install.ps1 does not look like a PowerShell script (first line: {0})" -f $firstLine)
+                exit 1
+            }
             Write-Log "Executing install.ps1"
             & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript -ApiKey $ApiKey -Domain $Domain *>> $LogFile
             $ec = $LASTEXITCODE

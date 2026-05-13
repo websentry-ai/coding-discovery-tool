@@ -180,10 +180,17 @@ switch ($Command) {
                 exit 1
             }
             Write-Log "Executing install.ps1"
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript -ApiKey $ApiKey -Domain $Domain *>> $LogFile
+            # Credentials go via env vars — Win32_Process.CommandLine is readable by any
+            # authenticated user and Windows Event Log 4688 captures full command lines.
+            $env:UNBOUND_API_KEY = $ApiKey
+            $env:UNBOUND_DOMAIN  = $Domain
+            & powershell -NoProfile -ExecutionPolicy Bypass -Command "& '$installScript' -ApiKey `$env:UNBOUND_API_KEY -Domain `$env:UNBOUND_DOMAIN" *>> $LogFile
             $ec = $LASTEXITCODE
         } catch {
             Write-Log ("ERROR: discover wrapper failed: {0}" -f $_.Exception.Message)
+        } finally {
+            Remove-Item Env:UNBOUND_API_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:UNBOUND_DOMAIN  -ErrorAction SilentlyContinue
         }
         Write-Log ("Discover exited with code {0}" -f $ec)
     }
@@ -197,11 +204,20 @@ switch ($Command) {
             Write-Log "ERROR: 'unbound' CLI not found in PATH. Install with: npm install -g unbound-cli"
             exit 1
         }
-        $cmdArgs = @('onboard', '--api-key', $ApiKey, '--discovery-key', $DiscoveryKey)
+        # Credentials go via env vars — Win32_Process.CommandLine is readable by any
+        # authenticated user and Windows Event Log 4688 captures full command lines.
+        $env:UNBOUND_API_KEY       = $ApiKey
+        $env:UNBOUND_DISCOVERY_KEY = $DiscoveryKey
+        $cmdArgs = @('onboard')
         if (-not [string]::IsNullOrEmpty($Domain)) { $cmdArgs += @('--domain', $Domain) }
-        Write-Log "Executing: unbound onboard --api-key *** --discovery-key *** ..."
-        & $unbound @cmdArgs *>> $LogFile
-        $ec = $LASTEXITCODE
+        Write-Log "Executing: unbound onboard (credentials via env vars) ..."
+        try {
+            & $unbound @cmdArgs *>> $LogFile
+            $ec = $LASTEXITCODE
+        } finally {
+            Remove-Item Env:UNBOUND_API_KEY       -ErrorAction SilentlyContinue
+            Remove-Item Env:UNBOUND_DISCOVERY_KEY -ErrorAction SilentlyContinue
+        }
         Write-Log ("Onboard exited with code {0}" -f $ec)
     }
     default {

@@ -268,8 +268,10 @@ case "\$COMMAND" in
             exit 1
         fi
         chmod +x "\$SCRIPT_PATH"
-        log "Executing: \$SCRIPT_PATH --api-key *** --domain \$DOMAIN"
-        "\$SCRIPT_PATH" --api-key "\$API_KEY" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        # Pass API key via env var — /proc/pid/cmdline and ps expose CLI args to
+        # other local users; env vars require ptrace/elevated access to read.
+        log "Executing: \$SCRIPT_PATH --domain \$DOMAIN (api-key via env var)"
+        UNBOUND_API_KEY="\$API_KEY" "\$SCRIPT_PATH" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
         # If the scan exited non-zero and the log contains an auth error, emit an
         # actionable hint. install.sh logs "HTTP 401" / "Invalid API key" on auth
         # failures; matching those phrases saves the operator from having to grep
@@ -296,10 +298,12 @@ case "\$COMMAND" in
             log "ERROR: 'unbound' CLI not found. Tried setup-time path (${RESOLVED_UNBOUND:-<none resolved at setup>}) and current PATH. Reinstall with: npm install -g unbound-cli"
             exit 1
         fi
-        ARGS=(onboard --api-key "\$API_KEY" --discovery-key "\$DISCOVERY_KEY")
+        # Pass keys via env vars — /proc/pid/cmdline and ps expose CLI args to
+        # other local users; env vars require ptrace/elevated access to read.
+        ARGS=(onboard)
         [ -n "\$DOMAIN" ] && ARGS+=(--domain "\$DOMAIN")
-        log "Executing: unbound onboard --api-key *** --discovery-key *** \${DOMAIN:+--domain \$DOMAIN}"
-        "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        log "Executing: unbound onboard (keys via env vars) \${DOMAIN:+--domain \$DOMAIN}"
+        UNBOUND_API_KEY="\$API_KEY" UNBOUND_DISCOVERY_KEY="\$DISCOVERY_KEY" "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
         if [ \$EXIT_CODE -ne 0 ] && tail -40 "\$LOG_DIR/scheduled.log" | grep -qiE "401|[Ii]nvalid.*(api.?key|key)|[Uu]nauthorized"; then
             log "HINT: Auth error detected — your API key may have been rotated in the Unbound dashboard. Re-run to update stored credentials: unbound onboard --set-cron --api-key <NEW_KEY> --discovery-key <NEW_DISCOVERY_KEY>"
         fi
@@ -321,7 +325,10 @@ log "=== Finished ==="
 exit \$EXIT_CODE
 WRAPPER_EOF
 
-    chmod +x "$WRAPPER_SCRIPT"
+    # 700 not +x: the file is created with the outer umask (typically 022 → 644).
+    # chmod +x on 644 yields 755, making the wrapper world-readable/executable.
+    # 700 restricts it to the owner only — the wrapper reads stored credentials.
+    chmod 700 "$WRAPPER_SCRIPT"
     echo "  Wrapper script created: $WRAPPER_SCRIPT"
 }
 

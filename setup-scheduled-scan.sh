@@ -49,6 +49,22 @@ LOG_DIR_LINUX="$INSTALL_DIR/logs"
 
 SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
 
+# Resolves the current HEAD SHA of coding-discovery-tool so the generated
+# wrapper pins install.sh to an immutable ref. Falls back to 'main' if the
+# GitHub API is unreachable (e.g., no network at install time).
+resolve_install_ref() {
+    local sha
+    sha=$(curl -fsSL \
+        "https://api.github.com/repos/websentry-ai/coding-discovery-tool/commits/main" \
+        2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])" 2>/dev/null || true)
+    if [ -n "$sha" ] && [ "${#sha}" -eq 40 ]; then
+        echo "$sha"
+    else
+        echo "main"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # OS detection
 # -----------------------------------------------------------------------------
@@ -518,6 +534,17 @@ fi
 if [ "$COMMAND" = "discover" ] && [ -z "$DOMAIN" ]; then
     echo "Error: --domain is required when --command discover"
     usage
+fi
+
+# Pin install.sh to the current HEAD SHA so the generated wrapper always
+# fetches an immutable version regardless of future pushes to main.
+echo "Resolving install script version..."
+install_ref=$(resolve_install_ref)
+SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/${install_ref}/install.sh"
+if [ "$install_ref" = "main" ]; then
+    echo "  Warning: could not resolve SHA — pinning to 'main' (mutable fallback)"
+else
+    echo "  Pinned to: ${install_ref:0:12}..."
 fi
 
 # Dispatch

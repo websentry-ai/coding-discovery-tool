@@ -124,7 +124,21 @@ public static class CredMgr {
     }
 }
 "@
-Add-Type -TypeDefinition $src -Language CSharp
+# Add-Type is blocked under PowerShell Constrained Language Mode (enforced
+# automatically by AppLocker / WDAC policies on locked-down enterprise
+# fleets — the very environments most likely to deploy this tool).
+# -ExecutionPolicy Bypass does NOT bypass CLM. Log a descriptive error so
+# operators can diagnose silent failures instead of staring at a wrapper
+# that only logged "=== Starting ===" and nothing else.
+try {
+    Add-Type -TypeDefinition $src -Language CSharp -ErrorAction Stop
+} catch {
+    Write-Log ("ERROR: Add-Type failed ({0}). PowerShell is likely running under " +
+        "Constrained Language Mode (enforced by AppLocker or WDAC). Scheduled " +
+        "runs cannot read credentials and will not work in this configuration. " +
+        "Run the scheduler under a session/policy that allows FullLanguage mode." -f $_.Exception.Message)
+    exit 1
+}
 
 $Command      = [CredMgr]::Read('ai.getunbound.scheduled:command')
 $ApiKey       = [CredMgr]::Read('ai.getunbound.scheduled:api_key')

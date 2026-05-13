@@ -385,10 +385,24 @@ install_linux() {
     store_credentials_linux
     create_wrapper_script
 
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        install_linux_systemd
+    # Gate on user-instance reachability, not just the system systemd dir.
+    # Containers, WSL2, CI runners, and headless servers (no linger configured)
+    # have /run/systemd/system but no user bus, so `systemctl --user` aborts.
+    # If the user instance is reachable but the install itself fails (e.g.
+    # PolicyKit denial, unit-file write race), fall through to crontab rather
+    # than leaving credentials + wrapper on disk with no scheduler.
+    local scheduler_installed=0
+    if systemd_user_available; then
+        if install_linux_systemd; then
+            scheduler_installed=1
+        else
+            echo "  systemd --user setup failed — falling back to crontab"
+        fi
     else
-        echo "  systemd not available — falling back to crontab (no catch-up for missed runs)"
+        echo "  systemd --user not available — using crontab (no catch-up for missed runs)"
+    fi
+
+    if [ "$scheduler_installed" -eq 0 ]; then
         install_linux_crontab
     fi
 
@@ -398,6 +412,15 @@ install_linux() {
     echo "  Schedule:    Daily at 09:00 (systemd: catches up missed runs; crontab: no catch-up)"
     echo "  Logs:        ${LOG_DIR}/scheduled.log"
     echo "  Uninstall:   unbound discover unschedule"
+}
+
+systemd_user_available() {
+    # Three independent checks: binary present, system systemd up, AND a user
+    # instance we can actually talk to. The last `systemctl --user status` is
+    # the only one that catches the "no user bus" case on containers/WSL2.
+    command -v systemctl >/dev/null 2>&1 \
+        && [ -d /run/systemd/system ] \
+        && systemctl --user status >/dev/null 2>&1
 }
 
 install_linux_systemd() {
@@ -434,11 +457,22 @@ Unit=$SYSTEMD_SERVICE_NAME
 WantedBy=timers.target
 EOF
 
-    systemctl --user daemon-reload
-    systemctl --user enable --now "$SYSTEMD_TIMER_NAME"
+    # Return non-zero (instead of aborting under set -e) so install_linux can
+    # tear down the half-written unit files and retry with crontab. The
+    # `|| return 1` form short-circuits set -e for these two specific calls.
+    if ! systemctl --user daemon-reload 2>/dev/null; then
+        rm -f "$SYSTEMD_USER_DIR/$SYSTEMD_SERVICE_NAME" "$SYSTEMD_USER_DIR/$SYSTEMD_TIMER_NAME"
+        return 1
+    fi
+    if ! systemctl --user enable --now "$SYSTEMD_TIMER_NAME" 2>/dev/null; then
+        rm -f "$SYSTEMD_USER_DIR/$SYSTEMD_SERVICE_NAME" "$SYSTEMD_USER_DIR/$SYSTEMD_TIMER_NAME"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        return 1
+    fi
 
     echo "  systemd --user timer installed: $SYSTEMD_USER_DIR/$SYSTEMD_TIMER_NAME"
     echo "  Note: if you log out, run \`loginctl enable-linger \$USER\` to keep the timer alive."
+    return 0
 }
 
 install_linux_crontab() {

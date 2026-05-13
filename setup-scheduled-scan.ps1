@@ -266,6 +266,11 @@ function Install-ScheduledTask {
                     -AllowStartIfOnBatteries `
                     -DontStopIfGoingOnBatteries `
                     -MultipleInstances IgnoreNew
+    # LogonType=Interactive is intentional: this tool targets personal developer
+    # laptops, so running only when the user is logged in is correct and avoids
+    # the need to store a plaintext password (required for S4U/Password types).
+    # Headless/server deployments are out of scope; use a service account with
+    # LogonType=Password and Register-ScheduledTask -Password if ever needed.
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
     Register-ScheduledTask `

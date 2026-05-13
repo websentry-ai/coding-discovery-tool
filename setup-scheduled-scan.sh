@@ -2,181 +2,260 @@
 set -euo pipefail
 
 # =============================================================================
-# Unbound AI Tools Discovery - Scheduled Scan Setup (macOS)
+# Unbound Scheduled Run Setup (macOS + Linux)
 # =============================================================================
 #
-# This script sets up a LaunchAgent to run the AI tools discovery scan
-# every 12 hours on macOS.
+# Sets up a daily (09:00) background job that re-runs either:
+#   - unbound discover  (default — backward-compat with `unbound discover schedule`)
+#   - unbound onboard   (when --command onboard, used by `unbound onboard --set-cron`)
 #
 # Usage:
-#   Install:   ./setup-scheduled-scan.sh --api-key <key> --domain <url>
-#   Uninstall: ./setup-scheduled-scan.sh --uninstall
+#   # Discover scheduled scan (back-compat invocation)
+#   ./setup-scheduled-scan.sh --api-key <key> --domain <url>
 #
-# Security Features:
-#   - Credentials stored in macOS Keychain (not in plist)
-#   - No remote code execution patterns in LaunchAgent plist
-#   - Download-to-file pattern for auto-updates (EDR-safe)
+#   # Discover via new --command flag
+#   ./setup-scheduled-scan.sh --command discover --api-key <key> --domain <url>
+#
+#   # Onboard scheduled run
+#   ./setup-scheduled-scan.sh --command onboard --api-key <key> --discovery-key <key> [--domain <url>]
+#
+#   # Uninstall
+#   ./setup-scheduled-scan.sh --uninstall
+#
+# Security:
+#   - macOS: credentials in Keychain
+#   - Linux: credentials in ~/.unbound/scheduled-creds.json (mode 0600)
 #
 # =============================================================================
 
-LABEL="ai.getunbound.discovery"
-PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
-LOG_DIR="$HOME/Library/Logs/unbound"
+LABEL="ai.getunbound.scheduled"
 INSTALL_DIR="$HOME/.local/share/unbound"
-WRAPPER_SCRIPT="$INSTALL_DIR/run-discovery.sh"
-KEYCHAIN_SERVICE="ai.getunbound.discovery"
+WRAPPER_SCRIPT="$INSTALL_DIR/run-scheduled.sh"
+KEYCHAIN_SERVICE="ai.getunbound.scheduled"
+PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
+CREDS_FILE_LINUX="$HOME/.unbound/scheduled-creds.json"
 
-# Remote URL (used by wrapper script, NOT by plist)
+# Linux scheduling: systemd --user timer with Persistent=true so missed runs
+# (system off at 09:00) trigger on the next boot/login. Falls back to crontab
+# if systemd is not available.
+SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+SYSTEMD_SERVICE_NAME="unbound-scheduled.service"
+SYSTEMD_TIMER_NAME="unbound-scheduled.timer"
+CRON_MARKER_TAG="# ai.getunbound.scheduled"
+CRON_TIME="0 9 * * *" # daily at 09:00 (cron fallback only)
+
+LOG_DIR_MACOS="$HOME/Library/Logs/unbound"
+LOG_DIR_LINUX="$INSTALL_DIR/logs"
+
 SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
 
-INTERVAL=43200 # 12 hours in seconds
+# -----------------------------------------------------------------------------
+# OS detection
+# -----------------------------------------------------------------------------
+OS=""
+case "$(uname -s)" in
+    Darwin) OS="macos" ;;
+    Linux)  OS="linux" ;;
+    *)      echo "Error: Unsupported OS. This script supports macOS and Linux. For Windows, use setup-scheduled-scan.ps1."; exit 1 ;;
+esac
+
+LOG_DIR="$LOG_DIR_MACOS"
+[ "$OS" = "linux" ] && LOG_DIR="$LOG_DIR_LINUX"
 
 usage() {
-    echo "Unbound AI Tools Discovery - Scheduled Scan Setup"
+    echo "Unbound Scheduled Run Setup"
     echo ""
     echo "Usage:"
-    echo "  Install:   $0 --api-key <key> --domain <url>"
-    echo "  Uninstall: $0 --uninstall"
+    echo "  Install (discover):  $0 [--command discover] --api-key <key> --domain <url>"
+    echo "  Install (onboard):   $0 --command onboard --api-key <key> --discovery-key <key> [--domain <url>]"
+    echo "  Uninstall:           $0 --uninstall"
     echo ""
     echo "Options:"
-    echo "  --api-key <key>   Your Unbound API key"
-    echo "  --domain <url>    Your Unbound domain (e.g., https://app.getunbound.ai)"
-    echo "  --uninstall       Remove the scheduled scan"
-    echo "  --help            Show this help message"
+    echo "  --command <name>     Subcommand to schedule: 'discover' (default) or 'onboard'"
+    echo "  --api-key <key>      User API key (or discovery key when --command discover)"
+    echo "  --discovery-key <k>  Discovery key (required for --command onboard)"
+    echo "  --domain <url>       Backend URL (e.g., https://backend.getunbound.ai)"
+    echo "  --uninstall          Remove the scheduled job"
+    echo "  --help               Show this help message"
     exit 1
 }
 
 # =============================================================================
-# Keychain Functions - Secure Credential Storage
+# Credential storage — macOS Keychain
 # =============================================================================
 
-store_credentials_in_keychain() {
-    local api_key="$1"
-    local domain="$2"
-
+store_credentials_macos() {
     echo "Storing credentials in macOS Keychain..."
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "command"       >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key"       >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "discovery_key" >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain"        >/dev/null 2>&1 || true
 
-    # Remove existing entries if present (suppress all output)
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" >/dev/null 2>&1 || true
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" >/dev/null 2>&1 || true
-
-    # Store new credentials with error checking
-    if ! security add-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w "$api_key" -U 2>/dev/null; then
-        echo "Error: Failed to store API key in Keychain"
-        echo "  You may need to grant Keychain access or unlock your Keychain"
-        exit 1
+    security add-generic-password -s "$KEYCHAIN_SERVICE" -a "command" -w "$COMMAND" -U 2>/dev/null \
+        || { echo "Error: Failed to store command in Keychain"; exit 1; }
+    security add-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w "$API_KEY" -U 2>/dev/null \
+        || { echo "Error: Failed to store API key in Keychain"; exit 1; }
+    if [ -n "$DISCOVERY_KEY" ]; then
+        security add-generic-password -s "$KEYCHAIN_SERVICE" -a "discovery_key" -w "$DISCOVERY_KEY" -U 2>/dev/null \
+            || { echo "Error: Failed to store discovery key in Keychain"; exit 1; }
     fi
-
-    if ! security add-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w "$domain" -U 2>/dev/null; then
-        echo "Error: Failed to store domain in Keychain"
-        echo "  You may need to grant Keychain access or unlock your Keychain"
-        exit 1
+    if [ -n "$DOMAIN" ]; then
+        security add-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w "$DOMAIN" -U 2>/dev/null \
+            || { echo "Error: Failed to store domain in Keychain"; exit 1; }
     fi
-
-    echo "  Credentials stored securely in Keychain"
+    echo "  Credentials stored in Keychain"
 }
 
-remove_credentials_from_keychain() {
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" >/dev/null 2>&1 || true
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" >/dev/null 2>&1 || true
+remove_credentials_macos() {
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "command"       >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key"       >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "discovery_key" >/dev/null 2>&1 || true
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "domain"        >/dev/null 2>&1 || true
     echo "  Removed credentials from Keychain"
 }
 
 # =============================================================================
-# Wrapper Script - EDR-Safe Auto-Update Pattern
+# Credential storage — Linux file (mode 0600)
 # =============================================================================
-# Downloads install script to a permanent location, validates it, then executes.
-# File is kept after execution (not deleted) to avoid anti-forensics pattern
-# that EDR tools like CrowdStrike flag as malware staging behavior.
+
+store_credentials_linux() {
+    echo "Storing credentials in $CREDS_FILE_LINUX (mode 0600)..."
+    mkdir -p "$(dirname "$CREDS_FILE_LINUX")"
+    # JSON is hand-built to avoid jq dependency. Values are passed through python's
+    # repr-like escaping isn't safe for arbitrary strings; we rely on the caller
+    # (unbound-cli) to have validated that keys/domains don't contain control chars.
+    umask 077
+    cat > "$CREDS_FILE_LINUX" <<EOF
+{
+  "command": "$COMMAND",
+  "api_key": "$API_KEY",
+  "discovery_key": "${DISCOVERY_KEY:-}",
+  "domain": "${DOMAIN:-}"
+}
+EOF
+    chmod 600 "$CREDS_FILE_LINUX"
+    echo "  Credentials stored"
+}
+
+remove_credentials_linux() {
+    if [ -f "$CREDS_FILE_LINUX" ]; then
+        rm -f "$CREDS_FILE_LINUX"
+        echo "  Removed credentials file"
+    fi
+}
+
+# =============================================================================
+# Wrapper script — runs the scheduled command using stored credentials
+# =============================================================================
+# Kept on disk after execution (EDR-safe — no download-execute-delete pattern).
 # =============================================================================
 
 create_wrapper_script() {
     echo "Creating local wrapper script..."
+    mkdir -p "$INSTALL_DIR" "$LOG_DIR"
 
-    mkdir -p "$INSTALL_DIR"
-
-    cat > "$WRAPPER_SCRIPT" << 'WRAPPER_EOF'
+    cat > "$WRAPPER_SCRIPT" <<WRAPPER_EOF
 #!/bin/bash
-# =============================================================================
-# Unbound Discovery Wrapper Script
-# =============================================================================
-# Executed by LaunchAgent every 12 hours.
-# Downloads and runs the latest discovery script using EDR-safe patterns.
-#
-# Security: File is kept after execution to avoid "download-execute-delete"
-# pattern that EDR tools flag as malware staging (anti-forensics behavior).
-# =============================================================================
-
+# Unbound Scheduled Wrapper — runs daily via launchd (macOS) / cron (Linux)
 set -euo pipefail
 
-KEYCHAIN_SERVICE="ai.getunbound.discovery"
-LOG_DIR="$HOME/Library/Logs/unbound"
-INSTALL_DIR="$HOME/.local/share/unbound"
-INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
+OS=""
+case "\$(uname -s)" in
+    Darwin) OS="macos" ;;
+    Linux)  OS="linux" ;;
+esac
 
-# Permanent location for downloaded script (not temp - EDR safe)
-SCRIPT_PATH="$INSTALL_DIR/install.sh"
-
-mkdir -p "$LOG_DIR"
-mkdir -p "$INSTALL_DIR"
+LOG_DIR="$LOG_DIR"
+mkdir -p "\$LOG_DIR"
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_DIR/scan.log"
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" >> "\$LOG_DIR/scheduled.log"
 }
 
-log "=== Starting Unbound Discovery ==="
+log "=== Starting Unbound scheduled run ==="
 
-# Step 1: Retrieve credentials from Keychain
-API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || {
-    log "ERROR: Could not retrieve API key from Keychain"
-    exit 1
-}
+# -----------------------------------------------------------------------------
+# Retrieve credentials
+# -----------------------------------------------------------------------------
+COMMAND=""
+API_KEY=""
+DISCOVERY_KEY=""
+DOMAIN=""
 
-DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || {
-    log "ERROR: Could not retrieve domain from Keychain"
-    exit 1
-}
-
-log "Credentials retrieved from Keychain"
-
-# Step 2: Download to permanent location (overwrites previous version)
-log "Downloading install script to: $SCRIPT_PATH"
-
-if ! curl -fsSL -o "$SCRIPT_PATH" "$INSTALL_SCRIPT_URL"; then
-    log "ERROR: Failed to download install script"
-    exit 1
-fi
-
-# Step 3: Validate the downloaded file
-if [ ! -s "$SCRIPT_PATH" ]; then
-    log "ERROR: Downloaded script is empty"
-    exit 1
-fi
-
-if ! head -1 "$SCRIPT_PATH" | grep -q '^#!/'; then
-    log "ERROR: Downloaded file is not a valid script"
-    exit 1
-fi
-
-log "Download validated successfully"
-
-# Step 4: Execute the local script
-chmod +x "$SCRIPT_PATH"
-
-log "Executing local script..."
-"$SCRIPT_PATH" --api-key "$API_KEY" --domain "$DOMAIN" >> "$LOG_DIR/scan.log" 2>&1
-EXIT_CODE=$?
-
-# Note: Script is intentionally NOT deleted after execution.
-# Keeping the file avoids the "download-execute-delete" pattern
-# that EDR tools like CrowdStrike flag as malware staging.
-
-if [ $EXIT_CODE -eq 0 ]; then
-    log "Discovery completed successfully"
+if [ "\$OS" = "macos" ]; then
+    COMMAND=\$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "command"       -w 2>/dev/null || echo "")
+    API_KEY=\$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key"       -w 2>/dev/null || echo "")
+    DISCOVERY_KEY=\$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "discovery_key" -w 2>/dev/null || echo "")
+    DOMAIN=\$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain"        -w 2>/dev/null || echo "")
 else
-    log "Discovery failed with exit code: $EXIT_CODE"
+    CREDS_FILE="$CREDS_FILE_LINUX"
+    if [ ! -f "\$CREDS_FILE" ]; then
+        log "ERROR: Credentials file not found at \$CREDS_FILE"
+        exit 1
+    fi
+    # Minimal JSON value extractor — avoids jq dependency.
+    # Matches "field": "value" pairs, tolerating empty strings.
+    extract_field() {
+        local field="\$1"
+        grep -E "\"\$field\"[[:space:]]*:" "\$CREDS_FILE" \
+            | head -1 \
+            | sed -E 's/.*"'"\$field"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'
+    }
+    COMMAND=\$(extract_field command)
+    API_KEY=\$(extract_field api_key)
+    DISCOVERY_KEY=\$(extract_field discovery_key)
+    DOMAIN=\$(extract_field domain)
 fi
 
+if [ -z "\$COMMAND" ] || [ -z "\$API_KEY" ]; then
+    log "ERROR: Required credentials missing (command='\$COMMAND', api_key set: \$([ -n "\$API_KEY" ] && echo yes || echo no))"
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Dispatch
+# -----------------------------------------------------------------------------
+case "\$COMMAND" in
+    discover)
+        # Backward-compat path: download install.sh and run it.
+        SCRIPT_PATH="$INSTALL_DIR/install.sh"
+        log "Downloading install script to: \$SCRIPT_PATH"
+        if ! curl -fsSL -o "\$SCRIPT_PATH" "$SCAN_SCRIPT_URL"; then
+            log "ERROR: Failed to download install script"
+            exit 1
+        fi
+        if [ ! -s "\$SCRIPT_PATH" ] || ! head -1 "\$SCRIPT_PATH" | grep -q '^#!/'; then
+            log "ERROR: Downloaded script invalid"
+            exit 1
+        fi
+        chmod +x "\$SCRIPT_PATH"
+        log "Executing: \$SCRIPT_PATH --api-key *** --domain \$DOMAIN"
+        "\$SCRIPT_PATH" --api-key "\$API_KEY" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1
+        ;;
+    onboard)
+        # Re-run the full unbound onboard flow daily.
+        UNBOUND_BIN=\$(command -v unbound 2>/dev/null || echo "")
+        if [ -z "\$UNBOUND_BIN" ]; then
+            log "ERROR: 'unbound' CLI not found in PATH. Install with: npm install -g unbound-cli"
+            exit 1
+        fi
+        ARGS=(onboard --api-key "\$API_KEY" --discovery-key "\$DISCOVERY_KEY")
+        [ -n "\$DOMAIN" ] && ARGS+=(--domain "\$DOMAIN")
+        log "Executing: unbound onboard --api-key *** --discovery-key *** \${DOMAIN:+--domain \$DOMAIN}"
+        "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1
+        ;;
+    *)
+        log "ERROR: Unknown command '\$COMMAND'"
+        exit 1
+        ;;
+esac
+
+EXIT_CODE=\$?
+if [ \$EXIT_CODE -eq 0 ]; then
+    log "Scheduled run completed successfully"
+else
+    log "Scheduled run failed with exit code: \$EXIT_CODE"
+fi
 log "=== Finished ==="
 WRAPPER_EOF
 
@@ -185,18 +264,24 @@ WRAPPER_EOF
 }
 
 # =============================================================================
-# LaunchAgent Plist - Clean Configuration
-# =============================================================================
-# The plist only references a local script.
-# No curl, no credentials, no remote URLs.
+# Scheduler — macOS launchd
 # =============================================================================
 
-create_plist() {
+install_macos() {
+    mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents"
+
+    # Unload existing job if present
+    if launchctl list "$LABEL" &>/dev/null; then
+        echo "Removing previous scheduled job..."
+        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null \
+            || launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    fi
+
+    store_credentials_macos
+    create_wrapper_script
+
     echo "Creating LaunchAgent plist..."
-
-    mkdir -p "$(dirname "$PLIST_PATH")"
-
-    cat > "$PLIST_PATH" << EOF
+    cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -207,54 +292,150 @@ create_plist() {
     <array>
         <string>${WRAPPER_SCRIPT}</string>
     </array>
-    <key>StartInterval</key>
-    <integer>${INTERVAL}</integer>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${LOG_DIR}/scan.log</string>
+    <string>${LOG_DIR}/scheduled.log</string>
     <key>StandardErrorPath</key>
-    <string>${LOG_DIR}/scan.err</string>
+    <string>${LOG_DIR}/scheduled.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 </dict>
 </plist>
 EOF
-
     echo "  Plist created: $PLIST_PATH"
+
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || launchctl load "$PLIST_PATH"
+    echo ""
+    echo "Unbound scheduled run set up."
+    echo "  Command:     $COMMAND"
+    echo "  Schedule:    Daily at 09:00 (runs once on install)"
+    echo "  Logs:        ${LOG_DIR}/scheduled.log"
+    echo "  Uninstall:   $0 --uninstall"
 }
 
 # =============================================================================
-# Uninstall - Complete Cleanup
+# Scheduler — Linux (systemd --user timer preferred, crontab fallback)
+# =============================================================================
+# Why systemd over plain cron: systemd timers support Persistent=true which
+# triggers a missed unit on the next boot/login. Plain crontab silently skips
+# any run whose scheduled time fell while the machine was off — bad for laptops.
+# We fall back to crontab only when systemd isn't available.
+# =============================================================================
+
+install_linux() {
+    mkdir -p "$LOG_DIR" "$INSTALL_DIR"
+
+    store_credentials_linux
+    create_wrapper_script
+
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        install_linux_systemd
+    else
+        echo "  systemd not available — falling back to crontab (no catch-up for missed runs)"
+        install_linux_crontab
+    fi
+
+    echo ""
+    echo "Unbound scheduled run set up."
+    echo "  Command:     $COMMAND"
+    echo "  Schedule:    Daily at 09:00"
+    echo "  Logs:        ${LOG_DIR}/scheduled.log"
+    echo "  Uninstall:   $0 --uninstall"
+}
+
+install_linux_systemd() {
+    mkdir -p "$SYSTEMD_USER_DIR"
+
+    # Disable + stop any existing timer before rewriting unit files so the daemon
+    # picks up the new content on reload.
+    systemctl --user disable --now "$SYSTEMD_TIMER_NAME" >/dev/null 2>&1 || true
+
+    cat > "$SYSTEMD_USER_DIR/$SYSTEMD_SERVICE_NAME" <<EOF
+[Unit]
+Description=Unbound scheduled run
+
+[Service]
+Type=oneshot
+ExecStart=$WRAPPER_SCRIPT
+EOF
+
+    cat > "$SYSTEMD_USER_DIR/$SYSTEMD_TIMER_NAME" <<EOF
+[Unit]
+Description=Unbound scheduled run (daily at 09:00, catches up missed runs)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+Unit=$SYSTEMD_SERVICE_NAME
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$SYSTEMD_TIMER_NAME"
+
+    echo "  systemd --user timer installed: $SYSTEMD_USER_DIR/$SYSTEMD_TIMER_NAME"
+    echo "  Note: if you log out, run \`loginctl enable-linger \$USER\` to keep the timer alive."
+}
+
+install_linux_crontab() {
+    local cron_line="$CRON_TIME $WRAPPER_SCRIPT $CRON_MARKER_TAG"
+    local existing filtered
+    existing=$(crontab -l 2>/dev/null || true)
+    filtered=$(printf '%s\n' "$existing" | grep -vF "$CRON_MARKER_TAG" || true)
+    {
+        if [ -n "$filtered" ]; then printf '%s\n' "$filtered"; fi
+        printf '%s\n' "$cron_line"
+    } | crontab -
+    echo "  Crontab entry installed (no catch-up for missed runs)"
+}
+
+# =============================================================================
+# Uninstall
 # =============================================================================
 
 uninstall() {
-    echo "Uninstalling Unbound scheduled scan..."
-
-    # Stop LaunchAgent
-    if launchctl list "$LABEL" &>/dev/null; then
-        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || launchctl unload "$PLIST_PATH" 2>/dev/null || true
-        echo "  Stopped scheduled job"
+    echo "Uninstalling Unbound scheduled run..."
+    if [ "$OS" = "macos" ]; then
+        if launchctl list "$LABEL" &>/dev/null; then
+            launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null \
+                || launchctl unload "$PLIST_PATH" 2>/dev/null || true
+            echo "  Stopped LaunchAgent"
+        fi
+        [ -f "$PLIST_PATH" ] && rm "$PLIST_PATH" && echo "  Removed plist"
+        remove_credentials_macos
+    else
+        # Tear down both systemd and crontab paths — whichever was installed.
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl --user disable --now "$SYSTEMD_TIMER_NAME" >/dev/null 2>&1 || true
+            rm -f "$SYSTEMD_USER_DIR/$SYSTEMD_TIMER_NAME" "$SYSTEMD_USER_DIR/$SYSTEMD_SERVICE_NAME"
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+            echo "  Removed systemd timer/service"
+        fi
+        local existing
+        existing=$(crontab -l 2>/dev/null || true)
+        if printf '%s\n' "$existing" | grep -qF "$CRON_MARKER_TAG"; then
+            printf '%s\n' "$existing" | grep -vF "$CRON_MARKER_TAG" | crontab -
+            echo "  Removed cron entry"
+        fi
+        remove_credentials_linux
     fi
-
-    # Remove plist
-    if [ -f "$PLIST_PATH" ]; then
-        rm "$PLIST_PATH"
-        echo "  Removed plist"
-    fi
-
-    # Remove credentials from Keychain
-    remove_credentials_from_keychain
-
-    # Remove wrapper script and install directory
     if [ -d "$INSTALL_DIR" ]; then
         rm -rf "$INSTALL_DIR"
         echo "  Removed install directory"
     fi
-
     echo "Done."
     exit 0
 }
@@ -263,56 +444,57 @@ uninstall() {
 # Main
 # =============================================================================
 
-# macOS check
-if [ "$(uname -s)" != "Darwin" ]; then
-    echo "Error: This script is for macOS only (uses launchd)."
-    exit 1
-fi
-
+COMMAND="discover" # default for back-compat with `unbound discover schedule`
 API_KEY=""
+DISCOVERY_KEY=""
 DOMAIN=""
+DO_UNINSTALL=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --command)
+            if [ $# -lt 2 ]; then echo "Error: --command requires a value"; usage; fi
+            COMMAND="$2"; shift 2 ;;
         --api-key)
             if [ $# -lt 2 ]; then echo "Error: --api-key requires a value"; usage; fi
             API_KEY="$2"; shift 2 ;;
+        --discovery-key)
+            if [ $# -lt 2 ]; then echo "Error: --discovery-key requires a value"; usage; fi
+            DISCOVERY_KEY="$2"; shift 2 ;;
         --domain)
             if [ $# -lt 2 ]; then echo "Error: --domain requires a value"; usage; fi
             DOMAIN="$2"; shift 2 ;;
-        --uninstall) uninstall ;;
+        --uninstall) DO_UNINSTALL=true; shift ;;
         --help|-h) usage ;;
         *) echo "Error: Unknown option '$1'"; usage ;;
     esac
 done
 
-if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
+if [ "$DO_UNINSTALL" = true ]; then
+    uninstall
+fi
+
+# Validation
+if [ "$COMMAND" != "discover" ] && [ "$COMMAND" != "onboard" ]; then
+    echo "Error: --command must be 'discover' or 'onboard' (got '$COMMAND')"
+    usage
+fi
+if [ -z "$API_KEY" ]; then
+    echo "Error: --api-key is required"
+    usage
+fi
+if [ "$COMMAND" = "onboard" ] && [ -z "$DISCOVERY_KEY" ]; then
+    echo "Error: --discovery-key is required when --command onboard"
+    usage
+fi
+if [ "$COMMAND" = "discover" ] && [ -z "$DOMAIN" ]; then
+    echo "Error: --domain is required when --command discover"
     usage
 fi
 
-# Create log directory
-mkdir -p "$LOG_DIR"
-mkdir -p "$HOME/Library/LaunchAgents"
-
-# Unload existing job if present
-if launchctl list "$LABEL" &>/dev/null; then
-    echo "Removing previous scheduled job..."
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || launchctl unload "$PLIST_PATH" 2>/dev/null || true
+# Dispatch
+if [ "$OS" = "macos" ]; then
+    install_macos
+else
+    install_linux
 fi
-
-# Install
-store_credentials_in_keychain "$API_KEY" "$DOMAIN"
-create_wrapper_script
-create_plist
-
-# Load the job
-launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || launchctl load "$PLIST_PATH"
-
-echo ""
-echo "Unbound scan scheduled successfully."
-echo "  Schedule:    Every 12 hours (runs immediately on install)"
-echo "  Logs:        ${LOG_DIR}/scan.log"
-echo "  Errors:      ${LOG_DIR}/scan.err"
-echo "  Credentials: Stored in macOS Keychain (not in plist)"
-echo "  Uninstall:   $0 --uninstall"
-echo ""

@@ -446,11 +446,14 @@ install_linux() {
 
 systemd_user_available() {
     # Three independent checks: binary present, system systemd up, AND a user
-    # instance we can actually talk to. The last `systemctl --user status` is
-    # the only one that catches the "no user bus" case on containers/WSL2.
+    # instance we can actually talk to. `systemctl --user show` (no unit arg)
+    # queries the manager's own properties and exits 0 as long as the user bus
+    # is reachable — unlike `status`, it does NOT exit 1 when the manager is in
+    # "degraded" state (failed xdg-portal, pipewire, gnome-keyring, etc.), which
+    # is the normal condition on most desktop sessions.
     command -v systemctl >/dev/null 2>&1 \
         && [ -d /run/systemd/system ] \
-        && systemctl --user status >/dev/null 2>&1
+        && systemctl --user show >/dev/null 2>&1
 }
 
 install_linux_systemd() {

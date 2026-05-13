@@ -248,6 +248,10 @@ case "\$COMMAND" in
         ;;
     onboard)
         # Re-run the full unbound onboard flow daily.
+        if [ -z "\$DISCOVERY_KEY" ]; then
+            log "ERROR: discovery_key missing from stored credentials (required for onboard)"
+            exit 1
+        fi
         UNBOUND_BIN=\$(command -v unbound 2>/dev/null || echo "")
         if [ -z "\$UNBOUND_BIN" ]; then
             log "ERROR: 'unbound' CLI not found in PATH. Install with: npm install -g unbound-cli"
@@ -333,9 +337,9 @@ EOF
     echo ""
     echo "Unbound scheduled run set up."
     echo "  Command:     $COMMAND"
-    echo "  Schedule:    Daily at 09:00 (runs once on install)"
+    echo "  Schedule:    Daily at 09:00 (runs on install + at each login via RunAtLoad)"
     echo "  Logs:        ${LOG_DIR}/scheduled.log"
-    echo "  Uninstall:   $0 --uninstall"
+    echo "  Uninstall:   unbound discover unschedule"
 }
 
 # =============================================================================
@@ -363,9 +367,9 @@ install_linux() {
     echo ""
     echo "Unbound scheduled run set up."
     echo "  Command:     $COMMAND"
-    echo "  Schedule:    Daily at 09:00"
+    echo "  Schedule:    Daily at 09:00 (systemd: catches up missed runs; crontab: no catch-up)"
     echo "  Logs:        ${LOG_DIR}/scheduled.log"
-    echo "  Uninstall:   $0 --uninstall"
+    echo "  Uninstall:   unbound discover unschedule"
 }
 
 install_linux_systemd() {

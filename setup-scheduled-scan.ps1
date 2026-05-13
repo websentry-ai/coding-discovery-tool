@@ -6,7 +6,7 @@
 #   - unbound discover  (default — backward-compat)
 #   - unbound onboard   (when -Command onboard)
 #
-# Uses only built-in Windows tools: schtasks, cmdkey, PowerShell. No new deps.
+# Uses only built-in Windows tools: Register-ScheduledTask, cmdkey, PowerShell. No new deps.
 #
 # Usage:
 #   .\setup-scheduled-scan.ps1 -ApiKey <key> -Domain <url>
@@ -161,15 +161,19 @@ switch ($Command) {
         Write-Log ("Discover exited with code {0}" -f $ec)
     }
     'onboard' {
+        if ([string]::IsNullOrEmpty($DiscoveryKey)) {
+            Write-Log "ERROR: discovery_key missing from Credential Manager (required for onboard command)"
+            exit 1
+        }
         $unbound = (Get-Command unbound -ErrorAction SilentlyContinue).Source
         if (-not $unbound) {
             Write-Log "ERROR: 'unbound' CLI not found in PATH. Install with: npm install -g unbound-cli"
             exit 1
         }
-        $args = @('onboard', '--api-key', $ApiKey, '--discovery-key', $DiscoveryKey)
-        if (-not [string]::IsNullOrEmpty($Domain)) { $args += @('--domain', $Domain) }
+        $cmdArgs = @('onboard', '--api-key', $ApiKey, '--discovery-key', $DiscoveryKey)
+        if (-not [string]::IsNullOrEmpty($Domain)) { $cmdArgs += @('--domain', $Domain) }
         Write-Log "Executing: unbound onboard --api-key *** --discovery-key *** ..."
-        & $unbound @args *>> $LogFile
+        & $unbound @cmdArgs *>> $LogFile
         $ec = $LASTEXITCODE
         Write-Log ("Onboard exited with code {0}" -f $ec)
     }
@@ -203,8 +207,7 @@ function Install-ScheduledTask {
 
     # Build task: Register-ScheduledTask supports StartWhenAvailable, which makes
     # Windows run the task as soon as possible after a missed scheduled start.
-    # This is the Windows equivalent of systemd's Persistent=true / launchd's
-    # automatic catch-up behaviour.
+    # This is the Windows equivalent of systemd's Persistent=true (Linux).
     $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $WrapperScript)
     $trigger   = New-ScheduledTaskTrigger -Daily -At '09:00'
     $settings  = New-ScheduledTaskSettingsSet `
@@ -225,9 +228,9 @@ function Install-ScheduledTask {
     Write-Host ""
     Write-Host "Unbound scheduled run set up."
     Write-Host "  Command:     $Command"
-    Write-Host "  Schedule:    Daily at 09:00 (catches up missed runs)"
+    Write-Host "  Schedule:    Daily at 09:00 (catches up missed runs when logged in)"
     Write-Host "  Logs:        $LogDir\scheduled.log"
-    Write-Host "  Uninstall:   .\setup-scheduled-scan.ps1 -Uninstall"
+    Write-Host "  Uninstall:   unbound discover unschedule"
 }
 
 function Uninstall-ScheduledTask {

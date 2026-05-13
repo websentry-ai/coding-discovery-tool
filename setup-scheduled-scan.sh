@@ -167,6 +167,12 @@ create_wrapper_script() {
 # Unbound Scheduled Wrapper — runs daily via launchd (macOS) / cron (Linux)
 set -euo pipefail
 
+# cron and systemd --user both invoke this with a minimal PATH that excludes
+# the dirs npm-global / nvm / homebrew / pipx use, so 'unbound' and 'curl'
+# would not be found. Prepend the common user-binary dirs so the onboard
+# branch below can locate the CLI regardless of which scheduler triggered us.
+export PATH="\$HOME/.local/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH"
+
 OS=""
 case "\$(uname -s)" in
     Darwin) OS="macos" ;;

@@ -184,7 +184,12 @@ switch ($Command) {
             # authenticated user and Windows Event Log 4688 captures full command lines.
             $env:UNBOUND_API_KEY = $ApiKey
             $env:UNBOUND_DOMAIN  = $Domain
-            & powershell -NoProfile -ExecutionPolicy Bypass -Command "& '$installScript' -ApiKey `$env:UNBOUND_API_KEY -Domain `$env:UNBOUND_DOMAIN" *>> $LogFile
+            # Escape any apostrophes in the path before embedding it inside a
+            # single-quoted PowerShell expression. A username like O'Brien turns
+            # $env:LOCALAPPDATA into a path with a literal apostrophe; without
+            # the escape that apostrophe would break the -Command string.
+            $safeInstallScript = $installScript -replace "'", "''"
+            & powershell -NoProfile -ExecutionPolicy Bypass -Command "& '$safeInstallScript' -ApiKey `$env:UNBOUND_API_KEY -Domain `$env:UNBOUND_DOMAIN" *>> $LogFile
             $ec = $LASTEXITCODE
         } catch {
             Write-Log ("ERROR: discover wrapper failed: {0}" -f $_.Exception.Message)
@@ -233,9 +238,13 @@ exit $ec
     # Bake in the unbound path resolved at install time so the wrapper survives PATH changes
     $resolvedUnbound = (Get-Command unbound -ErrorAction SilentlyContinue).Source
     if ($resolvedUnbound) {
+        # Escape apostrophes so a path like C:\Users\O'Brien\...\unbound.cmd
+        # does not break the single-quoted Test-Path / string literals baked
+        # into the wrapper.
+        $escapedUnbound = $resolvedUnbound -replace "'", "''"
         $wrapper = $wrapper.Replace(
             '$unbound = (Get-Command unbound -ErrorAction SilentlyContinue).Source',
-            "`$unbound = if (Test-Path '$resolvedUnbound') { '$resolvedUnbound' } else { (Get-Command unbound -ErrorAction SilentlyContinue).Source }"
+            "`$unbound = if (Test-Path '$escapedUnbound') { '$escapedUnbound' } else { (Get-Command unbound -ErrorAction SilentlyContinue).Source }"
         )
     }
 

@@ -369,12 +369,17 @@ install_linux_systemd() {
     # picks up the new content on reload.
     systemctl --user disable --now "$SYSTEMD_TIMER_NAME" >/dev/null 2>&1 || true
 
+    # systemd --user services inherit a minimal PATH that does not include
+    # ~/.local/bin, /usr/local/bin, or homebrew paths where the `unbound` CLI
+    # or `curl` may live. Set PATH explicitly so the onboard wrapper can find
+    # the binary at run time.
     cat > "$SYSTEMD_USER_DIR/$SYSTEMD_SERVICE_NAME" <<EOF
 [Unit]
 Description=Unbound scheduled run
 
 [Service]
 Type=oneshot
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
 ExecStart=$WRAPPER_SCRIPT
 EOF
 

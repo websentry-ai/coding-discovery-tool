@@ -140,15 +140,23 @@ switch ($Command) {
     'discover' {
         if ([string]::IsNullOrEmpty($Domain)) { Write-Log "ERROR: Domain missing for discover"; exit 1 }
         $installPs1 = 'https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1'
-        $tmp = Join-Path $env:TEMP ("unbound-install-{0}.ps1" -f ([Guid]::NewGuid().ToString('N')))
-        Write-Log "Downloading install.ps1 to $tmp"
+        # Keep install.ps1 cached on disk under %LOCALAPPDATA%\Unbound rather
+        # than downloading to TEMP and deleting after each run. EDR products
+        # flag the download-execute-delete pattern as suspicious; a stable
+        # script path under the app data dir is recognised as the install
+        # location and is treated as benign.
+        $InstallDir = Join-Path $env:LOCALAPPDATA 'Unbound'
+        if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
+        $installScript = Join-Path $InstallDir 'install.ps1'
+        $ec = 1
         try {
-            Invoke-WebRequest -Uri $installPs1 -OutFile $tmp -UseBasicParsing
+            Write-Log "Refreshing $installScript from $installPs1"
+            Invoke-WebRequest -Uri $installPs1 -OutFile $installScript -UseBasicParsing
             Write-Log "Executing install.ps1"
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $tmp -ApiKey $ApiKey -Domain $Domain *>> $LogFile
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript -ApiKey $ApiKey -Domain $Domain *>> $LogFile
             $ec = $LASTEXITCODE
-        } finally {
-            if (Test-Path $tmp) { Remove-Item $tmp -ErrorAction SilentlyContinue }
+        } catch {
+            Write-Log ("ERROR: discover wrapper failed: {0}" -f $_.Exception.Message)
         }
         Write-Log ("Discover exited with code {0}" -f $ec)
     }

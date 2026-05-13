@@ -121,18 +121,26 @@ remove_credentials_macos() {
 store_credentials_linux() {
     echo "Storing credentials in $CREDS_FILE_LINUX (mode 0600)..."
     mkdir -p "$(dirname "$CREDS_FILE_LINUX")"
-    # JSON is hand-built to avoid jq dependency. Values are passed through python's
-    # repr-like escaping isn't safe for arbitrary strings; we rely on the caller
-    # (unbound-cli) to have validated that keys/domains don't contain control chars.
-    umask 077
-    cat > "$CREDS_FILE_LINUX" <<EOF
+    # Escape JSON special chars (\, ") in each value. Run in a subshell so
+    # the tightened umask is scoped to this function and doesn't leak into
+    # subsequent file creation (wrapper script, logs).
+    json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+    local cmd_e key_e disc_e dom_e
+    cmd_e=$(json_escape "$COMMAND")
+    key_e=$(json_escape "$API_KEY")
+    disc_e=$(json_escape "${DISCOVERY_KEY:-}")
+    dom_e=$(json_escape "${DOMAIN:-}")
+    (
+        umask 077
+        cat > "$CREDS_FILE_LINUX" <<EOF
 {
-  "command": "$COMMAND",
-  "api_key": "$API_KEY",
-  "discovery_key": "${DISCOVERY_KEY:-}",
-  "domain": "${DOMAIN:-}"
+  "command": "$cmd_e",
+  "api_key": "$key_e",
+  "discovery_key": "$disc_e",
+  "domain": "$dom_e"
 }
 EOF
+    )
     chmod 600 "$CREDS_FILE_LINUX"
     echo "  Credentials stored"
 }

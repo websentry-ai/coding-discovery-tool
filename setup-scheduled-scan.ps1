@@ -197,6 +197,7 @@ switch ($Command) {
 }
 
 Write-Log "=== Finished ==="
+exit $ec
 '@
 
     Set-Content -Path $WrapperScript -Value $wrapper -Encoding UTF8

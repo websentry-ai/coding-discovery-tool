@@ -542,7 +542,7 @@ uninstall() {
         local existing
         existing=$(crontab -l 2>/dev/null || true)
         if printf '%s\n' "$existing" | grep -qF "$CRON_MARKER_TAG"; then
-            (printf '%s\n' "$existing" | grep -vF "$CRON_MARKER_TAG" || true) | crontab -
+            printf '%s\n' "$existing" | grep -vF "$CRON_MARKER_TAG" | crontab - || true
             echo "  Removed cron entry"
         fi
         remove_credentials_linux

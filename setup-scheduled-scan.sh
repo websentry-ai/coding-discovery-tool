@@ -163,6 +163,18 @@ create_wrapper_script() {
     echo "Creating local wrapper script..."
     mkdir -p "$INSTALL_DIR" "$LOG_DIR"
 
+    # Resolve the 'unbound' binary at install time (user's interactive shell — full PATH
+    # available). Baking the absolute path into the wrapper avoids the common failure
+    # where cron/systemd --user/launchd invoke the wrapper with a minimal PATH that
+    # omits nvm version dirs, non-standard npm prefix paths, or pipx roots.
+    local RESOLVED_UNBOUND NPM_BIN
+    RESOLVED_UNBOUND=$(command -v unbound 2>/dev/null || true)
+    # Also capture the active npm global bin dir at install time so it can be prepended
+    # to PATH in the wrapper. 'npm config get prefix' follows nvm and other prefix
+    # overrides, giving the correct per-user bin dir even on machines that differ from
+    # the system default.
+    NPM_BIN=$(npm config get prefix 2>/dev/null)/bin
+
     cat > "$WRAPPER_SCRIPT" <<WRAPPER_EOF
 #!/bin/bash
 # Unbound Scheduled Wrapper — runs daily via launchd (macOS) / cron (Linux)
@@ -172,7 +184,8 @@ set -euo pipefail
 # the dirs npm-global / nvm / homebrew / pipx use, so 'unbound' and 'curl'
 # would not be found. Prepend the common user-binary dirs so the onboard
 # branch below can locate the CLI regardless of which scheduler triggered us.
-export PATH="\$HOME/.local/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH"
+# ${NPM_BIN} is the active npm global bin dir resolved at install time (follows nvm).
+export PATH="${NPM_BIN}:\$HOME/.local/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH"
 
 OS=""
 case "\$(uname -s)" in
@@ -257,6 +270,13 @@ case "\$COMMAND" in
         chmod +x "\$SCRIPT_PATH"
         log "Executing: \$SCRIPT_PATH --api-key *** --domain \$DOMAIN"
         "\$SCRIPT_PATH" --api-key "\$API_KEY" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        # If the scan exited non-zero and the log contains an auth error, emit an
+        # actionable hint. install.sh logs "HTTP 401" / "Invalid API key" on auth
+        # failures; matching those phrases saves the operator from having to grep
+        # the log manually to understand why the scheduled run is failing.
+        if [ \$EXIT_CODE -ne 0 ] && tail -40 "\$LOG_DIR/scheduled.log" | grep -qiE "401|[Ii]nvalid.*(api.?key|key)|[Uu]nauthorized"; then
+            log "HINT: Auth error detected — your discovery API key may have been rotated in the Unbound dashboard. Re-run to update stored credentials: unbound discover --set-cron --api-key <NEW_KEY> --domain \$DOMAIN"
+        fi
         ;;
     onboard)
         # Re-run the full unbound onboard flow daily.
@@ -264,15 +284,25 @@ case "\$COMMAND" in
             log "ERROR: discovery_key missing from stored credentials (required for onboard)"
             exit 1
         fi
-        UNBOUND_BIN=\$(command -v unbound 2>/dev/null || echo "")
+        # Use the path that was resolved at setup time first. This survives nvm version
+        # switches, non-standard npm prefix layouts, and any other case where the
+        # scheduler's minimal PATH wouldn't find the binary. Fall back to a fresh PATH
+        # search in case the binary was reinstalled to a different location since setup.
+        UNBOUND_BIN="${RESOLVED_UNBOUND}"
+        if [ -z "\$UNBOUND_BIN" ] || [ ! -x "\$UNBOUND_BIN" ]; then
+            UNBOUND_BIN=\$(command -v unbound 2>/dev/null || echo "")
+        fi
         if [ -z "\$UNBOUND_BIN" ]; then
-            log "ERROR: 'unbound' CLI not found in PATH. Install with: npm install -g unbound-cli"
+            log "ERROR: 'unbound' CLI not found. Tried setup-time path (${RESOLVED_UNBOUND:-<none resolved at setup>}) and current PATH. Reinstall with: npm install -g unbound-cli"
             exit 1
         fi
         ARGS=(onboard --api-key "\$API_KEY" --discovery-key "\$DISCOVERY_KEY")
         [ -n "\$DOMAIN" ] && ARGS+=(--domain "\$DOMAIN")
         log "Executing: unbound onboard --api-key *** --discovery-key *** \${DOMAIN:+--domain \$DOMAIN}"
         "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        if [ \$EXIT_CODE -ne 0 ] && tail -40 "\$LOG_DIR/scheduled.log" | grep -qiE "401|[Ii]nvalid.*(api.?key|key)|[Uu]nauthorized"; then
+            log "HINT: Auth error detected — your API key may have been rotated in the Unbound dashboard. Re-run to update stored credentials: unbound onboard --set-cron --api-key <NEW_KEY> --discovery-key <NEW_DISCOVERY_KEY>"
+        fi
         ;;
     *)
         log "ERROR: Unknown command '\$COMMAND'"

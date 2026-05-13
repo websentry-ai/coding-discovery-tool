@@ -214,6 +214,29 @@ Write-Log "=== Finished ==="
 exit $ec
 '@
 
+    # Bake in the unbound path resolved at install time so the wrapper survives PATH changes
+    $resolvedUnbound = (Get-Command unbound -ErrorAction SilentlyContinue).Source
+    if ($resolvedUnbound) {
+        $wrapper = $wrapper.Replace(
+            '$unbound = (Get-Command unbound -ErrorAction SilentlyContinue).Source',
+            "`$unbound = if (Test-Path '$resolvedUnbound') { '$resolvedUnbound' } else { (Get-Command unbound -ErrorAction SilentlyContinue).Source }"
+        )
+    }
+
+    # Inject auth-failure hint before the final log line
+    $authHint = @'
+if ($ec -ne 0) {
+    try {
+        $recentLog = Get-Content $LogFile -Tail 30 -ErrorAction SilentlyContinue
+        if ($recentLog -and ($recentLog | Select-String -Pattern '401|Invalid.*(api.?key|key)|Unauthorized' -Quiet)) {
+            Write-Log 'HINT: Auth error detected — your API key may have been rotated. Re-run with updated credentials: unbound <command> --set-cron --api-key <NEW_KEY>'
+        }
+    } catch {}
+}
+
+'@
+    $wrapper = $wrapper.Replace('Write-Log "=== Finished ==="', ($authHint + 'Write-Log "=== Finished ==="'))
+
     Set-Content -Path $WrapperScript -Value $wrapper -Encoding UTF8
     Write-Host "  Wrapper script created: $WrapperScript"
 }

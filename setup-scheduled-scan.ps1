@@ -73,7 +73,6 @@ function Remove-AllCredentials {
 }
 
 function Create-WrapperScript {
-    param([string]$InstallRef = 'main')
     if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
     if (-not (Test-Path $LogDir))     { New-Item -ItemType Directory -Path $LogDir     -Force | Out-Null }
 
@@ -140,7 +139,7 @@ if ([string]::IsNullOrEmpty($Command) -or [string]::IsNullOrEmpty($ApiKey)) {
 switch ($Command) {
     'discover' {
         if ([string]::IsNullOrEmpty($Domain)) { Write-Log "ERROR: Domain missing for discover"; exit 1 }
-        $installPs1 = 'https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/UNBOUND_INSTALL_REF/install.ps1'
+        $installPs1 = 'https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1'
         # Keep install.ps1 cached on disk under %LOCALAPPDATA%\Unbound rather
         # than downloading to TEMP and deleting after each run. EDR products
         # flag the download-execute-delete pattern as suspicious; a stable
@@ -200,9 +199,6 @@ switch ($Command) {
 Write-Log "=== Finished ==="
 '@
 
-    # Substitute the resolved install ref (commit SHA or 'main' fallback) so
-    # the wrapper fetches an immutable version of install.ps1 on every run.
-    $wrapper = $wrapper -replace 'UNBOUND_INSTALL_REF', $InstallRef
     Set-Content -Path $WrapperScript -Value $wrapper -Encoding UTF8
     Write-Host "  Wrapper script created: $WrapperScript"
 }
@@ -214,25 +210,7 @@ function Install-ScheduledTask {
     if ($Domain)       { Store-Credential -Account 'domain'        -Secret $Domain }
     Write-Host "  Credentials stored in Windows Credential Manager"
 
-    # Pin install.ps1 to the current HEAD SHA so the generated wrapper always
-    # fetches an immutable version regardless of future pushes to main.
-    Write-Host "Resolving install script version..."
-    $installRef = 'main'
-    try {
-        $commit = Invoke-RestMethod `
-            -Uri 'https://api.github.com/repos/websentry-ai/coding-discovery-tool/commits/main' `
-            -UseBasicParsing
-        if ($commit.sha -match '^[0-9a-f]{40}$') { $installRef = $commit.sha }
-    } catch {
-        Write-Host "  Warning: could not resolve SHA — pinning to 'main' (mutable fallback)"
-    }
-    if ($installRef -eq 'main') {
-        Write-Host "  Warning: using mutable 'main' ref — re-run to pin when network is available"
-    } else {
-        Write-Host ("  Pinned to: {0}..." -f $installRef.Substring(0, 12))
-    }
-
-    Create-WrapperScript -InstallRef $installRef
+    Create-WrapperScript
 
     # Remove existing task if present
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {

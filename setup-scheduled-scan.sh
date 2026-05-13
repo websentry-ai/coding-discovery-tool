@@ -230,6 +230,13 @@ fi
 # -----------------------------------------------------------------------------
 # Dispatch
 # -----------------------------------------------------------------------------
+# EXIT_CODE is captured inline via "|| EXIT_CODE=\$?" rather than read from \$?
+# after the case block. With set -e, a non-zero exit inside the case would
+# terminate the wrapper before reaching the failure log line below, which was
+# the entire point of the trailing "Scheduled run failed" branch. The "|| =\$?"
+# form is the canonical bypass: it short-circuits set -e for just that command
+# and preserves the exit status for logging.
+EXIT_CODE=0
 case "\$COMMAND" in
     discover)
         # Backward-compat path: download install.sh and run it.
@@ -249,7 +256,7 @@ case "\$COMMAND" in
         fi
         chmod +x "\$SCRIPT_PATH"
         log "Executing: \$SCRIPT_PATH --api-key *** --domain \$DOMAIN"
-        "\$SCRIPT_PATH" --api-key "\$API_KEY" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1
+        "\$SCRIPT_PATH" --api-key "\$API_KEY" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
         ;;
     onboard)
         # Re-run the full unbound onboard flow daily.
@@ -265,21 +272,23 @@ case "\$COMMAND" in
         ARGS=(onboard --api-key "\$API_KEY" --discovery-key "\$DISCOVERY_KEY")
         [ -n "\$DOMAIN" ] && ARGS+=(--domain "\$DOMAIN")
         log "Executing: unbound onboard --api-key *** --discovery-key *** \${DOMAIN:+--domain \$DOMAIN}"
-        "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1
+        "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
         ;;
     *)
         log "ERROR: Unknown command '\$COMMAND'"
         exit 1
         ;;
 esac
-
-EXIT_CODE=\$?
 if [ \$EXIT_CODE -eq 0 ]; then
     log "Scheduled run completed successfully"
 else
     log "Scheduled run failed with exit code: \$EXIT_CODE"
 fi
 log "=== Finished ==="
+# Propagate the underlying exit code to launchd/systemd/cron so the OS
+# scheduler records the failure. Without this, the test above sets \$?
+# to 0 and every failure is reported as a successful run.
+exit \$EXIT_CODE
 WRAPPER_EOF
 
     chmod +x "$WRAPPER_SCRIPT"
@@ -292,6 +301,20 @@ WRAPPER_EOF
 
 install_macos() {
     mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents"
+
+    # Migration: an earlier version of this script registered the agent under
+    # the label "ai.getunbound.discovery" with plist of the same name. Users
+    # who ran that version still have it loaded and would otherwise end up
+    # with two daily agents firing after this upgrade — one stale, one new.
+    # Unload + delete the old plist before registering the new one. Best-effort.
+    local OLD_LABEL="ai.getunbound.discovery"
+    local OLD_PLIST="$HOME/Library/LaunchAgents/${OLD_LABEL}.plist"
+    if launchctl list "$OLD_LABEL" &>/dev/null || [ -f "$OLD_PLIST" ]; then
+        echo "Migrating: removing legacy '$OLD_LABEL' LaunchAgent..."
+        launchctl bootout "gui/$(id -u)/$OLD_LABEL" 2>/dev/null \
+            || launchctl unload "$OLD_PLIST" 2>/dev/null || true
+        rm -f "$OLD_PLIST" 2>/dev/null || true
+    fi
 
     # Unload existing job if present
     if launchctl list "$LABEL" &>/dev/null; then

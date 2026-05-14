@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from typing import Dict, Optional, Tuple
 
-from .utils import normalize_url, report_to_sentry
+from .utils import normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +113,14 @@ def try_s3_upload(
         upload_url = url_response["upload_url"]
         object_key = url_response["object_key"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.error(f"S3 step 1: malformed upload-url response: {e}; body={body[:200] if body else ''}")
-        report_to_sentry(e, {**ctx, "phase": "upload_url_parse"}, level="warning")
+        logger.warning(f"S3 step 1: malformed upload-url response: {e}; body={body[:200] if body else ''}")
         return False, True
 
     # ─── Step 2: PUT to S3 ──────────────────────────────────────────────
     try:
         s3_payload_json = json.dumps(payload)
     except (TypeError, ValueError) as e:
-        logger.error(f"S3 step 2: failed to serialize payload: {e}")
-        report_to_sentry(e, {**ctx, "phase": "upload_serialize"}, level="warning")
+        logger.warning(f"S3 step 2: failed to serialize payload: {e}")
         return False, True
 
     ok, status, body, err = _curl_put_to_s3(upload_url, s3_payload_json)
@@ -263,14 +261,7 @@ def _parse_curl(result):
 
 
 def _report_step_failure(phase, status, body, err, ctx):
-    """Single point for logging + Sentry on any S3-step failure."""
-    msg = f"S3 upload step '{phase}' failed: status={status}, err={err}, body={(body or '')[:200]}"
-    logger.warning(msg)
-    try:
-        raise RuntimeError(msg)
-    except RuntimeError as exc:
-        report_to_sentry(
-            exc,
-            {**ctx, "phase": phase, "http_code": status},
-            level="warning",
-        )
+    """Log-only. Fallback to the legacy endpoint handles recovery; Sentry would just be noise."""
+    logger.warning(
+        f"S3 upload step '{phase}' failed: status={status}, err={err}, body={(body or '')[:200]}"
+    )

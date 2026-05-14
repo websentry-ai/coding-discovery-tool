@@ -14,6 +14,8 @@ fallback already covers transient failures.
 curl is used exclusively (per ``CLAUDE.md``: never urllib — Zscaler intercepts HTTPS
 with a custom CA that urllib can't see).
 """
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -21,7 +23,7 @@ import subprocess
 import tempfile
 from typing import Dict, Optional, Tuple
 
-from .utils import normalize_url, report_to_sentry
+from .utils import normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,24 @@ UPLOAD_TIMEOUT_SECONDS = 180
 # fails fast (~10s) instead of stalling the whole user-facing scan for the full
 # --max-time budget. Falls back to the legacy endpoint immediately on connect failure.
 CONNECT_TIMEOUT_SECONDS = 10
+
+
+def _strip_ephemeral(tool: Dict) -> Dict:
+    """Strip non-content fields (rule/skill ``last_modified``) so a `touch` doesn't change the hash."""
+    cleaned = copy.deepcopy(tool)
+    for project in (cleaned.get("projects") or []):
+        for items_key in ("rules", "skills"):
+            for item in (project.get(items_key) or []):
+                if isinstance(item, dict):
+                    item.pop("last_modified", None)
+    return cleaned
+
+
+def compute_payload_hash(tool: Dict) -> str:
+    """SHA-256 hex of canonical JSON of the content-stripped tool dict."""
+    canonical = _strip_ephemeral(tool)
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def should_use_s3(payload: Dict) -> bool:
@@ -93,16 +113,14 @@ def try_s3_upload(
         upload_url = url_response["upload_url"]
         object_key = url_response["object_key"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.error(f"S3 step 1: malformed upload-url response: {e}; body={body[:200] if body else ''}")
-        report_to_sentry(e, {**ctx, "phase": "upload_url_parse"}, level="warning")
+        logger.warning(f"S3 step 1: malformed upload-url response: {e}; body={body[:200] if body else ''}")
         return False, True
 
     # ─── Step 2: PUT to S3 ──────────────────────────────────────────────
     try:
         s3_payload_json = json.dumps(payload)
     except (TypeError, ValueError) as e:
-        logger.error(f"S3 step 2: failed to serialize payload: {e}")
-        report_to_sentry(e, {**ctx, "phase": "upload_serialize"}, level="warning")
+        logger.warning(f"S3 step 2: failed to serialize payload: {e}")
         return False, True
 
     ok, status, body, err = _curl_put_to_s3(upload_url, s3_payload_json)
@@ -122,6 +140,8 @@ def try_s3_upload(
         "run_id": payload.get("run_id"),
         "app_name": payload.get("app_name"),
         "sentry_metrics": payload.get("sentry_metrics"),
+        "tool_name": payload.get("tool_name"),
+        "payload_hash": payload.get("payload_hash"),
     }
     # Strip None values to avoid sending bogus keys.
     notify_body = {k: v for k, v in notify_body.items() if v is not None}
@@ -241,14 +261,7 @@ def _parse_curl(result):
 
 
 def _report_step_failure(phase, status, body, err, ctx):
-    """Single point for logging + Sentry on any S3-step failure."""
-    msg = f"S3 upload step '{phase}' failed: status={status}, err={err}, body={(body or '')[:200]}"
-    logger.warning(msg)
-    try:
-        raise RuntimeError(msg)
-    except RuntimeError as exc:
-        report_to_sentry(
-            exc,
-            {**ctx, "phase": phase, "http_code": status},
-            level="warning",
-        )
+    """Log-only. Fallback to the legacy endpoint handles recovery; Sentry would just be noise."""
+    logger.warning(
+        f"S3 upload step '{phase}' failed: status={status}, err={err}, body={(body or '')[:200]}"
+    )

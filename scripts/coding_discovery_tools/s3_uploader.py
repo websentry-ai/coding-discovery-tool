@@ -14,6 +14,8 @@ fallback already covers transient failures.
 curl is used exclusively (per ``CLAUDE.md``: never urllib — Zscaler intercepts HTTPS
 with a custom CA that urllib can't see).
 """
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +39,37 @@ UPLOAD_TIMEOUT_SECONDS = 180
 # fails fast (~10s) instead of stalling the whole user-facing scan for the full
 # --max-time budget. Falls back to the legacy endpoint immediately on connect failure.
 CONNECT_TIMEOUT_SECONDS = 10
+
+
+def _strip_ephemeral(tool: Dict) -> Dict:
+    """
+    Remove fields that change without representing a content change.
+
+    Currently strips ``last_modified`` from every rule and skill — that
+    timestamp shifts on ``touch`` even when the file body is identical, so
+    leaving it in would defeat the hash-based dedup. Every other allowed
+    field is content-bearing and stays in.
+    """
+    cleaned = copy.deepcopy(tool)
+    for project in (cleaned.get("projects") or []):
+        for items_key in ("rules", "skills"):
+            for item in (project.get(items_key) or []):
+                if isinstance(item, dict):
+                    item.pop("last_modified", None)
+    return cleaned
+
+
+def compute_payload_hash(tool: Dict) -> str:
+    """
+    Stable SHA-256 hex digest of the tool dict's content.
+
+    Uses canonical JSON encoding (``sort_keys=True`` + compact separators) so
+    byte-identical content always hashes to the same value across runs and
+    Python versions.
+    """
+    canonical = _strip_ephemeral(tool)
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def should_use_s3(payload: Dict) -> bool:
@@ -122,6 +155,8 @@ def try_s3_upload(
         "run_id": payload.get("run_id"),
         "app_name": payload.get("app_name"),
         "sentry_metrics": payload.get("sentry_metrics"),
+        "tool_name": payload.get("tool_name"),
+        "payload_hash": payload.get("payload_hash"),
     }
     # Strip None values to avoid sending bogus keys.
     notify_body = {k: v for k, v in notify_body.items() if v is not None}

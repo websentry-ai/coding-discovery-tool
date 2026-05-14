@@ -12,10 +12,14 @@ import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from unittest.mock import patch
 
+import copy
+
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.s3_uploader import (
+    compute_payload_hash,
     should_use_s3,
     try_s3_upload,
+    _strip_ephemeral,
 )
 from scripts.coding_discovery_tools.utils import send_report_to_backend
 
@@ -297,10 +301,206 @@ class TestSendReportS3Integration(_ServerMixin, unittest.TestCase):
         )
         self.assertTrue(success)
         self.assertFalse(retryable)
-        # No S3 paths should have been hit.
         s3_paths = [
             r for r in self.server.requests
             if r["path"].startswith("/api/v1/ai-tools/report/upload-url")
             or r["path"].startswith("/api/v1/ai-tools/report/from-s3")
         ]
         self.assertEqual(s3_paths, [])
+
+
+# ────────────────────────────────────────────────────────────────────
+# Hash compute determinism + ephemeral stripping
+# ────────────────────────────────────────────────────────────────────
+class TestComputePayloadHash(unittest.TestCase):
+    def _tool(self):
+        return {
+            "name": "Cursor",
+            "version": "0.42",
+            "install_path": "/Applications/Cursor.app",
+            "projects": [
+                {
+                    "path": "/x",
+                    "rules": [
+                        {
+                            "file_name": ".rules",
+                            "content": "use TS",
+                            "size": 6,
+                            "last_modified": "2026-01-01T00:00:00Z",
+                        }
+                    ],
+                    "skills": [
+                        {
+                            "file_name": "ship.md",
+                            "skill_name": "ship",
+                            "content": "# ship",
+                            "size": 6,
+                            "last_modified": "2026-01-01T00:00:00Z",
+                        }
+                    ],
+                    "mcpServers": [{"name": "github", "command": "npx"}],
+                }
+            ],
+            "permissions": {"settings_source": "user", "raw_settings": {"a": 1}},
+        }
+
+    def test_deterministic_across_calls(self):
+        t = self._tool()
+        self.assertEqual(compute_payload_hash(t), compute_payload_hash(t))
+
+    def test_hash_unchanged_when_only_last_modified_changes(self):
+        t1 = self._tool()
+        t2 = self._tool()
+        t2["projects"][0]["rules"][0]["last_modified"] = "2099-12-31T23:59:59Z"
+        t2["projects"][0]["skills"][0]["last_modified"] = "2099-12-31T23:59:59Z"
+        self.assertEqual(compute_payload_hash(t1), compute_payload_hash(t2))
+
+    def test_hash_changes_when_content_changes(self):
+        t1 = self._tool()
+        t2 = self._tool()
+        t2["projects"][0]["rules"][0]["content"] = "use Rust"
+        self.assertNotEqual(compute_payload_hash(t1), compute_payload_hash(t2))
+
+    def test_hash_changes_when_mcp_server_added(self):
+        t1 = self._tool()
+        t2 = self._tool()
+        t2["projects"][0]["mcpServers"].append({"name": "notion", "command": "uvx"})
+        self.assertNotEqual(compute_payload_hash(t1), compute_payload_hash(t2))
+
+    def test_hash_changes_when_permissions_change(self):
+        t1 = self._tool()
+        t2 = self._tool()
+        t2["permissions"]["raw_settings"]["a"] = 2
+        self.assertNotEqual(compute_payload_hash(t1), compute_payload_hash(t2))
+
+    def test_hash_independent_of_key_order(self):
+        # Two different orderings of the same dict → same hash.
+        t1 = {"name": "Cursor", "version": "1.0"}
+        t2 = {"version": "1.0", "name": "Cursor"}
+        self.assertEqual(compute_payload_hash(t1), compute_payload_hash(t2))
+
+    def test_hash_is_64_hex_chars(self):
+        h = compute_payload_hash(self._tool())
+        self.assertEqual(len(h), 64)
+        self.assertTrue(all(c in "0123456789abcdef" for c in h))
+
+    def test_strip_does_not_mutate_input(self):
+        original = self._tool()
+        snapshot = copy.deepcopy(original)
+        _strip_ephemeral(original)
+        self.assertEqual(original, snapshot)
+
+    def test_handles_missing_optional_keys(self):
+        compute_payload_hash({"name": "Bare"})
+        compute_payload_hash({"name": "Empty", "projects": []})
+        compute_payload_hash({"name": "Plain", "projects": [{"path": "/x"}]})
+
+
+# ────────────────────────────────────────────────────────────────────
+# Hash + tool_name forwarding in send_report_to_backend
+# ────────────────────────────────────────────────────────────────────
+class TestHashForwarding(_ServerMixin, unittest.TestCase):
+    def _data_report(self):
+        return {
+            "device_id": "DEV-1",
+            "system_user": "alice",
+            "home_user": "alice",
+            "run_id": str(uuid.uuid4()),
+            "tools": [
+                {
+                    "name": "Cursor",
+                    "version": "0.42",
+                    "install_path": "/Applications/Cursor.app",
+                    "projects": [],
+                }
+            ],
+        }
+
+    def _setup_s3_happy_path(self):
+        upload_url = f"{self.base_url}/s3-bucket/key.json"
+        self._set_path_response(
+            "/api/v1/ai-tools/report/upload-url/", 200,
+            json.dumps({"upload_url": upload_url, "object_key": "org/1/run/k.json"}).encode(),
+        )
+        self._set_path_response("/s3-bucket/key.json", 200, b"")
+        self._set_path_response("/api/v1/ai-tools/report/from-s3/", 202, b"")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_s3_path_includes_hash_and_tool_name_in_step3(self, _sleep):
+        self._setup_s3_happy_path()
+        report = self._data_report()
+        expected_hash = compute_payload_hash(report["tools"][0])
+
+        success, _ = send_report_to_backend(self.base_url, "k", report)
+        self.assertTrue(success)
+
+        from_s3_req = next(
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/from-s3/"
+        )
+        body = json.loads(from_s3_req["body"])
+        self.assertEqual(body["tool_name"], "Cursor")
+        self.assertEqual(body["payload_hash"], expected_hash)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_legacy_path_includes_hash_and_tool_name_in_body(self, _sleep):
+        # Force fallback: upload-url returns 503 (S3 disabled). Legacy POST receives the body.
+        self._set_path_response("/api/v1/ai-tools/report/upload-url/", 503, b"{}")
+        self.server.default_code = 200  # legacy POST succeeds
+
+        report = self._data_report()
+        expected_hash = compute_payload_hash(report["tools"][0])
+
+        success, _ = send_report_to_backend(self.base_url, "k", report)
+        self.assertTrue(success)
+
+        legacy_req = next(
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/"
+        )
+        body = json.loads(legacy_req["body"])
+        self.assertEqual(body["tool_name"], "Cursor")
+        self.assertEqual(body["payload_hash"], expected_hash)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_multi_tool_payload_skips_hash_stamping(self, _sleep):
+        # When more than one tool is in the same payload we don't try to dedup
+        # (the backend dedup key is per-tool). Hash fields stay absent.
+        self._set_path_response("/api/v1/ai-tools/report/upload-url/", 503, b"{}")
+        self.server.default_code = 200
+
+        report = self._data_report()
+        report["tools"].append({"name": "Claude Code", "install_path": "/x", "projects": []})
+
+        success, _ = send_report_to_backend(self.base_url, "k", report)
+        self.assertTrue(success)
+
+        legacy_req = next(
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/"
+        )
+        body = json.loads(legacy_req["body"])
+        self.assertNotIn("payload_hash", body)
+        self.assertNotIn("tool_name", body)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_event_payload_skips_hash_stamping(self, _sleep):
+        self.server.default_code = 200
+        scan_payload = {
+            "device_id": "DEV-1",
+            "run_id": str(uuid.uuid4()),
+            "scan_event": "in_progress",
+        }
+        success, _ = send_report_to_backend(self.base_url, "k", scan_payload)
+        self.assertTrue(success)
+        legacy_req = next(
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/"
+        )
+        body = json.loads(legacy_req["body"])
+        self.assertNotIn("payload_hash", body)
+        self.assertNotIn("tool_name", body)

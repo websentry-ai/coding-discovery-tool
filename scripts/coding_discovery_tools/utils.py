@@ -453,10 +453,20 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     if app_name:
         payload["app_name"] = app_name
 
-    # Try S3 path first for data reports. Any failure → fall through to legacy POST.
-    # `payload` already carries `app_name` (added above), so the S3 uploader reads
-    # it from there for both the S3 PUT body and the /from-s3/ notification.
-    from .s3_uploader import should_use_s3, try_s3_upload
+    # Stamp a content hash on per-tool reports so the backend can dedup
+    # unchanged re-scans against its 5-day inbox window. Hashing is fast
+    # (single-digit ms even for 1 MB payloads) and the hash flows through
+    # both the S3 path and the legacy POST — backend reads it from whichever.
+    from .s3_uploader import compute_payload_hash, should_use_s3, try_s3_upload
+    tools = payload.get("tools")
+    if isinstance(tools, list) and len(tools) == 1 and isinstance(tools[0], dict):
+        try:
+            payload["tool_name"] = tools[0].get("name")
+            payload["payload_hash"] = compute_payload_hash(tools[0])
+        except Exception as e:
+            # Hash failure should never block the upload — log and proceed.
+            logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
+
     if should_use_s3(payload):
         s3_success, _ = try_s3_upload(
             backend_url, api_key, payload, sentry_context=ctx,

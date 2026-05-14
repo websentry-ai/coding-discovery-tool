@@ -504,3 +504,46 @@ class TestHashForwarding(_ServerMixin, unittest.TestCase):
         body = json.loads(legacy_req["body"])
         self.assertNotIn("payload_hash", body)
         self.assertNotIn("tool_name", body)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_missing_tool_name_skips_hash_stamping_entirely(self, _sleep):
+        # Tool dict without a "name" key shouldn't half-stamp (hash set, name missing)
+        # which would produce inconsistent body shapes across the S3 and legacy paths.
+        self.server.default_code = 200
+        report = self._data_report()
+        report["tools"][0].pop("name", None)
+
+        success, _ = send_report_to_backend(self.base_url, "k", report)
+        self.assertTrue(success)
+        legacy_req = next(
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/"
+        )
+        body = json.loads(legacy_req["body"])
+        self.assertNotIn("tool_name", body)
+        self.assertNotIn("payload_hash", body)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_hash_failure_does_not_leave_partial_stamp(self, _sleep):
+        # If compute_payload_hash raises, neither tool_name nor payload_hash
+        # should make it into the body — the backend dedup needs both or neither.
+        self.server.default_code = 200
+        report = self._data_report()
+
+        def boom(tool):
+            raise RuntimeError("simulated hash failure")
+
+        # The import happens inside send_report_to_backend, so patch the source.
+        with patch("scripts.coding_discovery_tools.s3_uploader.compute_payload_hash", side_effect=boom):
+            success, _ = send_report_to_backend(self.base_url, "k", report)
+
+        self.assertTrue(success)
+        legacy_req = next(
+            r for r in self.server.requests
+            if r["path"] == "/api/v1/ai-tools/report/"
+        )
+        body = json.loads(legacy_req["body"])
+        self.assertNotIn("tool_name", body)
+        self.assertNotIn("payload_hash", body)

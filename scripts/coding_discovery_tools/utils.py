@@ -457,15 +457,22 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     # unchanged re-scans against its 5-day inbox window. Hashing is fast
     # (single-digit ms even for 1 MB payloads) and the hash flows through
     # both the S3 path and the legacy POST — backend reads it from whichever.
+    #
+    # Tool name + hash are computed together and assigned only on success,
+    # so the backend never sees a half-populated dedup signal (tool_name set
+    # but hash missing, or vice-versa).
     from .s3_uploader import compute_payload_hash, should_use_s3, try_s3_upload
     tools = payload.get("tools")
     if isinstance(tools, list) and len(tools) == 1 and isinstance(tools[0], dict):
-        try:
-            payload["tool_name"] = tools[0].get("name")
-            payload["payload_hash"] = compute_payload_hash(tools[0])
-        except Exception as e:
-            # Hash failure should never block the upload — log and proceed.
-            logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
+        raw_name = tools[0].get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            try:
+                payload_hash = compute_payload_hash(tools[0])
+                payload["tool_name"] = raw_name.strip()
+                payload["payload_hash"] = payload_hash
+            except Exception as e:
+                # Hash failure should never block the upload — log and proceed.
+                logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
 
     if should_use_s3(payload):
         s3_success, _ = try_s3_upload(

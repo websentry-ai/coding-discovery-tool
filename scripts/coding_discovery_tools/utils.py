@@ -453,14 +453,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     if app_name:
         payload["app_name"] = app_name
 
-    # Stamp a content hash on per-tool reports so the backend can dedup
-    # unchanged re-scans against its 5-day inbox window. Hashing is fast
-    # (single-digit ms even for 1 MB payloads) and the hash flows through
-    # both the S3 path and the legacy POST — backend reads it from whichever.
-    #
-    # Tool name + hash are computed together and assigned only on success,
-    # so the backend never sees a half-populated dedup signal (tool_name set
-    # but hash missing, or vice-versa).
+    # Stamp tool_name + hash atomically; backend uses both to dedup unchanged re-scans.
     from .s3_uploader import compute_payload_hash, should_use_s3, try_s3_upload
     tools = payload.get("tools")
     if isinstance(tools, list) and len(tools) == 1 and isinstance(tools[0], dict):

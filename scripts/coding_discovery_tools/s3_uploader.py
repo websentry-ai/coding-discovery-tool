@@ -42,14 +42,7 @@ CONNECT_TIMEOUT_SECONDS = 10
 
 
 def _strip_ephemeral(tool: Dict) -> Dict:
-    """
-    Remove fields that change without representing a content change.
-
-    Currently strips ``last_modified`` from every rule and skill — that
-    timestamp shifts on ``touch`` even when the file body is identical, so
-    leaving it in would defeat the hash-based dedup. Every other allowed
-    field is content-bearing and stays in.
-    """
+    """Strip non-content fields (rule/skill ``last_modified``) so a `touch` doesn't change the hash."""
     cleaned = copy.deepcopy(tool)
     for project in (cleaned.get("projects") or []):
         for items_key in ("rules", "skills"):
@@ -60,13 +53,7 @@ def _strip_ephemeral(tool: Dict) -> Dict:
 
 
 def compute_payload_hash(tool: Dict) -> str:
-    """
-    Stable SHA-256 hex digest of the tool dict's content.
-
-    Uses canonical JSON encoding (``sort_keys=True`` + compact separators) so
-    byte-identical content always hashes to the same value across runs and
-    Python versions.
-    """
+    """SHA-256 hex of canonical JSON of the content-stripped tool dict."""
     canonical = _strip_ephemeral(tool)
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

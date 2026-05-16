@@ -46,7 +46,7 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_jetbrains_projects_for_user(self, user_home: Path) -> List[Dict]:
         all_projects = []
-        jetbrains_root = user_home / ".local" / "share" / "JetBrains"
+        jetbrains_root = user_home / ".config" / "JetBrains"
 
         if not jetbrains_root.exists():
             return all_projects

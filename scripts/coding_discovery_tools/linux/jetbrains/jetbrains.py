@@ -92,7 +92,7 @@ class LinuxJetBrainsDetector(BaseToolDetector):
 
     def _scan_jetbrains_config_dir(self, user_home: Path) -> List[Dict]:
         detected_ides = []
-        jetbrains_config_dir = user_home / ".local" / "share" / "JetBrains"
+        jetbrains_config_dir = user_home / ".config" / "JetBrains"
 
         if not jetbrains_config_dir.exists():
             logger.debug(f"JetBrains config directory not found: {jetbrains_config_dir}")

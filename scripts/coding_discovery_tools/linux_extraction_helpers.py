@@ -14,9 +14,11 @@ from typing import Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Linux virtual/system filesystems and package-manager paths to skip when walking from /
+# Note: /root is intentionally excluded — it is root's home directory and must be
+# scannable when the tool runs as root (e.g. in Docker/CI containers).
 _LINUX_SKIP_SYSTEM_DIRS = frozenset({
     '/proc', '/sys', '/dev', '/run', '/boot', '/snap',
-    '/lost+found', '/root', '/tmp', '/var', '/usr', '/bin',
+    '/lost+found', '/tmp', '/var', '/usr', '/bin',
     '/sbin', '/lib', '/lib32', '/lib64', '/libx32', '/etc',
     '/media', '/mnt', '/srv', '/swapfile',
 })

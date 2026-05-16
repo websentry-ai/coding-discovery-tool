@@ -41,12 +41,12 @@ class LinuxCursorMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_project_level_configs(self) -> List[Dict]:
         projects: List[Dict] = []
-        global_cursor_dir = self.GLOBAL_MCP_CONFIG_PATH.parent
 
         def should_skip(item: Path) -> bool:
             return should_skip_path(item) or should_skip_system_path(item)
 
         for user_home in get_linux_user_homes():
+            global_cursor_dir = user_home / ".cursor"
             try:
                 walk_for_cursor_mcp_configs(
                     user_home, user_home, projects, global_cursor_dir,

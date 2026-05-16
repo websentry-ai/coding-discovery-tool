@@ -41,12 +41,12 @@ class LinuxWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_project_level_configs(self) -> List[Dict]:
         projects: List[Dict] = []
-        global_windsurf_dir = self.GLOBAL_MCP_CONFIG_PATH.parent
 
         def should_skip(item: Path) -> bool:
             return should_skip_path(item) or should_skip_system_path(item)
 
         for user_home in get_linux_user_homes():
+            global_windsurf_dir = user_home / ".codeium" / "windsurf"
             try:
                 walk_for_windsurf_mcp_configs(
                     user_home, user_home, projects, global_windsurf_dir,

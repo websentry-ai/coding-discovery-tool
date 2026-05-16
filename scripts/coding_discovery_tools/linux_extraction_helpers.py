@@ -86,17 +86,28 @@ def scan_user_directories(check_func: Callable) -> Optional[Path]:
         return None
 
     home_dir = Path("/home")
-    if not home_dir.exists():
-        return None
+    dirs_checked = 0
 
-    for user_dir in home_dir.iterdir():
-        if user_dir.is_dir() and not user_dir.name.startswith('.'):
-            try:
-                result = check_func(user_dir)
-                if result:
-                    return result
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Skipping user directory {user_dir}: {e}")
+    if home_dir.exists():
+        for user_dir in home_dir.iterdir():
+            if user_dir.is_dir() and not user_dir.name.startswith('.'):
+                dirs_checked += 1
+                try:
+                    result = check_func(user_dir)
+                    if result:
+                        return result
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Skipping user directory {user_dir}: {e}")
+
+    # /home absent or empty (e.g. Docker/CI root-only container) — check root's own home
+    if dirs_checked == 0:
+        try:
+            result = check_func(Path.home())
+            if result:
+                return result
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Skipping {Path.home()}: {e}")
+
     return None
 
 

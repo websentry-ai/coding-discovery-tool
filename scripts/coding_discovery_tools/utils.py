@@ -485,6 +485,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
     Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
 
+    For data reports (payloads carrying a non-empty ``tools`` list), tries the
+    S3 presigned-upload path first (3-step: upload-url → S3 PUT → from-s3). On
+    any failure, falls through to this legacy direct-POST endpoint, which has
+    its own retry/queue logic. Scan-lifecycle events bypass S3 and use the
+    legacy endpoint directly — they are tiny.
+
     Args:
         backend_url: Backend URL to send the report to
         api_key: API key for authentication
@@ -509,6 +515,28 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     payload = dict(report)
     if app_name:
         payload["app_name"] = app_name
+
+    # Stamp tool_name + hash atomically; backend uses both to dedup unchanged re-scans.
+    from .s3_uploader import compute_payload_hash, should_use_s3, try_s3_upload
+    tools = payload.get("tools")
+    if isinstance(tools, list) and len(tools) == 1 and isinstance(tools[0], dict):
+        raw_name = tools[0].get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            try:
+                payload_hash = compute_payload_hash(tools[0])
+                payload["tool_name"] = raw_name.strip()
+                payload["payload_hash"] = payload_hash
+            except Exception as e:
+                # Hash failure should never block the upload — log and proceed.
+                logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
+
+    if should_use_s3(payload):
+        s3_success, _ = try_s3_upload(
+            backend_url, api_key, payload, sentry_context=ctx,
+        )
+        if s3_success:
+            return (True, False)
+        logger.info("S3 upload path failed; falling back to legacy /api/v1/ai-tools/report/")
 
     payload_json = json.dumps(payload)
     ctx = {

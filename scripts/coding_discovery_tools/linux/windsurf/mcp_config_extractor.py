@@ -13,7 +13,7 @@ from ...linux_extraction_helpers import (
 from ...mcp_extraction_helpers import (
     extract_windsurf_mcp_from_dir,
     walk_for_windsurf_mcp_configs,
-    extract_global_mcp_config_with_root_support,
+    read_global_mcp_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,18 +22,17 @@ logger = logging.getLogger(__name__)
 class LinuxWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Windsurf MCP config on Linux systems."""
 
-    GLOBAL_MCP_CONFIG_PATH = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
+    _GLOBAL_MCP_RELATIVE = Path(".codeium") / "windsurf" / "mcp_config.json"
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects: List[Dict] = []
 
-        global_config = extract_global_mcp_config_with_root_support(
-            self.GLOBAL_MCP_CONFIG_PATH,
-            tool_name="Windsurf",
-            parent_levels=3,
-        )
-        if global_config:
-            projects.append(global_config)
+        for user_home in get_linux_user_homes():
+            user_global_path = user_home / self._GLOBAL_MCP_RELATIVE
+            if user_global_path.exists():
+                global_config = read_global_mcp_config(user_global_path, tool_name="Windsurf", parent_levels=3)
+                if global_config:
+                    projects.append(global_config)
 
         projects.extend(self._extract_project_level_configs())
 

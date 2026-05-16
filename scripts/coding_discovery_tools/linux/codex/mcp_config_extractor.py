@@ -28,23 +28,19 @@ class LinuxCodexMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects = []
-
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
-
+        projects.extend(self._extract_global_configs())
         projects.extend(self._extract_project_level_configs())
-
         return {"projects": projects} if projects else None
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_configs(self) -> List[Dict]:
+        configs = []
         for user_home in get_linux_user_homes():
             config_path = user_home / ".codex" / "config.toml"
             if config_path.exists():
                 config = read_codex_toml_mcp_config(config_path, _TOOL_NAME, _PARENT_LEVELS)
                 if config:
-                    return config
-        return None
+                    configs.append(config)
+        return configs
 
     def _extract_project_level_configs(self) -> List[Dict]:
         configs = []

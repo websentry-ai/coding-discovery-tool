@@ -24,24 +24,19 @@ class LinuxCursorCliMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects = []
-
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
-
+        projects.extend(self._extract_global_configs())
         projects.extend(self._extract_project_level_configs())
-
         return {"projects": projects} if projects else None
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_configs(self) -> List[Dict]:
+        configs = []
         for user_home in get_linux_user_homes():
             global_mcp = user_home / ".cursor" / "mcp.json"
             if global_mcp.exists():
-                configs: List[Dict] = []
-                extract_cursor_mcp_from_dir(global_mcp.parent, configs, global_cursor_dir=None)
-                if configs:
-                    return configs[0]
-        return None
+                user_configs: List[Dict] = []
+                extract_cursor_mcp_from_dir(global_mcp.parent, user_configs, global_cursor_dir=None)
+                configs.extend(user_configs)
+        return configs
 
     def _extract_project_level_configs(self) -> List[Dict]:
         configs = []

@@ -15,19 +15,15 @@ class LinuxOpenCodeMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for OpenCode MCP config on Linux systems."""
 
     def extract_mcp_config(self) -> Optional[Dict]:
-        projects = []
-
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
-
+        projects = self._extract_global_configs()
         return {"projects": projects} if projects else None
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_configs(self) -> List[Dict]:
+        configs = []
         for user_home in get_linux_user_homes():
             config_path = user_home / ".config" / "opencode" / "opencode.json"
             if config_path.exists():
                 config = read_opencode_mcp_config(config_path, tool_name="OpenCode", parent_levels=3)
                 if config:
-                    return config
-        return None
+                    configs.append(config)
+        return configs

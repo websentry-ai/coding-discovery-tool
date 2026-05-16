@@ -70,31 +70,18 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         results = []
-        for user_home in get_linux_user_homes():
-            try:
-                results.extend(self._detect_jetbrains_for_user(user_home))
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Skipping user directory {user_home}: {e}")
-        return results
-
-    def _detect_jetbrains_for_user(self, user_home: Path) -> List[Dict]:
-        detected_results = []
-        jetbrains_detector = LinuxJetBrainsDetector()
-        all_ides = jetbrains_detector.detect() or []
-
+        all_ides = LinuxJetBrainsDetector().detect() or []
         for ide in all_ides:
-            plugins = ide.get("plugins", [])
-            for plugin_name in plugins:
+            for plugin_name in ide.get("plugins", []):
                 if "copilot" in plugin_name.lower():
-                    detected_results.append({
+                    results.append({
                         "name": f"GitHub Copilot ({ide['name']})",
                         "version": ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide["name"],
                         "install_path": ide.get("_config_path") or ide.get("install_path"),
                     })
-
-        return detected_results
+        return results
 
     def detect_all_tools(self, user_home: Optional[str] = None) -> List[Dict]:
         return self.detect_copilot()

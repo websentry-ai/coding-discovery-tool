@@ -147,4 +147,9 @@ def get_linux_user_homes() -> List[Path]:
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list /home: {e}")
 
+    # /root is root's own home — always include it when running as root
+    root_home = Path("/root")
+    if root_home.is_dir() and root_home not in homes:
+        homes.append(root_home)
+
     return homes or [Path.home()]

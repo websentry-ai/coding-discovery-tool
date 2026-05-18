@@ -276,6 +276,9 @@ def get_all_users_linux() -> List[str]:
 
     home_dir = Path("/home")
     if not home_dir.exists():
+        # Docker/CI root-only containers may have no /home at all
+        if _is_root():
+            return [Path.home().name]
         return []
 
     # Build a set of usernames with UID >= 1000 and interactive shells
@@ -318,6 +321,10 @@ def get_all_users_linux() -> List[str]:
             users.append(user_dir.name)
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from /home: {e}")
+
+    # /home exists but is empty (e.g. Docker/CI container) — fall back to root's home
+    if not users and _is_root():
+        return [Path.home().name]
 
     return users
 

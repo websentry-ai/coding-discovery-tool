@@ -86,12 +86,10 @@ def scan_user_directories(check_func: Callable) -> Optional[Path]:
         return None
 
     home_dir = Path("/home")
-    dirs_checked = 0
 
     if home_dir.exists():
         for user_dir in home_dir.iterdir():
             if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                dirs_checked += 1
                 try:
                     result = check_func(user_dir)
                     if result:
@@ -99,14 +97,15 @@ def scan_user_directories(check_func: Callable) -> Optional[Path]:
                 except (PermissionError, OSError) as e:
                     logger.debug(f"Skipping user directory {user_dir}: {e}")
 
-    # /home absent or empty (e.g. Docker/CI root-only container) — check root's own home
-    if dirs_checked == 0:
+    # Always also check /root itself — root is its own user regardless of /home contents
+    root_home = Path("/root")
+    if root_home.is_dir():
         try:
-            result = check_func(Path.home())
+            result = check_func(root_home)
             if result:
                 return result
         except (PermissionError, OSError) as e:
-            logger.debug(f"Skipping {Path.home()}: {e}")
+            logger.debug(f"Skipping {root_home}: {e}")
 
     return None
 
@@ -115,10 +114,14 @@ def is_user_level_tool_dir(tool_dir: Path) -> bool:
     """
     Return True if tool_dir is directly inside a user home on Linux.
 
-    Pattern: /home/<username>/.<tool>  →  parent.parent == /home
+    Patterns:
+      /home/<username>/.<tool>  →  parent.parent == /home
+      /root/.<tool>             →  parent == /root
     """
     try:
         if tool_dir.parent.parent == Path("/home"):
+            return True
+        if tool_dir.parent == Path("/root"):
             return True
     except Exception:
         pass

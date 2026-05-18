@@ -259,12 +259,84 @@ def get_all_users_windows() -> List[str]:
         return []
 
 
+def get_all_users_linux() -> List[str]:
+    """
+    Get all human user directory names from /home on Linux.
+
+    Parses /etc/passwd to filter out system accounts (UID < 1000) and
+    accounts with non-interactive shells (nologin, false, etc.).
+    Falls back to listing /home subdirectories when /etc/passwd is unreadable.
+
+    Returns:
+        List of usernames (directory names under /home), or an empty list
+        if not running on Linux or /home does not exist.
+    """
+    if platform.system() != "Linux":
+        return []
+
+    home_dir = Path("/home")
+    if not home_dir.exists():
+        # Docker/CI root-only containers may have no /home at all
+        if _is_root():
+            return [Path.home().name]
+        return []
+
+    # Build a set of usernames with UID >= 1000 and interactive shells
+    # from /etc/passwd so we filter out service accounts.
+    human_users: set = set()
+    try:
+        with open("/etc/passwd", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(":")
+                if len(parts) < 7:
+                    continue
+                username, _, uid_str, _, _, home_path, shell = (
+                    parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+                )
+                try:
+                    uid = int(uid_str)
+                except ValueError:
+                    continue
+                if uid < 1000:
+                    continue
+                if shell in NON_INTERACTIVE_SHELLS:
+                    continue
+                # Only include users whose home is under /home
+                if home_path.startswith("/home/"):
+                    human_users.add(username)
+    except Exception as e:
+        logger.debug(f"Could not parse /etc/passwd: {e}")
+
+    users: List[str] = []
+    try:
+        for user_dir in home_dir.iterdir():
+            if not user_dir.is_dir() or user_dir.name.startswith("."):
+                continue
+            # If we got passwd data, require UID >= 1000 filter; otherwise allow all
+            if human_users and user_dir.name not in human_users:
+                continue
+            users.append(user_dir.name)
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Could not list users from /home: {e}")
+
+    # Always include root's own account when running as root, regardless of /home contents
+    if _is_root():
+        root_name = Path("/root").name  # "root"
+        if root_name not in users:
+            users.append(root_name)
+
+    return users
+
+
 def get_user_info() -> str:
     """
     Get current user information (whoami equivalent).
     Cross-platform function that returns username.
     Gets username directly from system information, not environment variables.
-    
+
     On macOS, when running as root, finds the user with the most storage space
     in /Users directory to get the actual user instead of "root".
     

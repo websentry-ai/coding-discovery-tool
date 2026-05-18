@@ -1,0 +1,57 @@
+"""MCP config extraction for Windsurf on Linux."""
+
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from ...coding_tool_base import BaseMCPConfigExtractor
+from ...linux_extraction_helpers import (
+    get_linux_user_homes,
+    should_skip_path,
+    should_skip_system_path,
+)
+from ...mcp_extraction_helpers import (
+    extract_windsurf_mcp_from_dir,
+    walk_for_windsurf_mcp_configs,
+    read_global_mcp_config,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class LinuxWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
+    """Extractor for Windsurf MCP config on Linux systems."""
+
+    _GLOBAL_MCP_RELATIVE = Path(".codeium") / "windsurf" / "mcp_config.json"
+
+    def extract_mcp_config(self) -> Optional[Dict]:
+        projects: List[Dict] = []
+
+        for user_home in get_linux_user_homes():
+            user_global_path = user_home / self._GLOBAL_MCP_RELATIVE
+            if user_global_path.exists():
+                global_config = read_global_mcp_config(user_global_path, tool_name="Windsurf", parent_levels=3)
+                if global_config:
+                    projects.append(global_config)
+
+        projects.extend(self._extract_project_level_configs())
+
+        return {"projects": projects} if projects else None
+
+    def _extract_project_level_configs(self) -> List[Dict]:
+        projects: List[Dict] = []
+
+        def should_skip(item: Path) -> bool:
+            return should_skip_path(item) or should_skip_system_path(item)
+
+        for user_home in get_linux_user_homes():
+            global_windsurf_dir = user_home / ".codeium" / "windsurf"
+            try:
+                walk_for_windsurf_mcp_configs(
+                    user_home, user_home, projects, global_windsurf_dir,
+                    should_skip, current_depth=0,
+                )
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
+
+        return projects

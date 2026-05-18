@@ -322,9 +322,11 @@ def get_all_users_linux() -> List[str]:
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from /home: {e}")
 
-    # /home exists but is empty (e.g. Docker/CI container) — fall back to root's home
-    if not users and _is_root():
-        return [Path.home().name]
+    # Always include root's own account when running as root, regardless of /home contents
+    if _is_root():
+        root_name = Path("/root").name  # "root"
+        if root_name not in users:
+            users.append(root_name)
 
     return users
 

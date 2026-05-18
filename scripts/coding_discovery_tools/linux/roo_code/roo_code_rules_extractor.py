@@ -10,6 +10,7 @@ from ...linux_extraction_helpers import (
     build_project_list,
     extract_single_rule_file,
     get_linux_user_homes,
+    is_user_level_tool_dir,
     should_process_file,
     walk_for_tool_directories,
 )
@@ -75,6 +76,10 @@ class LinuxRooRulesExtractor(BaseRooRulesExtractor):
                 logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_rules_from_roo_directory(self, roo_dir: Path, projects_by_root: Dict) -> None:
+        # Skip user-level ~/.roo so user-scope rules aren't misclassified as
+        # project-scope — those are handled by _extract_global_rules.
+        if is_user_level_tool_dir(roo_dir):
+            return
         try:
             for item in roo_dir.iterdir():
                 if item.is_dir() and (item.name == "rules" or item.name.startswith("rules-")):

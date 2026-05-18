@@ -10,6 +10,7 @@ from ...linux_extraction_helpers import (
     build_project_list,
     extract_single_rule_file,
     get_linux_user_homes,
+    is_user_level_tool_dir,
     should_process_file,
     walk_for_tool_directories,
 )
@@ -68,6 +69,10 @@ class LinuxKiloCodeRulesExtractor(BaseKiloCodeRulesExtractor):
                 logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_rules_from_kilocode_directory(self, kilocode_dir: Path, projects_by_root: Dict) -> None:
+        # Skip user-level ~/.kilocode so user-scope rules aren't misclassified
+        # as project-scope — those are handled by _extract_global_rules.
+        if is_user_level_tool_dir(kilocode_dir):
+            return
         rules_dir = kilocode_dir / "rules"
         if rules_dir.exists() and rules_dir.is_dir():
             for rule_file in rules_dir.glob("*.md"):

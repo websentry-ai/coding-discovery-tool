@@ -11,6 +11,7 @@ from ...linux_extraction_helpers import (
     extract_single_rule_file,
     find_cursor_project_root,
     get_linux_user_homes,
+    is_user_level_tool_dir,
     walk_for_tool_directories,
 )
 
@@ -64,6 +65,10 @@ class LinuxCursorCliRulesExtractor(BaseCursorCliRulesExtractor):
                 logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_rules_from_cursor_directory(self, cursor_dir: Path, projects_by_root: Dict) -> None:
+        # Skip user-level ~/.cursor so user-scope rules aren't misclassified
+        # as project-scope — those are handled by _extract_user_level_rules.
+        if is_user_level_tool_dir(cursor_dir):
+            return
         for mdc_file in cursor_dir.glob("*.mdc"):
             rule_info = extract_single_rule_file(mdc_file, find_cursor_project_root, scope="project")
             if rule_info:

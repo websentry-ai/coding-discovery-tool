@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...coding_tool_base import BaseWindsurfRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -14,8 +13,6 @@ from ...linux_extraction_helpers import (
     get_linux_user_homes,
     is_user_level_tool_dir,
     should_process_file,
-    should_skip_path,
-    should_skip_system_path,
     walk_for_tool_directories,
 )
 
@@ -78,6 +75,11 @@ class LinuxWindsurfRulesExtractor(BaseWindsurfRulesExtractor):
     def _extract_rules_from_windsurf_directory(
         self, windsurf_dir: Path, projects_by_root: Dict[str, List[Dict]]
     ) -> None:
+        # Skip user-level ~/.windsurf so its rules aren't misclassified as
+        # project-scope — user-scope rules live at ~/codeium/.windsurf/ and
+        # are handled by _extract_global_rules.
+        if is_user_level_tool_dir(windsurf_dir):
+            return
         rules_dir = windsurf_dir / "rules"
         if not rules_dir.exists() or not rules_dir.is_dir():
             return

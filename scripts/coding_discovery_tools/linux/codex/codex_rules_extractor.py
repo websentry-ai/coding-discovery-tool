@@ -14,7 +14,6 @@ from ...linux_extraction_helpers import (
     should_process_file,
     should_skip_path,
     should_skip_system_path,
-    walk_for_tool_directories,
 )
 
 logger = logging.getLogger(__name__)

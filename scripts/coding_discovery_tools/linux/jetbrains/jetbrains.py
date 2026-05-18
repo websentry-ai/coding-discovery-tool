@@ -85,10 +85,13 @@ class LinuxJetBrainsDetector(BaseToolDetector):
         for user_home in get_linux_user_homes():
             try:
                 user_ides = self._scan_jetbrains_config_dir(user_home)
-                all_detected_ides.extend(user_ides)
+                # Dedup per-user so multiple installed versions of the same IDE
+                # collapse to the latest for that user, but never discard another
+                # user's IDE just because someone else has a newer version.
+                all_detected_ides.extend(self._filter_old_versions(user_ides))
             except (PermissionError, OSError) as e:
                 logger.debug(f"Skipping user directory {user_home}: {e}")
-        return self._filter_old_versions(all_detected_ides)
+        return all_detected_ides
 
     def _scan_jetbrains_config_dir(self, user_home: Path) -> List[Dict]:
         detected_ides = []

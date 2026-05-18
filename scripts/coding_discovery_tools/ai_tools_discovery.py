@@ -1755,7 +1755,7 @@ def main():
             elif platform.system() == "Windows":
                 user_home = Path(Path.home().anchor) / "Users" / user
             elif platform.system() == "Linux":
-                user_home = Path(f"/home/{user}")
+                user_home = Path("/root") if user == "root" else Path(f"/home/{user}")
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
@@ -1813,7 +1813,7 @@ def main():
                     elif platform.system() == "Windows":
                         user_home = Path(Path.home().anchor) / "Users" / user_name
                     elif platform.system() == "Linux":
-                        user_home = Path(f"/home/{user_name}")
+                        user_home = Path("/root") if user_name == "root" else Path(f"/home/{user_name}")
                     else:
                         user_home = Path.home()
 

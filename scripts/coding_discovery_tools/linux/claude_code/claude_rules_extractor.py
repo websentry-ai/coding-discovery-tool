@@ -24,9 +24,7 @@ from ...linux_extraction_helpers import (
     extract_single_rule_file,
     find_claude_project_root,
     get_linux_user_homes,
-    is_running_as_root,
     is_user_level_tool_dir,
-    scan_user_directories,
     should_process_directory,
     should_process_file,
     should_skip_path,
@@ -78,10 +76,11 @@ class LinuxClaudeRulesExtractor(BaseClaudeRulesExtractor):
             except Exception as e:
                 logger.debug(f"Error extracting user rules for {user_home}: {e}")
 
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
-        else:
-            extract_for_user(Path.home())
+        for user_home in get_linux_user_homes():
+            try:
+                extract_for_user(user_home)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_project_level_rules(
         self, projects_by_root: Dict[str, List[Dict]]

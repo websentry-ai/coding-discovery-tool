@@ -17,13 +17,12 @@ from typing import Dict, List, Optional
 from ...coding_tool_base import BaseClaudeSettingsExtractor
 from ...linux_extraction_helpers import (
     get_linux_user_homes,
-    is_running_as_root,
-    scan_user_directories,
+    read_file_content,
     should_process_file,
     should_skip_path,
     should_skip_system_path,
+    walk_for_tool_directories,
 )
-from ...macos_extraction_helpers import read_file_content, walk_for_tool_directories
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +56,11 @@ class LinuxClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
                 except Exception as e:
                     logger.error(f"Error extracting user settings from {path}: {e}")
 
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
-        else:
-            extract_for_user(Path.home())
+        for user_home in get_linux_user_homes():
+            try:
+                extract_for_user(user_home)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
 
         return settings_list
 

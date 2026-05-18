@@ -7,8 +7,6 @@ from typing import Optional, List, Dict
 
 from ...linux_extraction_helpers import (
     get_linux_user_homes,
-    is_running_as_root,
-    scan_user_directories,
     should_process_file,
     walk_for_tool_directories,
     read_file_content,
@@ -51,10 +49,11 @@ class LinuxCursorCliSettingsExtractor:
                 except Exception as e:
                     logger.debug(f"Error extracting Cursor CLI settings from {config_path}: {e}")
 
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
-        else:
-            extract_for_user(Path.home())
+        for user_home in get_linux_user_homes():
+            try:
+                extract_for_user(user_home)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
 
         return settings_list
 

@@ -9,8 +9,7 @@ from ...constants import MAX_SEARCH_DEPTH
 from ...linux_extraction_helpers import (
     extract_single_rule_file,
     get_linux_user_homes,
-    is_running_as_root,
-    scan_user_directories,
+    is_user_level_tool_dir,
     should_skip_path,
     should_skip_system_path,
 )
@@ -23,7 +22,6 @@ from ...cline_skills_helpers import (
 from ...claude_code_skills_helpers import (
     build_skills_project_list,
     add_skill_to_project,
-    is_user_level_claude_subdir,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,10 +46,11 @@ class LinuxClineSkillsExtractor(BaseClineSkillsExtractor):
         def extract_for_user(user_home: Path) -> None:
             extract_cline_user_level_items(user_home, user_skills, extract_single_rule_file, CLINE_ITEM_CONFIGS)
 
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
-        else:
-            extract_for_user(Path.home())
+        for user_home in get_linux_user_homes():
+            try:
+                extract_for_user(user_home)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_project_level_skills(self, projects_by_root: Dict) -> None:
         for user_home in get_linux_user_homes():
@@ -88,7 +87,7 @@ class LinuxClineSkillsExtractor(BaseClineSkillsExtractor):
                             for config in CLINE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
                                 if type_dir.exists() and type_dir.is_dir():
-                                    if not is_user_level_claude_subdir(type_dir):
+                                    if not is_user_level_tool_dir(item):
                                         extract_cline_items_from_directory(
                                             type_dir,
                                             projects_by_root,

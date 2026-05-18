@@ -9,8 +9,7 @@ from ...constants import MAX_SEARCH_DEPTH
 from ...linux_extraction_helpers import (
     extract_single_rule_file,
     get_linux_user_homes,
-    is_running_as_root,
-    scan_user_directories,
+    is_user_level_tool_dir,
     should_skip_path,
     should_skip_system_path,
 )
@@ -21,7 +20,6 @@ from ...claude_code_skills_helpers import (
     extract_items_from_directory,
     extract_user_level_items,
     add_skill_to_project,
-    is_user_level_claude_subdir,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,10 +46,11 @@ class LinuxClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                 user_home, user_skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS
             )
 
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
-        else:
-            extract_for_user(Path.home())
+        for user_home in get_linux_user_homes():
+            try:
+                extract_for_user(user_home)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_project_level_skills(
         self, projects_by_root: Dict[str, List[Dict]]
@@ -88,7 +87,7 @@ class LinuxClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                             for config in CLAUDE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
                                 if type_dir.exists() and type_dir.is_dir():
-                                    if not is_user_level_claude_subdir(type_dir):
+                                    if not is_user_level_tool_dir(item):
                                         extract_items_from_directory(
                                             type_dir, projects_by_root,
                                             extract_single_rule_file, add_skill_to_project, config,

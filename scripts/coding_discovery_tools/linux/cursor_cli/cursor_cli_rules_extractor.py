@@ -11,8 +11,6 @@ from ...linux_extraction_helpers import (
     extract_single_rule_file,
     find_cursor_project_root,
     get_linux_user_homes,
-    is_running_as_root,
-    scan_user_directories,
     walk_for_tool_directories,
 )
 
@@ -48,10 +46,11 @@ class LinuxCursorCliRulesExtractor(BaseCursorCliRulesExtractor):
                     if rule_info:
                         add_rule_to_project(rule_info, str(user_home), projects_by_root)
 
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
-        else:
-            extract_for_user(Path.home())
+        for user_home in get_linux_user_homes():
+            try:
+                extract_for_user(user_home)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_project_level_rules(self, projects_by_root: Dict) -> None:
         for user_home in get_linux_user_homes():

@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from .constants import MAX_SEARCH_DEPTH
+
 logger = logging.getLogger(__name__)
 
 # Linux virtual/system filesystems and package-manager paths to skip when walking from /
@@ -31,7 +33,6 @@ from .macos_extraction_helpers import (  # noqa: F401
     build_project_list,
     extract_and_add_rule,
     extract_single_rule_file,
-    walk_for_tool_directories,
     get_file_metadata,
     read_file_content,
     should_process_directory,
@@ -126,6 +127,48 @@ def is_user_level_tool_dir(tool_dir: Path) -> bool:
     except Exception:
         pass
     return False
+
+
+def walk_for_tool_directories(
+    root_path: Path,
+    current_dir: Path,
+    tool_dir_name: str,
+    extract_from_dir_func,
+    projects_by_root: Dict,
+    current_depth: int = 0,
+) -> None:
+    """Linux-aware walk: uses Linux should_skip_system_path, not the macOS one.
+
+    The macOS version skips '/home' entirely (it's in macOS SKIP_SYSTEM_DIRS),
+    which would silently drop all project-level configs under /home/*.
+    """
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+    try:
+        for item in current_dir.iterdir():
+            try:
+                if should_skip_path(item) or should_skip_system_path(item):
+                    continue
+                try:
+                    depth = len(item.relative_to(root_path).parts)
+                    if depth > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    continue
+                if item.is_dir():
+                    if item.name == tool_dir_name:
+                        extract_from_dir_func(item, projects_by_root)
+                        continue
+                    if item.is_symlink():
+                        continue
+                    walk_for_tool_directories(
+                        root_path, item, tool_dir_name,
+                        extract_from_dir_func, projects_by_root, current_depth + 1,
+                    )
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
 
 
 def get_linux_user_homes() -> List[Path]:

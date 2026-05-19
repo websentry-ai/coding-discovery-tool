@@ -64,7 +64,7 @@ try:
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
-    from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup
+    from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -111,7 +111,7 @@ except ImportError:
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
-    from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup
+    from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -1066,6 +1066,21 @@ class AIToolsDetector:
         else:
             logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
+        # Extract skills bundled inside plugins (separate from standalone skills walker)
+        if plugins:
+            try:
+                plugin_skills = extract_plugin_skills(plugins)
+                if plugin_skills:
+                    logger.info(f"  ✓ Found {len(plugin_skills)} plugin-bundled skill(s)")
+                    user_home = str(Path.home())
+                    if user_home not in projects_dict:
+                        projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
+                    if "skills" not in projects_dict[user_home]:
+                        projects_dict[user_home]["skills"] = []
+                    projects_dict[user_home]["skills"].extend(plugin_skills)
+            except Exception as e:
+                logger.debug(f"Error extracting plugin-bundled skills: {e}")
+
         return projects_dict
 
     def _is_project_empty(self, project: Dict) -> bool:
@@ -1373,6 +1388,21 @@ class AIToolsDetector:
                     logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
             else:
                 logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+            # Extract skills bundled inside Cursor plugins
+            if cursor_plugins:
+                try:
+                    plugin_skills = extract_plugin_skills(cursor_plugins)
+                    if plugin_skills:
+                        logger.info(f"  ✓ Found {len(plugin_skills)} Cursor plugin-bundled skill(s)")
+                        user_home = str(Path.home())
+                        if user_home not in projects_dict:
+                            projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
+                        if "skills" not in projects_dict[user_home]:
+                            projects_dict[user_home]["skills"] = []
+                        projects_dict[user_home]["skills"].extend(plugin_skills)
+                except Exception as e:
+                    logger.debug(f"Error extracting Cursor plugin-bundled skills: {e}")
 
         elif tool_name == "claude code":
             projects_dict = self._process_claude_code_tool(tool)

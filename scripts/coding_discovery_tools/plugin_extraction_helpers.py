@@ -477,3 +477,71 @@ def find_plugin_provenance_by_path(
             "is_official": best_match_info.get("is_official", False),
         }
     return None
+
+
+# ---------------------------------------------------------------------------
+# Plugin-bundled skills extraction
+# ---------------------------------------------------------------------------
+
+MAX_SKILL_FILE_SIZE = 50 * 1024  # 50KB
+
+
+def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
+    """
+    Extract skills bundled inside plugin install paths.
+
+    Walks <install_path>/skills/<name>/SKILL.md for each plugin that has
+    has_skills=True. Returns skill dicts tagged with source="plugin" and
+    provenance metadata, matching the format of the standalone skills pipeline.
+
+    Args:
+        plugins: List of plugin dicts from extract_claude_code_plugins or
+                 extract_cursor_plugins.
+
+    Returns:
+        List of skill dicts ready to merge into user_skills.
+    """
+    skills: List[Dict] = []
+    for plugin in plugins:
+        install_path = plugin.get("install_path")
+        if not install_path or not plugin.get("has_skills"):
+            continue
+        skills_dir = Path(install_path) / "skills"
+        try:
+            if not skills_dir.is_dir():
+                continue
+            for entry in skills_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                skill_file = entry / "SKILL.md"
+                if not skill_file.is_file():
+                    continue
+                try:
+                    file_size = skill_file.stat().st_size
+                    raw = skill_file.read_text(encoding="utf-8", errors="replace")
+                    truncated = len(raw.encode("utf-8")) > MAX_SKILL_FILE_SIZE
+                    content = raw[:MAX_SKILL_FILE_SIZE] if truncated else raw
+                    mtime = skill_file.stat().st_mtime
+                    from datetime import datetime, timezone
+                    last_modified = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+
+                    skills.append({
+                        "file_path": str(skill_file),
+                        "file_name": "SKILL.md",
+                        "content": content,
+                        "size": file_size,
+                        "last_modified": last_modified,
+                        "truncated": truncated,
+                        "scope": "user",
+                        "skill_name": entry.name,
+                        "type": "skill",
+                        "source": "plugin",
+                        "plugin_id": plugin.get("plugin_id"),
+                        "marketplace_name": plugin.get("marketplace_name"),
+                        "source_type": plugin.get("source_type"),
+                    })
+                except (PermissionError, OSError, UnicodeDecodeError):
+                    continue
+        except (PermissionError, OSError):
+            continue
+    return skills

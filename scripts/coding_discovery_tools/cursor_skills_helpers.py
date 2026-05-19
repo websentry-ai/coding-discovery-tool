@@ -74,11 +74,13 @@ def extract_cursor_item_info(
     extract_single_rule_file_func: Callable,
     scope: str,
     config: ItemTypeConfig,
+    plugin_lookup: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """Extract information from a Cursor item file. Delegates to generic."""
     return extract_item_info(
         item_file, extract_single_rule_file_func, scope, config,
         parent_dir_names=CURSOR_PARENT_DIR_NAMES,
+        plugin_lookup=plugin_lookup,
     )
 
 
@@ -88,11 +90,13 @@ def extract_cursor_items_from_directory(
     extract_single_rule_file_func: Callable,
     add_skill_func: Callable,
     config: ItemTypeConfig,
+    plugin_lookup: Optional[Dict] = None,
 ) -> None:
     """Extract all items of a given type from a Cursor directory. Delegates to generic."""
     extract_items_from_directory(
         type_dir, projects_by_root, extract_single_rule_file_func, add_skill_func, config,
         parent_dir_names=CURSOR_PARENT_DIR_NAMES,
+        plugin_lookup=plugin_lookup,
     )
 
 
@@ -101,12 +105,14 @@ def extract_cursor_user_level_items(
     user_skills: List[Dict],
     extract_single_rule_file_func: Callable,
     configs: List[ItemTypeConfig],
+    plugin_lookup: Optional[Dict] = None,
 ) -> None:
     """Extract user-level Cursor items from a user's home directory. Delegates to generic."""
     extract_user_level_items(
         user_home, user_skills, extract_single_rule_file_func, configs,
         user_dir_names=CURSOR_PARENT_DIR_NAMES,
         parent_dir_names=CURSOR_PARENT_DIR_NAMES,
+        plugin_lookup=plugin_lookup,
     )
 
 

@@ -1477,9 +1477,19 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
         extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
 
 
+def _lookup_plugin_provenance(
+    path_str: str,
+    plugin_lookup: Dict[str, Dict],
+) -> Optional[Dict]:
+    """Find plugin provenance for a path using longest-prefix match."""
+    from .plugin_extraction_helpers import find_plugin_provenance_by_path
+    return find_plugin_provenance_by_path(path_str, plugin_lookup)
+
+
 def extract_plugin_mcp_from_plugin_json(
     plugin_json_path: Path,
-    projects: List[Dict]
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
     Extract MCP config from a plugin's plugin.json file.
@@ -1500,12 +1510,18 @@ def extract_plugin_mcp_from_plugin_json(
 
         if mcp_servers_array:
             plugin_name = config_data.get("name", plugin_root.name)
-            projects.append({
+            project_entry = {
                 "path": str(plugin_root),
                 "mcpServers": mcp_servers_array,
                 "scope": "plugin",
-                "pluginName": plugin_name
-            })
+                "pluginName": plugin_name,
+            }
+            if plugin_lookup:
+                provenance = _lookup_plugin_provenance(str(plugin_root), plugin_lookup)
+                if provenance:
+                    provenance["source"] = "plugin"
+                    project_entry.update(provenance)
+            projects.append(project_entry)
     except json.JSONDecodeError as e:
         logger.debug(f"Invalid JSON in plugin.json {plugin_json_path}: {e}")
     except PermissionError as e:
@@ -1514,7 +1530,11 @@ def extract_plugin_mcp_from_plugin_json(
         logger.debug(f"Error reading plugin.json {plugin_json_path}: {e}")
 
 
-def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
+def _scan_plugin_cache_dir(
+    cache_dir: Path,
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
+) -> None:
     """
     Scan the plugin cache directory for MCP configs.
 
@@ -1525,6 +1545,7 @@ def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
     Args:
         cache_dir: Path to ~/.claude/plugins/cache
         projects: List to append results to
+        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
     if not cache_dir.exists() or not cache_dir.is_dir():
         return
@@ -1545,12 +1566,16 @@ def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
                             mcp_file = version_dir / ".mcp.json"
                             if mcp_file.exists() and mcp_file.is_file():
                                 _extract_plugin_mcp_from_dot_mcp_json(
-                                    mcp_file, plugin_dir.name, projects
+                                    mcp_file, plugin_dir.name, projects,
+                                    plugin_lookup=plugin_lookup,
                                 )
 
                             claude_plugin_json = version_dir / ".claude-plugin" / "plugin.json"
                             if claude_plugin_json.exists():
-                                extract_plugin_mcp_from_plugin_json(claude_plugin_json, projects)
+                                extract_plugin_mcp_from_plugin_json(
+                                    claude_plugin_json, projects,
+                                    plugin_lookup=plugin_lookup,
+                                )
                     except (PermissionError, OSError):
                         continue
             except (PermissionError, OSError):
@@ -1564,7 +1589,8 @@ def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
 def _extract_plugin_mcp_from_dot_mcp_json(
     mcp_json_path: Path,
     plugin_name: str,
-    projects: List[Dict]
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
     Extract MCP config from a plugin's .mcp.json file in the cache directory.
@@ -1573,6 +1599,7 @@ def _extract_plugin_mcp_from_dot_mcp_json(
         mcp_json_path: Path to the .mcp.json file
         plugin_name: Name of the plugin (directory name)
         projects: List to append results to
+        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
     try:
         content = mcp_json_path.read_text(encoding='utf-8', errors='replace')
@@ -1587,12 +1614,19 @@ def _extract_plugin_mcp_from_dot_mcp_json(
         mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
 
         if mcp_servers_array:
-            projects.append({
-                "path": str(mcp_json_path.parent),
+            parent_path = str(mcp_json_path.parent)
+            project_entry = {
+                "path": parent_path,
                 "mcpServers": mcp_servers_array,
                 "scope": "plugin",
-                "pluginName": plugin_name
-            })
+                "pluginName": plugin_name,
+            }
+            if plugin_lookup:
+                provenance = _lookup_plugin_provenance(parent_path, plugin_lookup)
+                if provenance:
+                    provenance["source"] = "plugin"
+                    project_entry.update(provenance)
+            projects.append(project_entry)
     except json.JSONDecodeError as e:
         logger.debug(f"Invalid JSON in plugin .mcp.json {mcp_json_path}: {e}")
     except PermissionError as e:
@@ -1601,7 +1635,10 @@ def _extract_plugin_mcp_from_dot_mcp_json(
         logger.debug(f"Error reading plugin .mcp.json {mcp_json_path}: {e}")
 
 
-def extract_claude_plugin_mcp_configs(projects: List[Dict]) -> None:
+def extract_claude_plugin_mcp_configs(
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
+) -> None:
     """
     Extract MCP configs from Claude Code plugins.
     """
@@ -1616,16 +1653,19 @@ def extract_claude_plugin_mcp_configs(projects: List[Dict]) -> None:
 
             plugin_json = plugin_dir / "plugin.json"
             if plugin_json.exists():
-                extract_plugin_mcp_from_plugin_json(plugin_json, projects)
+                extract_plugin_mcp_from_plugin_json(plugin_json, projects, plugin_lookup=plugin_lookup)
     except (PermissionError, OSError) as e:
         logger.debug(f"Error scanning plugins directory {plugins_dir}: {e}")
     except Exception as e:
         logger.debug(f"Error extracting plugin MCP configs: {e}")
 
-    _scan_plugin_cache_dir(plugins_dir / "cache", projects)
+    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
 
-def extract_claude_plugin_mcp_configs_with_root_support(projects: List[Dict]) -> None:
+def extract_claude_plugin_mcp_configs_with_root_support(
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
+) -> None:
     """
     Extract MCP configs from Claude Code plugins with root user support.
     """
@@ -1666,13 +1706,15 @@ def extract_claude_plugin_mcp_configs_with_root_support(projects: List[Dict]) ->
                                 continue
                             plugin_json = plugin_dir / "plugin.json"
                             if plugin_json.exists():
-                                extract_plugin_mcp_from_plugin_json(plugin_json, projects)
+                                extract_plugin_mcp_from_plugin_json(
+                                    plugin_json, projects, plugin_lookup=plugin_lookup
+                                )
                     except (PermissionError, OSError) as e:
                         logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
 
-                    _scan_plugin_cache_dir(plugins_dir / "cache", projects)
+                    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
-        extract_claude_plugin_mcp_configs(projects)
+        extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
     else:
-        extract_claude_plugin_mcp_configs(projects)
+        extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
 

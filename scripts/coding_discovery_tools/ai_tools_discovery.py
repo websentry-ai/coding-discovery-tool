@@ -64,6 +64,7 @@ try:
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -110,6 +111,7 @@ except ImportError:
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -295,9 +297,14 @@ class AIToolsDetector:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
             return None
 
-    def extract_all_claude_skills(self) -> Optional[Dict]:
+    def extract_all_claude_skills(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract all Claude Code skills from all projects.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
 
         Returns:
             Dict with:
@@ -307,7 +314,7 @@ class AIToolsDetector:
         """
         try:
             if self._claude_skills_extractor:
-                return self._claude_skills_extractor.extract_all_skills()
+                return self._claude_skills_extractor.extract_all_skills(plugin_lookup=plugin_lookup)
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude skills: {e}", exc_info=True)
@@ -331,9 +338,14 @@ class AIToolsDetector:
             logger.error(f"Error extracting Cowork skills: {e}", exc_info=True)
             return None
 
-    def extract_all_cursor_skills(self) -> Optional[Dict]:
+    def extract_all_cursor_skills(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract all Cursor skills from all projects.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
 
         Returns:
             Dict with:
@@ -343,7 +355,7 @@ class AIToolsDetector:
         """
         try:
             if self._cursor_skills_extractor:
-                return self._cursor_skills_extractor.extract_all_skills()
+                return self._cursor_skills_extractor.extract_all_skills(plugin_lookup=plugin_lookup)
             return None
         except Exception as e:
             logger.error(f"Error extracting Cursor skills: {e}", exc_info=True)
@@ -951,11 +963,28 @@ class AIToolsDetector:
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
 
+        # Extract plugins (Claude Code specific) — must come before MCP and skills
+        # so plugin_lookup is available for provenance tagging
+        logger.info(f"  Extracting {tool_name} plugins...")
+        try:
+            plugins_dir = Path.home() / ".claude" / "plugins"
+            plugins = extract_claude_code_plugins(plugins_dir)
+            plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
+            if plugins:
+                tool["plugins"] = plugins
+                logger.info(f"  ✓ Found {len(plugins)} plugin(s)")
+            else:
+                logger.info("  ℹ No plugins found")
+        except Exception as e:
+            logger.debug(f"Error extracting {tool_name} plugins: {e}")
+            plugins = []
+            plugin_lookup = {}
+
         # Extract and merge MCP configs
         logger.info(f"  Extracting {tool_name} MCP configs...")
         if self._claude_mcp_extractor:
             try:
-                mcp_config = self._claude_mcp_extractor.extract_mcp_config()
+                mcp_config = self._claude_mcp_extractor.extract_mcp_config(plugin_lookup=plugin_lookup)
                 if mcp_config and "projects" in mcp_config:
                     num_mcp_projects = len(mcp_config["projects"])
                     logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
@@ -992,7 +1021,7 @@ class AIToolsDetector:
         logger.info(f"  Extracting {tool_name} skills...")
         if self._claude_skills_extractor:
             try:
-                skills_result = self.extract_all_claude_skills()
+                skills_result = self.extract_all_claude_skills(plugin_lookup=plugin_lookup)
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -1291,11 +1320,27 @@ class AIToolsDetector:
             else:
                 logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
+            # Extract Cursor plugins
+            logger.info(f"  Extracting {tool_name} plugins...")
+            try:
+                cursor_plugins_dir = Path.home() / ".cursor" / "plugins"
+                cursor_plugins = extract_cursor_plugins(cursor_plugins_dir)
+                cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
+                if cursor_plugins:
+                    tool["plugins"] = cursor_plugins
+                    logger.info(f"  ✓ Found {len(cursor_plugins)} Cursor plugin(s)")
+                else:
+                    logger.info("  ℹ No Cursor plugins found")
+            except Exception as e:
+                logger.debug(f"Error extracting {tool_name} plugins: {e}")
+                cursor_plugins = []
+                cursor_plugin_lookup = {}
+
             # Extract Cursor skills
             logger.info(f"  Extracting {tool_name} skills...")
             if self._cursor_skills_extractor:
                 try:
-                    skills_result = self.extract_all_cursor_skills()
+                    skills_result = self.extract_all_cursor_skills(plugin_lookup=cursor_plugin_lookup)
                     user_skills = skills_result.get("user_skills", []) if skills_result else []
                     project_skills = skills_result.get("project_skills", []) if skills_result else []
 

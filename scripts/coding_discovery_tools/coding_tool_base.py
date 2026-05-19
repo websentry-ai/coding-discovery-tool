@@ -323,9 +323,14 @@ class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 
     @abstractmethod
-    def extract_mcp_config(self) -> Optional[Dict]:
+    def extract_mcp_config(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract MCP configuration for the tool.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, MCP servers originating from plugins are
+                tagged with provenance fields.
         """
         pass
 
@@ -334,7 +339,7 @@ class BaseClaudeSkillsExtractor(ABC):
     """Abstract base class for extracting Claude Code skills from all projects."""
 
     @abstractmethod
-    def extract_all_skills(self) -> Dict:
+    def extract_all_skills(self, plugin_lookup: Optional[Dict] = None) -> Dict:
         """
         Extract all Claude Code skills and commands from all projects on the machine.
 
@@ -345,6 +350,11 @@ class BaseClaudeSkillsExtractor(ABC):
         - Project-level commands: **/.claude/commands/<name>.md
 
         The `type` field distinguishes entries: "skill" for skills, "command" for commands.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
 
         Returns:
             Dict with:
@@ -389,7 +399,7 @@ class BaseCursorSkillsExtractor(ABC):
     """Abstract base class for extracting Cursor skills from all projects."""
 
     @abstractmethod
-    def extract_all_skills(self) -> Dict:
+    def extract_all_skills(self, plugin_lookup: Optional[Dict] = None) -> Dict:
         """
         Extract all Cursor skills from all projects on the machine.
 
@@ -398,6 +408,11 @@ class BaseCursorSkillsExtractor(ABC):
         - Project-level skills: **/.cursor/skills/<skill-name>/SKILL.md
 
         The `type` field distinguishes entries: "skill" for skills.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
 
         Returns:
             Dict with:

@@ -204,12 +204,40 @@ def find_item_project_root(
     return item_file.parent
 
 
+def _find_plugin_provenance(
+    file_path: str,
+    plugin_lookup: Optional[Dict[str, Dict]],
+) -> Dict:
+    """
+    Determine plugin provenance for a file path using longest-prefix match.
+
+    Args:
+        file_path: Absolute path string of the item file
+        plugin_lookup: Dict mapping plugin install_path to provenance metadata
+
+    Returns:
+        Dict with source and provenance fields
+    """
+    from .plugin_extraction_helpers import find_plugin_provenance_by_path
+
+    match = find_plugin_provenance_by_path(file_path, plugin_lookup)
+    if match:
+        return {
+            "source": "plugin",
+            "plugin_id": match.get("plugin_id"),
+            "marketplace_name": match.get("marketplace_name"),
+            "source_type": match.get("source_type"),
+        }
+    return {"source": "standalone"}
+
+
 def extract_item_info(
     item_file: Path,
     extract_single_rule_file_func: Callable,
     scope: str,
     config: ItemTypeConfig,
     parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> Optional[Dict]:
     """
     Extract information from an item file using the given extraction function.
@@ -217,7 +245,7 @@ def extract_item_info(
     Creates a closure that binds `config` and `parent_dir_names` to
     `find_item_project_root`, then delegates to `extract_single_rule_file_func`.
     On success, annotates the result with `skill_name` (derived via
-    config.name_extractor) and `type`.
+    config.name_extractor), `type`, and plugin provenance tags.
 
     Args:
         item_file: Path to the item file
@@ -226,6 +254,9 @@ def extract_item_info(
         scope: Scope of the item ("user" or "project")
         config: ItemTypeConfig describing this item type
         parent_dir_names: Tuple of directory names to recognise as the tool root
+        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata.
+            When provided, items whose file_path falls under a plugin install path
+            are tagged with source="plugin" and provenance fields.
 
     Returns:
         Dict with item info in unified rules format, or None if extraction fails
@@ -236,6 +267,10 @@ def extract_item_info(
     if rule_info:
         rule_info["skill_name"] = config.name_extractor(item_file)
         rule_info["type"] = config.type_name
+        provenance = _find_plugin_provenance(
+            rule_info.get("file_path", str(item_file)), plugin_lookup
+        )
+        rule_info.update(provenance)
 
     return rule_info
 
@@ -247,6 +282,7 @@ def extract_items_from_directory(
     add_skill_func: Callable,
     config: ItemTypeConfig,
     parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
     Extract all items of a given type from a <tool_dir>/<type> directory.
@@ -264,6 +300,7 @@ def extract_items_from_directory(
         add_skill_func: Function to add item to project dict (handles thread safety)
         config: ItemTypeConfig describing this item type
         parent_dir_names: Tuple of directory names to recognise as the tool root
+        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
     try:
         if config.layout == "nested":
@@ -277,6 +314,7 @@ def extract_items_from_directory(
                                 scope="project",
                                 config=config,
                                 parent_dir_names=parent_dir_names,
+                                plugin_lookup=plugin_lookup,
                             )
                             if item_info:
                                 project_root = item_info.get("project_root")
@@ -292,6 +330,7 @@ def extract_items_from_directory(
                         scope="project",
                         config=config,
                         parent_dir_names=parent_dir_names,
+                        plugin_lookup=plugin_lookup,
                     )
                     if item_info:
                         project_root = item_info.get("project_root")
@@ -308,6 +347,7 @@ def extract_user_level_items(
     configs: List[ItemTypeConfig],
     user_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
     parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
     Extract user-level items (skills, commands, agents) from a user's home directory.
@@ -327,6 +367,7 @@ def extract_user_level_items(
                         (e.g. (".claude",) or (".cursor", ".agents"))
         parent_dir_names: Tuple of directory names to recognise as the tool root
                           when resolving project roots
+        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
     for tool_dir_name in user_dir_names:
         for config in configs:
@@ -346,6 +387,7 @@ def extract_user_level_items(
                                         scope="user",
                                         config=config,
                                         parent_dir_names=parent_dir_names,
+                                        plugin_lookup=plugin_lookup,
                                     )
                                     if item_info:
                                         item_info["project_path"] = item_info.pop("project_root", None)
@@ -360,6 +402,7 @@ def extract_user_level_items(
                                 scope="user",
                                 config=config,
                                 parent_dir_names=parent_dir_names,
+                                plugin_lookup=plugin_lookup,
                             )
                             if item_info:
                                 item_info["project_path"] = item_info.pop("project_root", None)

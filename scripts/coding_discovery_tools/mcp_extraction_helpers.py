@@ -1501,7 +1501,8 @@ def extract_plugin_mcp_from_plugin_json(
         parent_dir = plugin_json_path.parent
         # Cache layout: cache/<mkt>/<plugin>/<ver>/.claude-plugin/plugin.json → go up one level
         # Non-cache layout: plugins/<plugin>/plugin.json → parent IS the plugin root
-        plugin_root = parent_dir.parent if parent_dir.name.startswith(".") else parent_dir
+        _METADATA_DIRS = {".claude-plugin", ".cursor-plugin"}
+        plugin_root = parent_dir.parent if parent_dir.name in _METADATA_DIRS else parent_dir
         content = plugin_json_path.read_text(encoding='utf-8', errors='replace')
         config_data = json.loads(content)
 

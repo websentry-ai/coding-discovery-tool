@@ -964,11 +964,35 @@ class AIToolsDetector:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
 
         # Extract plugins (Claude Code specific) — must come before MCP and skills
-        # so plugin_lookup is available for provenance tagging
+        # so plugin_lookup is available for provenance tagging.
+        # When running as root (MDM agents), scan all users' plugin dirs.
         logger.info(f"  Extracting {tool_name} plugins...")
         try:
-            plugins_dir = Path.home() / ".claude" / "plugins"
-            plugins = extract_claude_code_plugins(plugins_dir)
+            plugins = []
+            plugins_dirs_to_scan = [Path.home() / ".claude" / "plugins"]
+
+            # When running as root, also scan all real users' plugin dirs
+            if self.system == "Darwin":
+                try:
+                    for username in get_all_users_macos():
+                        user_plugins = Path(f"/Users/{username}") / ".claude" / "plugins"
+                        if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
+                            plugins_dirs_to_scan.append(user_plugins)
+                except Exception:
+                    pass
+            elif self.system == "Windows":
+                try:
+                    for username in get_all_users_windows():
+                        user_plugins = Path(Path.home().anchor) / "Users" / username / ".claude" / "plugins"
+                        if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
+                            plugins_dirs_to_scan.append(user_plugins)
+                except Exception:
+                    pass
+
+            for plugins_dir in plugins_dirs_to_scan:
+                user_plugins = extract_claude_code_plugins(plugins_dir)
+                plugins.extend(user_plugins)
+
             plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
             if plugins:
                 tool["plugins"] = plugins
@@ -1322,11 +1346,34 @@ class AIToolsDetector:
             )
 
             # Extract Cursor plugins — after rules/MCP but before skills,
-            # so cursor_plugin_lookup is available for skill provenance tagging
+            # so cursor_plugin_lookup is available for skill provenance tagging.
+            # When running as root (MDM agents), scan all users' plugin dirs.
             logger.info(f"  Extracting {tool_name} plugins...")
             try:
-                cursor_plugins_dir = Path.home() / ".cursor" / "plugins"
-                cursor_plugins = extract_cursor_plugins(cursor_plugins_dir)
+                cursor_plugins = []
+                cursor_plugins_dirs = [Path.home() / ".cursor" / "plugins"]
+
+                if self.system == "Darwin":
+                    try:
+                        for username in get_all_users_macos():
+                            user_plugins = Path(f"/Users/{username}") / ".cursor" / "plugins"
+                            if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
+                                cursor_plugins_dirs.append(user_plugins)
+                    except Exception:
+                        pass
+                elif self.system == "Windows":
+                    try:
+                        for username in get_all_users_windows():
+                            user_plugins = Path(Path.home().anchor) / "Users" / username / ".cursor" / "plugins"
+                            if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
+                                cursor_plugins_dirs.append(user_plugins)
+                    except Exception:
+                        pass
+
+                for cursor_plugins_dir in cursor_plugins_dirs:
+                    user_plugins = extract_cursor_plugins(cursor_plugins_dir)
+                    cursor_plugins.extend(user_plugins)
+
                 cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
                 if cursor_plugins:
                     tool["plugins"] = cursor_plugins

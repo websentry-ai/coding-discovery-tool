@@ -553,6 +553,7 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                         "plugin_id": plugin.get("plugin_id"),
                         "marketplace_name": plugin.get("marketplace_name"),
                         "source_type": plugin.get("source_type"),
+                        "is_official": plugin.get("is_official", False),
                     })
                 except (PermissionError, OSError, UnicodeDecodeError):
                     continue

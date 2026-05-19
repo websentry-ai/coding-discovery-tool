@@ -20,6 +20,9 @@ from .constants import MAX_SEARCH_DEPTH
 
 logger = logging.getLogger(__name__)
 
+# Directory names used by plugin metadata inside cache dirs
+_PLUGIN_METADATA_DIRS = frozenset({".claude-plugin", ".cursor-plugin"})
+
 
 def is_claude_plugins_path(path: Path) -> bool:
     """Check if a path is inside a .claude/plugins/ directory.
@@ -1501,8 +1504,7 @@ def extract_plugin_mcp_from_plugin_json(
         parent_dir = plugin_json_path.parent
         # Cache layout: cache/<mkt>/<plugin>/<ver>/.claude-plugin/plugin.json → go up one level
         # Non-cache layout: plugins/<plugin>/plugin.json → parent IS the plugin root
-        _METADATA_DIRS = {".claude-plugin", ".cursor-plugin"}
-        plugin_root = parent_dir.parent if parent_dir.name in _METADATA_DIRS else parent_dir
+        plugin_root = parent_dir.parent if parent_dir.name in _PLUGIN_METADATA_DIRS else parent_dir
         content = plugin_json_path.read_text(encoding='utf-8', errors='replace')
         config_data = json.loads(content)
 

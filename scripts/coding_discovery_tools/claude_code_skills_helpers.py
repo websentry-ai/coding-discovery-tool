@@ -227,6 +227,7 @@ def _find_plugin_provenance(
             "plugin_id": match.get("plugin_id"),
             "marketplace_name": match.get("marketplace_name"),
             "source_type": match.get("source_type"),
+            "is_official": match.get("is_official", False),
         }
     return {"source": "standalone"}
 

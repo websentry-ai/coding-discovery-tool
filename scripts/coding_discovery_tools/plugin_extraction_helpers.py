@@ -180,7 +180,7 @@ def extract_claude_code_plugins(plugins_dir: Path) -> List[Dict]:
 
     version = installed_data.get("version")
     if version != 2:
-        logger.debug("Unsupported installed_plugins.json version: %s", version)
+        logger.warning("Unsupported installed_plugins.json version: %s (expected 2); skipping plugin extraction", version)
         return []
 
     plugins_map = installed_data.get("plugins", {})
@@ -463,11 +463,12 @@ def find_plugin_provenance_by_path(
 
     best_match_path = ""
     best_match_info = None
+    normalized_path = path_str.replace("\\", "/").rstrip("/")
     for install_path, info in plugin_lookup.items():
-        stripped = install_path.rstrip("/")
-        if (path_str == stripped or path_str.startswith(stripped + "/")) \
-                and len(stripped) > len(best_match_path):
-            best_match_path = stripped
+        normalized_install = install_path.replace("\\", "/").rstrip("/")
+        if (normalized_path == normalized_install or normalized_path.startswith(normalized_install + "/")) \
+                and len(normalized_install) > len(best_match_path):
+            best_match_path = normalized_install
             best_match_info = info
 
     if best_match_info:
@@ -520,8 +521,9 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                 try:
                     file_size = skill_file.stat().st_size
                     raw = skill_file.read_text(encoding="utf-8", errors="replace")
-                    truncated = len(raw.encode("utf-8")) > MAX_SKILL_FILE_SIZE
-                    content = raw[:MAX_SKILL_FILE_SIZE] if truncated else raw
+                    raw_bytes = raw.encode("utf-8")
+                    truncated = len(raw_bytes) > MAX_SKILL_FILE_SIZE
+                    content = raw_bytes[:MAX_SKILL_FILE_SIZE].decode("utf-8", errors="ignore") if truncated else raw
                     mtime = skill_file.stat().st_mtime
                     from datetime import datetime, timezone
                     last_modified = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()

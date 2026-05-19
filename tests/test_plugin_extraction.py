@@ -563,5 +563,56 @@ class TestMcpProvenanceTagging(unittest.TestCase):
             self.assertEqual(projects[0]["plugin_id"], "slack@official")
 
 
+    def test_windows_path_separator_match(self):
+        """Provenance matches even when install_path uses backslashes and path uses forward slashes."""
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import find_plugin_provenance_by_path
+
+        plugin_lookup = {
+            "C:\\Users\\user\\.claude\\plugins\\cache\\official\\slack\\1.0.0": {
+                "plugin_id": "slack@official",
+                "marketplace_name": "official",
+                "source_type": "github",
+                "is_official": True,
+            },
+        }
+        # Forward-slash path against backslash lookup key
+        result = find_plugin_provenance_by_path(
+            "C:/Users/user/.claude/plugins/cache/official/slack/1.0.0/skills/send/SKILL.md",
+            plugin_lookup,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["plugin_id"], "slack@official")
+
+    def test_non_cache_plugin_json_gets_provenance(self):
+        """Non-cache plugin.json (plugins/<name>/plugin.json) gets correct plugin_root."""
+        from scripts.coding_discovery_tools.mcp_extraction_helpers import extract_plugin_mcp_from_plugin_json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Non-cache layout: plugins/<plugin>/plugin.json (no .claude-plugin subdir)
+            plugin_dir = os.path.join(tmpdir, "plugins", "my-plugin")
+            plugin_json_path = Path(plugin_dir) / "plugin.json"
+            _write_json(plugin_json_path, {
+                "name": "my-plugin",
+                "mcpServers": {"my-mcp": {"command": "npx", "args": ["my-mcp"]}},
+            })
+
+            plugin_lookup = {
+                plugin_dir: {
+                    "plugin_id": "my-plugin@marketplace",
+                    "marketplace_name": "marketplace",
+                    "source_type": "github",
+                    "is_official": False,
+                },
+            }
+
+            projects = []
+            extract_plugin_mcp_from_plugin_json(plugin_json_path, projects, plugin_lookup=plugin_lookup)
+
+            self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0]["path"], plugin_dir)
+            self.assertEqual(projects[0]["source"], "plugin")
+            self.assertEqual(projects[0]["plugin_id"], "my-plugin@marketplace")
+
+
 if __name__ == "__main__":
     unittest.main()

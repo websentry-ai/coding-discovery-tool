@@ -8,6 +8,7 @@ detection. Uses functional composition — no classes.
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -63,9 +64,14 @@ def _build_blocklist_reasons(blocklist_data: Optional[dict]) -> Dict[str, str]:
         return {}
 
 
+_OFFICIAL_CLAUDE_MARKETPLACES = frozenset({
+    "claude-plugins-official",
+})
+
+
 def _is_official_claude_marketplace(marketplace_name: str) -> bool:
     """Check if a marketplace is the official Claude Code marketplace."""
-    return marketplace_name == "claude-plugins-official"
+    return marketplace_name.lower() in _OFFICIAL_CLAUDE_MARKETPLACES
 
 
 _OFFICIAL_CURSOR_MARKETPLACES = frozenset({
@@ -82,7 +88,11 @@ def _is_official_cursor_marketplace(marketplace_name: str) -> bool:
 def _construct_source_url(source_type: str, source_repo: Optional[str]) -> Optional[str]:
     """Construct a URL from source type and repo identifier."""
     if source_type == "github" and source_repo:
-        return f"https://github.com/{source_repo}"
+        # Validate repo format (owner/repo) to prevent URL injection from untrusted JSON
+        if "/" in source_repo and all(
+            c.isalnum() or c in "-_./+" for c in source_repo
+        ):
+            return f"https://github.com/{source_repo}"
     return None
 
 
@@ -271,6 +281,8 @@ def _process_claude_code_plugin_entry(
         "block_reason": block_reason,
         "installed_at": entry.get("installedAt"),
         "git_commit_sha": entry.get("gitCommitSha"),
+        # source_type mirrors marketplace_source_type today; kept as a
+        # top-level convenience field used by provenance tagging on skills/MCP.
         "source_type": marketplace_source_type or None,
         "source_url": source_url,
         "source_repo": marketplace_repo,
@@ -519,14 +531,13 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                 if not skill_file.is_file():
                     continue
                 try:
-                    file_size = skill_file.stat().st_size
+                    st = skill_file.stat()
+                    file_size = st.st_size
                     raw = skill_file.read_text(encoding="utf-8", errors="replace")
                     raw_bytes = raw.encode("utf-8")
                     truncated = len(raw_bytes) > MAX_SKILL_FILE_SIZE
                     content = raw_bytes[:MAX_SKILL_FILE_SIZE].decode("utf-8", errors="ignore") if truncated else raw
-                    mtime = skill_file.stat().st_mtime
-                    from datetime import datetime, timezone
-                    last_modified = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+                    last_modified = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
 
                     skills.append({
                         "file_path": str(skill_file),

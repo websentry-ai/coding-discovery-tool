@@ -1321,21 +1321,8 @@ class AIToolsDetector:
                 self.extract_all_cursor_rules
             )
 
-            logger.info(f"  Extracting {tool_name} settings...")
-            if self._cursor_settings_extractor:
-                try:
-                    settings = self._cursor_settings_extractor.extract_settings()
-                    if settings:
-                        logger.info(f"  ✓ Found Cursor settings")
-                        tool["_settings"] = settings
-                    else:
-                        logger.info("  ℹ No Cursor settings found")
-                except Exception as e:
-                    logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
-            else:
-                logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
-
-            # Extract Cursor plugins
+            # Extract Cursor plugins — after rules/MCP but before skills,
+            # so cursor_plugin_lookup is available for skill provenance tagging
             logger.info(f"  Extracting {tool_name} plugins...")
             try:
                 cursor_plugins_dir = Path.home() / ".cursor" / "plugins"
@@ -1350,6 +1337,20 @@ class AIToolsDetector:
                 logger.debug(f"Error extracting {tool_name} plugins: {e}")
                 cursor_plugins = []
                 cursor_plugin_lookup = {}
+
+            logger.info(f"  Extracting {tool_name} settings...")
+            if self._cursor_settings_extractor:
+                try:
+                    settings = self._cursor_settings_extractor.extract_settings()
+                    if settings:
+                        logger.info(f"  ✓ Found Cursor settings")
+                        tool["_settings"] = settings
+                    else:
+                        logger.info("  ℹ No Cursor settings found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+            else:
+                logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
             # Extract Cursor skills
             logger.info(f"  Extracting {tool_name} skills...")

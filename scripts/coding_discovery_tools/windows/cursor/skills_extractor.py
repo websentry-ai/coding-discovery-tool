@@ -11,7 +11,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from ...coding_tool_base import BaseCursorSkillsExtractor
 from ...constants import MAX_SEARCH_DEPTH
@@ -44,9 +44,13 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
         super().__init__()
         self._lock = threading.Lock()
 
-    def extract_all_skills(self) -> Dict:
+    def extract_all_skills(self, plugin_lookup: Optional[Dict] = None) -> Dict:
         """
         Extract all Cursor skills from all projects on Windows.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata for tagging skills with source="plugin".
 
         Returns:
             Dict with:
@@ -57,7 +61,7 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
         projects_by_root = {}
 
         # Extract user-level skills from ~/.cursor/skills/
-        self._extract_user_level_skills(user_skills)
+        self._extract_user_level_skills(user_skills, plugin_lookup=plugin_lookup)
 
         # Extract project-level skills from **/.cursor/skills/
         # Use dynamic drive letter from home directory
@@ -65,7 +69,7 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
         root_path = Path(root_drive)
 
         logger.info(f"Searching for Cursor skills from root: {root_path}")
-        self._extract_project_level_skills(root_path, projects_by_root)
+        self._extract_project_level_skills(root_path, projects_by_root, plugin_lookup=plugin_lookup)
 
         return {
             "user_skills": user_skills,
@@ -82,25 +86,32 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
         # Home is typically C:\Users\<username>, so parent is C:\Users
         return Path.home().parent
 
-    def _extract_user_level_skills(self, user_skills: List[Dict]) -> None:
+    def _extract_user_level_skills(self, user_skills: List[Dict], plugin_lookup: Optional[Dict] = None) -> None:
         """
         Extract user-level skills from ~/.cursor/skills/ and ~/.agents/skills/ directories.
 
         Args:
             user_skills: List to populate with user-level skills
+            plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
         """
         def extract_for_user(user_home: Path) -> None:
-            extract_cursor_user_level_items(user_home, user_skills, extract_single_rule_file, CURSOR_ITEM_CONFIGS)
+            extract_cursor_user_level_items(
+                user_home, user_skills, extract_single_rule_file, CURSOR_ITEM_CONFIGS,
+                plugin_lookup=plugin_lookup,
+            )
 
         scan_windows_user_directories(extract_for_user)
 
-    def _extract_project_level_skills(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
+    def _extract_project_level_skills(
+        self, root_path: Path, projects_by_root: Dict[str, List[Dict]], plugin_lookup: Optional[Dict] = None
+    ) -> None:
         """
         Extract project-level skills recursively from all projects.
 
         Args:
             root_path: Root directory to search from
             projects_by_root: Dictionary to populate with skills grouped by project root
+            plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
         """
         try:
             top_level_dirs = [item for item in root_path.iterdir()
@@ -109,7 +120,10 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
             # Use parallel processing for top-level directories
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {
-                    executor.submit(self._walk_for_skills, root_path, dir_path, projects_by_root, current_depth=1)
+                    executor.submit(
+                        self._walk_for_skills, root_path, dir_path, projects_by_root,
+                        current_depth=1, plugin_lookup=plugin_lookup,
+                    )
                     for dir_path in top_level_dirs
                 }
 
@@ -120,14 +134,15 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
                         logger.debug(f"Error in parallel processing: {e}")
         except (PermissionError, OSError):
             # Fallback to sequential if parallel fails
-            self._walk_for_skills(root_path, root_path, projects_by_root, current_depth=0)
+            self._walk_for_skills(root_path, root_path, projects_by_root, current_depth=0, plugin_lookup=plugin_lookup)
 
     def _walk_for_skills(
         self,
         root_path: Path,
         current_dir: Path,
         projects_by_root: Dict[str, List[Dict]],
-        current_depth: int = 0
+        current_depth: int = 0,
+        plugin_lookup: Optional[Dict] = None,
     ) -> None:
         """
         Recursively walk directory tree looking for .cursor/skills directories.
@@ -137,6 +152,7 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
             current_dir: Current directory being processed
             projects_by_root: Dictionary to populate with skills
             current_depth: Current recursion depth
+            plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
         """
         if current_depth > MAX_SEARCH_DEPTH:
             return
@@ -171,11 +187,12 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
                                             extract_single_rule_file,
                                             self._add_skill_to_project_threadsafe,
                                             config,
+                                            plugin_lookup=plugin_lookup,
                                         )
                             continue
 
                         # Recurse into other directories
-                        self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)
+                        self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1, plugin_lookup=plugin_lookup)
 
                 except (PermissionError, OSError):
                     continue

@@ -464,9 +464,10 @@ def find_plugin_provenance_by_path(
     best_match_path = ""
     best_match_info = None
     for install_path, info in plugin_lookup.items():
-        normalized = install_path if install_path.endswith("/") else install_path + "/"
-        if path_str.startswith(normalized) and len(install_path) > len(best_match_path):
-            best_match_path = install_path
+        stripped = install_path.rstrip("/")
+        if (path_str == stripped or path_str.startswith(stripped + "/")) \
+                and len(stripped) > len(best_match_path):
+            best_match_path = stripped
             best_match_info = info
 
     if best_match_info:

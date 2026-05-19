@@ -481,5 +481,87 @@ class TestClaudeCodePluginCapabilities(unittest.TestCase):
             self.assertTrue(plugin["has_mcp_servers"])
 
 
+class TestMcpProvenanceTagging(unittest.TestCase):
+    """Tests for MCP server provenance tagging via plugin_lookup."""
+
+    def test_exact_path_match_for_mcp_provenance(self):
+        """MCP provenance matches when path equals install_path exactly (no child path)."""
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import find_plugin_provenance_by_path
+
+        plugin_lookup = {
+            "/home/user/.claude/plugins/cache/official/slack/1.0.0": {
+                "plugin_id": "slack@official",
+                "marketplace_name": "official",
+                "source_type": "github",
+                "is_official": True,
+            },
+        }
+        # Exact match — this is how MCP extraction calls it
+        result = find_plugin_provenance_by_path(
+            "/home/user/.claude/plugins/cache/official/slack/1.0.0",
+            plugin_lookup,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["plugin_id"], "slack@official")
+
+    def test_mcp_from_plugin_json_gets_provenance(self):
+        """extract_plugin_mcp_from_plugin_json tags MCP entries with plugin provenance."""
+        from scripts.coding_discovery_tools.mcp_extraction_helpers import extract_plugin_mcp_from_plugin_json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            install_path = os.path.join(tmpdir, "cache", "official", "slack", "1.0.0")
+            plugin_json_path = Path(install_path) / ".claude-plugin" / "plugin.json"
+            _write_json(plugin_json_path, {
+                "name": "slack",
+                "mcpServers": {"slack-mcp": {"command": "npx", "args": ["slack-mcp"]}},
+            })
+
+            plugin_lookup = {
+                install_path: {
+                    "plugin_id": "slack@official",
+                    "marketplace_name": "official",
+                    "source_type": "github",
+                    "is_official": True,
+                },
+            }
+
+            projects = []
+            extract_plugin_mcp_from_plugin_json(plugin_json_path, projects, plugin_lookup=plugin_lookup)
+
+            self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0]["source"], "plugin")
+            self.assertEqual(projects[0]["plugin_id"], "slack@official")
+            self.assertEqual(projects[0]["marketplace_name"], "official")
+
+    def test_mcp_from_dot_mcp_json_gets_provenance(self):
+        """_extract_plugin_mcp_from_dot_mcp_json tags MCP entries with plugin provenance."""
+        from scripts.coding_discovery_tools.mcp_extraction_helpers import _extract_plugin_mcp_from_dot_mcp_json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            install_path = os.path.join(tmpdir, "cache", "official", "slack", "1.0.0")
+            mcp_json_path = Path(install_path) / ".mcp.json"
+            _write_json(mcp_json_path, {
+                "mcpServers": {"slack-mcp": {"command": "npx", "args": ["slack-mcp"]}},
+            })
+
+            plugin_lookup = {
+                install_path: {
+                    "plugin_id": "slack@official",
+                    "marketplace_name": "official",
+                    "source_type": "github",
+                    "is_official": True,
+                },
+            }
+
+            projects = []
+            _extract_plugin_mcp_from_dot_mcp_json(
+                mcp_json_path, "slack", projects, plugin_lookup=plugin_lookup,
+            )
+
+            self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0]["source"], "plugin")
+            self.assertEqual(projects[0]["plugin_id"], "slack@official")
+
+
 if __name__ == "__main__":
     unittest.main()

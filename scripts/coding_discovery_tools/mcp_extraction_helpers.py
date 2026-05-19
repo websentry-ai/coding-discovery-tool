@@ -1498,7 +1498,8 @@ def extract_plugin_mcp_from_plugin_json(
         return
 
     try:
-        plugin_root = plugin_json_path.parent
+        plugin_meta_dir = plugin_json_path.parent
+        plugin_root = plugin_meta_dir.parent
         content = plugin_json_path.read_text(encoding='utf-8', errors='replace')
         config_data = json.loads(content)
 

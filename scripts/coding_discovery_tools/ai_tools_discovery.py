@@ -1747,6 +1747,12 @@ def main():
         logger.info("Detecting AI tools...")
         all_tools = []  # Store all unique tools across all users
         tools_by_user = {}  # Track which tools belong to which user
+        # Per-user tool-key sets, used to scope the early detected-tools
+        # preview report below to the tools each user actually has. Review
+        # feedback (#130): the previous version sent the device-wide union
+        # to every user, creating phantom tiles for tools that user didn't
+        # own (e.g. Alice gets a Cursor tile because Bob has Cursor).
+        tool_keys_by_user = {u: set() for u in all_users}
 
         for user in all_users:
             if platform.system() == "Darwin":
@@ -1769,6 +1775,7 @@ def main():
 
                     # Track which user this tool belongs to
                     tool_key = f"{tool_name}:{tool_path}"
+                    tool_keys_by_user[user].add(tool_key)
                     if tool_key not in tools_by_user:
                         tools_by_user[tool_key] = tool
                         all_tools.append(tool)
@@ -1791,20 +1798,39 @@ def main():
         # changes *when* a tile first appears, not the final data.
         if tools:
             logger.info("Sending early detected-tools report (for live UI)...")
-            preview_tools = []
+            # Build preview stubs keyed by tool_key so we can scope to per-user
+            # attribution below. Phantom-tile fix (#130 review): a user only
+            # receives stubs for tools their OWN detection pass found, never
+            # the device-wide union.
+            preview_tool_by_key = {}
             for t in tools:
                 pt = {k: v for k, v in t.items()
                       if not k.startswith('_') and k != 'projects'}
                 pt['projects'] = []
-                preview_tools.append(pt)
+                tool_key = f"{t.get('name', 'Unknown')}:{t.get('install_path', 'Unknown path')}"
+                preview_tool_by_key[tool_key] = pt
             with time_step("send_detected_preview", "send"):
                 for user_name in all_users:
+                    user_keys = tool_keys_by_user.get(user_name, set())
+                    user_preview_tools = [
+                        preview_tool_by_key[k]
+                        for k in user_keys
+                        if k in preview_tool_by_key
+                    ]
+                    if not user_preview_tools:
+                        # User has no tools — skip rather than send an empty
+                        # preview that would create an empty tile.
+                        logger.info(
+                            f"  -- detected-tools preview skipped for "
+                            f"{user_name} (no tools)"
+                        )
+                        continue
                     preview_report = {
                         "home_user": user_name,
                         "system_user": system_user,
                         "device_id": device_id,
                         "run_id": run_id,
-                        "tools": preview_tools,
+                        "tools": user_preview_tools,
                     }
                     try:
                         ok, _ = send_report_to_backend(
@@ -1813,7 +1839,7 @@ def main():
                         )
                         logger.info(
                             f"  {'OK' if ok else 'XX'} detected-tools preview "
-                            f"for {user_name}"
+                            f"for {user_name} ({len(user_preview_tools)} tool(s))"
                         )
                     except Exception as e:
                         logger.warning(

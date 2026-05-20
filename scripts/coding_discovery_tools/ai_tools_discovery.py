@@ -1802,11 +1802,20 @@ def main():
             # attribution below. Phantom-tile fix (#130 review): a user only
             # receives stubs for tools their OWN detection pass found, never
             # the device-wide union.
+            #
+            # IMPORTANT: the preview must OMIT the `projects` key entirely (not
+            # set it to []). The server uses key-absence as the only
+            # unambiguous "this is a preview" signal — a full per-tool report
+            # from a user with zero projects legitimately sends `projects: []`,
+            # so an explicit empty list here would be indistinguishable from a
+            # real zero-projects report and the server's short-circuit would
+            # misroute it, leaving stale projects on returning users.
+            # Companion change: ai-gateway-data#1945
+            # (webapp/services/ai_tools_service.py preview-only short-circuit).
             preview_tool_by_key = {}
             for t in tools:
                 pt = {k: v for k, v in t.items()
                       if not k.startswith('_') and k != 'projects'}
-                pt['projects'] = []
                 tool_key = f"{t.get('name', 'Unknown')}:{t.get('install_path', 'Unknown path')}"
                 preview_tool_by_key[tool_key] = pt
             with time_step("send_detected_preview", "send"):

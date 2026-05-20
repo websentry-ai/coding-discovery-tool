@@ -1780,6 +1780,48 @@ def main():
         logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
         logger.info("")
 
+        # --- Early "detected" pre-report (snappy live UI) -------------------
+        # Every tool is already known here, BEFORE the slow per-tool
+        # extraction (rules / MCP / skills / projects). Send a lightweight
+        # tools-only report (no projects) per user up front so the dashboard
+        # shows every agent tile within seconds of scan start, instead of one
+        # tile every ~tool-extraction. The full per-tool reports below
+        # supersede these (the backend keys installs by
+        # device + tool + home_user, retire-then-recreate), so this only
+        # changes *when* a tile first appears, not the final data.
+        if tools:
+            logger.info("Sending early detected-tools report (for live UI)...")
+            preview_tools = []
+            for t in tools:
+                pt = {k: v for k, v in t.items()
+                      if not k.startswith('_') and k != 'projects'}
+                pt['projects'] = []
+                preview_tools.append(pt)
+            with time_step("send_detected_preview", "send"):
+                for user_name in all_users:
+                    preview_report = {
+                        "home_user": user_name,
+                        "system_user": system_user,
+                        "device_id": device_id,
+                        "run_id": run_id,
+                        "tools": preview_tools,
+                    }
+                    try:
+                        ok, _ = send_report_to_backend(
+                            args.domain, args.api_key, preview_report,
+                            args.app_name, sentry_context=sentry_ctx,
+                        )
+                        logger.info(
+                            f"  {'OK' if ok else 'XX'} detected-tools preview "
+                            f"for {user_name}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"  detected-tools preview failed for "
+                            f"{user_name}: {e}"
+                        )
+            logger.info("")
+
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')

@@ -173,7 +173,7 @@ create_wrapper_script() {
     # to PATH in the wrapper. 'npm config get prefix' follows nvm and other prefix
     # overrides, giving the correct per-user bin dir even on machines that differ from
     # the system default.
-    NPM_BIN=$(npm config get prefix 2>/dev/null)/bin
+    NPM_BIN=$(npm config get prefix 2>/dev/null || true)/bin
 
     cat > "$WRAPPER_SCRIPT" <<WRAPPER_EOF
 #!/bin/bash

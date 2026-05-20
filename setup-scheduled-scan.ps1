@@ -216,9 +216,12 @@ switch ($Command) {
         $cmdArgs = @('onboard')
         if (-not [string]::IsNullOrEmpty($Domain)) { $cmdArgs += @('--domain', $Domain) }
         Write-Log "Executing: unbound onboard (credentials via env vars) ..."
+        $ec = 1
         try {
             & $unbound @cmdArgs *>> $LogFile
             $ec = $LASTEXITCODE
+        } catch {
+            Write-Log ("ERROR: onboard wrapper failed: {0}" -f $_.Exception.Message)
         } finally {
             Remove-Item Env:UNBOUND_API_KEY       -ErrorAction SilentlyContinue
             Remove-Item Env:UNBOUND_DISCOVERY_KEY -ErrorAction SilentlyContinue

@@ -351,6 +351,11 @@ install_macos() {
         launchctl bootout "gui/$(id -u)/$OLD_LABEL" 2>/dev/null \
             || launchctl unload "$OLD_PLIST" 2>/dev/null || true
         rm -f "$OLD_PLIST" 2>/dev/null || true
+        # Also remove any credentials stored under the old Keychain service name
+        # so they don't linger after --uninstall (which only cleans the current name).
+        for _acct in command api_key discovery_key domain; do
+            security delete-generic-password -s "$OLD_LABEL" -a "$_acct" >/dev/null 2>&1 || true
+        done
     fi
 
     # Unload existing job if present

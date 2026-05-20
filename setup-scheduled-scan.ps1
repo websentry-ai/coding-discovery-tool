@@ -267,6 +267,10 @@ if ($ec -ne 0) {
 }
 
 function Install-ScheduledTask {
+    # Clear all slots first so stale credentials from a previous install with a
+    # different command don't persist (e.g. switching from onboard to discover
+    # leaves discovery_key behind if we only store non-empty values).
+    Remove-AllCredentials
     Store-Credential -Account 'command'       -Secret $Command
     Store-Credential -Account 'api_key'       -Secret $ApiKey
     if ($DiscoveryKey) { Store-Credential -Account 'discovery_key' -Secret $DiscoveryKey }

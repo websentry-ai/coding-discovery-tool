@@ -6,7 +6,7 @@
 #   - unbound discover  (default — backward-compat)
 #   - unbound onboard   (when -Command onboard)
 #
-# Uses only built-in Windows tools: Register-ScheduledTask, cmdkey, PowerShell. No new deps.
+# Uses only built-in Windows tools: Register-ScheduledTask, CredWrite P/Invoke, PowerShell. No new deps.
 #
 # Usage:
 #   .\setup-scheduled-scan.ps1 -ApiKey <key> -Domain <url>
@@ -34,6 +34,63 @@ $WrapperScript  = Join-Path $InstallDir 'run-scheduled.ps1'
 $LogDir         = Join-Path $InstallDir 'Logs'
 $CredTargetBase = 'ai.getunbound.scheduled'
 
+# Load CredWrite P/Invoke so API keys are stored without appearing in the process
+# command line. cmdkey /pass: is visible in Windows Event Log 4688 (process
+# creation auditing), which enterprise SIEMs routinely capture.
+# Add-Type is blocked under PowerShell Constrained Language Mode (AppLocker/WDAC).
+# On CLM-enforced machines, exit with a clear diagnostic rather than falling back
+# to cmdkey /pass: which would expose the secret in audit logs.
+$_credWriteSrc = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class SetupCredMgr {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public int    Flags;
+        public int    Type;
+        [MarshalAs(UnmanagedType.LPWStr)] public string TargetName;
+        [MarshalAs(UnmanagedType.LPWStr)] public string Comment;
+        public long   LastWritten;
+        public int    CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public int    Persist;
+        public int    AttributeCount;
+        public IntPtr Attributes;
+        [MarshalAs(UnmanagedType.LPWStr)] public string TargetAlias;
+        [MarshalAs(UnmanagedType.LPWStr)] public string UserName;
+    }
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "CredWriteW")]
+    static extern bool CredWriteW(ref CREDENTIAL cred, uint flags);
+    public static void Write(string target, string user, string secret) {
+        var bytes = Encoding.Unicode.GetBytes(secret);
+        var pin   = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try {
+            var c = new CREDENTIAL {
+                Type               = 1,
+                TargetName         = target,
+                UserName           = user,
+                CredentialBlob     = pin.AddrOfPinnedObject(),
+                CredentialBlobSize = bytes.Length,
+                Persist            = 2
+            };
+            if (!CredWriteW(ref c, 0))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "CredWriteW failed for target: " + target);
+        } finally { pin.Free(); }
+    }
+}
+'@
+try {
+    Add-Type -TypeDefinition $_credWriteSrc -Language CSharp -ErrorAction Stop
+} catch {
+    Write-Error ("Add-Type failed: {0}. PowerShell is likely running under Constrained " +
+        "Language Mode (enforced by AppLocker or WDAC). Secure credential storage requires " +
+        "FullLanguage mode. Run setup under a session that allows FullLanguage mode." -f $_.Exception.Message)
+    exit 1
+}
+
 function Show-Usage {
     Write-Host @'
 Unbound Scheduled Run Setup (Windows)
@@ -57,13 +114,11 @@ function Store-Credential {
     param([string]$Account, [string]$Secret)
     if ([string]::IsNullOrEmpty($Secret)) { return }
     $target = "$CredTargetBase`:$Account"
-    # Remove existing, then add new. cmdkey silently overwrites if same target name,
-    # but explicit delete-then-add is more reliable across Windows versions.
+    # Delete first for idempotency; deletion exposes no secret.
     cmdkey /delete:$target *> $null
-    $null = cmdkey /generic:$target /user:$Account /pass:$Secret
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to store credential '$Account' in Windows Credential Manager"
-    }
+    # Write via CredWrite P/Invoke — keeps the secret out of the process command
+    # line (cmdkey /pass: appears in Event Log 4688 on audited systems).
+    [SetupCredMgr]::Write($target, $Account, $Secret)
 }
 
 function Remove-AllCredentials {

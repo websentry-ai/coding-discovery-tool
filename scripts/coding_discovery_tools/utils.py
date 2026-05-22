@@ -902,7 +902,7 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
 
 def get_claude_subscription_type(
     username: str,
-    claude_binary: str,
+    claude_binary: Optional[str] = None,
 ) -> Optional[str]:
     """
     Get the Claude Code subscription type for a specific user.
@@ -910,6 +910,12 @@ def get_claude_subscription_type(
     On macOS, first attempts a fast-path read directly from the macOS
     Keychain (~15ms).  Falls back to running 'claude auth status --json'
     as the specified user if the keychain read fails.
+
+    When ``claude_binary`` is ``None``, the command is passed through the
+    user's login shell (``shell -lc "claude auth status --json"``) so that
+    the shell's PATH resolves the binary.  This covers installations via
+    non-standard package managers (volta, pnpm, fnm, asdf, mise, etc.)
+    without needing to know the exact install path.
 
     On macOS when running as root, uses 'launchctl asuser <uid>' to execute
     in the user's Mach bootstrap namespace (required for Keychain access).
@@ -922,7 +928,8 @@ def get_claude_subscription_type(
 
     Args:
         username: System username to run the command as
-        claude_binary: Absolute path to the claude binary
+        claude_binary: Absolute path to the claude binary, or None to
+            let the user's login shell resolve ``claude`` via PATH.
 
     Returns:
         Subscription type string (e.g., "max", "pro", "team", "enterprise")
@@ -934,6 +941,12 @@ def get_claude_subscription_type(
             plan = _get_plan_from_keychain(username)
             if plan:
                 return plan
+
+        # Build the auth command — full path when known, bare name otherwise
+        if claude_binary:
+            auth_cmd = f"{shlex.quote(claude_binary)} auth status --json"
+        else:
+            auth_cmd = "claude auth status --json"
 
         # CLI fallback: spawn 'claude auth status --json'
         is_root = _is_root()
@@ -948,7 +961,7 @@ def get_claude_subscription_type(
                 cmd = [
                     "launchctl", "asuser", str(uid),
                     shell, "-lc",
-                    f"{shlex.quote(claude_binary)} auth status --json",
+                    auth_cmd,
                 ]
                 ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")
                 if ok:
@@ -967,14 +980,19 @@ def get_claude_subscription_type(
         if is_darwin and is_root:
             cmd = [
                 "su", "-", username, "-c",
-                f"{shlex.quote(claude_binary)} auth status --json",
+                auth_cmd,
             ]
             ok, plan = _run_auth_status(cmd, username, method="su")
             if ok:
                 return plan
 
         # Direct execution — final fallback for all platforms
-        cmd = [claude_binary, "auth", "status", "--json"]
+        if claude_binary:
+            cmd = [claude_binary, "auth", "status", "--json"]
+        else:
+            # No binary path known — use login shell to resolve via PATH
+            shell = _get_compatible_shell(username)
+            cmd = [shell, "-lc", auth_cmd]
         env = None
         if is_container:
             real_home = _get_real_home(username)

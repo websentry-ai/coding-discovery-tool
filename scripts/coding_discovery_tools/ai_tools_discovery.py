@@ -6,6 +6,7 @@ on macOS and Windows
 """
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -2041,6 +2042,28 @@ def main():
                             logger.info(f"  │ Permissions: ✗ Not present")
 
                         logger.info("  └──────────────────────────────────────────────────────────────────")
+                        logger.info("")
+
+                        # Log JSON payload (rules/skills content stripped to reduce volume)
+                        logger.info("  Complete JSON payload being sent to backend:")
+                        logger.info("  " + "=" * 70)
+                        try:
+                            log_report = copy.deepcopy(single_tool_report)
+                            for t in log_report.get("tools") or []:
+                                for p in t.get("projects") or []:
+                                    for r in p.get("rules") or []:
+                                        if "content" in r:
+                                            r["content"] = f"<{len(r['content'])} chars>"
+                                    for s in p.get("skills") or []:
+                                        if "content" in s:
+                                            s["content"] = f"<{len(s['content'])} chars>"
+                            report_json = json.dumps(log_report, indent=2)
+                            for line in report_json.split('\n'):
+                                logger.info(f"  {line}")
+                        except Exception as e:
+                            logger.warning(f"  Could not serialize report to JSON for logging: {e}")
+                            logger.info(f"  Report structure: {single_tool_report}")
+                        logger.info("  " + "=" * 70)
                         logger.info("")
 
                         # Send report to backend

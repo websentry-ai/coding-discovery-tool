@@ -118,6 +118,17 @@ logger = logging.getLogger(__name__)
 configure_logger()
 
 
+_METRIC_SAFE = frozenset('abcdefghijklmnopqrstuvwxyz0123456789_.-')
+
+
+def _metric_slug(name: str) -> str:
+    """Sanitize a tool name into a valid Sentry metric key segment."""
+    slug = ''.join(c if c in _METRIC_SAFE else '_' for c in name.lower())
+    if slug and not slug[0].isalpha() and slug[0] != '_':
+        slug = '_' + slug
+    return slug[:50] or 'unknown'
+
+
 class AIToolsDetector:
     """
     Detector for AI coding tools on macOS and Windows.
@@ -1906,6 +1917,7 @@ def main():
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
+            tool_slug = _metric_slug(tool_name)
             sentry_ctx["tool_name"] = tool_name
 
             logger.info("")
@@ -1917,7 +1929,7 @@ def main():
             try:
                 # Process this tool once (extract all rules and MCP configs for all users)
                 logger.info(f"  Extracting rules and MCP configs for {tool_name}...")
-                with time_step("process_single_tool", "process"):
+                with time_step(f"process_tool.{tool_slug}", "process"):
                     tool_with_projects = detector.process_single_tool(tool)
                 logger.info(f"  ✓ Processing complete for {tool_name}")
                 logger.info("")
@@ -2031,24 +2043,10 @@ def main():
                         logger.info("  └──────────────────────────────────────────────────────────────────")
                         logger.info("")
 
-                        # Log the complete JSON being sent to backend
-                        logger.info("  Complete JSON payload being sent to backend:")
-                        logger.info("  " + "=" * 70)
-                        with time_step("log_payload", "process"):
-                            try:
-                                report_json = json.dumps(single_tool_report, indent=2)
-                                for line in report_json.split('\n'):
-                                    logger.info(f"  {line}")
-                            except Exception as e:
-                                logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                                logger.info(f"  Report structure: {single_tool_report}")
-                        logger.info("  " + "=" * 70)
-                        logger.info("")
-
                         # Send report to backend
                         logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
-                        with time_step("send_report_per_tool_user", "send"):
+                        with time_step(f"send_tool.{tool_slug}", "send"):
                             success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                         if success:
                             logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")

@@ -126,18 +126,48 @@ log() {
 
 log "=== Starting Unbound Discovery ==="
 
-# Step 1: Retrieve credentials from Keychain
-API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || {
-    log "ERROR: Could not retrieve API key from Keychain"
-    exit 1
-}
+API_KEY=""
+DOMAIN=""
 
-DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || {
-    log "ERROR: Could not retrieve domain from Keychain"
-    exit 1
-}
+# Credential chain: managed preferences > system config > user keychain
+API_KEY=$(defaults read ai.getunbound.discovery api_key 2>/dev/null) || true
+DOMAIN=$(defaults read ai.getunbound.discovery domain 2>/dev/null) || true
 
-log "Credentials retrieved from Keychain"
+if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
+    log "Credentials retrieved from managed preferences"
+fi
+
+if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
+    SYSTEM_CONFIG="/Library/Application Support/Unbound/config"
+    if [ -f "$SYSTEM_CONFIG" ]; then
+        if [ -z "$API_KEY" ]; then
+            API_KEY=$(grep '^API_KEY=' "$SYSTEM_CONFIG" | head -1 | cut -d= -f2-)
+        fi
+        if [ -z "$DOMAIN" ]; then
+            DOMAIN=$(grep '^DOMAIN=' "$SYSTEM_CONFIG" | head -1 | cut -d= -f2-)
+        fi
+        if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
+            log "Credentials retrieved from system config"
+        fi
+    fi
+fi
+
+if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
+    if [ -z "$API_KEY" ]; then
+        API_KEY=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "api_key" -w 2>/dev/null) || true
+    fi
+    if [ -z "$DOMAIN" ]; then
+        DOMAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "domain" -w 2>/dev/null) || true
+    fi
+    if [ -n "$API_KEY" ] && [ -n "$DOMAIN" ]; then
+        log "Credentials retrieved from user keychain"
+    fi
+fi
+
+if [ -z "$API_KEY" ] || [ -z "$DOMAIN" ]; then
+    log "ERROR: No credentials found"
+    exit 1
+fi
 
 # Step 2: Download to permanent location (overwrites previous version)
 log "Downloading install script to: $SCRIPT_PATH"

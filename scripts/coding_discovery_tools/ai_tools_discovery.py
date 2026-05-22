@@ -1755,9 +1755,10 @@ def main():
 
     # Discovery only supports macOS/Windows. Exit cleanly on other platforms (Linux, etc.)
     # before detector init, which would otherwise raise and page Sentry on every run.
-    if platform.system() not in ("Darwin", "Windows"):
+    current_platform = platform.system()
+    if current_platform not in ("Darwin", "Windows"):
         print(
-            f"AI tool discovery is not supported on {platform.system()}. "
+            f"AI tool discovery is not supported on {current_platform}. "
             "The Unbound CLI works normally; skipping the discovery scan.",
             file=sys.stderr,
         )

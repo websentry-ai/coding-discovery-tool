@@ -903,6 +903,7 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
 def get_claude_subscription_type(
     username: str,
     claude_binary: Optional[str] = None,
+    diagnostics: Optional[List[Dict]] = None,
 ) -> Optional[str]:
     """
     Get the Claude Code subscription type for a specific user.
@@ -930,15 +931,42 @@ def get_claude_subscription_type(
         username: System username to run the command as
         claude_binary: Absolute path to the claude binary, or None to
             let the user's login shell resolve ``claude`` via PATH.
+        diagnostics: Optional list to collect breadcrumb dicts for
+            diagnostic reporting.  When ``None`` (the default), no
+            breadcrumbs are recorded and behaviour is identical to
+            previous versions.
 
     Returns:
         Subscription type string (e.g., "max", "pro", "team", "enterprise")
         or None if detection fails or user is not logged in
     """
     try:
+        is_root = _is_root()
+        binary_status = "provided" if claude_binary else "shell_resolution"
+
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "plan_detection",
+                "message": "Starting plan detection",
+                "level": "info",
+                "data": {
+                    "os": platform.system(),
+                    "is_root": is_root,
+                    "binary_status": binary_status,
+                    "username": username,
+                },
+            })
+
         # Fast path: read directly from macOS Keychain (no CLI needed)
         if platform.system() == "Darwin":
             plan = _get_plan_from_keychain(username)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "keychain",
+                    "message": f"Keychain result: {plan}" if plan else "Keychain returned None",
+                    "level": "info" if plan else "warning",
+                    "data": {"plan": plan},
+                })
             if plan:
                 return plan
 
@@ -949,7 +977,6 @@ def get_claude_subscription_type(
             auth_cmd = "claude auth status --json"
 
         # CLI fallback: spawn 'claude auth status --json'
-        is_root = _is_root()
         is_darwin = platform.system() == "Darwin"
         is_container = is_darwin and _is_daemon_container()
         use_launchctl = is_darwin and (is_root or is_container)
@@ -964,6 +991,13 @@ def get_claude_subscription_type(
                     auth_cmd,
                 ]
                 ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "category": "launchctl_asuser",
+                        "message": f"ok={ok}, plan={plan}",
+                        "level": "info" if ok else "warning",
+                        "data": {"ok": ok, "plan": plan, "uid": uid, "shell": shell},
+                    })
                 if ok:
                     return plan
                 logger.debug(
@@ -975,6 +1009,13 @@ def get_claude_subscription_type(
                     f"Could not resolve UID for {username}, "
                     f"skipping launchctl asuser"
                 )
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "category": "launchctl_asuser",
+                        "message": "UID resolution failed, skipping launchctl",
+                        "level": "warning",
+                        "data": {"uid": None},
+                    })
 
         # Fallback for root on macOS: su - username
         if is_darwin and is_root:
@@ -983,14 +1024,23 @@ def get_claude_subscription_type(
                 auth_cmd,
             ]
             ok, plan = _run_auth_status(cmd, username, method="su")
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "su_fallback",
+                    "message": f"ok={ok}, plan={plan}",
+                    "level": "info" if ok else "warning",
+                    "data": {"ok": ok, "plan": plan},
+                })
             if ok:
                 return plan
 
         # Direct execution — final fallback for all platforms
+        shell_fallback = False
         if claude_binary:
             cmd = [claude_binary, "auth", "status", "--json"]
         else:
             # No binary path known — use login shell to resolve via PATH
+            shell_fallback = True
             shell = _get_compatible_shell(username)
             cmd = [shell, "-lc", auth_cmd]
         env = None
@@ -1004,10 +1054,30 @@ def get_claude_subscription_type(
                     f"(daemon container detected)"
                 )
         ok, plan = _run_auth_status(cmd, username, method="direct", env=env)
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "direct_exec",
+                "message": f"ok={ok}, plan={plan}",
+                "level": "info" if ok else "warning",
+                "data": {
+                    "ok": ok,
+                    "plan": plan,
+                    "binary": claude_binary,
+                    "shell_fallback": shell_fallback,
+                    "daemon_container": is_container if is_darwin else False,
+                },
+            })
         return plan
 
     except Exception as e:
         logger.debug(f"Unexpected error getting subscription for {username}: {e}")
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "unexpected_error",
+                "message": f"{type(e).__name__}: {e}",
+                "level": "error",
+                "data": {"error_type": type(e).__name__, "error_message": str(e)},
+            })
         return None
 
 
@@ -1131,51 +1201,21 @@ _SENTRY_TAG_KEYS = (
 )
 
 
-def report_to_sentry(
-    exception: Exception,
-    context: Optional[Dict] = None,
-    level: str = "error",
-) -> None:
-    """Send an event to Sentry using the raw HTTP store endpoint.
+def _send_sentry_payload(payload: dict) -> None:
+    """Send a pre-built Sentry event payload via curl.
+
+    Handles DSN parsing, auth header construction, tmpfile transport, and
+    cleanup.  Never raises -- all errors are logged at DEBUG level.
 
     Args:
-        exception: The exception to report.
-        context: Extra tags/context (e.g. phase, tool_name, http_code).
-        level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+        payload: Complete Sentry event dict (must already contain event_id,
+            timestamp, level, etc.).
     """
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
         if not dsn:
             logger.debug("Sentry reporting skipped (no valid DSN configured)")
             return
-
-        ctx = context or {}
-
-        tags = {
-            "os": platform.system(),
-            "hostname": platform.node(),
-            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
-        }
-
-        payload = {
-            "event_id": os.urandom(16).hex(),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": level,
-            "platform": "python",
-            "environment": _SENTRY_ENV,
-            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
-            "tags": tags,
-            "exception": {
-                "values": [
-                    {
-                        "type": type(exception).__name__,
-                        "value": str(exception),
-                        "stacktrace": {"frames": _extract_frames(exception)},
-                    }
-                ]
-            },
-            "extra": ctx,
-        }
 
         sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
         fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-sentry-", suffix=".json")
@@ -1209,6 +1249,110 @@ def report_to_sentry(
     except Exception as sentry_err:
         # Sentry failures must never crash the script
         logger.debug(f"Sentry reporting failed: {sentry_err}")
+
+
+def report_to_sentry(
+    exception: Exception,
+    context: Optional[Dict] = None,
+    level: str = "error",
+) -> None:
+    """Send an exception event to Sentry using the raw HTTP store endpoint.
+
+    Args:
+        exception: The exception to report.
+        context: Extra tags/context (e.g. phase, tool_name, http_code).
+        level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+    """
+    try:
+        ctx = context or {}
+
+        tags = {
+            "os": platform.system(),
+            "hostname": platform.node(),
+            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
+        }
+
+        payload = {
+            "event_id": os.urandom(16).hex(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "platform": "python",
+            "environment": _SENTRY_ENV,
+            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
+            "tags": tags,
+            "exception": {
+                "values": [
+                    {
+                        "type": type(exception).__name__,
+                        "value": str(exception),
+                        "stacktrace": {"frames": _extract_frames(exception)},
+                    }
+                ]
+            },
+            "extra": ctx,
+        }
+
+        _send_sentry_payload(payload)
+    except Exception as sentry_err:
+        # Sentry failures must never crash the script
+        logger.debug(f"Sentry reporting failed: {sentry_err}")
+
+
+def report_message_to_sentry(
+    message: str,
+    context: Optional[Dict] = None,
+    breadcrumbs: Optional[List[Dict]] = None,
+    level: str = "warning",
+) -> None:
+    """Send a message event (not an exception) to Sentry.
+
+    Useful for diagnostic reporting when no exception has been raised but
+    something noteworthy happened (e.g. plan detection returned None).
+
+    Args:
+        message: Human-readable message describing the event.
+        context: Extra tags/context dict.
+        breadcrumbs: List of breadcrumb dicts with keys ``category``,
+            ``message``, ``level``, and optionally ``data``.
+        level: Sentry level (default "warning").
+    """
+    try:
+        ctx = context or {}
+
+        tags = {
+            "os": platform.system(),
+            "hostname": platform.node(),
+            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
+        }
+
+        sentry_breadcrumbs: List[Dict] = []
+        for bc in (breadcrumbs or []):
+            sentry_breadcrumbs.append({
+                "type": "default",
+                "category": bc.get("category", ""),
+                "message": bc.get("message", ""),
+                "level": bc.get("level", "info"),
+                "data": bc.get("data", {}),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        payload = {
+            "event_id": os.urandom(16).hex(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "platform": "python",
+            "environment": _SENTRY_ENV,
+            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
+            "tags": tags,
+            "message": {"formatted": message},
+            "breadcrumbs": {"values": sentry_breadcrumbs},
+            "extra": ctx,
+        }
+
+        _send_sentry_payload(payload)
+    except Exception as sentry_err:
+        # Sentry failures must never crash the script
+        logger.debug(f"Sentry message reporting failed: {sentry_err}")
 
 
 def _extract_frames(exception: Exception) -> List[Dict]:

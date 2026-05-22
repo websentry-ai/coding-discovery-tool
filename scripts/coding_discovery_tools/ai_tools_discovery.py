@@ -1966,17 +1966,19 @@ def main():
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
-                                    report_to_sentry(
-                                        RuntimeError(f"Claude Code plan detection failed for {user_name}"),
-                                        context={
-                                            **sentry_ctx,
-                                            "phase": "plan_detection",
-                                            "user": user_name,
-                                            "claude_binary": str(claude_bin) if claude_bin else "None",
-                                            "diagnostics": plan_diagnostics,
-                                        },
-                                        level="warning",
-                                    )
+                                    # Only alert when user actively uses Claude Code but plan is missing
+                                    if tool_filtered.get("projects"):
+                                        report_to_sentry(
+                                            RuntimeError(f"Claude Code plan detection failed for {user_name}"),
+                                            context={
+                                                **sentry_ctx,
+                                                "phase": "plan_detection",
+                                                "user": user_name,
+                                                "claude_binary": str(claude_bin) if claude_bin else "None",
+                                                "diagnostics": plan_diagnostics,
+                                            },
+                                            level="warning",
+                                        )
                             except (PermissionError, OSError) as e:
                                 logger.warning(f"    Could not detect plan for {user_name}: {e}")
 

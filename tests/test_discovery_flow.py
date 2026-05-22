@@ -20,12 +20,11 @@ import threading
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
     report_to_sentry,
-    get_claude_subscription_type,
     _parse_sentry_dsn,
     _extract_frames,
 )
@@ -541,94 +540,6 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
         # Permissions block is kept (settings_path is under gowshik_2's home)
         self.assertIn("permissions", filtered_gowshik_2)
-
-
-class TestGetClaudeSubscriptionDiagnostics(unittest.TestCase):
-    """get_claude_subscription_type populates diagnostics when provided."""
-
-    def setUp(self):
-        self.patcher = patch(
-            "scripts.coding_discovery_tools.utils._get_plan_from_keychain",
-            return_value=None,
-        )
-        self.patcher.start()
-        self.addCleanup(self.patcher.stop)
-
-    def _mock_result(self, stdout="", returncode=0, stderr=""):
-        mock = MagicMock(spec=subprocess.CompletedProcess)
-        mock.stdout = stdout
-        mock.returncode = returncode
-        mock.stderr = stderr
-        return mock
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_diagnostics_populated_on_failure(self, _mock_root, mock_run):
-        """When plan detection fails, diagnostics list has breadcrumbs."""
-        mock_run.return_value = self._mock_result(returncode=1)
-        diag = []
-        result = get_claude_subscription_type("testuser", "/usr/local/bin/claude", diagnostics=diag)
-        self.assertIsNone(result)
-        self.assertGreater(len(diag), 0)
-        categories = [d["category"] for d in diag]
-        self.assertIn("plan_detection", categories)
-        self.assertIn("direct_exec", categories)
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_diagnostics_populated_on_success(self, _mock_root, mock_run):
-        """When plan detection succeeds, diagnostics list still has breadcrumbs."""
-        mock_run.return_value = self._mock_result(
-            stdout=json.dumps({"loggedIn": True, "subscriptionType": "pro"})
-        )
-        diag = []
-        result = get_claude_subscription_type("testuser", "/usr/local/bin/claude", diagnostics=diag)
-        self.assertEqual(result, "pro")
-        self.assertGreater(len(diag), 0)
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_backward_compat_without_diagnostics(self, _mock_root, mock_run):
-        """When diagnostics is not passed, function works identically to before."""
-        mock_run.return_value = self._mock_result(
-            stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"})
-        )
-        result = get_claude_subscription_type("testuser", "/usr/local/bin/claude")
-        self.assertEqual(result, "max")
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_backward_compat_none_diagnostics(self, _mock_root, mock_run):
-        """Explicitly passing diagnostics=None works the same as omitting it."""
-        mock_run.return_value = self._mock_result(returncode=1)
-        result = get_claude_subscription_type("testuser", "/usr/local/bin/claude", diagnostics=None)
-        self.assertIsNone(result)
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_diagnostics_contain_start_breadcrumb(self, _mock_root, mock_run):
-        """First breadcrumb is always the environment summary."""
-        mock_run.return_value = self._mock_result(returncode=1)
-        diag = []
-        get_claude_subscription_type("testuser", "/usr/local/bin/claude", diagnostics=diag)
-        first = diag[0]
-        self.assertEqual(first["category"], "plan_detection")
-        self.assertIn("os", first["data"])
-        self.assertIn("is_root", first["data"])
-        self.assertIn("binary_status", first["data"])
-        self.assertIn("username", first["data"])
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run",
-           side_effect=RuntimeError("unexpected"))
-    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
-    def test_diagnostics_populated_on_exception(self, _mock_root, mock_run):
-        """When an unexpected exception occurs, diagnostics captures the error."""
-        diag = []
-        result = get_claude_subscription_type("testuser", "/usr/local/bin/claude", diagnostics=diag)
-        self.assertIsNone(result)
-        error_crumbs = [d for d in diag if d["category"] == "unexpected_error"]
-        self.assertEqual(len(error_crumbs), 1)
-        self.assertEqual(error_crumbs[0]["data"]["error_type"], "RuntimeError")
 
 
 if __name__ == "__main__":

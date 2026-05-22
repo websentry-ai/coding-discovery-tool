@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
     report_to_sentry,
-    report_message_to_sentry,
     get_claude_subscription_type,
     _parse_sentry_dsn,
     _extract_frames,
@@ -542,42 +541,6 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
         # Permissions block is kept (settings_path is under gowshik_2's home)
         self.assertIn("permissions", filtered_gowshik_2)
-
-
-class TestReportMessageToSentryNeverCrashes(unittest.TestCase):
-    """report_message_to_sentry must never raise, regardless of input."""
-
-    @patch.object(utils_mod, "_SENTRY_DSN", "")
-    def test_with_empty_dsn(self):
-        report_message_to_sentry("test message")
-
-    @patch.object(utils_mod, "_SENTRY_DSN", "not-a-valid-dsn")
-    def test_with_bad_dsn(self):
-        report_message_to_sentry("test message", level="error")
-
-    @patch.object(utils_mod, "_SENTRY_DSN", "")
-    def test_with_none_breadcrumbs(self):
-        report_message_to_sentry("msg", breadcrumbs=None)
-
-    @patch.object(utils_mod, "_SENTRY_DSN", "")
-    def test_with_empty_breadcrumbs(self):
-        report_message_to_sentry("msg", breadcrumbs=[])
-
-    @patch.object(utils_mod, "_SENTRY_DSN", "")
-    def test_with_populated_breadcrumbs(self):
-        crumbs = [
-            {"category": "keychain", "message": "Keychain returned None", "level": "warning", "data": {"plan": None}},
-            {"category": "direct_exec", "message": "ok=False, plan=None", "level": "warning", "data": {}},
-        ]
-        report_message_to_sentry("plan detection failed", context={"phase": "test"}, breadcrumbs=crumbs)
-
-    @patch.object(utils_mod, "_SENTRY_DSN", "")
-    def test_with_none_context(self):
-        report_message_to_sentry("msg", context=None, level="warning")
-
-    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@localhost:1/0")
-    def test_with_unreachable_host(self):
-        report_message_to_sentry("unreachable", context={"phase": "test"})
 
 
 class TestGetClaudeSubscriptionDiagnostics(unittest.TestCase):

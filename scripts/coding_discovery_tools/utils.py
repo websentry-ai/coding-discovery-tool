@@ -1201,21 +1201,51 @@ _SENTRY_TAG_KEYS = (
 )
 
 
-def _send_sentry_payload(payload: dict) -> None:
-    """Send a pre-built Sentry event payload via curl.
-
-    Handles DSN parsing, auth header construction, tmpfile transport, and
-    cleanup.  Never raises -- all errors are logged at DEBUG level.
+def report_to_sentry(
+    exception: Exception,
+    context: Optional[Dict] = None,
+    level: str = "error",
+) -> None:
+    """Send an event to Sentry using the raw HTTP store endpoint.
 
     Args:
-        payload: Complete Sentry event dict (must already contain event_id,
-            timestamp, level, etc.).
+        exception: The exception to report.
+        context: Extra tags/context (e.g. phase, tool_name, http_code).
+        level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
     """
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
         if not dsn:
             logger.debug("Sentry reporting skipped (no valid DSN configured)")
             return
+
+        ctx = context or {}
+
+        tags = {
+            "os": platform.system(),
+            "hostname": platform.node(),
+            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
+        }
+
+        payload = {
+            "event_id": os.urandom(16).hex(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "platform": "python",
+            "environment": _SENTRY_ENV,
+            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
+            "tags": tags,
+            "exception": {
+                "values": [
+                    {
+                        "type": type(exception).__name__,
+                        "value": str(exception),
+                        "stacktrace": {"frames": _extract_frames(exception)},
+                    }
+                ]
+            },
+            "extra": ctx,
+        }
 
         sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
         fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-sentry-", suffix=".json")
@@ -1249,110 +1279,6 @@ def _send_sentry_payload(payload: dict) -> None:
     except Exception as sentry_err:
         # Sentry failures must never crash the script
         logger.debug(f"Sentry reporting failed: {sentry_err}")
-
-
-def report_to_sentry(
-    exception: Exception,
-    context: Optional[Dict] = None,
-    level: str = "error",
-) -> None:
-    """Send an exception event to Sentry using the raw HTTP store endpoint.
-
-    Args:
-        exception: The exception to report.
-        context: Extra tags/context (e.g. phase, tool_name, http_code).
-        level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
-    """
-    try:
-        ctx = context or {}
-
-        tags = {
-            "os": platform.system(),
-            "hostname": platform.node(),
-            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
-        }
-
-        payload = {
-            "event_id": os.urandom(16).hex(),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": level,
-            "platform": "python",
-            "environment": _SENTRY_ENV,
-            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
-            "tags": tags,
-            "exception": {
-                "values": [
-                    {
-                        "type": type(exception).__name__,
-                        "value": str(exception),
-                        "stacktrace": {"frames": _extract_frames(exception)},
-                    }
-                ]
-            },
-            "extra": ctx,
-        }
-
-        _send_sentry_payload(payload)
-    except Exception as sentry_err:
-        # Sentry failures must never crash the script
-        logger.debug(f"Sentry reporting failed: {sentry_err}")
-
-
-def report_message_to_sentry(
-    message: str,
-    context: Optional[Dict] = None,
-    breadcrumbs: Optional[List[Dict]] = None,
-    level: str = "warning",
-) -> None:
-    """Send a message event (not an exception) to Sentry.
-
-    Useful for diagnostic reporting when no exception has been raised but
-    something noteworthy happened (e.g. plan detection returned None).
-
-    Args:
-        message: Human-readable message describing the event.
-        context: Extra tags/context dict.
-        breadcrumbs: List of breadcrumb dicts with keys ``category``,
-            ``message``, ``level``, and optionally ``data``.
-        level: Sentry level (default "warning").
-    """
-    try:
-        ctx = context or {}
-
-        tags = {
-            "os": platform.system(),
-            "hostname": platform.node(),
-            **{k: str(ctx[k]) for k in _SENTRY_TAG_KEYS if k in ctx},
-        }
-
-        sentry_breadcrumbs: List[Dict] = []
-        for bc in (breadcrumbs or []):
-            sentry_breadcrumbs.append({
-                "type": "default",
-                "category": bc.get("category", ""),
-                "message": bc.get("message", ""),
-                "level": bc.get("level", "info"),
-                "data": bc.get("data", {}),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-
-        payload = {
-            "event_id": os.urandom(16).hex(),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": level,
-            "platform": "python",
-            "environment": _SENTRY_ENV,
-            "sdk": {"name": "ai-tools-discovery", "version": "1.0.0"},
-            "tags": tags,
-            "message": {"formatted": message},
-            "breadcrumbs": {"values": sentry_breadcrumbs},
-            "extra": ctx,
-        }
-
-        _send_sentry_payload(payload)
-    except Exception as sentry_err:
-        # Sentry failures must never crash the script
-        logger.debug(f"Sentry message reporting failed: {sentry_err}")
 
 
 def _extract_frames(exception: Exception) -> List[Dict]:

@@ -8,6 +8,7 @@ user-specific paths like ~/.nvm, ~/.bun, and user configuration directories.
 import logging
 import os
 import platform
+import shutil
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -351,5 +352,18 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                     continue
     except (PermissionError, OSError):
         pass
+
+    # Fallback: use PATH lookup only for the current user
+    # (PATH belongs to the current user; using it for other users would
+    #  return the wrong binary and attribute the wrong plan to them)
+    try:
+        is_current_user = user_home == Path.home()
+    except (RuntimeError, OSError):
+        is_current_user = False
+    if is_current_user:
+        which_result = shutil.which("claude")
+        if which_result:
+            logger.debug(f"Claude binary found via PATH lookup: {which_result}")
+            return which_result
 
     return None

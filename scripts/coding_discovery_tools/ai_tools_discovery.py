@@ -1958,13 +1958,27 @@ def main():
                                     claude_bin = find_claude_binary_for_user(user_home)
                                 if claude_bin is None:
                                     logger.debug(f"    Claude binary not found for {user_name}, using shell resolution")
+                                plan_diagnostics = []
                                 with time_step("detect_subscriptions", "process"):
-                                    subscription = get_claude_subscription_type(user_name, claude_bin)
+                                    subscription = get_claude_subscription_type(user_name, claude_bin, diagnostics=plan_diagnostics)
                                 if subscription:
                                     tool_filtered["plan"] = subscription
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
+                                    # Only alert when user actively uses Claude Code but plan is missing
+                                    if tool_filtered.get("projects"):
+                                        report_to_sentry(
+                                            RuntimeError(f"Claude Code plan detection failed for {user_name}"),
+                                            context={
+                                                **sentry_ctx,
+                                                "phase": "plan_detection",
+                                                "user": user_name,
+                                                "claude_binary": str(claude_bin) if claude_bin else "None",
+                                                "diagnostics": plan_diagnostics,
+                                            },
+                                            level="warning",
+                                        )
                             except (PermissionError, OSError) as e:
                                 logger.warning(f"    Could not detect plan for {user_name}: {e}")
 

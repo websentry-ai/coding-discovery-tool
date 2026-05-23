@@ -223,6 +223,10 @@ main() {
         *) [ -n "${UNBOUND_API_KEY:-}" ] && _extra_args+=(--api-key "$UNBOUND_API_KEY") ;;
     esac
 
+    # NOTE: the Python subprocess still receives --api-key as a CLI argument, so the
+    # key appears in /proc/pid/cmdline and ps for the duration of the Python process.
+    # This is a pre-existing limitation of the Python entry point (not introduced by
+    # this PR); the scheduled wrapper already avoids exposing the key at the shell level.
     $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "${_extra_args[@]}" "$@"
 }
 

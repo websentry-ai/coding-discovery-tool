@@ -119,6 +119,9 @@ function Main {
 
     Push-Location $TEMP_DIR
     try {
+        # NOTE: --api-key appears in the Python process command line (Win32_Process.CommandLine /
+        # Event Log 4688). This is a pre-existing limitation of the Python entry point,
+        # the wrapper already avoids exposing the key at the PS level.
         $pythonArgs = @("-m", "scripts.coding_discovery_tools.ai_tools_discovery", "--api-key", $ApiKey, "--domain", $Domain)
         if ($AppName) { $pythonArgs += @("--app_name", $AppName) }
         

@@ -934,7 +934,14 @@ def extract_global_mcp_config_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
-    
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/home")
+        except ImportError:
+            pass
+
     # When running as admin/root, prioritize checking user directories first
     if is_admin and users_dir and users_dir.exists():
         for user_dir in users_dir.iterdir():
@@ -1012,7 +1019,14 @@ def extract_ide_global_configs_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
-    
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/home")
+        except ImportError:
+            pass
+
     # When running as admin/root, check all users
     if is_admin and users_dir and users_dir.exists():
         for user_dir in users_dir.iterdir():
@@ -1296,7 +1310,14 @@ def extract_dual_path_configs_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
-    
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/home")
+        except ImportError:
+            pass
+
     # When running as admin/root, check all users
     if is_admin and users_dir and users_dir.exists():
         for user_dir in users_dir.iterdir():
@@ -1464,6 +1485,13 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/home")
+        except ImportError:
+            pass
 
     if is_admin and users_dir and users_dir.exists():
         for user_dir in users_dir.iterdir():
@@ -1700,6 +1728,13 @@ def extract_claude_plugin_mcp_configs_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+            users_dir = Path("/home")
+        except ImportError:
+            pass
 
     if is_admin and users_dir and users_dir.exists():
         for user_dir in users_dir.iterdir():

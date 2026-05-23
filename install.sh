@@ -210,21 +210,28 @@ main() {
     # Check dependencies (silently)
     check_python
     download_repo
-    
+
     # Change to repository root directory
     cd "$TEMP_DIR"
-    
-    # Execute the discovery script with all provided arguments
-    # (The Python script will handle its own output)
-    $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "$@"
+
+    # Accept --api-key via UNBOUND_API_KEY env var so the scheduled wrapper can
+    # avoid putting the key value in /proc/pid/cmdline or ps output. Only prepend
+    # the flag if --api-key is not already present in the explicit arguments.
+    _extra_args=()
+    case " $* " in
+        *" --api-key "*) ;;
+        *) [ -n "${UNBOUND_API_KEY:-}" ] && _extra_args+=(--api-key "$UNBOUND_API_KEY") ;;
+    esac
+
+    $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "${_extra_args[@]}" "$@"
 }
 
 # ==============================================================================
 # ARGUMENT PARSING AND SCRIPT ENTRY POINT
 # ==============================================================================
 
-# Check if arguments were provided
-if [ $# -eq 0 ]; then
+# Check if arguments were provided (allow skipping --api-key when env var is set)
+if [ $# -eq 0 ] && [ -z "${UNBOUND_API_KEY:-}" ]; then
     echo ""
     print_error "Missing required arguments"
     echo ""

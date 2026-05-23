@@ -138,6 +138,11 @@ from .macos.junie.junie import MacOSJunieDetector
 from .macos.junie.mcp_config_extractor import MacOSJunieMCPConfigExtractor
 from .macos.junie.junie_rules_extractor import MacOSJunieRulesExtractor
 
+# Windows - Junie
+from .windows.junie.junie import WindowsJunieDetector
+from .windows.junie.mcp_config_extractor import WindowsJunieMCPConfigExtractor
+from .windows.junie.junie_rules_extractor import WindowsJunieRulesExtractor
+
 # Windows - JetBrains
 from .windows.jetbrains.jetbrains import WindowsJetBrainsDetector
 from .windows.jetbrains.mcp_config_extractor import WindowsJetBrainsMCPConfigExtractor
@@ -569,6 +574,8 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSJunieDetector()
+        elif os_name == "Windows":
+            return WindowsJunieDetector()
         else:
             return None
 
@@ -1299,6 +1306,8 @@ class JunieMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSJunieMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsJunieMCPConfigExtractor()
         else:
             return None
 
@@ -1322,6 +1331,8 @@ class JunieRulesExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSJunieRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsJunieRulesExtractor()
         else:
             return None
 

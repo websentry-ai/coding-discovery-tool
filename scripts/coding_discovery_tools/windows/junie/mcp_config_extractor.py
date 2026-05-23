@@ -13,7 +13,9 @@ from ...windows_extraction_helpers import scan_windows_user_directories
 logger = logging.getLogger(__name__)
 
 _TOOL_NAME = "Junie"
-_PARENT_LEVELS = 2
+# ~\.junie\mcp\mcp.json -> 3 levels up = ~ (home), matching how every other
+# global MCP config keys its `path` to the user's home directory.
+_PARENT_LEVELS = 3
 
 
 class WindowsJunieMCPConfigExtractor(BaseMCPConfigExtractor):

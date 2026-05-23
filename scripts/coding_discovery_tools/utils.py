@@ -823,7 +823,7 @@ def _run_auth_status(
 
         parsed = json.loads(result.stdout.strip())
         plan = parsed.get("subscriptionType")
-        if plan is None and parsed.get("authMethod") == "api_key":
+        if plan is None and str(parsed.get("authMethod", "")).lower() == "api_key":
             plan = "api_key"
         return (True, plan)
 

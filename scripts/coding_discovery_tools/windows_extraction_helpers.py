@@ -214,7 +214,7 @@ def _detect_rule_scope(rule_file: Path) -> str:
     Path.home() so that scope detection works correctly when running
     as admin via MDM (where Path.home() may not match the actual user).
     """
-    config_dir_names = {".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"}
+    config_dir_names = {".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini", ".junie"}
     try:
         parts = rule_file.resolve().parts
         # On Windows: ('C:\\', 'Users', '<username>', '.<config_dir>', ...)

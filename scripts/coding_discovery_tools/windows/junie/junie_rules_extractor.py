@@ -16,8 +16,8 @@ from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
     extract_single_rule_file,
-    is_running_as_admin,
     is_user_level_tool_dir,
+    scan_windows_user_directories,
     should_skip_path,
     get_windows_system_directories,
 )
@@ -58,7 +58,12 @@ class WindowsJunieRulesExtractor(BaseJunieRulesExtractor):
         return build_project_list(projects_by_root)
 
     def _extract_global_rules(self, projects_by_root: Dict[str, List[Dict]]) -> None:
-        """Extract global Junie rules from ~\\.junie\\, scanning all users when admin."""
+        """Extract global Junie rules from ~\\.junie\\, scanning all users when admin.
+
+        Uses the shared scan_windows_user_directories helper, which centralises
+        the admin/non-admin branching, excludes system/default accounts
+        (Public, Default, etc.), and handles PermissionError.
+        """
         def extract_for_user(user_home: Path) -> None:
             junie_dir = user_home / JUNIE_DIR_NAME
             if not junie_dir.exists() or not junie_dir.is_dir():
@@ -66,7 +71,9 @@ class WindowsJunieRulesExtractor(BaseJunieRulesExtractor):
             try:
                 for md_file in junie_dir.glob("*.md"):
                     if md_file.is_file() and not should_skip_path(md_file, set()):
-                        rule_info = extract_single_rule_file(md_file, find_junie_project_root)
+                        rule_info = extract_single_rule_file(
+                            md_file, find_junie_project_root, scope="user"
+                        )
                         if rule_info:
                             project_root = rule_info.get('project_root')
                             if project_root:
@@ -74,18 +81,7 @@ class WindowsJunieRulesExtractor(BaseJunieRulesExtractor):
             except Exception as e:
                 logger.debug(f"Error extracting global Junie rules for {user_home}: {e}")
 
-        if is_running_as_admin():
-            users_dir = Path(Path.home().anchor) / "Users"
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        try:
-                            extract_for_user(user_dir)
-                        except (PermissionError, OSError) as e:
-                            logger.debug(f"Skipping user directory {user_dir}: {e}")
-                            continue
-        else:
-            extract_for_user(Path.home())
+        scan_windows_user_directories(extract_for_user)
 
     def _extract_project_level_rules(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """Walk the drive recursively for project-level .junie directories."""

@@ -8,7 +8,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import read_global_mcp_config
-from ...windows_extraction_helpers import is_running_as_admin
+from ...windows_extraction_helpers import scan_windows_user_directories
 
 logger = logging.getLogger(__name__)
 
@@ -28,30 +28,19 @@ class WindowsJunieMCPConfigExtractor(BaseMCPConfigExtractor):
         return {"projects": projects} if projects else None
 
     def _extract_global_configs(self) -> List[Dict]:
-        """Extract global MCP configs from ~\\.junie\\mcp\\mcp.json for each user."""
+        """Extract global MCP configs from ~\\.junie\\mcp\\mcp.json for each user.
+
+        Uses the shared scan_windows_user_directories helper for consistent
+        admin/non-admin branching and system-account exclusion.
+        """
         configs: List[Dict] = []
 
-        if is_running_as_admin():
-            users_dir = Path(Path.home().anchor) / "Users"
-            if users_dir.exists():
-                excluded = {'public', 'default', 'default user', 'all users'}
-                for user_dir in users_dir.iterdir():
-                    if not user_dir.is_dir() or user_dir.name.startswith('.'):
-                        continue
-                    if user_dir.name.lower() in excluded:
-                        continue
-                    try:
-                        config = self._extract_config_for_user(user_dir)
-                        if config:
-                            configs.append(config)
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Skipping user directory {user_dir}: {e}")
-                        continue
-        else:
-            config = self._extract_config_for_user(Path.home())
+        def collect_for_user(user_home: Path) -> None:
+            config = self._extract_config_for_user(user_home)
             if config:
                 configs.append(config)
 
+        scan_windows_user_directories(collect_for_user)
         return configs
 
     def _extract_config_for_user(self, user_home: Path) -> Optional[Dict]:

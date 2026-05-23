@@ -10,10 +10,10 @@ profile under ``C:\\Users``; otherwise just the current user's home.
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseToolDetector
-from ...windows_extraction_helpers import is_running_as_admin
+from ...windows_extraction_helpers import scan_windows_user_directories
 
 logger = logging.getLogger(__name__)
 
@@ -29,26 +29,23 @@ class WindowsJunieDetector(BaseToolDetector):
         return "Junie"
 
     def detect(self) -> Optional[Dict]:
-        """Detect Junie installation on Windows."""
-        if is_running_as_admin():
-            users_dir = Path(Path.home().anchor) / "Users"
-            if users_dir.exists():
-                excluded = {'public', 'default', 'default user', 'all users'}
-                for user_dir in users_dir.iterdir():
-                    if not user_dir.is_dir() or user_dir.name.startswith('.'):
-                        continue
-                    if user_dir.name.lower() in excluded:
-                        continue
-                    try:
-                        result = self._detect_junie_for_user(user_dir)
-                        if result:
-                            return result
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Skipping user directory {user_dir}: {e}")
-                        continue
-            return None
-        else:
-            return self._detect_junie_for_user(Path.home())
+        """Detect Junie installation on Windows.
+
+        Uses the shared scan_windows_user_directories helper for consistent
+        admin/non-admin branching and system-account exclusion, returning the
+        first user's installation found.
+        """
+        found: List[Dict] = []
+
+        def check_user(user_home: Path) -> None:
+            if found:
+                return
+            result = self._detect_junie_for_user(user_home)
+            if result:
+                found.append(result)
+
+        scan_windows_user_directories(check_user)
+        return found[0] if found else None
 
     def get_version(self) -> Optional[str]:
         """Extract Junie version."""

@@ -13,7 +13,9 @@ from ...mcp_extraction_helpers import read_global_mcp_config
 logger = logging.getLogger(__name__)
 
 _TOOL_NAME = "Junie"
-_PARENT_LEVELS = 2
+# ~/.junie/mcp/mcp.json -> 3 levels up = ~ (home), matching how every other
+# global MCP config keys its `path` to the user's home directory.
+_PARENT_LEVELS = 3
 
 
 class LinuxJunieMCPConfigExtractor(BaseMCPConfigExtractor):

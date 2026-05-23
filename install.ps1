@@ -61,6 +61,16 @@ function Get-Repository {
 
 # --- MAIN EXECUTION ---
 function Main {
+    # Accept UNBOUND_API_KEY / UNBOUND_DOMAIN env vars so the scheduled wrapper
+    # can invoke this script via -File without putting credentials in the command
+    # line (which Win32_Process.CommandLine and Event Log 4688 capture).
+    if ([string]::IsNullOrEmpty($ApiKey) -and -not [string]::IsNullOrEmpty($env:UNBOUND_API_KEY)) {
+        $ApiKey = $env:UNBOUND_API_KEY
+    }
+    if ([string]::IsNullOrEmpty($Domain) -and -not [string]::IsNullOrEmpty($env:UNBOUND_DOMAIN)) {
+        $Domain = $env:UNBOUND_DOMAIN
+    }
+
     if (-not $ApiKey -or -not $Domain) {
         Write-ErrorMessage "Missing required arguments: -ApiKey and -Domain"
         exit 1

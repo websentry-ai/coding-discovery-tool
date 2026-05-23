@@ -124,6 +124,9 @@ store_credentials_linux() {
     # file-write in a subshell with umask 077 so both the parent directory
     # and the file get tight permissions (dir 0700, file 0600), and the
     # umask change doesn't leak into subsequent file creation (wrapper, logs).
+    # Escapes \ and " only. Control characters (newlines, tabs) are not escaped
+    # because API keys and domain URLs never contain them; the simpler form is
+    # sufficient and avoids complex multi-line sed pipelines.
     json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
     local cmd_e key_e disc_e dom_e
     cmd_e=$(json_escape "$COMMAND")
@@ -150,6 +153,9 @@ remove_credentials_linux() {
     if [ -f "$CREDS_FILE_LINUX" ]; then
         rm -f "$CREDS_FILE_LINUX"
         echo "  Removed credentials file"
+        # Remove the parent dir if it is now empty (rmdir is a no-op if non-empty,
+        # so this is safe when other Unbound components share the directory).
+        rmdir "$(dirname "$CREDS_FILE_LINUX")" 2>/dev/null || true
     fi
 }
 

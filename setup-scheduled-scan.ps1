@@ -235,16 +235,13 @@ switch ($Command) {
                 exit 1
             }
             Write-Log "Executing install.ps1"
-            # Credentials go via env vars — Win32_Process.CommandLine is readable by any
-            # authenticated user and Windows Event Log 4688 captures full command lines.
+            # Pass credentials via env vars only. Using -File (not -Command) means the
+            # child process command line contains only the script path — no credentials.
+            # install.ps1 reads UNBOUND_API_KEY / UNBOUND_DOMAIN from the inherited env.
+            # Win32_Process.CommandLine and Event Log 4688 will show only the file path.
             $env:UNBOUND_API_KEY = $ApiKey
             $env:UNBOUND_DOMAIN  = $Domain
-            # Escape any apostrophes in the path before embedding it inside a
-            # single-quoted PowerShell expression. A username like O'Brien turns
-            # $env:LOCALAPPDATA into a path with a literal apostrophe; without
-            # the escape that apostrophe would break the -Command string.
-            $safeInstallScript = $installScript -replace "'", "''"
-            & powershell -NoProfile -ExecutionPolicy Bypass -Command "& '$safeInstallScript' -ApiKey `$env:UNBOUND_API_KEY -Domain `$env:UNBOUND_DOMAIN" *>> $LogFile
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript *>> $LogFile
             $ec = $LASTEXITCODE
         } catch {
             Write-Log ("ERROR: discover wrapper failed: {0}" -f $_.Exception.Message)

@@ -1966,8 +1966,14 @@ def main():
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
-                                    # Only alert when user actively uses Claude Code but plan is missing
-                                    if tool_filtered.get("projects"):
+                                    # Only alert when the CLI actually succeeded (ok=True) at
+                                    # some stage but returned no plan.  If every stage failed
+                                    # (ok=False), the user never authenticated — not actionable.
+                                    cli_succeeded = any(
+                                        d.get("data", {}).get("ok") is True
+                                        for d in plan_diagnostics
+                                    )
+                                    if tool_filtered.get("projects") and cli_succeeded:
                                         report_to_sentry(
                                             RuntimeError(f"Claude Code plan detection failed for {user_name}"),
                                             context={

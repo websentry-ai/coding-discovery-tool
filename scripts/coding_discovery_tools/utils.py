@@ -795,14 +795,14 @@ def _run_auth_status(
     username: str,
     method: str = "direct",
     env: Optional[dict] = None,
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[str]]:
     """Execute an auth-status command and parse the subscription type.
 
-    Returns a tuple of (success, subscription_type):
-    - (True, "max")      — command ran successfully, user has a plan
-    - (True, "api_key")  — command ran, user authenticated via API key (no subscription)
-    - (True, None)       — command ran successfully, user is not logged in
-    - (False, None)      — command failed (non-zero exit, timeout, OS error)
+    Returns a tuple of (success, subscription_type, auth_method):
+    - (True, "max", "oauth")    — command ran successfully, user has a plan
+    - (True, "api_key", "api_key") — command ran, user authenticated via API key
+    - (True, None, None)        — command ran successfully, user is not logged in
+    - (False, None, None)       — command failed (non-zero exit, timeout, OS error)
     """
     try:
         result = subprocess.run(
@@ -819,23 +819,24 @@ def _run_auth_status(
                 f"{username}: rc={result.returncode}, "
                 f"stderr={result.stderr.strip()}"
             )
-            return (False, None)
+            return (False, None, None)
 
         parsed = json.loads(result.stdout.strip())
+        auth_method = parsed.get("authMethod")
         plan = parsed.get("subscriptionType")
-        if plan is None and str(parsed.get("authMethod", "")).lower() == "api_key":
+        if plan is None and str(auth_method or "").lower() == "api_key":
             plan = "api_key"
-        return (True, plan)
+        return (True, plan, auth_method)
 
     except subprocess.TimeoutExpired:
         logger.debug(f"claude auth status ({method}) timed out for {username}")
-        return (False, None)
+        return (False, None, None)
     except json.JSONDecodeError:
         logger.warning(f"claude auth status ({method}) returned non-JSON for {username}")
-        return (False, None)
+        return (False, None, None)
     except OSError as e:
         logger.debug(f"Could not run claude auth status ({method}) for {username}: {e}")
-        return (False, None)
+        return (False, None, None)
 
 
 def _get_plan_from_keychain(username: str) -> Optional[str]:
@@ -994,13 +995,13 @@ def get_claude_subscription_type(
                     shell, "-lc",
                     auth_cmd,
                 ]
-                ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")
+                ok, plan, auth_method = _run_auth_status(cmd, username, method="launchctl asuser")
                 if diagnostics is not None:
                     diagnostics.append({
                         "category": "launchctl_asuser",
                         "message": f"ok={ok}, plan={plan}",
                         "level": "info" if ok else "warning",
-                        "data": {"ok": ok, "plan": plan, "uid": uid, "shell": shell},
+                        "data": {"ok": ok, "plan": plan, "auth_method": auth_method, "uid": uid, "shell": shell},
                     })
                 if ok:
                     return plan
@@ -1027,13 +1028,13 @@ def get_claude_subscription_type(
                 "su", "-", username, "-c",
                 auth_cmd,
             ]
-            ok, plan = _run_auth_status(cmd, username, method="su")
+            ok, plan, auth_method = _run_auth_status(cmd, username, method="su")
             if diagnostics is not None:
                 diagnostics.append({
                     "category": "su_fallback",
                     "message": f"ok={ok}, plan={plan}",
                     "level": "info" if ok else "warning",
-                    "data": {"ok": ok, "plan": plan},
+                    "data": {"ok": ok, "plan": plan, "auth_method": auth_method},
                 })
             if ok:
                 return plan
@@ -1057,7 +1058,7 @@ def get_claude_subscription_type(
                     f"Overriding HOME to {real_home} for {username} "
                     f"(daemon container detected)"
                 )
-        ok, plan = _run_auth_status(cmd, username, method="direct", env=env)
+        ok, plan, auth_method = _run_auth_status(cmd, username, method="direct", env=env)
         if diagnostics is not None:
             diagnostics.append({
                 "category": "direct_exec",
@@ -1066,6 +1067,7 @@ def get_claude_subscription_type(
                 "data": {
                     "ok": ok,
                     "plan": plan,
+                    "auth_method": auth_method,
                     "binary": claude_binary,
                     "shell_fallback": shell_fallback,
                     "daemon_container": is_container if is_darwin else False,

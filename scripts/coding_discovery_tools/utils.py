@@ -799,9 +799,10 @@ def _run_auth_status(
     """Execute an auth-status command and parse the subscription type.
 
     Returns a tuple of (success, subscription_type):
-    - (True, "max")  — command ran successfully, user has a plan
-    - (True, None)   — command ran successfully, user is not logged in
-    - (False, None)  — command failed (non-zero exit, timeout, OS error)
+    - (True, "max")      — command ran successfully, user has a plan
+    - (True, "api_key")  — command ran, user authenticated via API key (no subscription)
+    - (True, None)       — command ran successfully, user is not logged in
+    - (False, None)      — command failed (non-zero exit, timeout, OS error)
     """
     try:
         result = subprocess.run(
@@ -821,7 +822,10 @@ def _run_auth_status(
             return (False, None)
 
         parsed = json.loads(result.stdout.strip())
-        return (True, parsed.get("subscriptionType"))
+        plan = parsed.get("subscriptionType")
+        if plan is None and parsed.get("authMethod") == "api_key":
+            plan = "api_key"
+        return (True, plan)
 
     except subprocess.TimeoutExpired:
         logger.debug(f"claude auth status ({method}) timed out for {username}")
@@ -937,8 +941,8 @@ def get_claude_subscription_type(
             previous versions.
 
     Returns:
-        Subscription type string (e.g., "max", "pro", "team", "enterprise")
-        or None if detection fails or user is not logged in
+        Subscription type string (e.g., "max", "pro", "team", "enterprise",
+        "api_key") or None if detection fails or user is not logged in
     """
     try:
         is_root = _is_root()

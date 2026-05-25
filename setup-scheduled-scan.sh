@@ -167,13 +167,20 @@ create_wrapper_script() {
     # available). Baking the absolute path into the wrapper avoids the common failure
     # where cron/systemd --user/launchd invoke the wrapper with a minimal PATH that
     # omits nvm version dirs, non-standard npm prefix paths, or pipx roots.
-    local RESOLVED_UNBOUND NPM_BIN
+    local RESOLVED_UNBOUND NPM_PREFIX NPM_BIN
     RESOLVED_UNBOUND=$(command -v unbound 2>/dev/null || true)
     # Also capture the active npm global bin dir at install time so it can be prepended
     # to PATH in the wrapper. 'npm config get prefix' follows nvm and other prefix
     # overrides, giving the correct per-user bin dir even on machines that differ from
-    # the system default.
-    NPM_BIN=$(npm config get prefix 2>/dev/null)/bin
+    # the system default. Guard with '|| true' so a host without npm does not abort
+    # the whole setup under 'set -euo pipefail'. NPM_BIN carries its own trailing
+    # colon only when resolved, so an npm-absent host doesn't leave a leading ':'
+    # in the wrapper PATH (which would put the CWD on PATH).
+    NPM_PREFIX=$(npm config get prefix 2>/dev/null || true)
+    NPM_BIN=""
+    if [ -n "$NPM_PREFIX" ]; then
+        NPM_BIN="${NPM_PREFIX}/bin:"
+    fi
 
     cat > "$WRAPPER_SCRIPT" <<WRAPPER_EOF
 #!/bin/bash
@@ -184,8 +191,9 @@ set -euo pipefail
 # the dirs npm-global / nvm / homebrew / pipx use, so 'unbound' and 'curl'
 # would not be found. Prepend the common user-binary dirs so the onboard
 # branch below can locate the CLI regardless of which scheduler triggered us.
-# ${NPM_BIN} is the active npm global bin dir resolved at install time (follows nvm).
-export PATH="${NPM_BIN}:\$HOME/.local/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH"
+# ${NPM_BIN} is the active npm global bin dir resolved at install time (follows nvm);
+# it already includes a trailing colon when set, and is empty when npm is absent.
+export PATH="${NPM_BIN}\$HOME/.local/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH"
 
 OS=""
 case "\$(uname -s)" in

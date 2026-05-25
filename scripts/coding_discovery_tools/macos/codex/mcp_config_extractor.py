@@ -187,41 +187,60 @@ def _parse_server_section(section_content: str) -> Dict[str, Any]:
 
 def parse_toml_mcp_servers(content: str) -> Optional[Dict[str, Dict[str, Any]]]:
     """
-    Parse MCP servers from TOML content.
-    
-    Supports two section formats:
-    1. camelCase: [mcpServers.server_name]
-    2. snake_case: [mcp_servers.server_name]
-    
-    Example formats:
-    [mcpServers.linear]
-    command = "npx"
-    args = ["-y", "mcp-remote", "https://mcp.linear.app/sse"]
-    disabled = false
-    
-    [mcp_servers.linear]
-    type = "http"
-    url = "https://mcp.linear.app/mcp"
-    
-    Args:
-        content: TOML file content as string
-        
-    Returns:
-        Dictionary mapping server names to their configurations, or None if not found
+    Parse MCP servers from TOML content. Returns a dict keyed by server name.
+
+    Supports both [mcpServers.<name>] and [mcp_servers.<name>] section styles.
+    Nested sub-tables (e.g. [mcp_servers.foo.http_headers], [mcp_servers.foo.tools.bar])
+    are config sub-sections of the parent server, not separate servers — they are
+    dropped here so they don't surface as spurious top-level entries downstream
+    (and so secrets inside them like Authorization headers aren't leaked outward).
     """
+    try:
+        import tomllib
+    except ImportError:
+        return _parse_toml_mcp_servers_regex(content)
+
+    try:
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return None
+
+    servers = data.get('mcp_servers') or data.get('mcpServers')
+    if not isinstance(servers, dict):
+        return None
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for name, config in servers.items():
+        if not isinstance(config, dict):
+            continue
+        flat = {k: v for k, v in config.items() if not isinstance(v, dict)}
+        if flat:
+            result[name] = flat
+    return result if result else None
+
+
+def _parse_toml_mcp_servers_regex(content: str) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Fallback parser for Python <3.11. Skips nested sub-tables and dict-valued fields."""
     mcp_servers: Dict[str, Dict[str, Any]] = {}
-    
+
     for match in _MCP_SERVERS_SECTION_PATTERN.finditer(content):
-        server_name = match.group(1).strip()
-        # Remove surrounding quotes if present
-        if len(server_name) >= 2 and server_name[0] == server_name[-1] and server_name[0] in _QUOTE_CHARS:
-            server_name = server_name[1:-1]
-        section_content = match.group(2)
-        
-        server_config = _parse_server_section(section_content)
-        if server_config:
-            mcp_servers[server_name] = server_config
-    
+        raw_name = match.group(1).strip()
+        is_quoted = (
+            len(raw_name) >= 2
+            and raw_name[0] == raw_name[-1]
+            and raw_name[0] in _QUOTE_CHARS
+        )
+        server_name = raw_name[1:-1] if is_quoted else raw_name
+        if not is_quoted and '.' in server_name:
+            continue
+
+        server_config = _parse_server_section(match.group(2))
+        if not server_config:
+            continue
+        flat = {k: v for k, v in server_config.items() if not isinstance(v, dict)}
+        if flat:
+            mcp_servers[server_name] = flat
+
     return mcp_servers if mcp_servers else None
 
 

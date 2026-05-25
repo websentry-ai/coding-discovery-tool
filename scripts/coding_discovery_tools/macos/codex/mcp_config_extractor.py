@@ -205,7 +205,7 @@ def parse_toml_mcp_servers(content: str) -> Optional[Dict[str, Dict[str, Any]]]:
     except tomllib.TOMLDecodeError:
         return None
 
-    servers = data.get('mcp_servers') or data.get('mcpServers')
+    servers = data['mcp_servers'] if 'mcp_servers' in data else data.get('mcpServers')
     if not isinstance(servers, dict):
         return None
 
@@ -213,7 +213,11 @@ def parse_toml_mcp_servers(content: str) -> Optional[Dict[str, Dict[str, Any]]]:
     for name, config in servers.items():
         if not isinstance(config, dict):
             continue
-        flat = {k: v for k, v in config.items() if not isinstance(v, dict)}
+        flat = {
+            k: v for k, v in config.items()
+            if not isinstance(v, dict)
+            and not (isinstance(v, list) and any(isinstance(e, dict) for e in v))
+        }
         if flat:
             result[name] = flat
     return result if result else None

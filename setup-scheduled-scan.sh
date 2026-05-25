@@ -208,6 +208,20 @@ log() {
 
 log "=== Starting Unbound scheduled run ==="
 
+# macOS fires RunAtLoad (every boot) AND StartCalendarInterval (09:00) as two
+# independent triggers. If the machine boots before 09:00, both fire in the
+# same morning. Skip if we already ran within the last 8 hours.
+LAST_RUN_FILE="\$LOG_DIR/.last-run-ts"
+if [ -f "\$LAST_RUN_FILE" ]; then
+    _last=\$(cat "\$LAST_RUN_FILE" 2>/dev/null || echo 0)
+    _now=\$(date +%s)
+    if [ \$((_now - _last)) -lt 28800 ]; then
+        log "Skipping — ran \$(( (_now - _last) / 60 )) minutes ago (within 8-hour window)"
+        exit 0
+    fi
+fi
+date +%s > "\$LAST_RUN_FILE"
+
 # -----------------------------------------------------------------------------
 # Retrieve credentials
 # -----------------------------------------------------------------------------

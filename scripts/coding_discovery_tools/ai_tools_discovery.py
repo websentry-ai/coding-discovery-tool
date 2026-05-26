@@ -2073,6 +2073,13 @@ def main():
                                     for s in p.get("skills") or []:
                                         if "content" in s:
                                             s["content"] = f"<{len(s['content'])} chars>"
+                                    for mcp in p.get("mcpServers") or []:
+                                        for tool in (mcp.get("scan") or {}).get("tools") or []:
+                                            tool.pop("inputSchema", None)
+                                            tool.pop("outputSchema", None)
+                                            desc = tool.get("description") or ""
+                                            if len(desc) > 80:
+                                                tool["description"] = desc[:80] + "..."
                             report_json = json.dumps(log_report, indent=2)
                             for line in report_json.split('\n'):
                                 logger.info(f"  {line}")

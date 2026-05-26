@@ -29,8 +29,6 @@ KEYCHAIN_SERVICE="ai.getunbound.discovery"
 # Remote URL (used by wrapper script, NOT by plist)
 SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
 
-INTERVAL=43200 # 12 hours in seconds
-
 usage() {
     echo "Unbound AI Tools Discovery - Scheduled Scan Setup"
     echo ""
@@ -207,10 +205,15 @@ create_plist() {
     <array>
         <string>${WRAPPER_SCRIPT}</string>
     </array>
-    <key>StartInterval</key>
-    <integer>${INTERVAL}</integer>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
     <key>RunAtLoad</key>
-    <true/>
+    $( [ "$NO_RUN_AT_LOAD" = "true" ] && printf '<false/>' || printf '<true/>' )
     <key>StandardOutPath</key>
     <string>${LOG_DIR}/scan.log</string>
     <key>StandardErrorPath</key>
@@ -271,6 +274,7 @@ fi
 
 API_KEY=""
 DOMAIN=""
+NO_RUN_AT_LOAD=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -281,6 +285,7 @@ while [[ $# -gt 0 ]]; do
             if [ $# -lt 2 ]; then echo "Error: --domain requires a value"; usage; fi
             DOMAIN="$2"; shift 2 ;;
         --uninstall) uninstall ;;
+        --no-run-at-load) NO_RUN_AT_LOAD=true; shift ;;
         --help|-h) usage ;;
         *) echo "Error: Unknown option '$1'"; usage ;;
     esac
@@ -310,7 +315,11 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || launchctl load "
 
 echo ""
 echo "Unbound scan scheduled successfully."
-echo "  Schedule:    Every 12 hours (runs immediately on install)"
+if [ "$NO_RUN_AT_LOAD" = "true" ]; then
+    echo "  Schedule:    Daily at 09:00"
+else
+    echo "  Schedule:    Daily at 09:00 (runs immediately on install)"
+fi
 echo "  Logs:        ${LOG_DIR}/scan.log"
 echo "  Errors:      ${LOG_DIR}/scan.err"
 echo "  Credentials: Stored in macOS Keychain (not in plist)"

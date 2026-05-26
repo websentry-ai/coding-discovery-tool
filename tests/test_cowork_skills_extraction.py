@@ -11,6 +11,7 @@ Covers:
 - runtime-only skill name exclusion (``context``)
 """
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -245,6 +246,14 @@ class TestBuildCoworkSkillDict(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@unittest.skipUnless(
+    sys.platform == "darwin",
+    "macOS-specific extractor test — the Linux equivalent lives in "
+    "tests/test_cowork_skills_extraction_linux.py. The macOS extractor's "
+    "final-step dedup is intentionally skipped under root, which makes the "
+    "explicit-sessions-root tempdir path ordering-dependent on ext4 (Linux); "
+    "Linux uses LinuxClaudeCoworkSkillsExtractor which dedups unconditionally.",
+)
 class TestMacOSClaudeCoworkSkillsExtractor(unittest.TestCase):
     """Walk a tempdir that mirrors the real on-disk shape."""
 

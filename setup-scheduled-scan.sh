@@ -6,7 +6,7 @@ set -euo pipefail
 # =============================================================================
 #
 # This script sets up a LaunchAgent to run the AI tools discovery scan
-# every 12 hours on macOS.
+# daily at 09:00 on macOS.
 #
 # Usage:
 #   Install:   ./setup-scheduled-scan.sh --api-key <key> --domain <url>
@@ -98,7 +98,7 @@ create_wrapper_script() {
 # =============================================================================
 # Unbound Discovery Wrapper Script
 # =============================================================================
-# Executed by LaunchAgent every 12 hours.
+# Executed by LaunchAgent daily at 09:00.
 # Downloads and runs the latest discovery script using EDR-safe patterns.
 #
 # Security: File is kept after execution to avoid "download-execute-delete"

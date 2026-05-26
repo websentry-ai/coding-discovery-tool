@@ -933,6 +933,11 @@ class AIToolsDetector:
                             win_users_dir = Path(Path.home().anchor) / "Users"
                             for username in get_all_users_windows():
                                 user_homes.add(str(win_users_dir / username))
+                        elif self.system == "Linux":
+                            for username in get_all_users_linux():
+                                # `root` user's home is /root, not /home/root.
+                                home = Path("/root") if username == "root" else Path(f"/home/{username}")
+                                user_homes.add(str(home))
                     if not user_homes:
                         user_homes.add(str(Path.home()))
                     for user_home in user_homes:
@@ -984,6 +989,17 @@ class AIToolsDetector:
                 try:
                     for username in get_all_users_windows():
                         user_plugins = Path(Path.home().anchor) / "Users" / username / ".claude" / "plugins"
+                        if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
+                            plugins_dirs_to_scan.append(user_plugins)
+                except Exception:
+                    pass
+            elif self.system == "Linux":
+                try:
+                    for username in get_all_users_linux():
+                        # `root` user's home is /root, not /home/root — same
+                        # special-case used elsewhere for Linux multi-user scans.
+                        user_home = Path("/root") if username == "root" else Path(f"/home/{username}")
+                        user_plugins = user_home / ".claude" / "plugins"
                         if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
                             plugins_dirs_to_scan.append(user_plugins)
                 except Exception:
@@ -1357,6 +1373,16 @@ class AIToolsDetector:
                     try:
                         for username in get_all_users_macos():
                             user_plugins = Path(f"/Users/{username}") / ".cursor" / "plugins"
+                            if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
+                                cursor_plugins_dirs.append(user_plugins)
+                    except Exception:
+                        pass
+                elif self.system == "Linux":
+                    try:
+                        for username in get_all_users_linux():
+                            # `root` user's home is /root, not /home/root.
+                            user_home = Path("/root") if username == "root" else Path(f"/home/{username}")
+                            user_plugins = user_home / ".cursor" / "plugins"
                             if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
                                 cursor_plugins_dirs.append(user_plugins)
                     except Exception:

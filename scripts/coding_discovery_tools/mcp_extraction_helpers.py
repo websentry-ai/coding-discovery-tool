@@ -1377,6 +1377,9 @@ def get_managed_mcp_path() -> Optional[Path]:
         return Path("/Library/Application Support/ClaudeCode/managed-mcp.json")
     elif system == "Windows":
         return Path("C:/Program Files/ClaudeCode/managed-mcp.json")
+    elif system == "Linux":
+        # System-wide managed MCP location on Linux (MDM/system-config convention).
+        return Path("/etc/ClaudeCode/managed-mcp.json")
     return None
 
 

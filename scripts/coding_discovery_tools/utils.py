@@ -1087,6 +1087,8 @@ def _get_cursor_db_path(user_home: Path) -> Optional[Path]:
         db_path = user_home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
     elif system == "Windows":
         db_path = user_home / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    elif system == "Linux":
+        db_path = user_home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
     else:
         return None
 

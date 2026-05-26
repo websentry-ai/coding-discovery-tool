@@ -124,6 +124,9 @@ store_credentials_linux() {
     # file-write in a subshell with umask 077 so both the parent directory
     # and the file get tight permissions (dir 0700, file 0600), and the
     # umask change doesn't leak into subsequent file creation (wrapper, logs).
+    # Escapes \ and " only. Control characters (newlines, tabs) are not escaped
+    # because API keys and domain URLs never contain them; the simpler form is
+    # sufficient and avoids complex multi-line sed pipelines.
     json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
     local cmd_e key_e disc_e dom_e
     cmd_e=$(json_escape "$COMMAND")
@@ -150,6 +153,9 @@ remove_credentials_linux() {
     if [ -f "$CREDS_FILE_LINUX" ]; then
         rm -f "$CREDS_FILE_LINUX"
         echo "  Removed credentials file"
+        # Remove the parent dir if it is now empty (rmdir is a no-op if non-empty,
+        # so this is safe when other Unbound components share the directory).
+        rmdir "$(dirname "$CREDS_FILE_LINUX")" 2>/dev/null || true
     fi
 }
 
@@ -209,6 +215,20 @@ log() {
 }
 
 log "=== Starting Unbound scheduled run ==="
+
+# macOS fires RunAtLoad (every boot) AND StartCalendarInterval (09:00) as two
+# independent triggers. If the machine boots before 09:00, both fire in the
+# same morning. Skip if we already ran within the last 8 hours.
+LAST_RUN_FILE="$LOG_DIR/.last-run-ts"
+if [ -f "$LAST_RUN_FILE" ]; then
+    _last=$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)
+    _now=$(date +%s)
+    if [ $((_now - _last)) -lt 28800 ]; then
+        log "Skipping — ran $(( (_now - _last) / 60 )) minutes ago (within 8-hour window)"
+        exit 0
+    fi
+fi
+date +%s > "$LAST_RUN_FILE"
 
 # -----------------------------------------------------------------------------
 # Retrieve credentials
@@ -359,6 +379,11 @@ install_macos() {
         launchctl bootout "gui/$(id -u)/$OLD_LABEL" 2>/dev/null \
             || launchctl unload "$OLD_PLIST" 2>/dev/null || true
         rm -f "$OLD_PLIST" 2>/dev/null || true
+        # Also remove any credentials stored under the old Keychain service name
+        # so they don't linger after --uninstall (which only cleans the current name).
+        for _acct in command api_key discovery_key domain; do
+            security delete-generic-password -s "$OLD_LABEL" -a "$_acct" >/dev/null 2>&1 || true
+        done
     fi
 
     # Unload existing job if present

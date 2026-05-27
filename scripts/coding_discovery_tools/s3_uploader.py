@@ -41,74 +41,14 @@ UPLOAD_TIMEOUT_SECONDS = 180
 CONNECT_TIMEOUT_SECONDS = 10
 
 
-def _sorted_by(seq, key):
-    """Sort a list of dicts by a per-item key fn, treating non-dicts as empty key."""
-    return sorted(seq, key=lambda x: key(x) if isinstance(x, dict) else "")
-
-
 def _strip_ephemeral(tool: Dict) -> Dict:
-    """Canonicalise a tool dict for hashing so cosmetic re-scans dedup correctly.
-
-    Two classes of noise we kill here:
-
-    1. Per-scan ephemera (timestamps, error bodies, dynamic OAuth IDs) — values
-       that differ between scans of an unchanged install.
-    2. List order — ``json.dumps(sort_keys=True)`` sorts dict keys recursively
-       but never reorders list elements. Filesystem walk order, plugin cache
-       order, and MCP server tool order can all flip between scans without any
-       content change, busting the hash."""
+    """Strip non-content fields (rule/skill ``last_modified``) so a `touch` doesn't change the hash."""
     cleaned = copy.deepcopy(tool)
-
-    for plugin in (cleaned.get("plugins") or []):
-        if isinstance(plugin, dict):
-            plugin.pop("installed_at", None)
-
     for project in (cleaned.get("projects") or []):
         for items_key in ("rules", "skills"):
             for item in (project.get(items_key) or []):
                 if isinstance(item, dict):
                     item.pop("last_modified", None)
-        for mcp in (project.get("mcpServers") or []):
-            if not isinstance(mcp, dict):
-                continue
-            scan = mcp.get("scan")
-            if isinstance(scan, dict):
-                scan.pop("scanned_at", None)
-                scan.pop("error", None)
-                if isinstance(scan.get("tools"), list):
-                    scan["tools"] = _sorted_by(scan["tools"], lambda t: t.get("name", ""))
-            oauth = mcp.get("oauth")
-            if isinstance(oauth, dict):
-                # Dynamic OAuth client registration produces a fresh clientId/port
-                # per scan even when the server config itself hasn't changed.
-                oauth.pop("clientId", None)
-                oauth.pop("callbackPort", None)
-
-    perms = cleaned.get("permissions")
-    if isinstance(perms, dict):
-        for rule_key in ("allow_rules", "deny_rules", "ask_rules"):
-            if isinstance(perms.get(rule_key), list):
-                perms[rule_key] = sorted(perms[rule_key])
-        raw = perms.get("raw_settings")
-        if isinstance(raw, dict):
-            rs_perms = raw.get("permissions")
-            if isinstance(rs_perms, dict):
-                for k in ("allow", "deny", "ask"):
-                    if isinstance(rs_perms.get(k), list):
-                        rs_perms[k] = sorted(rs_perms[k])
-
-    if isinstance(cleaned.get("plugins"), list):
-        cleaned["plugins"] = _sorted_by(cleaned["plugins"], lambda p: p.get("name", ""))
-    if isinstance(cleaned.get("projects"), list):
-        cleaned["projects"] = _sorted_by(cleaned["projects"], lambda p: p.get("path", ""))
-    for project in (cleaned.get("projects") or []):
-        if isinstance(project.get("rules"), list):
-            project["rules"] = _sorted_by(project["rules"], lambda r: r.get("file_path", ""))
-        if isinstance(project.get("skills"), list):
-            project["skills"] = _sorted_by(project["skills"], lambda s: s.get("file_path", s.get("file_name", "")))
-        if isinstance(project.get("mcpServers"), list):
-            project["mcpServers"] = _sorted_by(project["mcpServers"], lambda m: m.get("name", ""))
-
     return cleaned
 
 

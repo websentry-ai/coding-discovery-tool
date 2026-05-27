@@ -34,6 +34,19 @@ def is_claude_plugins_path(path: Path) -> bool:
     return (".claude", "plugins") in zip(parts, parts[1:])
 
 
+def is_home_dotdir_descendant(path: Path) -> bool:
+    """True if `path` lives under any user's top-level hidden home dir
+    (e.g. ``/Users/alice/.codex/...``, ``/home/bob/.cursor/...``,
+    ``C:\\Users\\carol\\.copilot\\...``).
+    """
+    parts = path.parts
+    for i, segment in enumerate(parts):
+        if segment in ("Users", "home") and i + 2 < len(parts):
+            if parts[i + 2].startswith("."):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # MCP tool-list scanning
 # ---------------------------------------------------------------------------
@@ -573,9 +586,9 @@ def walk_for_mcp_configs_generic(
         for item in current_dir.iterdir():
             try:
                 # Check if we should skip this path
-                if should_skip_func(item):
+                if should_skip_func(item) or is_home_dotdir_descendant(item):
                     continue
-                
+
                 # Check depth
                 try:
                     depth = len(item.relative_to(root_path).parts)
@@ -1211,7 +1224,7 @@ def walk_for_claude_project_mcp_configs(
         for entry in current_dir.iterdir():
             try:
                 if entry.is_dir():
-                    if should_skip_func(entry):
+                    if should_skip_func(entry) or is_home_dotdir_descendant(entry):
                         continue
                     if entry.is_symlink():
                         continue
@@ -1227,7 +1240,7 @@ def walk_for_claude_project_mcp_configs(
                     except ValueError:
                         continue
 
-                    if should_skip_func(entry):
+                    if should_skip_func(entry) or is_home_dotdir_descendant(entry):
                         continue
 
                     extract_claude_project_mcp_from_file(entry, projects)

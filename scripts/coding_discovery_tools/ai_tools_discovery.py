@@ -1747,13 +1747,19 @@ class AIToolsDetector:
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
-    parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
+    parser.add_argument('--api-key', type=str, help='API key for authentication and report submission (or set UNBOUND_API_KEY env)')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
     args = parser.parse_args()
 
+    # Hook-triggered invocations pass the api_key via env so it never appears
+    # in argv / /proc/<pid>/cmdline. CLI --api-key remains supported for MDM
+    # and direct-script usage.
+    if not args.api_key:
+        args.api_key = os.environ.get("UNBOUND_API_KEY") or ""
+
     if not args.api_key or not args.domain:
-        print("Error: --api-key and --domain arguments are required")
+        print("Error: --api-key (or UNBOUND_API_KEY env) and --domain are required")
         print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
         sys.exit(1)
 

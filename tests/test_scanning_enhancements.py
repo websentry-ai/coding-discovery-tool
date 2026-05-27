@@ -36,6 +36,8 @@ from scripts.coding_discovery_tools.macos.github_copilot.mcp_config_extractor im
 )
 from scripts.coding_discovery_tools.macos.codex.mcp_config_extractor import (
     MacOSCodexMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.toml_mcp_helpers import (
     parse_toml_mcp_servers,
     read_codex_toml_mcp_config,
     _parse_toml_mcp_servers_regex,

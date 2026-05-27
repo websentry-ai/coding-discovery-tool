@@ -115,7 +115,6 @@ except ImportError:
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
 
 logger = logging.getLogger(__name__)
-detail_logger = logging.getLogger(__name__ + ".detail")
 payload_logger = logging.getLogger(__name__ + ".payload")
 configure_logger()
 
@@ -1748,33 +1747,36 @@ def main():
     parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
-    parser.add_argument(
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
         '--dump',
         action='store_true',
-        help='Also log the full per-tool JSON payload sent to the backend. '
+        help='Also log the full per-tool JSON payload sent to the backend.',
     )
-    parser.add_argument(
+    verbosity.add_argument(
         '--summary',
         action='store_true',
-        help='Suppress per-tool detail boxes (and any --dump output); keep only '
-             'top-level scan progress, success/warning lines, warnings, and errors.',
+        help='Suppress the transport lines (Sending / ✓ sent) and the '
+             'logging_helpers sub-boxes; keep headline output + per-tool '
+             'Report Summary box + warnings + errors.',
     )
-    parser.add_argument(
+    verbosity.add_argument(
         '--payload',
         action='store_true',
-        help='Print only the per-tool JSON payload(s) and nothing else '
-             '(implies --dump; errors still pass through). Takes precedence over --summary.',
+        help='Print only the per-tool JSON payload(s) as raw output; mute every '
+             'other INFO log (errors/warnings still pass through).',
     )
     args = parser.parse_args()
 
-    _HELPERS_LOGGER = "scripts.coding_discovery_tools.logging_helpers"
     if args.payload:
         logging.getLogger().setLevel(logging.WARNING)
         payload_logger.setLevel(logging.INFO)
     elif args.summary:
-        detail_logger.setLevel(logging.WARNING)
-        payload_logger.setLevel(logging.WARNING)
-        logging.getLogger(_HELPERS_LOGGER).setLevel(logging.WARNING)
+        try:
+            from scripts.coding_discovery_tools import logging_helpers as _lh
+        except ImportError:
+            from . import logging_helpers as _lh
+        logging.getLogger(_lh.__name__).setLevel(logging.WARNING)
 
     if not args.api_key or not args.domain:
         print("Error: --api-key and --domain arguments are required")
@@ -2053,39 +2055,38 @@ def main():
                             'rules': num_rules
                         })
 
-                        # Log detailed summary of what's being sent
-                        logger.info("")
-                        logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
-                        logger.info(f"  │ User: {user_name}")
-                        logger.info(f"  │ Tool: {tool_name}")
-                        logger.info(f"  │ Version: {tool_filtered.get('version', 'Unknown')}")
-                        logger.info(f"  │ Install Path: {tool_filtered.get('install_path', 'Unknown')}")
-                        logger.info(f"  │ Projects: {len(projects)}")
-                        logger.info(f"  │ Total Rules: {num_rules}")
-                        logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
+                        if not args.payload:
+                            logger.info("")
+                            logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
+                            logger.info(f"  │ User: {user_name}")
+                            logger.info(f"  │ Tool: {tool_name}")
+                            logger.info(f"  │ Version: {tool_filtered.get('version', 'Unknown')}")
+                            logger.info(f"  │ Install Path: {tool_filtered.get('install_path', 'Unknown')}")
+                            logger.info(f"  │ Projects: {len(projects)}")
+                            logger.info(f"  │ Total Rules: {num_rules}")
+                            logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
 
-                        # Log permissions details if present
-                        if "permissions" in tool_filtered:
-                            perms = tool_filtered.get("permissions", {})
-                            logger.info(f"  │ Permissions: ✓ Present")
-                            logger.info(f"  │   Scope: {perms.get('scope', 'unknown')}")
-                            logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
-                            logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
-                            logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
-                            logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
-                            logger.info(f"  │   Ask Rules: {len(perms.get('ask_rules', []))}")
-                            if perms.get('mcp_servers'):
-                                logger.info(f"  │   MCP Servers: {len(perms.get('mcp_servers', []))}")
-                            if perms.get('mcp_policies'):
-                                policies = perms.get('mcp_policies', {})
-                                if policies.get('allowedMcpServers') or policies.get('deniedMcpServers'):
-                                    logger.info(f"  │   MCP Policies: allowed={len(policies.get('allowedMcpServers', []))}, denied={len(policies.get('deniedMcpServers', []))}")
-                            logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
-                        else:
-                            logger.info(f"  │ Permissions: ✗ Not present")
+                            if "permissions" in tool_filtered:
+                                perms = tool_filtered.get("permissions", {})
+                                logger.info(f"  │ Permissions: ✓ Present")
+                                logger.info(f"  │   Scope: {perms.get('scope', 'unknown')}")
+                                logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
+                                logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
+                                logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
+                                logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
+                                logger.info(f"  │   Ask Rules: {len(perms.get('ask_rules', []))}")
+                                if perms.get('mcp_servers'):
+                                    logger.info(f"  │   MCP Servers: {len(perms.get('mcp_servers', []))}")
+                                if perms.get('mcp_policies'):
+                                    policies = perms.get('mcp_policies', {})
+                                    if policies.get('allowedMcpServers') or policies.get('deniedMcpServers'):
+                                        logger.info(f"  │   MCP Policies: allowed={len(policies.get('allowedMcpServers', []))}, denied={len(policies.get('deniedMcpServers', []))}")
+                                logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
+                            else:
+                                logger.info(f"  │ Permissions: ✗ Not present")
 
-                        logger.info("  └──────────────────────────────────────────────────────────────────")
-                        logger.info("")
+                            logger.info("  └──────────────────────────────────────────────────────────────────")
+                            logger.info("")
 
                         if args.dump or args.payload:
                             payload_logger.info("  Complete JSON payload being sent to backend:")
@@ -2116,19 +2117,21 @@ def main():
                             payload_logger.info("  " + "=" * 70)
                             payload_logger.info("")
 
-
-                        detail_logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
+                        if not args.summary and not args.payload:
+                            logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
                         with time_step("send_report_per_tool_user", "send"):
                             success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                         if success:
-                            detail_logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                            if not args.summary and not args.payload:
+                                logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                         else:
                             logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                             if retryable:
                                 failed_reports.append(single_tool_report)
 
-                        detail_logger.info("")
+                        if not args.summary and not args.payload:
+                            logger.info("")
 
                     except PermissionError as e:
                         # User-specific permission error - send scan_event=failed with home_user

@@ -25,20 +25,12 @@ UNBOUND_DIR = Path.home() / ".unbound"
 CACHE_PATH = UNBOUND_DIR / "discovery-cache.json"
 LOCK_PATH = UNBOUND_DIR / "discovery.lock"
 
-DEBOUNCE_SECONDS = 24 * 3600
 STALE_LOCK_SECONDS = 15 * 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _parse_iso(ts: str) -> Optional[float]:
-    try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-    except (ValueError, TypeError):
-        return None
 
 
 def read_cache() -> dict:
@@ -69,23 +61,6 @@ def atomic_write_cache(data: dict) -> None:
                     pass
     except OSError as e:
         logger.warning(f"discovery-cache write failed: {e}")
-
-
-def is_debounced(cache: Optional[dict] = None) -> bool:
-    cache = cache if cache is not None else read_cache()
-    last = cache.get("last_run_at")
-    if not isinstance(last, str):
-        return False
-    ts = _parse_iso(last)
-    if ts is None:
-        return False
-    return (time.time() - ts) < DEBOUNCE_SECONDS
-
-
-def stamp_last_run() -> None:
-    cache = read_cache()
-    cache["last_run_at"] = _now_iso()
-    atomic_write_cache(cache)
 
 
 def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:

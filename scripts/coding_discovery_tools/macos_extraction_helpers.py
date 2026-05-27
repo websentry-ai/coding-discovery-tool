@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
+from .mcp_extraction_helpers import is_home_dotdir_descendant
 
 logger = logging.getLogger(__name__)
 
@@ -585,7 +586,6 @@ def walk_for_tool_directories(
     if current_depth > MAX_SEARCH_DEPTH:
         return
 
-    from .mcp_extraction_helpers import is_home_dotdir_descendant
     try:
         for item in current_dir.iterdir():
             try:

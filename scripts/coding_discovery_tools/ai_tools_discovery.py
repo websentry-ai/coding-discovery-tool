@@ -66,8 +66,6 @@ try:
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
-    from .s3_uploader import compute_payload_hash
-    from . import cache as discovery_cache
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -115,8 +113,6 @@ except ImportError:
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
-    from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
-    from scripts.coding_discovery_tools import cache as discovery_cache
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -1748,19 +1744,13 @@ class AIToolsDetector:
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
-    parser.add_argument('--api-key', type=str, help='API key for authentication and report submission (or set UNBOUND_API_KEY env)')
+    parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
     args = parser.parse_args()
 
-    # Hook-triggered invocations pass the api_key via env so it never appears
-    # in argv / /proc/<pid>/cmdline. CLI --api-key remains supported for MDM
-    # and direct-script usage.
-    if not args.api_key:
-        args.api_key = os.environ.get("UNBOUND_API_KEY") or ""
-
     if not args.api_key or not args.domain:
-        print("Error: --api-key (or UNBOUND_API_KEY env) and --domain are required")
+        print("Error: --api-key and --domain arguments are required")
         print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
         sys.exit(1)
 
@@ -1806,16 +1796,7 @@ def main():
             )
             step_phases[name] = phase
 
-    # Acquire single-flight lock. Another discovery process running means we exit
-    # quietly — hook fire was redundant. Heartbeat thread keeps the lock mtime fresh
-    # so other hooks can detect a zombie (>STALE_LOCK_SECONDS without a tick).
-    if not discovery_cache.acquire_lock():
-        logger.info("Another discovery process is running (lock held); exiting.")
-        sys.exit(0)
-    _heartbeat_stop = None
-
     try:
-        _heartbeat_stop = discovery_cache.heartbeat_start()
         detector = AIToolsDetector()
 
         # Get device ID once (shared across all user reports)
@@ -2108,31 +2089,17 @@ def main():
                         logger.info("  " + "=" * 70)
                         logger.info("")
 
-                        # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.
-                        # Backend already dedups on payload_hash; this short-circuits the upload
-                        # itself when local cache shows no change since last successful upload.
-                        try:
-                            local_payload_hash = compute_payload_hash(single_tool_report["tools"][0])
-                        except Exception as hash_err:
-                            local_payload_hash = None
-                            logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
+                        # Send report to backend
+                        logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
-                        cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
-                        if local_payload_hash and cached_hash == local_payload_hash:
-                            logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
+                        with time_step("send_report_per_tool_user", "send"):
+                            success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                        if success:
+                            logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                         else:
-                            logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
-
-                            with time_step("send_report_per_tool_user", "send"):
-                                success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
-                            if success:
-                                logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
-                                if local_payload_hash:
-                                    discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
-                            else:
-                                logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
-                                if retryable:
-                                    failed_reports.append(single_tool_report)
+                            logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
+                            if retryable:
+                                failed_reports.append(single_tool_report)
 
                         logger.info("")
 
@@ -2256,12 +2223,6 @@ def main():
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
-    finally:
-        try:
-            _heartbeat_stop.set()
-        except Exception:
-            pass
-        discovery_cache.release_lock()
 
 
 if __name__ == "__main__":

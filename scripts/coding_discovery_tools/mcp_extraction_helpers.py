@@ -34,23 +34,6 @@ def is_claude_plugins_path(path: Path) -> bool:
     return (".claude", "plugins") in zip(parts, parts[1:])
 
 
-def is_home_dotdir_descendant(path: Path) -> bool:
-    """True if `path` lives under a top-level hidden home dir of any user
-    (e.g. ``/Users/alice/.codex/...``, ``/home/bob/.cursor/...``,
-    ``C:\\Users\\carol\\.copilot\\...``).
-
-    Only matches the canonical OS layouts (``Users``/``home`` immediately
-    below the filesystem root) so non-standard mounts like
-    ``/srv/home/<u>/.config`` aren't falsely treated as tool dirs.
-    """
-    parts = path.parts
-    return (
-        len(parts) >= 4
-        and parts[1] in ("Users", "home")
-        and parts[3].startswith(".")
-    )
-
-
 # ---------------------------------------------------------------------------
 # MCP tool-list scanning
 # ---------------------------------------------------------------------------
@@ -590,9 +573,9 @@ def walk_for_mcp_configs_generic(
         for item in current_dir.iterdir():
             try:
                 # Check if we should skip this path
-                if should_skip_func(item) or is_home_dotdir_descendant(item):
+                if should_skip_func(item):
                     continue
-
+                
                 # Check depth
                 try:
                     depth = len(item.relative_to(root_path).parts)
@@ -1228,7 +1211,7 @@ def walk_for_claude_project_mcp_configs(
         for entry in current_dir.iterdir():
             try:
                 if entry.is_dir():
-                    if should_skip_func(entry) or is_home_dotdir_descendant(entry):
+                    if should_skip_func(entry):
                         continue
                     if entry.is_symlink():
                         continue
@@ -1244,7 +1227,7 @@ def walk_for_claude_project_mcp_configs(
                     except ValueError:
                         continue
 
-                    if should_skip_func(entry) or is_home_dotdir_descendant(entry):
+                    if should_skip_func(entry):
                         continue
 
                     extract_claude_project_mcp_from_file(entry, projects)

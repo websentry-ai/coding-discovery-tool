@@ -116,6 +116,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 detail_logger = logging.getLogger(__name__ + ".detail")
+payload_logger = logging.getLogger(__name__ + ".payload")
 configure_logger()
 
 
@@ -1758,11 +1759,22 @@ def main():
         help='Suppress per-tool detail boxes (and any --dump output); keep only '
              'top-level scan progress, success/warning lines, warnings, and errors.',
     )
+    parser.add_argument(
+        '--payload',
+        action='store_true',
+        help='Print only the per-tool JSON payload(s) and nothing else '
+             '(implies --dump; errors still pass through). Takes precedence over --summary.',
+    )
     args = parser.parse_args()
 
-    if args.summary:
+    _HELPERS_LOGGER = "scripts.coding_discovery_tools.logging_helpers"
+    if args.payload:
+        logging.getLogger().setLevel(logging.WARNING)
+        payload_logger.setLevel(logging.INFO)
+    elif args.summary:
         detail_logger.setLevel(logging.WARNING)
-        logging.getLogger("scripts.coding_discovery_tools.logging_helpers").setLevel(logging.WARNING)
+        payload_logger.setLevel(logging.WARNING)
+        logging.getLogger(_HELPERS_LOGGER).setLevel(logging.WARNING)
 
     if not args.api_key or not args.domain:
         print("Error: --api-key and --domain arguments are required")
@@ -2075,9 +2087,9 @@ def main():
                         logger.info("  └──────────────────────────────────────────────────────────────────")
                         logger.info("")
 
-                        if args.dump:
-                            detail_logger.info("  Complete JSON payload being sent to backend:")
-                            detail_logger.info("  " + "=" * 70)
+                        if args.dump or args.payload:
+                            payload_logger.info("  Complete JSON payload being sent to backend:")
+                            payload_logger.info("  " + "=" * 70)
                             try:
                                 log_report = copy.deepcopy(single_tool_report)
                                 for t in log_report.get("tools") or []:
@@ -2097,12 +2109,12 @@ def main():
                                                     tool["description"] = desc[:80] + "..."
                                 report_json = json.dumps(log_report, indent=2)
                                 for line in report_json.split('\n'):
-                                    detail_logger.info(f"  {line}")
+                                    payload_logger.info(f"  {line}")
                             except Exception as e:
                                 logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                                detail_logger.info(f"  Report structure: {single_tool_report}")
-                            detail_logger.info("  " + "=" * 70)
-                            detail_logger.info("")
+                                payload_logger.info(f"  Report structure: {single_tool_report}")
+                            payload_logger.info("  " + "=" * 70)
+                            payload_logger.info("")
 
 
                         detail_logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")

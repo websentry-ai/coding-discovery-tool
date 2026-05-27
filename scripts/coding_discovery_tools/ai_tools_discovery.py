@@ -65,6 +65,8 @@ try:
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from .s3_uploader import compute_payload_hash
+    from . import cache as discovery_cache
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -112,6 +114,8 @@ except ImportError:
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
+    from scripts.coding_discovery_tools import cache as discovery_cache
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -1784,6 +1788,14 @@ def main():
             )
             step_phases[name] = phase
 
+    # Acquire single-flight lock. Another discovery process running means we exit
+    # quietly — hook fire was redundant. Heartbeat thread keeps the lock mtime fresh
+    # so other hooks can detect a zombie (>STALE_LOCK_SECONDS without a tick).
+    if not discovery_cache.acquire_lock():
+        logger.info("Another discovery process is running (lock held); exiting.")
+        sys.exit(0)
+    _heartbeat_stop = discovery_cache.heartbeat_start()
+
     try:
         detector = AIToolsDetector()
 
@@ -2045,17 +2057,31 @@ def main():
                         logger.info("  " + "=" * 70)
                         logger.info("")
 
-                        # Send report to backend
-                        logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
+                        # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.
+                        # Backend already dedups on payload_hash; this short-circuits the upload
+                        # itself when local cache shows no change since last successful upload.
+                        try:
+                            local_payload_hash = compute_payload_hash(single_tool_report["tools"][0])
+                        except Exception as hash_err:
+                            local_payload_hash = None
+                            logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        with time_step("send_report_per_tool_user", "send"):
-                            success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
-                        if success:
-                            logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                        cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        if local_payload_hash and cached_hash == local_payload_hash:
+                            logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
-                            logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
-                            if retryable:
-                                failed_reports.append(single_tool_report)
+                            logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
+
+                            with time_step("send_report_per_tool_user", "send"):
+                                success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                            if success:
+                                logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                                if local_payload_hash:
+                                    discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
+                            else:
+                                logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
+                                if retryable:
+                                    failed_reports.append(single_tool_report)
 
                         logger.info("")
 
@@ -2179,6 +2205,12 @@ def main():
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        try:
+            _heartbeat_stop.set()
+        except Exception:
+            pass
+        discovery_cache.release_lock()
 
 
 if __name__ == "__main__":

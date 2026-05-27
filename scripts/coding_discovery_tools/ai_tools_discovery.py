@@ -114,8 +114,8 @@ except ImportError:
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
 
-# Set up logger
 logger = logging.getLogger(__name__)
+detail_logger = logging.getLogger(__name__ + ".detail")
 configure_logger()
 
 
@@ -1747,7 +1747,22 @@ def main():
     parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
+    parser.add_argument(
+        '--dump',
+        action='store_true',
+        help='Also log the full per-tool JSON payload sent to the backend. '
+    )
+    parser.add_argument(
+        '--summary',
+        action='store_true',
+        help='Suppress per-tool detail boxes (and any --dump output); keep only '
+             'top-level scan progress, success/warning lines, warnings, and errors.',
+    )
     args = parser.parse_args()
+
+    if args.summary:
+        detail_logger.setLevel(logging.WARNING)
+        logging.getLogger("scripts.coding_discovery_tools.logging_helpers").setLevel(logging.WARNING)
 
     if not args.api_key or not args.domain:
         print("Error: --api-key and --domain arguments are required")
@@ -2060,48 +2075,48 @@ def main():
                         logger.info("  └──────────────────────────────────────────────────────────────────")
                         logger.info("")
 
-                        # Log JSON payload (rules/skills content stripped to reduce volume)
-                        logger.info("  Complete JSON payload being sent to backend:")
-                        logger.info("  " + "=" * 70)
-                        try:
-                            log_report = copy.deepcopy(single_tool_report)
-                            for t in log_report.get("tools") or []:
-                                for p in t.get("projects") or []:
-                                    for r in p.get("rules") or []:
-                                        if "content" in r:
-                                            r["content"] = f"<{len(r['content'])} chars>"
-                                    for s in p.get("skills") or []:
-                                        if "content" in s:
-                                            s["content"] = f"<{len(s['content'])} chars>"
-                                    for mcp in p.get("mcpServers") or []:
-                                        for tool in (mcp.get("scan") or {}).get("tools") or []:
-                                            tool.pop("inputSchema", None)
-                                            tool.pop("outputSchema", None)
-                                            desc = tool.get("description") or ""
-                                            if len(desc) > 80:
-                                                tool["description"] = desc[:80] + "..."
-                            report_json = json.dumps(log_report, indent=2)
-                            for line in report_json.split('\n'):
-                                logger.info(f"  {line}")
-                        except Exception as e:
-                            logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                            logger.info(f"  Report structure: {single_tool_report}")
-                        logger.info("  " + "=" * 70)
-                        logger.info("")
+                        if args.dump:
+                            detail_logger.info("  Complete JSON payload being sent to backend:")
+                            detail_logger.info("  " + "=" * 70)
+                            try:
+                                log_report = copy.deepcopy(single_tool_report)
+                                for t in log_report.get("tools") or []:
+                                    for p in t.get("projects") or []:
+                                        for r in p.get("rules") or []:
+                                            if "content" in r:
+                                                r["content"] = f"<{len(r['content'])} chars>"
+                                        for s in p.get("skills") or []:
+                                            if "content" in s:
+                                                s["content"] = f"<{len(s['content'])} chars>"
+                                        for mcp in p.get("mcpServers") or []:
+                                            for tool in (mcp.get("scan") or {}).get("tools") or []:
+                                                tool.pop("inputSchema", None)
+                                                tool.pop("outputSchema", None)
+                                                desc = tool.get("description") or ""
+                                                if len(desc) > 80:
+                                                    tool["description"] = desc[:80] + "..."
+                                report_json = json.dumps(log_report, indent=2)
+                                for line in report_json.split('\n'):
+                                    detail_logger.info(f"  {line}")
+                            except Exception as e:
+                                logger.warning(f"  Could not serialize report to JSON for logging: {e}")
+                                detail_logger.info(f"  Report structure: {single_tool_report}")
+                            detail_logger.info("  " + "=" * 70)
+                            detail_logger.info("")
 
-                        # Send report to backend
-                        logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
+
+                        detail_logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
                         with time_step("send_report_per_tool_user", "send"):
                             success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                         if success:
-                            logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                            detail_logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                         else:
                             logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                             if retryable:
                                 failed_reports.append(single_tool_report)
 
-                        logger.info("")
+                        detail_logger.info("")
 
                     except PermissionError as e:
                         # User-specific permission error - send scan_event=failed with home_user

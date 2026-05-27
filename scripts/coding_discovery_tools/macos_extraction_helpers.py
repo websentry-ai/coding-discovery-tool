@@ -585,13 +585,15 @@ def walk_for_tool_directories(
     if current_depth > MAX_SEARCH_DEPTH:
         return
 
+    from .mcp_extraction_helpers import is_home_dotdir_descendant
     try:
         for item in current_dir.iterdir():
             try:
                 # Check if we should skip this path
-                if should_skip_path(item) or should_skip_system_path(item):
+                if (should_skip_path(item) or should_skip_system_path(item)
+                        or is_home_dotdir_descendant(item)):
                     continue
-                
+
                 # Check depth for this item
                 try:
                     depth = len(item.relative_to(root_path).parts)
@@ -599,7 +601,7 @@ def walk_for_tool_directories(
                         continue
                 except ValueError:
                     continue
-                
+
                 if item.is_dir():
                     # Found the tool directory!
                     if item.name == tool_dir_name:
@@ -607,7 +609,7 @@ def walk_for_tool_directories(
                         extract_from_dir_func(item, projects_by_root)
                         # Don't recurse into tool directory
                         continue
-                    
+
                     if item.is_symlink():
                         continue
 

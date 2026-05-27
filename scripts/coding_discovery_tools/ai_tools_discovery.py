@@ -1812,9 +1812,10 @@ def main():
     if not discovery_cache.acquire_lock():
         logger.info("Another discovery process is running (lock held); exiting.")
         sys.exit(0)
-    _heartbeat_stop = discovery_cache.heartbeat_start()
+    _heartbeat_stop = None
 
     try:
+        _heartbeat_stop = discovery_cache.heartbeat_start()
         detector = AIToolsDetector()
 
         # Get device ID once (shared across all user reports)

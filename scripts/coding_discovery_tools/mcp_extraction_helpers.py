@@ -35,16 +35,20 @@ def is_claude_plugins_path(path: Path) -> bool:
 
 
 def is_home_dotdir_descendant(path: Path) -> bool:
-    """True if `path` lives under any user's top-level hidden home dir
+    """True if `path` lives under a top-level hidden home dir of any user
     (e.g. ``/Users/alice/.codex/...``, ``/home/bob/.cursor/...``,
     ``C:\\Users\\carol\\.copilot\\...``).
+
+    Only matches the canonical OS layouts (``Users``/``home`` immediately
+    below the filesystem root) so non-standard mounts like
+    ``/srv/home/<u>/.config`` aren't falsely treated as tool dirs.
     """
     parts = path.parts
-    for i, segment in enumerate(parts):
-        if segment in ("Users", "home") and i + 2 < len(parts):
-            if parts[i + 2].startswith("."):
-                return True
-    return False
+    return (
+        len(parts) >= 4
+        and parts[1] in ("Users", "home")
+        and parts[3].startswith(".")
+    )
 
 
 # ---------------------------------------------------------------------------

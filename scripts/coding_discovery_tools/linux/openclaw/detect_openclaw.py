@@ -108,7 +108,7 @@ class LinuxOpenClawDetector(BaseOpenClawDetector):
 
     def _check_running_process(self) -> bool:
         try:
-            result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+            result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=10)
             return "openclaw" in result.stdout.lower()
         except Exception:
             return False

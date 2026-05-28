@@ -199,3 +199,13 @@ def get_linux_user_homes() -> List[Path]:
         homes.append(root_home)
 
     return homes or [Path.home()]
+
+
+def linux_home_for_user(username: str) -> Path:
+    """Return the home directory path for a given Linux username.
+
+    Handles the special case where root's home is /root, not /home/root.
+    """
+    if username == "root":
+        return Path("/root")
+    return Path(f"/home/{username}")

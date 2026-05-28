@@ -278,7 +278,7 @@ def get_all_users_linux() -> List[str]:
     if not home_dir.exists():
         # Docker/CI root-only containers may have no /home at all
         if _is_root():
-            return [Path.home().name]
+            return ["root"]
         return []
 
     # Build a set of usernames with UID >= 1000 and interactive shells

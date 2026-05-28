@@ -61,6 +61,7 @@ try:
         ClineSkillsExtractorFactory,
     )
     from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -108,6 +109,7 @@ except ImportError:
         ClineSkillsExtractorFactory,
     )
     from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
@@ -936,7 +938,7 @@ class AIToolsDetector:
                         elif self.system == "Linux":
                             for username in get_all_users_linux():
                                 # `root` user's home is /root, not /home/root.
-                                home = Path("/root") if username == "root" else Path(f"/home/{username}")
+                                home = linux_home_for_user(username)
                                 user_homes.add(str(home))
                     if not user_homes:
                         user_homes.add(str(Path.home()))
@@ -998,7 +1000,7 @@ class AIToolsDetector:
                     for username in get_all_users_linux():
                         # `root` user's home is /root, not /home/root — same
                         # special-case used elsewhere for Linux multi-user scans.
-                        user_home = Path("/root") if username == "root" else Path(f"/home/{username}")
+                        user_home = linux_home_for_user(username)
                         user_plugins = user_home / ".claude" / "plugins"
                         if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
                             plugins_dirs_to_scan.append(user_plugins)
@@ -1381,7 +1383,7 @@ class AIToolsDetector:
                     try:
                         for username in get_all_users_linux():
                             # `root` user's home is /root, not /home/root.
-                            user_home = Path("/root") if username == "root" else Path(f"/home/{username}")
+                            user_home = linux_home_for_user(username)
                             user_plugins = user_home / ".cursor" / "plugins"
                             if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
                                 cursor_plugins_dirs.append(user_plugins)
@@ -1904,7 +1906,7 @@ def main():
             elif platform.system() == "Windows":
                 user_home = Path(Path.home().anchor) / "Users" / user
             elif platform.system() == "Linux":
-                user_home = Path("/root") if user == "root" else Path(f"/home/{user}")
+                user_home = linux_home_for_user(user)
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
@@ -1962,7 +1964,7 @@ def main():
                     elif platform.system() == "Windows":
                         user_home = Path(Path.home().anchor) / "Users" / user_name
                     elif platform.system() == "Linux":
-                        user_home = Path("/root") if user_name == "root" else Path(f"/home/{user_name}")
+                        user_home = linux_home_for_user(user_name)
                     else:
                         user_home = Path.home()
 

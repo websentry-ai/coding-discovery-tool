@@ -7,8 +7,14 @@ from typing import Optional, Dict
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...utils import run_command
+from ...linux_extraction_helpers import get_linux_user_homes
 
 logger = logging.getLogger(__name__)
+
+_USER_RELATIVE_PATHS = [
+    Path(".local/bin/gemini"),
+    Path(".npm-global/bin/gemini"),
+]
 
 
 class LinuxGeminiCliDetector(BaseToolDetector):
@@ -49,4 +55,10 @@ class LinuxGeminiCliDetector(BaseToolDetector):
                     return path
         except Exception as e:
             logger.debug(f"Could not check for Gemini CLI command: {e}")
+        for user_home in get_linux_user_homes():
+            for rel in _USER_RELATIVE_PATHS:
+                p = user_home / rel
+                if p.exists() and p.is_file():
+                    logger.debug(f"Found Gemini CLI at: {p}")
+                    return str(p)
         return None

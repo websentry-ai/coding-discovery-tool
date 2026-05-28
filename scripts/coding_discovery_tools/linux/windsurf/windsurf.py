@@ -75,6 +75,16 @@ class LinuxWindsurfDetector(BaseToolDetector):
                         return extract_version_number(out)
             except Exception:
                 continue
+        for user_home in get_linux_user_homes():
+            for rel in _USER_RELATIVE_PATHS:
+                binary = user_home / rel
+                try:
+                    if binary.exists():
+                        out = run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                        if out:
+                            return extract_version_number(out)
+                except Exception:
+                    continue
         try:
             out = run_command(["windsurf", "--version"], VERSION_TIMEOUT)
             return extract_version_number(out) if out else None

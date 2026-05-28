@@ -835,6 +835,28 @@ def walk_for_kilocode_mcp_configs(
     )
 
 
+def _iter_admin_user_homes(is_admin: bool, users_dir: Optional[Path]) -> List[Path]:
+    """Return all user home directories for an admin/root-level scan.
+
+    On Linux, delegates to get_linux_user_homes() which already includes
+    /root alongside /home/* entries — fixing the gap where users_dir=/home
+    would silently miss root's own configs. On Darwin/Windows, iterates
+    users_dir and filters to real (non-hidden) directories.
+    """
+    import platform
+    if not is_admin:
+        return []
+    if platform.system() == "Linux":
+        try:
+            from .linux_extraction_helpers import get_linux_user_homes
+            return get_linux_user_homes()
+        except ImportError:
+            pass
+    if users_dir and users_dir.exists():
+        return [d for d in users_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
+    return []
+
+
 def read_global_mcp_config(
     config_path: Path,
     tool_name: str = "MCP",
@@ -938,17 +960,16 @@ def extract_global_mcp_config_with_root_support(
         try:
             from .macos_extraction_helpers import is_running_as_root
             is_admin = is_running_as_root()
-            users_dir = Path("/home")
         except ImportError:
             pass
 
     # When running as admin/root, prioritize checking user directories first
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                # Build user-specific config path
-                # global_config_path is like ~/.cursor/mcp.json
-                # We need to replace ~ with user_dir
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            # Build user-specific config path
+            # global_config_path is like ~/.cursor/mcp.json
+            # We need to replace ~ with user_dir
                 try:
                     user_config_path = user_dir / global_config_path.relative_to(Path.home())
                     if user_config_path.exists():
@@ -1023,27 +1044,28 @@ def extract_ide_global_configs_with_root_support(
         try:
             from .macos_extraction_helpers import is_running_as_root
             is_admin = is_running_as_root()
-            users_dir = Path("/home")
         except ImportError:
             pass
 
     # When running as admin/root, check all users
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                try:
-                    user_configs = extract_configs_for_user_func(user_dir)
-                    all_configs.extend(user_configs)
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
-                    continue
-        
-        # Also check root/admin's own configs
-        try:
-            root_configs = extract_configs_for_user_func(Path.home())
-            all_configs.extend(root_configs)
-        except Exception as e:
-            logger.debug(f"Error extracting root configs for {tool_name}: {e}")
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            try:
+                user_configs = extract_configs_for_user_func(user_dir)
+                all_configs.extend(user_configs)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
+                continue
+
+        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        import platform as _platform
+        if _platform.system() != "Linux":
+            try:
+                root_configs = extract_configs_for_user_func(Path.home())
+                all_configs.extend(root_configs)
+            except Exception as e:
+                logger.debug(f"Error extracting root configs for {tool_name}: {e}")
     else:
         # For regular users, check their own home directory
         try:
@@ -1314,44 +1336,45 @@ def extract_dual_path_configs_with_root_support(
         try:
             from .macos_extraction_helpers import is_running_as_root
             is_admin = is_running_as_root()
-            users_dir = Path("/home")
         except ImportError:
             pass
 
     # When running as admin/root, check all users
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                # Try preferred location for this user
-                try:
-                    user_preferred = user_dir / preferred_path.relative_to(Path.home())
-                    if user_preferred.exists():
-                        user_projects = extract_from_file_func(user_preferred)
-                        if user_projects:
-                            all_projects.extend(user_projects)
-                            continue
-                except (ValueError, OSError):
-                    pass
-                
-                # Try fallback location for this user
-                try:
-                    user_fallback = user_dir / fallback_path.relative_to(Path.home())
-                    if user_fallback.exists():
-                        user_projects = extract_from_file_func(user_fallback)
-                        if user_projects:
-                            all_projects.extend(user_projects)
-                except (ValueError, OSError):
-                    pass
-        
-        # Also check root/admin's configs
-        if preferred_path.exists():
-            root_projects = extract_from_file_func(preferred_path)
-            if root_projects:
-                all_projects.extend(root_projects)
-        elif fallback_path.exists():
-            root_projects = extract_from_file_func(fallback_path)
-            if root_projects:
-                all_projects.extend(root_projects)
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            # Try preferred location for this user
+            try:
+                user_preferred = user_dir / preferred_path.relative_to(Path.home())
+                if user_preferred.exists():
+                    user_projects = extract_from_file_func(user_preferred)
+                    if user_projects:
+                        all_projects.extend(user_projects)
+                        continue
+            except (ValueError, OSError):
+                pass
+
+            # Try fallback location for this user
+            try:
+                user_fallback = user_dir / fallback_path.relative_to(Path.home())
+                if user_fallback.exists():
+                    user_projects = extract_from_file_func(user_fallback)
+                    if user_projects:
+                        all_projects.extend(user_projects)
+            except (ValueError, OSError):
+                pass
+
+        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        import platform as _platform
+        if _platform.system() != "Linux":
+            if preferred_path.exists():
+                root_projects = extract_from_file_func(preferred_path)
+                if root_projects:
+                    all_projects.extend(root_projects)
+            elif fallback_path.exists():
+                root_projects = extract_from_file_func(fallback_path)
+                if root_projects:
+                    all_projects.extend(root_projects)
     else:
         # For regular users, check their own home directory
         if preferred_path.exists():
@@ -1492,21 +1515,23 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
         try:
             from .macos_extraction_helpers import is_running_as_root
             is_admin = is_running_as_root()
-            users_dir = Path("/home")
         except ImportError:
             pass
 
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                claude_dir = user_dir / ".claude"
-                if claude_dir.exists() and claude_dir.is_dir():
-                    try:
-                        extract_claudeai_mcp_servers(claude_dir, projects)
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            claude_dir = user_dir / ".claude"
+            if claude_dir.exists() and claude_dir.is_dir():
+                try:
+                    extract_claudeai_mcp_servers(claude_dir, projects)
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
-        extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
+        # On Darwin/Windows also scan the admin's own home (not in users_dir)
+        import platform as _platform
+        if _platform.system() != "Linux":
+            extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
     else:
         extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
 
@@ -1735,30 +1760,32 @@ def extract_claude_plugin_mcp_configs_with_root_support(
         try:
             from .macos_extraction_helpers import is_running_as_root
             is_admin = is_running_as_root()
-            users_dir = Path("/home")
         except ImportError:
             pass
 
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                plugins_dir = user_dir / ".claude" / "plugins"
-                if plugins_dir.exists() and plugins_dir.is_dir():
-                    try:
-                        for plugin_dir in plugins_dir.iterdir():
-                            if not plugin_dir.is_dir():
-                                continue
-                            plugin_json = plugin_dir / "plugin.json"
-                            if plugin_json.exists():
-                                extract_plugin_mcp_from_plugin_json(
-                                    plugin_json, projects, plugin_lookup=plugin_lookup
-                                )
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            plugins_dir = user_dir / ".claude" / "plugins"
+            if plugins_dir.exists() and plugins_dir.is_dir():
+                try:
+                    for plugin_dir in plugins_dir.iterdir():
+                        if not plugin_dir.is_dir():
+                            continue
+                        plugin_json = plugin_dir / "plugin.json"
+                        if plugin_json.exists():
+                            extract_plugin_mcp_from_plugin_json(
+                                plugin_json, projects, plugin_lookup=plugin_lookup
+                            )
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
 
-                    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
+                _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
-        extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
+        # On Darwin/Windows also scan admin's own home plugins (not in users_dir)
+        import platform as _platform
+        if _platform.system() != "Linux":
+            extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
     else:
         extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
 

@@ -13,9 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import MAX_SEARCH_DEPTH
 from ...toml_mcp_helpers import (
-    _TOOL_NAME,
-    _PARENT_LEVELS,
+    TOOL_NAME,
+    PARENT_LEVELS,
     read_codex_toml_mcp_config,
+    extract_codex_global_mcp_config_with_admin_support,
 )
 from ...macos_extraction_helpers import (
     get_top_level_directories,
@@ -44,70 +45,6 @@ def _is_admin_user() -> Tuple[bool, Optional[Path]]:
     except ImportError:
         return False, None
 
-
-def _extract_config_from_user_directories(
-    global_config_path: Path,
-    tool_name: str,
-    parent_levels: int
-) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
-    """
-    Extract MCP config from all user directories (when running as root).
-
-    Args:
-        global_config_path: Path to the global MCP config file (relative to home)
-        tool_name: Name of the tool (for logging)
-        parent_levels: Number of parent directories to go up for the path
-
-    Returns:
-        Dict with 'path' and 'mcpServers' keys, or None if no config found
-    """
-    is_admin, users_dir = _is_admin_user()
-
-    if not is_admin or not users_dir or not users_dir.exists():
-        return None
-
-    for user_dir in users_dir.iterdir():
-        if not user_dir.is_dir() or user_dir.name.startswith('.'):
-            continue
-
-        try:
-            user_config_path = user_dir / global_config_path.relative_to(Path.home())
-            if user_config_path.exists():
-                config = read_codex_toml_mcp_config(user_config_path, tool_name, parent_levels)
-                if config:
-                    return config
-        except (ValueError, OSError):
-            continue
-
-    return None
-
-
-def extract_codex_global_mcp_config_with_root_support(
-    global_config_path: Path,
-    tool_name: str = _TOOL_NAME,
-    parent_levels: int = _PARENT_LEVELS
-) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
-    """
-    Extract global Codex MCP config with support for root user.
-
-    Args:
-        global_config_path: Path to the global MCP config file (relative to home)
-        tool_name: Name of the tool (for logging)
-        parent_levels: Number of parent directories to go up for the path
-
-    Returns:
-        Dict with 'path' and 'mcpServers' keys, or None if no config found
-    """
-    config = _extract_config_from_user_directories(
-        global_config_path, tool_name, parent_levels
-    )
-    if config:
-        return config
-
-    if global_config_path.exists():
-        return read_codex_toml_mcp_config(global_config_path, tool_name, parent_levels)
-
-    return None
 
 
 class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
@@ -154,10 +91,11 @@ class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns:
             Dict with 'path' and 'mcpServers' keys, or None if not found
         """
-        return extract_codex_global_mcp_config_with_root_support(
+        return extract_codex_global_mcp_config_with_admin_support(
             self.GLOBAL_MCP_CONFIG_PATH,
-            tool_name=_TOOL_NAME,
-            parent_levels=_PARENT_LEVELS
+            _is_admin_user,
+            tool_name=TOOL_NAME,
+            parent_levels=PARENT_LEVELS
         )
 
     def _extract_project_level_configs(self) -> List[Dict]:
@@ -263,7 +201,7 @@ class MacOSCodexMCPConfigExtractor(BaseMCPConfigExtractor):
         if config_toml.exists() and config_toml.is_file():
             config = read_codex_toml_mcp_config(
                 config_toml,
-                tool_name=_TOOL_NAME,
+                tool_name=TOOL_NAME,
                 parent_levels=self._PROJECT_PARENT_LEVELS
             )
             if config:

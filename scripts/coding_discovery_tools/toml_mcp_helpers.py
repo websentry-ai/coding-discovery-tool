@@ -7,18 +7,15 @@ Used by both macOS and Windows Codex extractors to avoid duplication.
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .mcp_extraction_helpers import transform_mcp_servers_to_array
 
 logger = logging.getLogger(__name__)
 
-# Tool name shared across Codex extractors
-_TOOL_NAME = "Codex"
-
-# Number of parent levels to traverse for global config:
-# ~/.codex/config.toml -> 1 level up = ~/.codex
-_PARENT_LEVELS = 1
+# Public constants — part of this module's API, imported by platform extractors.
+TOOL_NAME = "Codex"
+PARENT_LEVELS = 1  # ~/.codex/config.toml -> 1 level up = ~/.codex
 
 # Pattern matches both camelCase [mcpServers.*] and snake_case [mcp_servers.*] formats
 _MCP_SERVERS_SECTION_PATTERN = re.compile(
@@ -131,7 +128,8 @@ def parse_toml_mcp_servers(content: str) -> Optional[Dict[str, Dict[str, Any]]]:
 
     try:
         data = tomllib.loads(content)
-    except tomllib.TOMLDecodeError:
+    except tomllib.TOMLDecodeError as e:
+        logger.warning("Failed to parse TOML config: %s", e)
         return None
 
     servers = data['mcp_servers'] if 'mcp_servers' in data else data.get('mcpServers')
@@ -191,8 +189,8 @@ def _calculate_config_path(config_path: Path, parent_levels: int) -> Path:
 
 def read_codex_toml_mcp_config(
     config_path: Path,
-    tool_name: str = _TOOL_NAME,
-    parent_levels: int = _PARENT_LEVELS
+    tool_name: str = TOOL_NAME,
+    parent_levels: int = PARENT_LEVELS
 ) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
     """
     Read and parse a Codex TOML config file to extract MCP servers.
@@ -230,5 +228,38 @@ def read_codex_toml_mcp_config(
         logger.warning(
             f"Error reading global {tool_name} MCP config {config_path}: {e}"
         )
+
+    return None
+
+
+def extract_codex_global_mcp_config_with_admin_support(
+    global_config_path: Path,
+    is_admin_fn: Callable[[], Tuple[bool, Optional[Path]]],
+    tool_name: str = TOOL_NAME,
+    parent_levels: int = PARENT_LEVELS
+) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
+    """
+    Extract global Codex MCP config with support for admin/root users.
+
+    Accepts a platform-specific callable returning (is_admin, users_dir).
+    When admin, searches all user directories; falls back to the current user's path.
+    """
+    is_admin, users_dir = is_admin_fn()
+
+    if is_admin and users_dir and users_dir.exists():
+        for user_dir in users_dir.iterdir():
+            if not user_dir.is_dir() or user_dir.name.startswith('.'):
+                continue
+            try:
+                user_config_path = user_dir / global_config_path.relative_to(Path.home())
+                if user_config_path.exists():
+                    config = read_codex_toml_mcp_config(user_config_path, tool_name, parent_levels)
+                    if config:
+                        return config
+            except (ValueError, OSError):
+                continue
+
+    if global_config_path.exists():
+        return read_codex_toml_mcp_config(global_config_path, tool_name, parent_levels)
 
     return None

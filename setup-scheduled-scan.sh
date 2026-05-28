@@ -619,7 +619,7 @@ while [[ $# -gt 0 ]]; do
         --domain)
             if [ $# -lt 2 ]; then echo "Error: --domain requires a value"; usage; fi
             DOMAIN="$2"; shift 2 ;;
-        --no-run-at-load) NO_RUN_AT_LOAD=true; shift ;;
+        --no-run-at-load) NO_RUN_AT_LOAD=true; shift ;;  # internal: passed by unbound CLI, not end-user facing
         --uninstall) DO_UNINSTALL=true; shift ;;
         --help|-h) usage ;;
         *) echo "Error: Unknown option '$1'"; usage ;;

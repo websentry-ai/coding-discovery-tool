@@ -53,6 +53,7 @@ try:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        CopilotCliMCPConfigExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -102,6 +103,7 @@ except ImportError:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        CopilotCliMCPConfigExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -197,6 +199,9 @@ class AIToolsDetector:
 
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
+
+            # GitHub Copilot CLI MCP extractor (macOS only; None elsewhere)
+            self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -1238,13 +1243,76 @@ class AIToolsDetector:
         
         return filtered_tool
 
+    def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
+        """
+        Process the GitHub Copilot CLI: extract its MCP config (no rules/settings
+        in this scope) and return the standard tool dict.
+
+        The CLI is its own product (distinct from the IDE Copilot extension), so
+        it gets a dedicated branch. Because this branch returns early — before
+        the shared empty-project filter in ``process_single_tool`` — it filters
+        empty projects itself: a parseable-but-serverless ``mcp-config.json``
+        must not emit a phantom "1 project / 0 servers" row (review P1-2).
+
+        Args:
+            tool: Tool info dict from detection.
+
+        Returns:
+            Tool dict with ``name``, ``version``, ``install_path`` and ``projects``.
+        """
+        tool_name = tool.get("name", "")
+        projects_dict: Dict[str, Dict] = {}
+
+        logger.info(f"  Extracting {tool_name} MCP configs...")
+        if self._copilot_cli_mcp_extractor:
+            try:
+                mcp_config = self._copilot_cli_mcp_extractor.extract_mcp_config()
+                if mcp_config and "projects" in mcp_config:
+                    for project in mcp_config["projects"]:
+                        project_path = project.get("path", "")
+                        if project_path:
+                            if project_path not in projects_dict:
+                                projects_dict[project_path] = {
+                                    "mcpServers": [],
+                                    "rules": [],
+                                }
+                            projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
+                    log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info("  No GitHub Copilot CLI MCP configs found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
+
+        # Drop empty projects so a serverless config doesn't surface a phantom row.
+        projects_list = [
+            {
+                "path": path,
+                "mcpServers": data.get("mcpServers", []),
+                "rules": data.get("rules", []),
+            }
+            for path, data in projects_dict.items()
+            if not self._is_project_empty(data)
+        ]
+
+        logger.info(f"  ✓ Final project count: {len(projects_list)} project(s)")
+        logger.info("=" * 70)
+
+        return {
+            "name": tool.get("name"),
+            "version": tool.get("version"),
+            "install_path": tool.get("install_path"),
+            "projects": projects_list,
+        }
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
-        
+
         Args:
             tool: Tool info dict from detection
-            
+
         Returns:
             Tool dict with projects populated
         """
@@ -1265,7 +1333,13 @@ class AIToolsDetector:
                     tool_dict[key] = tool[key]
 
             return tool_dict
-        
+
+        # Exact-match BEFORE the "github copilot" substring branch below —
+        # otherwise the substring check would swallow the CLI and route it
+        # through the IDE Copilot path (rules + VS Code/JetBrains MCP).
+        if tool_name == "github copilot cli":
+            return self._process_copilot_cli_tool(tool)
+
         if "github copilot" in tool_name:
             logger.info(f"  Extracting {tool_name} rules...")
             projects_dict = {}

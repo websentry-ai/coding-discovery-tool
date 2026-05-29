@@ -112,6 +112,10 @@ from .macos.github_copilot.detect_copilot import MacOSCopilotDetector
 from .macos.github_copilot.mcp_config_extractor import MacOSGitHubCopilotMCPConfigExtractor
 from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRulesExtractor
 
+# macOS - Copilot CLI (standalone @github/copilot agentic terminal tool)
+from .macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
+from .macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
+
 # Windows - Copilot
 from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
 from .windows.github_copilot.mcp_config_extractor import WindowsGitHubCopilotMCPConfigExtractor
@@ -539,6 +543,20 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_copilot_cli_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate GitHub Copilot CLI detector for the OS.
+
+        macOS only for now; Windows is a follow-up.
+        """
+        if os_name is None:
+            os_name = platform.system()
+        if os_name == "Darwin":
+            return MacOSCopilotCliDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_jetbrains_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate JetBrains IDEs detector for the OS.
@@ -644,6 +662,11 @@ class ToolDetectorFactory:
         copilot_detector = ToolDetectorFactory.create_copilot_detector(os_name)
         if copilot_detector is not None:
             detectors.append(copilot_detector)
+
+        # Add GitHub Copilot CLI detector for macOS
+        copilot_cli_detector = ToolDetectorFactory.create_copilot_cli_detector(os_name)
+        if copilot_cli_detector is not None:
+            detectors.append(copilot_cli_detector)
 
         # Add JetBrains detector for macOS
         jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
@@ -1257,6 +1280,25 @@ class GitHubCopilotMCPConfigExtractorFactory:
             return MacOSGitHubCopilotMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsGitHubCopilotMCPConfigExtractor()
+        else:
+            return None
+
+
+class CopilotCliMCPConfigExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create GitHub Copilot CLI MCP config extractor for the OS.
+
+        macOS only for now; Windows is a follow-up.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliMCPConfigExtractor()
         else:
             return None
 

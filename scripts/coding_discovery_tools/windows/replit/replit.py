@@ -91,14 +91,28 @@ class WindowsReplitDetector(BaseToolDetector):
         return None
 
     def _candidate_install_paths(self) -> list:
-        candidates = []
+        """
+        Build the list of conventional Windows install dirs for Replit Desktop.
+
+        Reads ``%LOCALAPPDATA%`` and the Program Files env vars, falling back
+        to user-home-derived / ``C:\\Program Files`` defaults when any of
+        them are unset — matching the symmetry the Windows KiloCode helper
+        already has, so a restricted service account (env stripped) still
+        gets full coverage.
+        """
+        roots = []
         local_app = os.environ.get("LOCALAPPDATA")
-        program_files = os.environ.get("ProgramFiles")
-        program_files_x86 = os.environ.get("ProgramFiles(x86)")
-        for base in (local_app and Path(local_app) / "Programs", program_files, program_files_x86):
-            if not base:
-                continue
-            base = Path(base)
+        roots.append(Path(local_app) / "Programs" if local_app
+                     else Path.home() / "AppData" / "Local" / "Programs")
+        for env, default in (
+            ("ProgramFiles", Path("C:\\Program Files")),
+            ("ProgramFiles(x86)", Path("C:\\Program Files (x86)")),
+        ):
+            base = os.environ.get(env)
+            roots.append(Path(base) if base else default)
+
+        candidates = []
+        for base in roots:
             for name in self.INSTALL_DIR_NAMES:
                 candidates.append(base / name)
         return candidates

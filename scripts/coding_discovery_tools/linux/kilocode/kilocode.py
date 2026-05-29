@@ -29,10 +29,16 @@ class LinuxKiloCodeDetector(BaseToolDetector):
         return None
 
     def get_version(self) -> Optional[str]:
-        for user_home in get_linux_user_homes():
-            version = self._get_extension_version_for_user(user_home)
-            if version:
-                return version
+        """
+        Delegate to detect() so the install-gating logic (extension settings
+        dir present in any supported IDE's globalStorage) stays the single
+        source of truth — a leftover ~/.vscode/extensions folder without a
+        real install must not surface a version when detect() returns None.
+        """
+        result = self.detect()
+        if result:
+            version = result.get("version")
+            return version if version != "Unknown" else None
         return None
 
     def _get_extension_version_for_user(self, user_home: Path) -> Optional[str]:

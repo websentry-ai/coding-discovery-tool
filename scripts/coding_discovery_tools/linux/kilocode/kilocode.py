@@ -1,5 +1,6 @@
 """Kilo Code detection for Linux."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict
@@ -28,6 +29,38 @@ class LinuxKiloCodeDetector(BaseToolDetector):
         return None
 
     def get_version(self) -> Optional[str]:
+        for user_home in get_linux_user_homes():
+            version = self._get_extension_version_for_user(user_home)
+            if version:
+                return version
+        return None
+
+    def _get_extension_version_for_user(self, user_home: Path) -> Optional[str]:
+        for ide_name in self.SUPPORTED_IDES:
+            extensions_dir = user_home / ".vscode" / "extensions"
+            if ide_name == "Cursor":
+                extensions_dir = user_home / ".cursor" / "extensions"
+
+            try:
+                if not extensions_dir.exists():
+                    continue
+                for ext_dir in extensions_dir.glob(f"{self.KILOCODE_EXTENSION_ID}-*"):
+                    package_json = ext_dir / "package.json"
+                    if package_json.exists():
+                        try:
+                            with open(package_json, "r", encoding="utf-8") as f:
+                                version = json.load(f).get("version")
+                            if version:
+                                return version
+                        except (json.JSONDecodeError, OSError):
+                            pass
+                    if "-" in ext_dir.name:
+                        try:
+                            return ext_dir.name.rsplit("-", 1)[1]
+                        except IndexError:
+                            pass
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not check extensions directory {extensions_dir}: {e}")
         return None
 
     def _check_user_for_kilocode(self, user_home: Path) -> Optional[Dict]:
@@ -42,7 +75,7 @@ class LinuxKiloCodeDetector(BaseToolDetector):
 
         return {
             "name": self.tool_name,
-            "version": "Unknown",
+            "version": self._get_extension_version_for_user(user_home) or "Unknown",
             "install_path": str(extension_path),
         }
 

@@ -1756,9 +1756,9 @@ def main():
     verbosity.add_argument(
         '--summary',
         action='store_true',
-        help='Suppress the transport lines (Sending / ✓ sent) and the '
-             'logging_helpers sub-boxes; keep headline output + per-tool '
-             'Report Summary box + warnings + errors.',
+        help='Suppress per-tool detail output: Report Summary box, transport '
+             'lines (Sending / ✓ sent), and logging_helpers sub-boxes. Keeps '
+             'headline output, per-tool totals, warnings, and errors.',
     )
     verbosity.add_argument(
         '--payload',
@@ -2055,7 +2055,7 @@ def main():
                             'rules': num_rules
                         })
 
-                        if not args.payload:
+                        if not args.summary and not args.payload:
                             logger.info("")
                             logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
                             logger.info(f"  │ User: {user_name}")

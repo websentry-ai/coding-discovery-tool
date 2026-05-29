@@ -1901,6 +1901,12 @@ def main():
         logger.info("Detecting AI tools...")
         all_tools = []  # Store all unique tools across all users
         tools_by_user = {}  # Track which tools belong to which user
+        # Per-user tool-key sets, used to scope the early detected-tools
+        # preview report below to the tools each user actually has. Review
+        # feedback (#130): the previous version sent the device-wide union
+        # to every user, creating phantom tiles for tools that user didn't
+        # own (e.g. Alice gets a Cursor tile because Bob has Cursor).
+        tool_keys_by_user = {u: set() for u in all_users}
 
         for user in all_users:
             if platform.system() == "Darwin":
@@ -1923,6 +1929,7 @@ def main():
 
                     # Track which user this tool belongs to
                     tool_key = f"{tool_name}:{tool_path}"
+                    tool_keys_by_user[user].add(tool_key)
                     if tool_key not in tools_by_user:
                         tools_by_user[tool_key] = tool
                         all_tools.append(tool)
@@ -1933,6 +1940,76 @@ def main():
         tools = all_tools
         logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
         logger.info("")
+
+        # --- Early "detected" pre-report (snappy live UI) -------------------
+        # Every tool is already known here, BEFORE the slow per-tool
+        # extraction (rules / MCP / skills / projects). Send a lightweight
+        # tools-only report (no projects) per user up front so the dashboard
+        # shows every agent tile within seconds of scan start, instead of one
+        # tile every ~tool-extraction. The full per-tool reports below
+        # supersede these (the backend keys installs by
+        # device + tool + home_user, retire-then-recreate), so this only
+        # changes *when* a tile first appears, not the final data.
+        if tools:
+            logger.info("Sending early detected-tools report (for live UI)...")
+            # Build preview stubs keyed by tool_key so we can scope to per-user
+            # attribution below. Phantom-tile fix (#130 review): a user only
+            # receives stubs for tools their OWN detection pass found, never
+            # the device-wide union.
+            #
+            # IMPORTANT: the preview must OMIT the `projects` key entirely (not
+            # set it to []). The server uses key-absence as the only
+            # unambiguous "this is a preview" signal — a full per-tool report
+            # from a user with zero projects legitimately sends `projects: []`,
+            # so an explicit empty list here would be indistinguishable from a
+            # real zero-projects report and the server's short-circuit would
+            # misroute it, leaving stale projects on returning users.
+            # Companion change: ai-gateway-data#1945
+            # (webapp/services/ai_tools_service.py preview-only short-circuit).
+            preview_tool_by_key = {}
+            for t in tools:
+                pt = {k: v for k, v in t.items()
+                      if not k.startswith('_') and k != 'projects'}
+                tool_key = f"{t.get('name', 'Unknown')}:{t.get('install_path', 'Unknown path')}"
+                preview_tool_by_key[tool_key] = pt
+            with time_step("send_detected_preview", "send"):
+                for user_name in all_users:
+                    user_keys = tool_keys_by_user.get(user_name, set())
+                    user_preview_tools = [
+                        preview_tool_by_key[k]
+                        for k in user_keys
+                        if k in preview_tool_by_key
+                    ]
+                    if not user_preview_tools:
+                        # User has no tools — skip rather than send an empty
+                        # preview that would create an empty tile.
+                        logger.info(
+                            f"  -- detected-tools preview skipped for "
+                            f"{user_name} (no tools)"
+                        )
+                        continue
+                    preview_report = {
+                        "home_user": user_name,
+                        "system_user": system_user,
+                        "device_id": device_id,
+                        "run_id": run_id,
+                        "tools": user_preview_tools,
+                    }
+                    try:
+                        ok, _ = send_report_to_backend(
+                            args.domain, args.api_key, preview_report,
+                            args.app_name, sentry_context=sentry_ctx,
+                        )
+                        logger.info(
+                            f"  {'OK' if ok else 'XX'} detected-tools preview "
+                            f"for {user_name} ({len(user_preview_tools)} tool(s))"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"  detected-tools preview failed for "
+                            f"{user_name}: {e}"
+                        )
+            logger.info("")
 
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:

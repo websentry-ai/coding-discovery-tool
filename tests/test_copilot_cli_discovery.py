@@ -31,6 +31,7 @@ from scripts.coding_discovery_tools.coding_tool_factory import (
 )
 from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli import (
     MacOSCopilotCliDetector,
+    _parse_cli_version,
 )
 from scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor import (
     MacOSCopilotCliMCPConfigExtractor,
@@ -648,18 +649,54 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["install_path"], str(copilot_dir))
 
-    def test_get_version_uses_shell_true_for_npm_shim(self):
-        """Windows overrides get_version with shell=True (npm .cmd shim) and parses output."""
-        fake = MagicMock(returncode=0, stdout="GitHub Copilot CLI 0.0.399.\n", stderr="")
+    def test_get_version_uses_shell_true_and_parses_semver(self):
+        """Windows get_version uses shell=True (npm .cmd shim) AND parses the bare
+        semver out of the multi-line banner — not the raw ~70-char string that
+        would overflow the backend version column."""
+        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        fake = MagicMock(returncode=0, stdout=banner, stderr="")
         with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
             version = WindowsCopilotCliDetector().get_version()
-        self.assertEqual(version, "GitHub Copilot CLI 0.0.399.")
+        self.assertEqual(version, "0.0.399")
         self.assertIs(run.call_args.kwargs.get("shell"), True)
 
     def test_get_version_returns_none_on_failure(self):
         """A failed/absent binary yields None (caller falls back to 'unknown'), never raises."""
         with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()):
             self.assertIsNone(WindowsCopilotCliDetector().get_version())
+
+
+class TestCopilotCliVersionParse(unittest.TestCase):
+    """_parse_cli_version turns the raw `copilot --version` banner into a clean semver.
+
+    Regression for the backend `varchar(50)` overflow: the raw multi-line banner
+    is ~70 chars and breaks ingestion; the parsed value must be a short semver.
+    """
+
+    def test_parses_semver_from_multiline_banner(self):
+        raw = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        self.assertEqual(_parse_cli_version(raw), "0.0.399")
+
+    def test_parses_prerelease_suffix(self):
+        self.assertEqual(_parse_cli_version("copilot 1.2.3-beta.4"), "1.2.3-beta.4")
+
+    def test_none_and_empty_return_none(self):
+        self.assertIsNone(_parse_cli_version(None))
+        self.assertIsNone(_parse_cli_version(""))
+        self.assertIsNone(_parse_cli_version("   \n  "))
+
+    def test_fallback_first_line_capped_when_no_semver(self):
+        result = _parse_cli_version("x" * 80 + "\nsecond line")
+        self.assertEqual(result, "x" * 50)
+
+    def test_parsed_value_fits_backend_version_column(self):
+        raw = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        self.assertLessEqual(len(_parse_cli_version(raw)), 50)
+
+    def test_macos_get_version_parses_via_run_command(self):
+        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=banner):
+            self.assertEqual(MacOSCopilotCliDetector().get_version(), "0.0.399")
 
 
 # ---------------------------------------------------------------------------

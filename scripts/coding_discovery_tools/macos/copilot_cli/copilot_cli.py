@@ -12,6 +12,7 @@ all-users/root scanning rather than Codex's global-binary model.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -70,6 +71,27 @@ def _copilot_dir_has_known_artifact(copilot_dir: Path) -> bool:
     except OSError as exc:
         logger.debug(f"Error inspecting Copilot CLI dir {copilot_dir}: {exc}")
     return False
+
+
+_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?")
+
+
+def _parse_cli_version(raw: Optional[str]) -> Optional[str]:
+    """Extract a clean version from raw ``copilot --version`` output.
+
+    The CLI prints a multi-line banner (e.g. ``"GitHub Copilot CLI 0.0.399.\\n
+    Run 'copilot update'..."``); we want just the version number so the stored
+    value is clean, comparable, and well under the backend's version column
+    limit (a raw multi-line banner overflows it). Falls back to the first
+    non-empty line (capped) when no semver is present.
+    """
+    if not raw:
+        return None
+    match = _VERSION_RE.search(raw)
+    if match:
+        return match.group(0)
+    first_line = next((line.strip() for line in raw.splitlines() if line.strip()), "")
+    return first_line[:50] or None
 
 
 class MacOSCopilotCliDetector(BaseToolDetector):
@@ -144,7 +166,10 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         by the caller.
 
         Returns:
-            Version string or None if version cannot be determined.
+            Parsed version (e.g. ``0.0.399``) or None if it can't be determined.
+            The semver is parsed out of the multi-line ``copilot --version``
+            banner so the stored value is clean and within the backend's version
+            column limit (a raw multi-line banner overflows it).
         """
         # TODO(copilot-cli): resolve the per-user binary (e.g. ~/.local/bin,
         # .bun/bin, nvm paths) and probe that explicitly, mirroring
@@ -152,9 +177,7 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         # where root's PATH lacks the user's copilot install (review W2).
         try:
             output = run_command(["copilot", "--version"], VERSION_TIMEOUT)
-            if output:
-                version = output.strip()
-                return version if version else None
+            return _parse_cli_version(output)
         except Exception as exc:
             logger.debug(f"Could not extract Copilot CLI version: {exc}")
         return None

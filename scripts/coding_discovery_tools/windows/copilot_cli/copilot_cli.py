@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 
 from ...constants import VERSION_TIMEOUT
 from ...windows_extraction_helpers import is_running_as_admin
-from ...macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
+from ...macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector, _parse_cli_version
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +109,7 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
                 shell=True,  # Required for npm .CMD shims on Windows
             )
             if result.returncode == 0:
-                output = result.stdout.strip() or result.stderr.strip()
-                return output or None
+                return _parse_cli_version(result.stdout or result.stderr)
         except Exception as exc:
             logger.debug(f"Could not extract Copilot CLI version on Windows: {exc}")
         return None

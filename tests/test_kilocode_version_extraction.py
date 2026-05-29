@@ -94,10 +94,27 @@ class TestWindowsKiloCodeVersion(unittest.TestCase):
         version = self.detector._get_extension_version_for_user(self.user_home, "Code")
         self.assertEqual(version, "3.7.0")
 
+    def test_falls_back_to_folder_suffix_when_package_json_unreadable(self):
+        ext_dir = _make_extension(self.user_home / ".vscode" / "extensions", folder_suffix="2.5.1")
+        (ext_dir / "package.json").write_text("not valid json {{{")
+        version = self.detector._get_extension_version_for_user(self.user_home, "Code")
+        self.assertEqual(version, "2.5.1")
+
+    def test_folder_suffix_preserves_prerelease_metadata(self):
+        ext_dir = _make_extension(self.user_home / ".vscode" / "extensions", folder_suffix="1.2.3-pre.5")
+        (ext_dir / "package.json").write_text("not valid json")
+        version = self.detector._get_extension_version_for_user(self.user_home, "Code")
+        self.assertEqual(version, "1.2.3-pre.5")
+
     def test_scoped_to_requested_ide_only(self):
         _make_extension(self.user_home / ".vscode" / "extensions", package_version="1.0.0")
         version = self.detector._get_extension_version_for_user(self.user_home, "Cursor")
         self.assertIsNone(version)
+
+    def test_uses_cursor_extensions_dir_when_cursor_requested(self):
+        _make_extension(self.user_home / ".cursor" / "extensions", package_version="4.2.0")
+        version = self.detector._get_extension_version_for_user(self.user_home, "Cursor")
+        self.assertEqual(version, "4.2.0")
 
 
 if __name__ == "__main__":

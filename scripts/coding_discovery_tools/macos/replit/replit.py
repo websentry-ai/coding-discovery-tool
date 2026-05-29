@@ -63,20 +63,21 @@ class MacOSReplitDetector(BaseToolDetector):
         if app_path:
             return {
                 "name": self.tool_name,
-                "version": self.get_version() or "Unknown",
+                "version": self.get_version(app_path) or "Unknown",
                 "install_path": str(app_path)
             }
 
         if user_data_path:
+            # user-data-only path means no .app, so version is unreachable
             return {
                 "name": self.tool_name,
-                "version": self.get_version() or "Unknown",
+                "version": self.get_version(None) or "Unknown",
                 "install_path": str(user_data_path)
             }
         
         return None
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:
         """
         Extract Replit version.
 
@@ -86,10 +87,18 @@ class MacOSReplitDetector(BaseToolDetector):
         the plist first because ``defaults read`` is significantly cheaper
         than parsing the JSON resource bundle.
 
+        Args:
+            app_path: Optional already-resolved .app path. When ``detect()``
+                has just confirmed the install, passing it here avoids a
+                redundant ``_check_application_installation()`` filesystem
+                call. Matches the macOS Antigravity detector's signature.
+
         Returns:
             Version string if the app is installed, None otherwise.
         """
-        if not self._check_application_installation():
+        if app_path is None:
+            app_path = self._check_application_installation()
+        if not app_path:
             return None
         try:
             plist_path = self.APPLICATION_PATH / "Contents" / "Info.plist"

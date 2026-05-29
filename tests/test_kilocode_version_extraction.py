@@ -41,6 +41,19 @@ class TestMacOSKiloCodeVersion(unittest.TestCase):
         version = self.detector._get_extension_version_for_user(self.user_home, "Code")
         self.assertEqual(version, "2.5.1")
 
+    def test_folder_suffix_preserves_prerelease_metadata(self):
+        """Pre-release suffixes (1.2.3-pre.5) must NOT be truncated by rsplit."""
+        ext_dir = _make_extension(self.user_home / ".vscode" / "extensions", folder_suffix="1.2.3-pre.5")
+        (ext_dir / "package.json").write_text("not valid json")
+        version = self.detector._get_extension_version_for_user(self.user_home, "Code")
+        self.assertEqual(version, "1.2.3-pre.5")
+
+    def test_folder_suffix_preserves_beta_metadata(self):
+        ext_dir = _make_extension(self.user_home / ".vscode" / "extensions", folder_suffix="1.0.0-beta.1")
+        (ext_dir / "package.json").write_text("not valid json")
+        version = self.detector._get_extension_version_for_user(self.user_home, "Code")
+        self.assertEqual(version, "1.0.0-beta.1")
+
     def test_scoped_to_requested_ide_only(self):
         """A Cursor lookup must NOT return a leftover VS Code version."""
         _make_extension(self.user_home / ".vscode" / "extensions", package_version="1.0.0")

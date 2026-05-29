@@ -119,7 +119,15 @@ class WindowsReplitDetector(BaseToolDetector):
             except (PermissionError, OSError):
                 continue
             try:
-                ps_command = f"(Get-Item {repr(str(exe))}).VersionInfo.FileVersion"
+                # Quote the path as a PowerShell single-quoted string. Inside
+                # single quotes, backslashes are literal — so we just need to
+                # escape any embedded single quotes by doubling them. Don't use
+                # Python's repr(): it produces ``'C:\\Users\\…'`` (with double
+                # backslashes) which PowerShell would treat as literal ``\\``.
+                escaped = str(exe).replace("'", "''")
+                ps_command = (
+                    f"(Get-Item -LiteralPath '{escaped}').VersionInfo.FileVersion"
+                )
                 output = run_command(["powershell", "-Command", ps_command], COMMAND_TIMEOUT)
                 if output:
                     output = output.strip()

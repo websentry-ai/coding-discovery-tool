@@ -7,12 +7,15 @@ This module detects Replit installations by checking for:
 2. User data directory in ~/Library/Application Support/Replit/
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
+from ...constants import VERSION_TIMEOUT
 from ...macos_extraction_helpers import is_running_as_root, scan_user_directories
+from ...utils import run_command
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +76,36 @@ class MacOSReplitDetector(BaseToolDetector):
     def get_version(self) -> Optional[str]:
         """
         Extract Replit version.
-        
-        Note: Version extraction is not implemented as Replit doesn't expose
-        version information in a standard way.
-        
+
+        Replit Desktop is a standard Electron app, so version lives in two
+        well-known places: the .app's Info.plist (CFBundleShortVersionString,
+        same source Cursor/Windsurf use) and resources/app/package.json. Try
+        the plist first because ``defaults read`` is significantly cheaper
+        than parsing the JSON resource bundle.
+
         Returns:
-            None (version extraction not available)
+            Version string if the app is installed, None otherwise.
         """
+        if not self._check_application_installation():
+            return None
+        try:
+            plist_path = self.APPLICATION_PATH / "Contents" / "Info.plist"
+            if plist_path.exists():
+                output = run_command(
+                    ["defaults", "read", str(plist_path), "CFBundleShortVersionString"],
+                    VERSION_TIMEOUT,
+                )
+                if output:
+                    return output.strip()
+        except Exception as e:
+            logger.debug(f"Could not read Replit Info.plist: {e}")
+        try:
+            pkg_json = self.APPLICATION_PATH / "Contents" / "Resources" / "app" / "package.json"
+            if pkg_json.exists():
+                with open(pkg_json, "r", encoding="utf-8") as f:
+                    return json.load(f).get("version")
+        except (json.JSONDecodeError, OSError, PermissionError) as e:
+            logger.debug(f"Could not read Replit package.json: {e}")
         return None
 
     def _check_application_installation(self) -> Optional[Path]:

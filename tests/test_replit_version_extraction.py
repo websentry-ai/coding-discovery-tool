@@ -119,6 +119,38 @@ class TestWindowsReplitVersion(unittest.TestCase):
         ps_command = rc.call_args.args[0][2]
         self.assertIn("user''s", ps_command)
 
+    def test_get_version_scans_supplied_user_home_first(self):
+        """
+        Regression guard for the SYSTEM/Admin multi-user blind spot.
+
+        Under ``az run-command`` / Run-Command-Manager elevation, the
+        process runs as SYSTEM, so ``%LOCALAPPDATA%`` resolves to
+        ``C:\\Windows\\system32\\config\\systemprofile\\AppData\\Local`` —
+        not the scanned user's AppData. detect() now plumbs the
+        discovered user_home through to get_version(); _candidate_install_paths
+        must put ``<user_home>\\AppData\\Local\\Programs`` ahead of the env-var
+        path so the per-user squirrel install is actually found.
+        """
+        fake_user_home = Path(self.tmp.name) / "alice"
+        install_dir = fake_user_home / "AppData" / "Local" / "Programs" / "Replit"
+        install_dir.mkdir(parents=True, exist_ok=True)
+        pkg = install_dir / "resources" / "app" / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        pkg.write_text(json.dumps({"name": "replit", "version": "3.1.0"}))
+
+        # Point the env var at SOMETHING ELSE so the test would fail loudly
+        # if get_version() fell back to the env-var path instead of using
+        # the supplied user_home.
+        wrong_localappdata = Path(self.tmp.name) / "system-profile" / "AppData" / "Local"
+        wrong_localappdata.mkdir(parents=True, exist_ok=True)
+        env = {"LOCALAPPDATA": str(wrong_localappdata),
+               "ProgramFiles": str(Path(self.tmp.name) / "Program Files"),
+               "ProgramFiles(x86)": str(Path(self.tmp.name) / "Program Files (x86)")}
+        with patch.dict("os.environ", env, clear=False):
+            version = self.detector.get_version(user_home=fake_user_home)
+
+        self.assertEqual(version, "3.1.0")
+
 
 if __name__ == "__main__":
     unittest.main()

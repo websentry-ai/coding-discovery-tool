@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
@@ -43,27 +43,34 @@ class WindowsReplitDetector(BaseToolDetector):
     def detect(self) -> Optional[Dict]:
         """
         Detect Replit installation on Windows.
-        
-        When running as administrator, scans all user directories to find installations
-        across multiple user accounts.
-        
+
+        When running as administrator, scans all user directories so that an
+        install owned by a different user (e.g. squirrel per-user install
+        under ``C:\\Users\\<other>\\AppData\\Local\\Programs\\Replit\\``) is
+        still discovered. Crucially, the resolved ``user_home`` is plumbed
+        through to ``get_version()`` so the version lookup walks the SAME
+        user's AppData — not the SYSTEM/Admin profile that ``%LOCALAPPDATA%``
+        would otherwise point to under elevation.
+
         Returns:
-            Dict containing tool info (name, version, install_path) or None if not found
+            Dict containing tool info (name, version, install_path) or None
+            if not found.
         """
-        user_data_path = self._check_user_data_directory()
-        if user_data_path:
+        found = self._check_user_data_directory()
+        if found:
+            user_data_path, user_home = found
             return {
                 "name": self.tool_name,
                 # ``or "Unknown"`` keeps the version field consistent with
                 # KiloCode — without it, a data-dir-only install emits
                 # ``"version": null`` while KiloCode emits ``"Unknown"``.
-                "version": self.get_version() or "Unknown",
-                "install_path": str(user_data_path)
+                "version": self.get_version(user_home) or "Unknown",
+                "install_path": str(user_data_path),
             }
-        
+
         return None
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, user_home: Optional[Path] = None) -> Optional[str]:
         """
         Extract Replit version.
 
@@ -73,10 +80,18 @@ class WindowsReplitDetector(BaseToolDetector):
         and read ``resources\\app\\package.json``. If that fails, fall back
         to the .exe's FileVersion via PowerShell.
 
+        Args:
+            user_home: Optional resolved user home (e.g. ``C:\\Users\\alice``)
+                whose ``AppData\\Local\\Programs`` should be scanned in
+                addition to / instead of the env-var-derived path. Required
+                for multi-user scans under SYSTEM/Admin, where the running
+                process's ``%LOCALAPPDATA%`` points to its own profile
+                rather than the scanned user's.
+
         Returns:
             Version string if the app is installed, None otherwise.
         """
-        for app_path in self._candidate_install_paths():
+        for app_path in self._candidate_install_paths(user_home):
             try:
                 if not app_path.exists():
                     continue
@@ -90,17 +105,21 @@ class WindowsReplitDetector(BaseToolDetector):
                 return version
         return None
 
-    def _candidate_install_paths(self) -> list:
+    def _candidate_install_paths(self, user_home: Optional[Path] = None) -> List[Path]:
         """
         Build the list of conventional Windows install dirs for Replit Desktop.
 
-        Reads ``%LOCALAPPDATA%`` and the Program Files env vars, falling back
-        to user-home-derived / ``C:\\Program Files`` defaults when any of
-        them are unset — matching the symmetry the Windows KiloCode helper
-        already has, so a restricted service account (env stripped) still
-        gets full coverage.
+        When ``user_home`` is provided, scan that user's
+        ``AppData\\Local\\Programs`` first — this is the only correct path
+        under SYSTEM/Admin elevation, since the env-var-derived
+        ``%LOCALAPPDATA%`` would otherwise point to the wrong profile.
+        The env-var path and system-wide ``Program Files`` roots are still
+        appended for fall-through, with hard-coded defaults when the env
+        vars are missing (e.g. restricted service accounts).
         """
-        roots = []
+        roots: List[Path] = []
+        if user_home is not None:
+            roots.append(user_home / "AppData" / "Local" / "Programs")
         local_app = os.environ.get("LOCALAPPDATA")
         roots.append(Path(local_app) / "Programs" if local_app
                      else Path.home() / "AppData" / "Local" / "Programs")
@@ -111,10 +130,15 @@ class WindowsReplitDetector(BaseToolDetector):
             base = os.environ.get(env)
             roots.append(Path(base) if base else default)
 
-        candidates = []
+        candidates: List[Path] = []
+        seen = set()
         for base in roots:
             for name in self.INSTALL_DIR_NAMES:
-                candidates.append(base / name)
+                p = base / name
+                if p in seen:
+                    continue
+                seen.add(p)
+                candidates.append(p)
         return candidates
 
     def _read_version_from_package_json(self, app_path: Path) -> Optional[str]:
@@ -154,15 +178,16 @@ class WindowsReplitDetector(BaseToolDetector):
                 logger.debug(f"PowerShell version lookup failed for {exe}: {e}")
         return None
 
-    def _check_user_data_directory(self) -> Optional[Path]:
+    def _check_user_data_directory(self) -> Optional[Tuple[Path, Path]]:
         """
-        Check if Replit user data directory exists.
-        
-        When running as administrator, scans all user directories.
-        Otherwise, checks current user's directory.
-        
-        Returns:
-            Path to user data directory if found, None otherwise
+        Locate a Replit user-data directory.
+
+        When running as administrator, scans every ``C:\\Users\\<name>\\``
+        directory; otherwise inspects only the running user. Returns
+        ``(user_data_path, user_home)`` for the FIRST matching user so the
+        caller can plumb the same ``user_home`` into the version lookup —
+        otherwise an admin-mode scan would discover one user's userdata but
+        read another's (or SYSTEM's) install dir for the version.
         """
         # When running as administrator, scan all user directories
         if self._is_running_as_admin():
@@ -173,16 +198,16 @@ class WindowsReplitDetector(BaseToolDetector):
                         try:
                             user_data_path = self._get_user_data_path(user_dir)
                             if user_data_path:
-                                return user_data_path
+                                return user_data_path, user_dir
                         except (PermissionError, OSError) as e:
                             logger.debug(f"Skipping user directory {user_dir}: {e}")
                             continue
-        
+
         # Check current user's directory
         user_data_path = self._get_user_data_path(Path.home())
         if user_data_path:
-            return user_data_path
-        
+            return user_data_path, Path.home()
+
         return None
 
     def _get_user_data_path(self, user_home: Path) -> Optional[Path]:

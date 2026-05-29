@@ -408,7 +408,7 @@ install_macos() {
         <integer>0</integer>
     </dict>
     <key>RunAtLoad</key>
-    <true/>
+    $( if [ "$NO_RUN_AT_LOAD" = "true" ]; then printf '<false/>'; else printf '<true/>'; fi )
     <key>StandardOutPath</key>
     <string>${LOG_DIR}/scheduled.log</string>
     <key>StandardErrorPath</key>
@@ -427,7 +427,11 @@ EOF
     echo ""
     echo "Unbound scheduled run set up."
     echo "  Command:     $COMMAND"
-    echo "  Schedule:    Daily at 09:00 (runs on install + at each login via RunAtLoad)"
+    if [ "$NO_RUN_AT_LOAD" = "true" ]; then
+        echo "  Schedule:    Daily at 09:00"
+    else
+        echo "  Schedule:    Daily at 09:00 (runs on install + at each login via RunAtLoad)"
+    fi
     echo "  Logs:        ${LOG_DIR}/scheduled.log"
     echo "  Uninstall:   unbound discover unschedule"
 }
@@ -599,6 +603,7 @@ API_KEY=""
 DISCOVERY_KEY=""
 DOMAIN=""
 DO_UNINSTALL=false
+NO_RUN_AT_LOAD=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -614,6 +619,7 @@ while [[ $# -gt 0 ]]; do
         --domain)
             if [ $# -lt 2 ]; then echo "Error: --domain requires a value"; usage; fi
             DOMAIN="$2"; shift 2 ;;
+        --no-run-at-load) NO_RUN_AT_LOAD=true; shift ;;
         --uninstall) DO_UNINSTALL=true; shift ;;
         --help|-h) usage ;;
         *) echo "Error: Unknown option '$1'"; usage ;;

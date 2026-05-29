@@ -6,6 +6,7 @@ on macOS and Windows
 """
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -1763,6 +1764,17 @@ def main():
         print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
         sys.exit(1)
 
+    # Discovery only supports macOS/Windows. Exit cleanly on other platforms (Linux, etc.)
+    # before detector init, which would otherwise raise and page Sentry on every run.
+    current_platform = platform.system()
+    if current_platform not in ("Darwin", "Windows"):
+        print(
+            f"AI tool discovery is not supported on {current_platform}. "
+            "The Unbound CLI works normally; skipping the discovery scan.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
     # Build Sentry context that persists for the whole run
     sentry_ctx = {
         "domain": args.domain,
@@ -1964,18 +1976,35 @@ def main():
                             try:
                                 with time_step("find_subscription_binary", "detect"):
                                     claude_bin = find_claude_binary_for_user(user_home)
-                                with time_step("detect_subscriptions", "process"):
-                                    subscription = (
-                                        get_claude_subscription_type(user_name, claude_bin)
-                                        if claude_bin else None
-                                    )
                                 if claude_bin is None:
-                                    logger.debug(f"    Claude binary not found for {user_name}")
-                                elif subscription:
+                                    logger.debug(f"    Claude binary not found for {user_name}, using shell resolution")
+                                plan_diagnostics = []
+                                with time_step("detect_subscriptions", "process"):
+                                    subscription = get_claude_subscription_type(user_name, claude_bin, diagnostics=plan_diagnostics)
+                                if subscription:
                                     tool_filtered["plan"] = subscription
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
+                                    # Only alert when the CLI actually succeeded (ok=True) at
+                                    # some stage but returned no plan.  If every stage failed
+                                    # (ok=False), the user never authenticated — not actionable.
+                                    cli_succeeded = any(
+                                        d.get("data", {}).get("ok") is True
+                                        for d in plan_diagnostics
+                                    )
+                                    if tool_filtered.get("projects") and cli_succeeded:
+                                        report_to_sentry(
+                                            RuntimeError(f"Claude Code plan detection failed for {user_name}"),
+                                            context={
+                                                **sentry_ctx,
+                                                "phase": "plan_detection",
+                                                "user": user_name,
+                                                "claude_binary": str(claude_bin) if claude_bin else "None",
+                                                "diagnostics": plan_diagnostics,
+                                            },
+                                            level="warning",
+                                        )
                             except (PermissionError, OSError) as e:
                                 logger.warning(f"    Could not detect plan for {user_name}: {e}")
 
@@ -2050,17 +2079,32 @@ def main():
                         logger.info("  └──────────────────────────────────────────────────────────────────")
                         logger.info("")
 
-                        # Log the complete JSON being sent to backend
+                        # Log JSON payload (rules/skills content stripped to reduce volume)
                         logger.info("  Complete JSON payload being sent to backend:")
                         logger.info("  " + "=" * 70)
-                        with time_step("log_payload", "process"):
-                            try:
-                                report_json = json.dumps(single_tool_report, indent=2)
-                                for line in report_json.split('\n'):
-                                    logger.info(f"  {line}")
-                            except Exception as e:
-                                logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                                logger.info(f"  Report structure: {single_tool_report}")
+                        try:
+                            log_report = copy.deepcopy(single_tool_report)
+                            for t in log_report.get("tools") or []:
+                                for p in t.get("projects") or []:
+                                    for r in p.get("rules") or []:
+                                        if "content" in r:
+                                            r["content"] = f"<{len(r['content'])} chars>"
+                                    for s in p.get("skills") or []:
+                                        if "content" in s:
+                                            s["content"] = f"<{len(s['content'])} chars>"
+                                    for mcp in p.get("mcpServers") or []:
+                                        for tool in (mcp.get("scan") or {}).get("tools") or []:
+                                            tool.pop("inputSchema", None)
+                                            tool.pop("outputSchema", None)
+                                            desc = tool.get("description") or ""
+                                            if len(desc) > 80:
+                                                tool["description"] = desc[:80] + "..."
+                            report_json = json.dumps(log_report, indent=2)
+                            for line in report_json.split('\n'):
+                                logger.info(f"  {line}")
+                        except Exception as e:
+                            logger.warning(f"  Could not serialize report to JSON for logging: {e}")
+                            logger.info(f"  Report structure: {single_tool_report}")
                         logger.info("  " + "=" * 70)
                         logger.info("")
 

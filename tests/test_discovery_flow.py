@@ -195,6 +195,23 @@ class TestMainCLI(unittest.TestCase):
         self.assertGreaterEqual(len(data), 1)
 
 
+class TestUnsupportedPlatformGuard(unittest.TestCase):
+    """main() exits cleanly on unsupported platforms instead of crashing in detector init."""
+
+    def test_linux_exits_code_3_before_detector_init(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 3)
+        mock_detector.assert_not_called()
+
+
 class TestSentryNeverCrashes(unittest.TestCase):
     """report_to_sentry must never raise, regardless of input."""
 

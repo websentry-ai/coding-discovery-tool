@@ -36,8 +36,11 @@ from scripts.coding_discovery_tools.macos.github_copilot.mcp_config_extractor im
 )
 from scripts.coding_discovery_tools.macos.codex.mcp_config_extractor import (
     MacOSCodexMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.toml_mcp_helpers import (
     parse_toml_mcp_servers,
     read_codex_toml_mcp_config,
+    _parse_toml_mcp_servers_regex,
 )
 
 
@@ -964,6 +967,159 @@ class TestParseTomlMcpServers(unittest.TestCase):
 
     def test_empty_content_returns_none(self):
         result = parse_toml_mcp_servers("")
+        self.assertIsNone(result)
+
+    def test_http_headers_sub_table_not_emitted_as_server(self):
+        content = (
+            '[mcp_servers.context7]\n'
+            'url = "https://mcp.context7.com/mcp"\n'
+            '\n'
+            '[mcp_servers.context7.http_headers]\n'
+            'CONTEXT7_API_KEY = "ctx7sk-secret-value"\n'
+        )
+        result = parse_toml_mcp_servers(content)
+        self.assertIsNotNone(result)
+        self.assertEqual(list(result.keys()), ["context7"])
+        self.assertEqual(result["context7"].get("url"), "https://mcp.context7.com/mcp")
+        self.assertNotIn("http_headers", result["context7"])
+
+    def test_secret_in_http_headers_does_not_leak(self):
+        content = (
+            '[mcp_servers.context7]\n'
+            'url = "https://mcp.context7.com/mcp"\n'
+            '\n'
+            '[mcp_servers.context7.http_headers]\n'
+            'CONTEXT7_API_KEY = "ctx7sk-leaky"\n'
+        )
+        result = parse_toml_mcp_servers(content)
+        serialized = repr(result)
+        self.assertNotIn("ctx7sk-leaky", serialized)
+        self.assertNotIn("CONTEXT7_API_KEY", serialized)
+
+    def test_per_tool_approval_sub_tables_not_emitted_as_servers(self):
+        content = (
+            '[mcp_servers.playwright]\n'
+            'command = "npx"\n'
+            'args = ["@playwright/mcp@latest"]\n'
+            '\n'
+            '[mcp_servers.playwright.tools.browser_navigate]\n'
+            'approval_mode = "approve"\n'
+            '\n'
+            '[mcp_servers.playwright.tools.browser_click]\n'
+            'approval_mode = "approve"\n'
+        )
+        result = parse_toml_mcp_servers(content)
+        self.assertIsNotNone(result)
+        self.assertEqual(list(result.keys()), ["playwright"])
+        self.assertEqual(result["playwright"].get("command"), "npx")
+        self.assertEqual(result["playwright"].get("args"), ["@playwright/mcp@latest"])
+        self.assertNotIn("tools", result["playwright"])
+
+    def test_env_sub_table_not_emitted_as_server(self):
+        content = (
+            '[mcp_servers.serena]\n'
+            'command = "serena"\n'
+            '\n'
+            '[mcp_servers.serena.env]\n'
+            'SERENA_LOG_LEVEL = "info"\n'
+        )
+        result = parse_toml_mcp_servers(content)
+        self.assertIsNotNone(result)
+        self.assertEqual(list(result.keys()), ["serena"])
+        self.assertNotIn("env", result["serena"])
+
+    def test_inline_env_table_dropped_from_server_fields(self):
+        content = (
+            '[mcp_servers.foo]\n'
+            'command = "foo-bin"\n'
+            'env = { SECRET = "shh" }\n'
+        )
+        result = parse_toml_mcp_servers(content)
+        self.assertIsNotNone(result)
+        self.assertIn("foo", result)
+        self.assertEqual(result["foo"].get("command"), "foo-bin")
+        self.assertNotIn("env", result["foo"])
+        self.assertNotIn("shh", repr(result))
+
+    def test_args_array_preserved(self):
+        content = (
+            '[mcp_servers.linear]\n'
+            'command = "npx"\n'
+            'args = ["-y", "mcp-remote", "https://mcp.linear.app/sse"]\n'
+        )
+        result = parse_toml_mcp_servers(content)
+        self.assertEqual(
+            result["linear"]["args"],
+            ["-y", "mcp-remote", "https://mcp.linear.app/sse"],
+        )
+
+    def test_quoted_dotted_server_name_kept_as_single_server(self):
+        content = (
+            '[mcp_servers."weird.name"]\n'
+            'command = "x"\n'
+        )
+        result = parse_toml_mcp_servers(content)
+        self.assertIsNotNone(result)
+        self.assertEqual(list(result.keys()), ["weird.name"])
+
+    def test_invalid_toml_returns_none(self):
+        result = parse_toml_mcp_servers("[[[not valid")
+        self.assertIsNone(result)
+
+
+class TestParseTomlMcpServersRegexFallback(unittest.TestCase):
+    """Cover the Python <3.11 fallback path — same fixtures, regex parser."""
+
+    def test_camel_case_section(self):
+        content = '[mcpServers.linear]\ncommand = "npx"\n'
+        result = _parse_toml_mcp_servers_regex(content)
+        self.assertIsNotNone(result)
+        self.assertIn("linear", result)
+
+    def test_snake_case_section(self):
+        content = '[mcp_servers.linear]\nurl = "https://x"\n'
+        result = _parse_toml_mcp_servers_regex(content)
+        self.assertIsNotNone(result)
+        self.assertIn("linear", result)
+
+    def test_http_headers_sub_table_skipped(self):
+        content = (
+            '[mcp_servers.context7]\n'
+            'url = "https://mcp.context7.com/mcp"\n'
+            '\n'
+            '[mcp_servers.context7.http_headers]\n'
+            'CONTEXT7_API_KEY = "ctx7sk-leaky"\n'
+        )
+        result = _parse_toml_mcp_servers_regex(content)
+        self.assertIsNotNone(result)
+        self.assertEqual(list(result.keys()), ["context7"])
+        self.assertNotIn("ctx7sk-leaky", repr(result))
+
+    def test_per_tool_sub_tables_skipped(self):
+        content = (
+            '[mcp_servers.playwright]\n'
+            'command = "npx"\n'
+            '\n'
+            '[mcp_servers.playwright.tools.browser_click]\n'
+            'approval_mode = "approve"\n'
+        )
+        result = _parse_toml_mcp_servers_regex(content)
+        self.assertIsNotNone(result)
+        self.assertEqual(list(result.keys()), ["playwright"])
+
+    def test_env_sub_table_skipped(self):
+        content = (
+            '[mcp_servers.serena]\n'
+            'command = "serena"\n'
+            '\n'
+            '[mcp_servers.serena.env]\n'
+            'SERENA_LOG_LEVEL = "info"\n'
+        )
+        result = _parse_toml_mcp_servers_regex(content)
+        self.assertEqual(list(result.keys()), ["serena"])
+
+    def test_no_mcp_servers_returns_none(self):
+        result = _parse_toml_mcp_servers_regex("[general]\nkey = 'value'\n")
         self.assertIsNone(result)
 
 

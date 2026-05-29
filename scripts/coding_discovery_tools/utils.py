@@ -795,13 +795,15 @@ def _run_auth_status(
     username: str,
     method: str = "direct",
     env: Optional[dict] = None,
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
     """Execute an auth-status command and parse the subscription type.
 
-    Returns a tuple of (success, subscription_type):
-    - (True, "max")  — command ran successfully, user has a plan
-    - (True, None)   — command ran successfully, user is not logged in
-    - (False, None)  — command failed (non-zero exit, timeout, OS error)
+    Returns a tuple of (success, subscription_type, auth_method, api_key_source):
+    - (True, "max", "claude.ai", None)           — user has a personal plan
+    - (True, "api_key", "api_key", "ANTHROPIC_API_KEY") — API key auth
+    - (True, None, "claude.ai", "/login managed key")   — org-managed login
+    - (True, None, None, None)                   — user is not logged in
+    - (False, None, None, None)                  — command failed
     """
     try:
         result = subprocess.run(
@@ -818,20 +820,25 @@ def _run_auth_status(
                 f"{username}: rc={result.returncode}, "
                 f"stderr={result.stderr.strip()}"
             )
-            return (False, None)
+            return (False, None, None, None)
 
         parsed = json.loads(result.stdout.strip())
-        return (True, parsed.get("subscriptionType"))
+        auth_method = parsed.get("authMethod")
+        api_key_source = parsed.get("apiKeySource")
+        plan = parsed.get("subscriptionType")
+        if plan is None and auth_method in {"api_key", "api_key_helper"}:
+            plan = "api_key"
+        return (True, plan, auth_method, api_key_source)
 
     except subprocess.TimeoutExpired:
         logger.debug(f"claude auth status ({method}) timed out for {username}")
-        return (False, None)
+        return (False, None, None, None)
     except json.JSONDecodeError:
         logger.warning(f"claude auth status ({method}) returned non-JSON for {username}")
-        return (False, None)
+        return (False, None, None, None)
     except OSError as e:
         logger.debug(f"Could not run claude auth status ({method}) for {username}: {e}")
-        return (False, None)
+        return (False, None, None, None)
 
 
 def _get_plan_from_keychain(username: str) -> Optional[str]:
@@ -902,7 +909,8 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
 
 def get_claude_subscription_type(
     username: str,
-    claude_binary: str,
+    claude_binary: Optional[str] = None,
+    diagnostics: Optional[List[Dict]] = None,
 ) -> Optional[str]:
     """
     Get the Claude Code subscription type for a specific user.
@@ -910,6 +918,12 @@ def get_claude_subscription_type(
     On macOS, first attempts a fast-path read directly from the macOS
     Keychain (~15ms).  Falls back to running 'claude auth status --json'
     as the specified user if the keychain read fails.
+
+    When ``claude_binary`` is ``None``, the command is passed through the
+    user's login shell (``shell -lc "claude auth status --json"``) so that
+    the shell's PATH resolves the binary.  This covers installations via
+    non-standard package managers (volta, pnpm, fnm, asdf, mise, etc.)
+    without needing to know the exact install path.
 
     On macOS when running as root, uses 'launchctl asuser <uid>' to execute
     in the user's Mach bootstrap namespace (required for Keychain access).
@@ -922,21 +936,54 @@ def get_claude_subscription_type(
 
     Args:
         username: System username to run the command as
-        claude_binary: Absolute path to the claude binary
+        claude_binary: Absolute path to the claude binary, or None to
+            let the user's login shell resolve ``claude`` via PATH.
+        diagnostics: Optional list to collect breadcrumb dicts for
+            diagnostic reporting.  When ``None`` (the default), no
+            breadcrumbs are recorded and behaviour is identical to
+            previous versions.
 
     Returns:
-        Subscription type string (e.g., "max", "pro", "team", "enterprise")
-        or None if detection fails or user is not logged in
+        Subscription type string (e.g., "max", "pro", "team", "enterprise",
+        "api_key") or None if detection fails or user is not logged in
     """
     try:
+        is_root = _is_root()
+        binary_status = "provided" if claude_binary else "shell_resolution"
+
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "plan_detection",
+                "message": "Starting plan detection",
+                "level": "info",
+                "data": {
+                    "os": platform.system(),
+                    "is_root": is_root,
+                    "binary_status": binary_status,
+                    "username": username,
+                },
+            })
+
         # Fast path: read directly from macOS Keychain (no CLI needed)
         if platform.system() == "Darwin":
             plan = _get_plan_from_keychain(username)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "keychain",
+                    "message": f"Keychain result: {plan}" if plan else "Keychain returned None",
+                    "level": "info" if plan else "warning",
+                    "data": {"plan": plan},
+                })
             if plan:
                 return plan
 
+        # Build the auth command — full path when known, bare name otherwise
+        if claude_binary:
+            auth_cmd = f"{shlex.quote(claude_binary)} auth status --json"
+        else:
+            auth_cmd = "claude auth status --json"
+
         # CLI fallback: spawn 'claude auth status --json'
-        is_root = _is_root()
         is_darwin = platform.system() == "Darwin"
         is_container = is_darwin and _is_daemon_container()
         use_launchctl = is_darwin and (is_root or is_container)
@@ -948,9 +995,16 @@ def get_claude_subscription_type(
                 cmd = [
                     "launchctl", "asuser", str(uid),
                     shell, "-lc",
-                    f"{shlex.quote(claude_binary)} auth status --json",
+                    auth_cmd,
                 ]
-                ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")
+                ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="launchctl asuser")
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "category": "launchctl_asuser",
+                        "message": f"ok={ok}, plan={plan}",
+                        "level": "info" if ok else "warning",
+                        "data": {"ok": ok, "plan": plan, "auth_method": auth_method, "key_source": key_source, "uid": uid, "shell": shell},
+                    })
                 if ok:
                     return plan
                 logger.debug(
@@ -962,19 +1016,40 @@ def get_claude_subscription_type(
                     f"Could not resolve UID for {username}, "
                     f"skipping launchctl asuser"
                 )
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "category": "launchctl_asuser",
+                        "message": "UID resolution failed, skipping launchctl",
+                        "level": "warning",
+                        "data": {"uid": None},
+                    })
 
         # Fallback for root on macOS: su - username
         if is_darwin and is_root:
             cmd = [
                 "su", "-", username, "-c",
-                f"{shlex.quote(claude_binary)} auth status --json",
+                auth_cmd,
             ]
-            ok, plan = _run_auth_status(cmd, username, method="su")
+            ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="su")
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "su_fallback",
+                    "message": f"ok={ok}, plan={plan}",
+                    "level": "info" if ok else "warning",
+                    "data": {"ok": ok, "plan": plan, "auth_method": auth_method, "key_source": key_source},
+                })
             if ok:
                 return plan
 
         # Direct execution — final fallback for all platforms
-        cmd = [claude_binary, "auth", "status", "--json"]
+        shell_fallback = False
+        if claude_binary:
+            cmd = [claude_binary, "auth", "status", "--json"]
+        else:
+            # No binary path known — use login shell to resolve via PATH
+            shell_fallback = True
+            shell = _get_compatible_shell(username)
+            cmd = [shell, "-lc", auth_cmd]
         env = None
         if is_container:
             real_home = _get_real_home(username)
@@ -985,11 +1060,33 @@ def get_claude_subscription_type(
                     f"Overriding HOME to {real_home} for {username} "
                     f"(daemon container detected)"
                 )
-        ok, plan = _run_auth_status(cmd, username, method="direct", env=env)
+        ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="direct", env=env)
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "direct_exec",
+                "message": f"ok={ok}, plan={plan}",
+                "level": "info" if ok else "warning",
+                "data": {
+                    "ok": ok,
+                    "plan": plan,
+                    "auth_method": auth_method,
+                    "key_source": key_source,
+                    "binary": claude_binary,
+                    "shell_fallback": shell_fallback,
+                    "daemon_container": is_container if is_darwin else False,
+                },
+            })
         return plan
 
     except Exception as e:
         logger.debug(f"Unexpected error getting subscription for {username}: {e}")
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "unexpected_error",
+                "message": f"{type(e).__name__}: {e}",
+                "level": "error",
+                "data": {"error_type": type(e).__name__, "error_message": str(e)},
+            })
         return None
 
 

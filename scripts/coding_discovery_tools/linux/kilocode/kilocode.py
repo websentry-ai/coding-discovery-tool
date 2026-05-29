@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -9,6 +10,10 @@ from ...coding_tool_base import BaseToolDetector
 from ...linux_extraction_helpers import get_linux_user_homes
 
 logger = logging.getLogger(__name__)
+
+# Match the trailing semver portion of a VS Code extension folder name,
+# including pre-release suffixes like 1.2.3-pre.5 or 1.0.0-beta.1.
+_VERSION_SUFFIX_RE = re.compile(r"-(\d+\.\d+\.\d+(?:[-+][\w.+-]+)?)$")
 
 
 class LinuxKiloCodeDetector(BaseToolDetector):
@@ -70,8 +75,9 @@ class LinuxKiloCodeDetector(BaseToolDetector):
                             return version
                     except (json.JSONDecodeError, OSError):
                         pass
-                if "-" in ext_dir.name:
-                    return ext_dir.name.rsplit("-", 1)[1]
+                m = _VERSION_SUFFIX_RE.search(ext_dir.name)
+                if m:
+                    return m.group(1)
         except (PermissionError, OSError) as e:
             logger.debug(f"Could not check extensions directory {extensions_dir}: {e}")
         return None

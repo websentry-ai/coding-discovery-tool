@@ -94,7 +94,8 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         system_dirs = self._get_system_directories()
 
         def should_skip(item: Path) -> bool:
-            return should_skip_path(item, system_dirs) or is_claude_plugins_path(item)
+            return (should_skip_path(item, system_dirs)
+                    or is_claude_plugins_path(item))
 
         try:
             top_level_dirs = [

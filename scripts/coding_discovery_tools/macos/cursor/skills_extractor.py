@@ -35,6 +35,7 @@ from ...claude_code_skills_helpers import (
     add_skill_to_project,
     is_user_level_claude_subdir,
 )
+from ...mcp_extraction_helpers import is_home_dotdir_descendant
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,8 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item) or should_skip_system_path(item):
+                    if (should_skip_path(item) or should_skip_system_path(item)
+                            or is_home_dotdir_descendant(item)):
                         continue
 
                     # Check depth for this item

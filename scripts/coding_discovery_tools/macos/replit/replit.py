@@ -101,7 +101,7 @@ class MacOSReplitDetector(BaseToolDetector):
         if not app_path:
             return None
         try:
-            plist_path = self.APPLICATION_PATH / "Contents" / "Info.plist"
+            plist_path = app_path / "Contents" / "Info.plist"
             if plist_path.exists():
                 output = run_command(
                     ["defaults", "read", str(plist_path), "CFBundleShortVersionString"],
@@ -112,7 +112,7 @@ class MacOSReplitDetector(BaseToolDetector):
         except Exception as e:
             logger.debug(f"Could not read Replit Info.plist: {e}")
         try:
-            pkg_json = self.APPLICATION_PATH / "Contents" / "Resources" / "app" / "package.json"
+            pkg_json = app_path / "Contents" / "Resources" / "app" / "package.json"
             if pkg_json.exists():
                 with open(pkg_json, "r", encoding="utf-8") as f:
                     return json.load(f).get("version")

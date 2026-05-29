@@ -2,7 +2,8 @@
 MCP config extraction for the GitHub Copilot CLI on macOS systems.
 
 The CLI stores its MCP servers in ``~/.copilot/mcp-config.json``. The file is
-JSONC (comments allowed), and the server map may appear under ``mcpServers``,
+JSON with comments (``//`` and ``/* */`` are tolerated; trailing commas are
+not), and the server map may appear under ``mcpServers``,
 under ``servers``, or — for the GitHub CLI's Claude-style unwrapped form — as a
 flat top-level object of ``{name: config}`` entries (review P1-4).
 """
@@ -62,8 +63,12 @@ def _extract_servers_obj(config_data: Dict[str, Any]) -> Dict[str, Any]:
     1. ``mcpServers`` (canonical wrapped form)
     2. ``servers`` (VS Code / alternate wrapped form)
     3. flat top-level object of ``{name: {config}}`` — the GitHub CLI accepts
-       the unwrapped Claude-style form (review P1-4). Only dict-valued entries
-       are treated as servers so scalar metadata keys are ignored.
+       the unwrapped Claude-style form (review P1-4). In this fallback only,
+       a value counts as a server iff it is a dict carrying a ``command`` or
+       ``url`` (the fields a server is actually reachable by); this ignores
+       scalar metadata and non-server objects (e.g. a VS Code-style ``inputs``
+       block) so they aren't surfaced or scanned as phantom servers. The
+       wrapped forms above are trusted as-is — the user declared them servers.
     """
     wrapped = config_data.get("mcpServers")
     if isinstance(wrapped, dict):
@@ -77,6 +82,7 @@ def _extract_servers_obj(config_data: Dict[str, Any]) -> Dict[str, Any]:
         name: value
         for name, value in config_data.items()
         if isinstance(value, dict)
+        and ("command" in value or "url" in value)
     }
 
 

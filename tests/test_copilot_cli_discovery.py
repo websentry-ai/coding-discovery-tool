@@ -337,6 +337,14 @@ class TestCopilotCliMcpHelpers(unittest.TestCase):
         obj = {"serena": {"command": "x"}, "version": 1, "enabled": True}
         self.assertEqual(set(_extract_servers_obj(obj)), {"serena"})
 
+    def test_extract_servers_flat_ignores_non_server_objects(self):
+        """Flat-form dict values without command/url (e.g. a VS Code 'inputs' block) aren't servers."""
+        obj = {
+            "serena": {"command": "uvx"},
+            "inputs": {"id": "token", "type": "promptString"},
+        }
+        self.assertEqual(set(_extract_servers_obj(obj)), {"serena"})
+
 
 # ---------------------------------------------------------------------------
 # 4. Routing-order regression guard (process_single_tool)

@@ -41,39 +41,48 @@ class LinuxKiloCodeDetector(BaseToolDetector):
             return version if version != "Unknown" else None
         return None
 
-    def _get_extension_version_for_user(self, user_home: Path) -> Optional[str]:
-        for ide_name in self.SUPPORTED_IDES:
-            extensions_dir = user_home / ".vscode" / "extensions"
-            if ide_name == "Cursor":
-                extensions_dir = user_home / ".cursor" / "extensions"
+    def _get_extension_version_for_user(self, user_home: Path, ide_name: str) -> Optional[str]:
+        """
+        Read the Kilo Code extension version for a single IDE.
 
-            try:
-                if not extensions_dir.exists():
-                    continue
-                for ext_dir in extensions_dir.glob(f"{self.KILOCODE_EXTENSION_ID}-*"):
-                    package_json = ext_dir / "package.json"
-                    if package_json.exists():
-                        try:
-                            with open(package_json, "r", encoding="utf-8") as f:
-                                version = json.load(f).get("version")
-                            if version:
-                                return version
-                        except (json.JSONDecodeError, OSError):
-                            pass
-                    if "-" in ext_dir.name:
-                        try:
-                            return ext_dir.name.rsplit("-", 1)[1]
-                        except IndexError:
-                            pass
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Could not check extensions directory {extensions_dir}: {e}")
+        Scoped to one IDE so the version always matches the install_path
+        reported by detect() — looking in another IDE's extensions dir would
+        risk returning a leftover VS Code version against a Cursor install.
+
+        Reads ``package.json`` inside the matching extension folder, falling
+        back to the version suffix in the folder name if package.json is
+        unreadable.
+        """
+        extensions_dir = user_home / ".vscode" / "extensions"
+        if ide_name == "Cursor":
+            extensions_dir = user_home / ".cursor" / "extensions"
+
+        try:
+            if not extensions_dir.exists():
+                return None
+            for ext_dir in extensions_dir.glob(f"{self.KILOCODE_EXTENSION_ID}-*"):
+                package_json = ext_dir / "package.json"
+                if package_json.exists():
+                    try:
+                        with open(package_json, "r", encoding="utf-8") as f:
+                            version = json.load(f).get("version")
+                        if version:
+                            return version
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                if "-" in ext_dir.name:
+                    return ext_dir.name.rsplit("-", 1)[1]
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check extensions directory {extensions_dir}: {e}")
         return None
 
     def _check_user_for_kilocode(self, user_home: Path) -> Optional[Dict]:
         extension_path = None
+        ide_with_extension = None
         for ide_name in self.SUPPORTED_IDES:
             extension_path = self._check_kilocode_extension(user_home, ide_name)
             if extension_path:
+                ide_with_extension = ide_name
                 break
 
         if not extension_path:
@@ -81,7 +90,7 @@ class LinuxKiloCodeDetector(BaseToolDetector):
 
         return {
             "name": self.tool_name,
-            "version": self._get_extension_version_for_user(user_home) or "Unknown",
+            "version": self._get_extension_version_for_user(user_home, ide_with_extension) or "Unknown",
             "install_path": str(extension_path),
         }
 

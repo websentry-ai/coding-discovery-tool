@@ -1,11 +1,18 @@
 """
-MCP config extraction for the GitHub Copilot CLI on macOS systems.
+MCP config extraction for the GitHub Copilot CLI.
 
 The CLI stores its MCP servers in ``~/.copilot/mcp-config.json``. The file is
-JSON with comments (``//`` and ``/* */`` are tolerated; trailing commas are
-not), and the server map may appear under ``mcpServers``,
-under ``servers``, or — for the GitHub CLI's Claude-style unwrapped form — as a
-flat top-level object of ``{name: config}`` entries (review P1-4).
+JSON with comments (``//`` and ``/* */``) and trailing commas are both
+tolerated, since the file is commonly hand-edited (review P1). The server map
+may appear under ``mcpServers``, under ``servers``, or — for the GitHub CLI's
+Claude-style unwrapped form — as a flat top-level object of ``{name: config}``
+entries (review P1-4).
+
+The parsing here is platform-neutral and the all-users branch is handled by
+``extract_ide_global_configs_with_root_support`` (which already supports both
+macOS ``/Users`` and Windows ``C:\\Users`` admin scans), so this extractor is
+OS-agnostic. The Windows package reuses it via a thin subclass; do not fork the
+parser. The class keeps the ``MacOS`` name for historical/import stability.
 """
 
 import json
@@ -43,6 +50,17 @@ _JSONC_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+# String-aware trailing-comma stripper. Hand-edited configs often leave a comma
+# before a closing ``}`` or ``]`` (e.g. ``{"mcpServers": {...},}``), which is
+# invalid JSON and would otherwise raise JSONDecodeError -> silently 0 servers
+# (review P1). Group 1 captures a full quoted string so a comma INSIDE a string
+# value (e.g. ``"args": ["a,"]``) is preserved verbatim; otherwise we keep just
+# the bracket and drop the dangling comma. Applied AFTER comment stripping (so
+# ``},  // note`` -> ``}`` first) and BEFORE json.loads.
+_TRAILING_COMMA_PATTERN = re.compile(
+    r'("(?:\\.|[^"\\])*")|,(\s*[}\]])'
+)
+
 
 def _strip_jsonc_comments(raw: str) -> str:
     """Remove // and /* */ comments from JSONC text, preserving string literals."""
@@ -53,6 +71,18 @@ def _strip_jsonc_comments(raw: str) -> str:
         return ""
 
     return _JSONC_PATTERN.sub(_replace, raw)
+
+
+def _strip_trailing_commas(raw: str) -> str:
+    """Remove trailing commas before } or ], preserving commas inside strings."""
+    def _replace(match: "re.Match") -> str:
+        # Group 1 is a quoted string — keep it verbatim (commas inside stay).
+        # Otherwise group 2 is the bracket after a dangling comma; drop comma.
+        if match.group(1) is not None:
+            return match.group(1)
+        return match.group(2)
+
+    return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
 def _extract_servers_obj(config_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -131,9 +161,10 @@ class MacOSCopilotCliMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Read and parse a Copilot CLI ``mcp-config.json`` file.
 
-        Strips JSONC comments before parsing, resolves the server mapping from
-        the wrapped or flat form, and transforms it to the array shape. All IO
-        is wrapped — this tool runs on customer machines and must never crash.
+        Strips JSONC comments and trailing commas before parsing, resolves the
+        server mapping from the wrapped or flat form, and transforms it to the
+        array shape. All IO is wrapped — this tool runs on customer machines and
+        must never crash.
 
         Returns:
             Dict with ``path`` and ``mcpServers`` keys, or None.
@@ -143,7 +174,9 @@ class MacOSCopilotCliMCPConfigExtractor(BaseMCPConfigExtractor):
                 return None
 
             content = config_path.read_text(encoding='utf-8', errors='replace')
-            config_data = json.loads(_strip_jsonc_comments(content))
+            content = _strip_jsonc_comments(content)
+            content = _strip_trailing_commas(content)
+            config_data = json.loads(content)
 
             if not isinstance(config_data, dict):
                 return None

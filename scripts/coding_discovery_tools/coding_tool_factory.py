@@ -121,6 +121,10 @@ from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
 from .windows.github_copilot.mcp_config_extractor import WindowsGitHubCopilotMCPConfigExtractor
 from .windows.github_copilot.copilot_rules_extractor import WindowsGitHubCopilotRulesExtractor
 
+# Windows - Copilot CLI (standalone @github/copilot agentic terminal tool)
+from .windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
+from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
+
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
 # Windows - Codex
@@ -546,13 +550,13 @@ class ToolDetectorFactory:
     def create_copilot_cli_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate GitHub Copilot CLI detector for the OS.
-
-        macOS only for now; Windows is a follow-up.
         """
         if os_name is None:
             os_name = platform.system()
         if os_name == "Darwin":
             return MacOSCopilotCliDetector()
+        elif os_name == "Windows":
+            return WindowsCopilotCliDetector()
         else:
             return None
 
@@ -663,7 +667,7 @@ class ToolDetectorFactory:
         if copilot_detector is not None:
             detectors.append(copilot_detector)
 
-        # Add GitHub Copilot CLI detector for macOS
+        # Add GitHub Copilot CLI detector (macOS + Windows)
         copilot_cli_detector = ToolDetectorFactory.create_copilot_cli_detector(os_name)
         if copilot_cli_detector is not None:
             detectors.append(copilot_cli_detector)
@@ -1292,13 +1296,17 @@ class CopilotCliMCPConfigExtractorFactory:
         """
         Create GitHub Copilot CLI MCP config extractor for the OS.
 
-        macOS only for now; Windows is a follow-up.
+        The extraction logic is OS-agnostic (the all-users scan is handled by
+        the shared root-support helper), so the Windows extractor is a thin
+        subclass of the macOS one — see WindowsCopilotCliMCPConfigExtractor.
         """
         if os_name is None:
             os_name = platform.system()
 
         if os_name == "Darwin":
             return MacOSCopilotCliMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliMCPConfigExtractor()
         else:
             return None
 

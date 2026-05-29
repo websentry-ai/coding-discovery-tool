@@ -1,11 +1,9 @@
 """Unit tests for KiloCode version extraction across IDEs."""
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 
 def _make_extension(extensions_dir: Path, package_version: str = None, folder_suffix: str = "1.2.3") -> Path:
@@ -17,9 +15,13 @@ def _make_extension(extensions_dir: Path, package_version: str = None, folder_su
     return ext_dir
 
 
-@unittest.skipUnless(sys.platform == "darwin", "macOS-only detector")
 class TestMacOSKiloCodeVersion(unittest.TestCase):
-    """Tests for macOS KiloCode version scoping & package.json reads."""
+    """Tests for macOS KiloCode version scoping & package.json reads.
+
+    No platform skip: ``_get_extension_version_for_user`` is pure ``pathlib``
+    + JSON parsing, so the IDE-scoping regression guard runs on every CI box
+    (otherwise the Linux runner would skip the very test we care about).
+    """
 
     def setUp(self):
         from scripts.coding_discovery_tools.macos.kilocode.kilocode import MacOSKiloCodeDetector
@@ -71,9 +73,12 @@ class TestMacOSKiloCodeVersion(unittest.TestCase):
         self.assertIsNone(version)
 
 
-@unittest.skipUnless(sys.platform == "win32", "Windows-only detector")
 class TestWindowsKiloCodeVersion(unittest.TestCase):
-    """Tests for Windows KiloCode version scoping & package.json reads."""
+    """Tests for Windows KiloCode version scoping & package.json reads.
+
+    No platform skip — same reasoning as the macOS class: the helper is
+    pure ``pathlib`` so the IDE-scoping regression guard runs on Linux CI.
+    """
 
     def setUp(self):
         from scripts.coding_discovery_tools.windows.kilocode.kilocode import WindowsKiloCodeDetector

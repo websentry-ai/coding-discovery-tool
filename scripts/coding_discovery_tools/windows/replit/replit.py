@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
-from ...constants import COMMAND_TIMEOUT
+from ...constants import VERSION_TIMEOUT
 from ...utils import run_command
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,10 @@ class WindowsReplitDetector(BaseToolDetector):
         if user_data_path:
             return {
                 "name": self.tool_name,
-                "version": self.get_version(),
+                # ``or "Unknown"`` keeps the version field consistent with
+                # KiloCode — without it, a data-dir-only install emits
+                # ``"version": null`` while KiloCode emits ``"Unknown"``.
+                "version": self.get_version() or "Unknown",
                 "install_path": str(user_data_path)
             }
         
@@ -128,7 +131,7 @@ class WindowsReplitDetector(BaseToolDetector):
                 ps_command = (
                     f"(Get-Item -LiteralPath '{escaped}').VersionInfo.FileVersion"
                 )
-                output = run_command(["powershell", "-Command", ps_command], COMMAND_TIMEOUT)
+                output = run_command(["powershell", "-Command", ps_command], VERSION_TIMEOUT)
                 if output:
                     output = output.strip()
                     if output:

@@ -56,18 +56,21 @@ class MacOSReplitDetector(BaseToolDetector):
         # Check user data directory
         user_data_path = self._check_user_data_directory()
         
-        # Return detection result if either app or user data is found
+        # Return detection result if either app or user data is found.
+        # ``or "Unknown"`` keeps the version field consistent with KiloCode —
+        # without it, a data-dir-only install would emit ``"version": null``
+        # while KiloCode emits the string ``"Unknown"`` for the same case.
         if app_path:
             return {
                 "name": self.tool_name,
-                "version": self.get_version(),
+                "version": self.get_version() or "Unknown",
                 "install_path": str(app_path)
             }
-        
+
         if user_data_path:
             return {
                 "name": self.tool_name,
-                "version": self.get_version(),
+                "version": self.get_version() or "Unknown",
                 "install_path": str(user_data_path)
             }
         

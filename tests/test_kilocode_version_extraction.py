@@ -211,5 +211,89 @@ class TestWindowsKiloCodeVersion(unittest.TestCase):
         self.assertEqual(version, "4.2.0")
 
 
+class TestWindowsKiloCodeCheckUserInstallGating(unittest.TestCase):
+    """
+    Regression tests for the IDE install-gating in the Windows
+    ``_check_user_for_kilocode``. AppData survives an IDE uninstall on
+    Windows, so a stale ``%AppData%\\Code\\...\\kilocode.Kilo-Code\\`` dir
+    could shadow a live Cursor install — and the version lookup would then
+    read from VS Code's leftover extensions folder.
+    """
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.windows.kilocode.kilocode import WindowsKiloCodeDetector
+        self.detector = WindowsKiloCodeDetector()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.user_home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_globalstorage(self, ide_name: str) -> Path:
+        gs = (
+            self.user_home / "AppData" / "Roaming"
+            / ide_name / "User" / "globalStorage" / "kilocode.Kilo-Code"
+        )
+        gs.mkdir(parents=True, exist_ok=True)
+        return gs
+
+    def test_rejects_globalstorage_when_matching_ide_not_installed(self):
+        """
+        Code globalStorage exists (AppData survived an uninstall), but only
+        Cursor is currently installed. The detector must not pair Code's
+        stale globalStorage with Cursor and surface a misleading version.
+        """
+        self._make_globalstorage("Code")  # stale leftover AppData
+        # leave VS Code's extensions/package.json present too — that's the
+        # whole point: AppData + extensions/ both persist after uninstall
+        _make_extension(self.user_home / ".vscode" / "extensions", package_version="9.9.9-stale")
+        # Cursor.app side has no kilocode globalStorage at all
+
+        with patch.object(self.detector, "_check_ide_installation",
+                          side_effect=lambda home, ide: ide == "Cursor"):
+            result = self.detector._check_user_for_kilocode(self.user_home)
+
+        self.assertIsNone(
+            result,
+            "Must not pair Code globalStorage (uninstalled IDE) with a live Cursor install",
+        )
+
+    def test_prefers_ide_with_both_globalstorage_and_install(self):
+        """
+        Both Code and Cursor have globalStorage on disk (AppData persists).
+        Only Cursor is currently installed. The detector reports Cursor,
+        and the version comes from Cursor's extensions dir — NOT from
+        VS Code's stale leftover.
+        """
+        self._make_globalstorage("Code")
+        cursor_gs = self._make_globalstorage("Cursor")
+        # stale VS Code leftover; should NOT be returned
+        _make_extension(self.user_home / ".vscode" / "extensions", package_version="9.9.9-stale")
+        # real install in Cursor
+        _make_extension(self.user_home / ".cursor" / "extensions", package_version="3.18.0")
+
+        with patch.object(self.detector, "_check_ide_installation",
+                          side_effect=lambda home, ide: ide == "Cursor"):
+            result = self.detector._check_user_for_kilocode(self.user_home)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cursor_gs))
+        self.assertEqual(
+            result["version"], "3.18.0",
+            "Version must come from Cursor's extensions dir, not VS Code's stale leftover",
+        )
+
+    def test_returns_result_when_first_ide_has_both(self):
+        code_gs = self._make_globalstorage("Code")
+        _make_extension(self.user_home / ".vscode" / "extensions", package_version="3.7.0")
+
+        with patch.object(self.detector, "_check_ide_installation", return_value=True):
+            result = self.detector._check_user_for_kilocode(self.user_home)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(code_gs))
+        self.assertEqual(result["version"], "3.7.0")
+
+
 if __name__ == "__main__":
     unittest.main()

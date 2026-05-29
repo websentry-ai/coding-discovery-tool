@@ -9,9 +9,10 @@ This module detects Kilo Code installations by checking for:
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
-from typing import Optional, Dict
+from typing import List, Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
 
@@ -25,7 +26,7 @@ _VERSION_SUFFIX_RE = re.compile(r"-(\d+\.\d+\.\d+(?:[-+][\w.+-]+)?)$")
 class WindowsKiloCodeDetector(BaseToolDetector):
     """
     Detector for Kilo Code installations on Windows systems.
-    
+
     Kilo Code operates as a VS Code extension, so detection involves:
     - Checking for compatible IDE installations (VS Code, Cursor)
     - Verifying Kilo Code extension settings exist in IDE global storage
@@ -33,9 +34,25 @@ class WindowsKiloCodeDetector(BaseToolDetector):
 
     # Supported IDEs that can host the Kilo Code extension
     SUPPORTED_IDES = ['Code', 'Cursor']
-    
+
     # Kilo Code extension identifier
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
+
+    # Conventional Windows install dir names for each IDE under
+    # ``%LOCALAPPDATA%\\Programs\\``, ``%ProgramFiles%``, and ``%ProgramFiles(x86)%``.
+    # AppData survives an IDE uninstall, so we MUST verify the IDE itself
+    # is still present before trusting its globalStorage — otherwise stale
+    # config can dictate the wrong extensions directory for the version lookup.
+    IDE_INSTALL_DIR_NAMES = {
+        "Code": ("Microsoft VS Code", "Microsoft VS Code Insiders"),
+        "Cursor": ("cursor", "Cursor"),
+    }
+
+    # Per-IDE .exe filenames to confirm the install dir is the real thing.
+    IDE_EXE_NAMES = {
+        "Code": ("Code.exe", "Code - Insiders.exe"),
+        "Cursor": ("Cursor.exe", "cursor.exe"),
+    }
 
     @property
     def tool_name(self) -> str:
@@ -159,43 +176,74 @@ class WindowsKiloCodeDetector(BaseToolDetector):
     def _check_user_for_kilocode(self, user_home: Path) -> Optional[Dict]:
         """
         Check if Kilo Code is installed for a specific user.
-        
-        Since Kilo Code is an extension, we first check if the extension exists
-        in any IDE. Only if the extension is found, we proceed with detection.
-        
-        This method:
-        1. First checks for Kilo Code extension in any supported IDE
-        2. If extension found, returns detection result (extension can only exist if IDE is installed)
-        
-        Args:
-            user_home: User's home directory path
-            
-        Returns:
-            Dict with tool info (name, version, install_path) or None if not found
-        """
-        # First, check if Kilo Code extension exists in any IDE
-        extension_path = None
-        ide_with_extension = None
 
+        Walk the supported IDEs once and accept the first one that has BOTH a
+        globalStorage settings dir for the kilocode extension AND a still-
+        present IDE install on disk. The earlier shortcut (*"extension can
+        only exist if IDE is installed"*) was wrong on Windows: AppData
+        survives an IDE uninstall, so stale ``%AppData%\\Code\\User\\
+        globalStorage\\kilocode.Kilo-Code\\`` could shadow a live Cursor
+        install — and the version lookup would then read from VS Code's
+        leftover ``%USERPROFILE%\\.vscode\\extensions\\`` folder instead of
+        Cursor's, surfacing a stale version under a Cursor install path.
+        """
         for ide_name in self.SUPPORTED_IDES:
             extension_path = self._check_kilocode_extension(user_home, ide_name)
-            if extension_path:
-                ide_with_extension = ide_name
-                logger.debug(f"Found Kilo Code extension in {ide_name} at: {extension_path}")
-                break
+            if not extension_path:
+                continue
+            if not self._check_ide_installation(user_home, ide_name):
+                logger.debug(
+                    f"Kilo Code globalStorage found in {ide_name} but {ide_name} "
+                    f"is not installed — skipping (stale AppData)"
+                )
+                continue
+            logger.debug(f"Found Kilo Code in {ide_name} at: {extension_path}")
+            return {
+                "name": self.tool_name,
+                "version": self._get_extension_version_for_user(user_home, ide_name) or "Unknown",
+                "install_path": str(extension_path),
+            }
+        logger.debug("No IDE has both Kilo Code globalStorage and a live install")
+        return None
 
-        # If no extension found, return None immediately
-        if not extension_path:
-            logger.debug("Kilo Code extension not found in any IDE")
-            return None
+    def _check_ide_installation(self, user_home: Path, ide_name: str) -> bool:
+        """
+        Return True iff the given IDE is currently installed on this machine.
 
-        # If extension found, IDE is installed (extension can only exist if IDE is installed)
-        # Use the extension path as install_path
-        return {
-            "name": self.tool_name,
-            "version": self._get_extension_version_for_user(user_home, ide_with_extension) or "Unknown",
-            "install_path": str(extension_path)
-        }
+        Looks under the per-user ``%LOCALAPPDATA%\\Programs\\`` location plus
+        the system-wide ``%ProgramFiles%`` / ``%ProgramFiles(x86)%`` roots.
+        For each candidate install dir, requires the IDE's main ``.exe`` to
+        still be present — directory existence alone is not enough since
+        squirrel-style uninstalls can leave the parent folder behind.
+        """
+        for root in self._ide_search_roots(user_home):
+            for dir_name in self.IDE_INSTALL_DIR_NAMES.get(ide_name, ()):
+                install_dir = root / dir_name
+                try:
+                    if not install_dir.is_dir():
+                        continue
+                except (PermissionError, OSError):
+                    continue
+                for exe_name in self.IDE_EXE_NAMES.get(ide_name, ()):
+                    try:
+                        if (install_dir / exe_name).is_file():
+                            return True
+                    except (PermissionError, OSError):
+                        continue
+        return False
+
+    def _ide_search_roots(self, user_home: Path) -> List[Path]:
+        roots: List[Path] = [user_home / "AppData" / "Local" / "Programs"]
+        for env in ("ProgramFiles", "ProgramFiles(x86)"):
+            base = os.environ.get(env)
+            if base:
+                roots.append(Path(base))
+        # Standard fallbacks in case the env vars are unset (e.g. under a
+        # restricted service account scanning another user's home).
+        for default in (Path("C:\\Program Files"), Path("C:\\Program Files (x86)")):
+            if default not in roots:
+                roots.append(default)
+        return roots
 
     def _check_kilocode_extension(self, user_home: Path, ide_name: str) -> Optional[Path]:
         """

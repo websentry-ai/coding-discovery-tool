@@ -70,21 +70,21 @@ class MacOSKiloCodeDetector(BaseToolDetector):
 
     def get_version(self) -> Optional[str]:
         """
-        Extract Kilo Code version from the extension's package.json.
+        Extract Kilo Code version.
 
-        Walks supported IDE extensions directories looking for the kilocode
-        extension folder (named like kilocode.Kilo-Code-X.Y.Z) and reads the
-        version from its package.json. Falls back to the version suffix in
-        the folder name if package.json is unreadable.
+        Delegates to detect() so the install-gating logic (extension settings
+        dir + IDE present in /Applications) stays the single source of truth.
+        A leftover extension folder without a real install must not surface
+        a version when detect() would report nothing.
 
         Returns:
-            Version string if found, None otherwise.
+            Version string if KiloCode is installed, None otherwise.
         """
-        if is_running_as_root():
-            version = scan_user_directories(self._get_extension_version_for_user)
-            if version:
-                return version
-        return self._get_extension_version_for_user(Path.home())
+        result = self.detect()
+        if result:
+            version = result.get("version")
+            return version if version != "Unknown" else None
+        return None
 
     def _get_extension_version_for_user(self, user_home: Path) -> Optional[str]:
         for ide_name in self.SUPPORTED_IDES:

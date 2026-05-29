@@ -58,28 +58,20 @@ class WindowsKiloCodeDetector(BaseToolDetector):
 
     def get_version(self) -> Optional[str]:
         """
-        Extract Kilo Code version from the extension's package.json.
+        Extract Kilo Code version.
 
-        Walks supported IDE extensions directories looking for the kilocode
-        extension folder (named like kilocode.Kilo-Code-X.Y.Z) and reads the
-        version from its package.json. Falls back to the version suffix in
-        the folder name if package.json is unreadable.
+        Delegates to detect() so the install-gating logic stays the single
+        source of truth — a leftover extension folder without a real install
+        must not surface a version when detect() would report nothing.
 
         Returns:
-            Version string if found, None otherwise.
+            Version string if KiloCode is installed, None otherwise.
         """
-        if self._is_running_as_admin():
-            users_dir = Path("C:\\Users")
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith("."):
-                        try:
-                            version = self._get_extension_version_for_user(user_dir)
-                            if version:
-                                return version
-                        except (PermissionError, OSError):
-                            continue
-        return self._get_extension_version_for_user(Path.home())
+        result = self.detect()
+        if result:
+            version = result.get("version")
+            return version if version != "Unknown" else None
+        return None
 
     def _get_extension_version_for_user(self, user_home: Path) -> Optional[str]:
         for ide_name in self.SUPPORTED_IDES:

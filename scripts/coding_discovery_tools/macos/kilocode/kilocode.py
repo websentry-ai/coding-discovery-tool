@@ -7,6 +7,7 @@ This module detects Kilo Code installations by checking for:
 2. Kilo Code extension settings in IDE global storage directories
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Tuple
@@ -69,13 +70,48 @@ class MacOSKiloCodeDetector(BaseToolDetector):
 
     def get_version(self) -> Optional[str]:
         """
-        Extract Kilo Code version.
-        
-        Note: Version extraction is currently not implemented.
-        
+        Extract Kilo Code version from the extension's package.json.
+
+        Walks supported IDE extensions directories looking for the kilocode
+        extension folder (named like kilocode.Kilo-Code-X.Y.Z) and reads the
+        version from its package.json. Falls back to the version suffix in
+        the folder name if package.json is unreadable.
+
         Returns:
-            None (version extraction removed per requirements)
+            Version string if found, None otherwise.
         """
+        if is_running_as_root():
+            version = scan_user_directories(self._get_extension_version_for_user)
+            if version:
+                return version
+        return self._get_extension_version_for_user(Path.home())
+
+    def _get_extension_version_for_user(self, user_home: Path) -> Optional[str]:
+        for ide_name in self.SUPPORTED_IDES:
+            extensions_dir = user_home / ".vscode" / "extensions"
+            if ide_name == "Cursor":
+                extensions_dir = user_home / ".cursor" / "extensions"
+
+            try:
+                if not extensions_dir.exists():
+                    continue
+                for ext_dir in extensions_dir.glob(f"{self.KILOCODE_EXTENSION_ID}-*"):
+                    package_json = ext_dir / "package.json"
+                    if package_json.exists():
+                        try:
+                            with open(package_json, "r", encoding="utf-8") as f:
+                                version = json.load(f).get("version")
+                            if version:
+                                return version
+                        except (json.JSONDecodeError, OSError):
+                            pass
+                    if "-" in ext_dir.name:
+                        try:
+                            return ext_dir.name.rsplit("-", 1)[1]
+                        except IndexError:
+                            pass
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not check extensions directory {extensions_dir}: {e}")
         return None
 
     def _check_user_for_kilocode(self, user_home: Path) -> Optional[Dict]:
@@ -132,7 +168,7 @@ class MacOSKiloCodeDetector(BaseToolDetector):
         # Use the extension path as install_path
         return {
             "name": self.tool_name,
-            "version": "Unknown",
+            "version": self._get_extension_version_for_user(user_home) or "Unknown",
             "install_path": str(extension_path)
         }
 

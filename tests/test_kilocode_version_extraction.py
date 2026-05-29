@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _make_extension(extensions_dir: Path, package_version: str = None, folder_suffix: str = "1.2.3") -> Path:
@@ -71,6 +72,99 @@ class TestMacOSKiloCodeVersion(unittest.TestCase):
     def test_returns_none_when_no_extensions_dir(self):
         version = self.detector._get_extension_version_for_user(self.user_home, "Code")
         self.assertIsNone(version)
+
+
+class TestMacOSKiloCodeCheckUserInstallGating(unittest.TestCase):
+    """
+    Regression tests for the IDE install-gating in ``_check_user_for_kilocode``.
+
+    The earlier implementation had a fallback that, when the first IDE with
+    globalStorage didn't have a matching ``.app`` in /Applications, accepted
+    *any other* installed IDE — but never updated the ``ide_with_extension``
+    variable. The downstream version lookup then read from the wrong IDE's
+    extensions directory.
+    """
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.macos.kilocode.kilocode import MacOSKiloCodeDetector
+        self.detector = MacOSKiloCodeDetector()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.user_home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_globalstorage(self, ide_name: str) -> Path:
+        """Create the globalStorage dir for the kilocode extension under one IDE."""
+        gs = (
+            self.user_home / "Library" / "Application Support"
+            / ide_name / "User" / "globalStorage" / "kilocode.Kilo-Code"
+        )
+        gs.mkdir(parents=True, exist_ok=True)
+        return gs
+
+    def test_rejects_globalstorage_when_matching_ide_not_installed(self):
+        """
+        Trap config: Code has globalStorage but Code.app is NOT in /Applications;
+        Cursor.app IS installed but has no kilocode globalStorage. The old
+        fallback would have returned Code's globalStorage path glued to a
+        Cursor-derived install signal and a "Unknown" version — the new
+        behaviour returns None because no single IDE has both pieces.
+        """
+        self._make_globalstorage("Code")
+        # No Cursor globalStorage exists
+
+        def fake_check_ide(ide_name):
+            # Code.app missing, Cursor.app installed
+            return (ide_name == "Cursor", f"/Applications/{ide_name}.app")
+
+        with patch.object(self.detector, "_check_ide_installation", side_effect=fake_check_ide):
+            result = self.detector._check_user_for_kilocode(self.user_home)
+
+        self.assertIsNone(
+            result,
+            "Detector must not pair globalStorage from an uninstalled IDE with a different installed IDE",
+        )
+
+    def test_prefers_ide_with_both_globalstorage_and_app(self):
+        """
+        When BOTH Code and Cursor have globalStorage but only Cursor.app is
+        installed, the detector picks Cursor — and the version comes from
+        Cursor's extensions dir, NOT VS Code's leftover one.
+        """
+        self._make_globalstorage("Code")
+        cursor_gs = self._make_globalstorage("Cursor")
+
+        # Stale leftover extension folder in Code's dir with the wrong version
+        _make_extension(self.user_home / ".vscode" / "extensions", package_version="9.9.9-stale")
+        # Real KiloCode install in Cursor's extensions dir
+        _make_extension(self.user_home / ".cursor" / "extensions", package_version="3.18.0")
+
+        def fake_check_ide(ide_name):
+            return (ide_name == "Cursor", f"/Applications/{ide_name}.app")
+
+        with patch.object(self.detector, "_check_ide_installation", side_effect=fake_check_ide):
+            result = self.detector._check_user_for_kilocode(self.user_home)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cursor_gs))
+        self.assertEqual(
+            result["version"],
+            "3.18.0",
+            "Version must come from Cursor's extensions dir, not Code's stale leftover",
+        )
+
+    def test_returns_result_when_first_ide_has_both(self):
+        """Happy path — first IDE in SUPPORTED_IDES has both globalStorage and .app."""
+        code_gs = self._make_globalstorage("Code")
+        _make_extension(self.user_home / ".vscode" / "extensions", package_version="3.7.0")
+
+        with patch.object(self.detector, "_check_ide_installation", return_value=(True, "/Applications/Code.app")):
+            result = self.detector._check_user_for_kilocode(self.user_home)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(code_gs))
+        self.assertEqual(result["version"], "3.7.0")
 
 
 class TestWindowsKiloCodeVersion(unittest.TestCase):

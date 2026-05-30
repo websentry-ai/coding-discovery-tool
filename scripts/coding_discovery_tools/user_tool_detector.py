@@ -268,8 +268,8 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
 
 def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
     """Detect Claude Cowork installation for a user."""
-    # Claude Desktop app must be present (system-wide on macOS)
-    if platform.system() == "Darwin":
+    system = platform.system()
+    if system == "Darwin":
         app_path = Path("/Applications/Claude.app")
         try:
             if not app_path.exists():
@@ -277,8 +277,9 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         except OSError:
             return None
         sessions_dir = user_home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+    elif system == "Linux":
+        sessions_dir = user_home / ".config" / "Claude" / COWORK_SESSIONS_DIR
     else:
-        # Windows
         sessions_dir = user_home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
 
     try:

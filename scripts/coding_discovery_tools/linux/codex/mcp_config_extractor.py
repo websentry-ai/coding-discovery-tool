@@ -8,7 +8,6 @@ from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import MAX_SEARCH_DEPTH
 from ...linux_extraction_helpers import (
     get_linux_user_homes,
-    is_running_as_root,
     should_skip_path,
     should_skip_system_path,
 )

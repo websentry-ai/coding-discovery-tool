@@ -11,7 +11,6 @@ from ...linux_extraction_helpers import (
     should_skip_system_path,
 )
 from ...mcp_extraction_helpers import (
-    extract_cursor_mcp_from_dir,
     walk_for_cursor_mcp_configs,
     read_global_mcp_config,
 )

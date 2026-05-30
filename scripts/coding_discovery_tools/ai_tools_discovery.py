@@ -1792,10 +1792,11 @@ def main():
         print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
         sys.exit(1)
 
-    # Discovery only supports macOS/Windows. Exit cleanly on other platforms (Linux, etc.)
-    # before detector init, which would otherwise raise and page Sentry on every run.
+    # Discovery supports macOS, Windows, and Linux. Exit cleanly on any other
+    # platform (e.g. *BSD, AIX) before detector init, which would otherwise
+    # raise and page Sentry on every run.
     current_platform = platform.system()
-    if current_platform not in ("Darwin", "Windows"):
+    if current_platform not in ("Darwin", "Windows", "Linux"):
         print(
             f"AI tool discovery is not supported on {current_platform}. "
             "The Unbound CLI works normally; skipping the discovery scan.",

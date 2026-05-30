@@ -9,8 +9,10 @@ config plus ``~/.copilot/mcp-config.json`` for MCP servers).
 
 from .copilot_cli import MacOSCopilotCliDetector
 from .mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
+from .copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
 
 __all__ = [
     'MacOSCopilotCliDetector',
     'MacOSCopilotCliMCPConfigExtractor',
+    'MacOSCopilotCliRulesExtractor',
 ]

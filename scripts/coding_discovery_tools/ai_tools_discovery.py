@@ -54,6 +54,7 @@ try:
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
+        CopilotCliRulesExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -104,6 +105,7 @@ except ImportError:
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
+        CopilotCliRulesExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -200,8 +202,9 @@ class AIToolsDetector:
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
 
-            # GitHub Copilot CLI MCP extractor (macOS only; None elsewhere)
+            # GitHub Copilot CLI MCP + rules extractors (macOS/Windows; None elsewhere)
             self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
+            self._copilot_cli_rules_extractor = CopilotCliRulesExtractorFactory.create(self.system)
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -1245,14 +1248,15 @@ class AIToolsDetector:
 
     def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
         """
-        Process the GitHub Copilot CLI: extract its MCP config (no rules/settings
-        in this scope) and return the standard tool dict.
+        Process the GitHub Copilot CLI: extract its MCP config + rules and return
+        the standard tool dict.
 
         The CLI is its own product (distinct from the IDE Copilot extension), so
         it gets a dedicated branch. Because this branch returns early — before
         the shared empty-project filter in ``process_single_tool`` — it filters
-        empty projects itself: a parseable-but-serverless ``mcp-config.json``
-        must not emit a phantom "1 project / 0 servers" row (review P1-2).
+        empty projects itself: a project with neither servers nor rules (e.g. a
+        parseable-but-serverless ``mcp-config.json``) must not emit a phantom
+        row (review P1-2).
 
         Args:
             tool: Tool info dict from detection.
@@ -1284,6 +1288,30 @@ class AIToolsDetector:
                 logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
+
+        logger.info(f"  Extracting {tool_name} rules...")
+        if self._copilot_cli_rules_extractor:
+            try:
+                rules_projects = self._copilot_cli_rules_extractor.extract_all_copilot_cli_rules()
+                for rules_project in rules_projects:
+                    project_root = rules_project.get("project_root", "")
+                    rules = rules_project.get("rules", [])
+                    if project_root:
+                        if project_root not in projects_dict:
+                            projects_dict[project_root] = {
+                                "mcpServers": [],
+                                "rules": [],
+                            }
+                        projects_dict[project_root]["rules"] = self._deduplicate_project_items(rules)
+                if rules_projects:
+                    logger.info(f"  ✓ Found {len(rules_projects)} project(s) with {tool_name} rules")
+                    log_rules_details(projects_dict, tool_name)
+                else:
+                    logger.info(f"  No {tool_name} rules found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} rules: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
 
         # Drop empty projects so a serverless config doesn't surface a phantom row.
         projects_list = [

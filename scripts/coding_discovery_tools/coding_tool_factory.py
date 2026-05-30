@@ -23,6 +23,7 @@ from .coding_tool_base import (
     BaseCodexRulesExtractor,
     BaseOpenCodeRulesExtractor,
     BaseCursorCliRulesExtractor,
+    BaseCopilotCliRulesExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
     BaseCursorSettingsExtractor,
@@ -115,6 +116,7 @@ from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRule
 # macOS - Copilot CLI (standalone @github/copilot agentic terminal tool)
 from .macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
 from .macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
+from .macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
 
 # Windows - Copilot
 from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
@@ -124,6 +126,7 @@ from .windows.github_copilot.copilot_rules_extractor import WindowsGitHubCopilot
 # Windows - Copilot CLI (standalone @github/copilot agentic terminal tool)
 from .windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
 from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
+from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -1307,6 +1310,30 @@ class CopilotCliMCPConfigExtractorFactory:
             return MacOSCopilotCliMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliMCPConfigExtractor()
+        else:
+            return None
+
+
+class CopilotCliRulesExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCopilotCliRulesExtractor]:
+        """
+        Create GitHub Copilot CLI rules extractor for the OS.
+
+        The 6-source detection logic and the depth-bounded walk are shared in
+        the macOS class; the Windows subclass overrides only the OS-specific
+        seams (privilege check, all-users scan, filesystem root, top-level
+        enumeration, system-dir skip) — see WindowsCopilotCliRulesExtractor.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliRulesExtractor()
         else:
             return None
 

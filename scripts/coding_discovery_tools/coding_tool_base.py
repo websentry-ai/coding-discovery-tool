@@ -289,6 +289,45 @@ class BaseGitHubCopilotRulesExtractor(ABC):
         pass
 
 
+class BaseCopilotCliRulesExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI rules.
+
+    This is for the standalone ``@github/copilot`` CLI (config under
+    ``~/.copilot/``), a distinct product from the GitHub Copilot IDE
+    extension/plugin. It mirrors the single-product rules bases
+    (``BaseCodexRulesExtractor`` / ``BaseGeminiCliRulesExtractor``) and takes no
+    ``tool_name`` argument — the CLI is one tool, not a family of IDE-coupled
+    variants, so ``BaseGitHubCopilotRulesExtractor`` is intentionally not reused.
+    """
+
+    @abstractmethod
+    def extract_all_copilot_cli_rules(self) -> List[Dict]:
+        """
+        Extract all GitHub Copilot CLI rules from all projects on the machine.
+
+        Searches for (all paths docs-verified):
+        - Global (scope "user"): ``<config_dir>/copilot-instructions.md``
+        - Global (scope "user"): ``<config_dir>/instructions/**/*.instructions.md``
+        - Project (scope "project"): repo-root ``.github/copilot-instructions.md``
+        - Project (scope "project"): ``.github/instructions/**/*.instructions.md``
+        - Project (scope "project"): repo-root ``AGENTS.md`` / ``CLAUDE.md`` /
+          ``GEMINI.md`` (root only, not recursive)
+        - Env (scope "user", current user only): each dir in
+          ``COPILOT_CUSTOM_INSTRUCTIONS_DIRS`` contributes ``AGENTS.md`` and
+          ``.github/instructions/**/*.instructions.md``
+
+        ``<config_dir>`` honors ``COPILOT_HOME`` for the running user, else
+        ``<user_home>/.copilot``.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root directory
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated, scope)
+        """
+        pass
+
+
 class BaseJunieRulesExtractor(ABC):
     """Abstract base class for extracting Junie rules from all projects."""
 

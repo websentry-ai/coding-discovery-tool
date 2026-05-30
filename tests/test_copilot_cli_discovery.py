@@ -41,17 +41,35 @@ from scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor impor
     _strip_jsonc_comments,
     _strip_trailing_commas,
 )
+from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_rules_extractor import (
+    MacOSCopilotCliRulesExtractor,
+)
 from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli import (
     WindowsCopilotCliDetector,
 )
 from scripts.coding_discovery_tools.windows.copilot_cli.mcp_config_extractor import (
     WindowsCopilotCliMCPConfigExtractor,
 )
+from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_rules_extractor import (
+    WindowsCopilotCliRulesExtractor,
+)
 
 # Module path for patching the detector's root-scan helpers.
 _DETECTOR_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli"
 # Module path for patching the Windows detector's admin/all-users scan.
 _WIN_DETECTOR_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli"
+# Module path for patching the rules extractor's shared helpers.
+_RULES_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_rules_extractor"
+# Module path for patching the Windows rules extractor's OS-specific seams.
+_WIN_RULES_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_rules_extractor"
+
+# The backend's ALLOWED_RULE_FIELDS — any rule dict carrying a key outside this
+# set is silently dropped whole by ingestion, so every rule we emit MUST be a
+# subset of these. Notably, no frontmatter keys (applyTo / excludeAgent).
+_ALLOWED_RULE_FIELDS = {
+    "file_path", "file_name", "content", "size",
+    "last_modified", "truncated", "scope", "project_path",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +514,9 @@ class TestCopilotCliRouting(unittest.TestCase):
                 {"path": "/Users/x/.copilot", "mcpServers": [{"name": "serena"}]},
             ]
         }
+        # Isolate the MCP-only assertion from the real on-disk rules walk.
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
         result = self.detector.process_single_tool(tool)
         self.assertEqual(len(result["projects"]), 1)
         self.assertEqual(result["projects"][0]["mcpServers"][0]["name"], "serena")
@@ -513,6 +534,9 @@ class TestCopilotCliRouting(unittest.TestCase):
         self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = {
             "projects": [{"path": "/Users/x/.copilot", "mcpServers": []}]
         }
+        # Isolate the empty-project assertion from the real on-disk rules walk.
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
         result = self.detector.process_single_tool(tool)
         self.assertEqual(result["projects"], [])
         self.assertEqual(result["version"], "0.0.1")
@@ -525,6 +549,9 @@ class TestCopilotCliRouting(unittest.TestCase):
         }
         self.detector._copilot_cli_mcp_extractor = MagicMock()
         self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
+        # Isolate the no-projects assertion from the real on-disk rules walk.
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
         result = self.detector.process_single_tool(tool)
         self.assertEqual(result["projects"], [])
 
@@ -889,6 +916,531 @@ class TestWindowsCopilotCliMcpExtraction(unittest.TestCase):
     def test_malformed_json_no_crash_no_results(self):
         self.config_path.write_text("{ not valid json {{{", encoding="utf-8")
         self.assertEqual(self.extractor._extract_cli_configs_for_user(self.user_home), [])
+
+
+# ---------------------------------------------------------------------------
+# 9. Rules: global (user-scope) — G1, G2, COPILOT_HOME relocation
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliRulesGlobal(unittest.TestCase):
+    """Global (user-scope) rules under the resolved config dir.
+
+    Exercises ``_extract_global_rules`` with ``Path.home`` redirected to a temp
+    home (the current-user, non-root path). Asserts the backend field allowlist
+    and that frontmatter is left verbatim inside ``content`` (never parsed out).
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = MacOSCopilotCliRulesExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.home = Path(self.tmp_dir) / "home"
+        self.home.mkdir(parents=True)
+        self.config_dir = self.home / ".copilot"
+        self.config_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _run_global(self) -> dict:
+        """Run global extraction as the current (non-root) user -> projects_by_root."""
+        projects_by_root: dict = {}
+        with patch(f"{_RULES_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_RULES_MOD}.is_running_as_root", return_value=False):
+            self.extractor._extract_global_rules(projects_by_root)
+        return projects_by_root
+
+    def _all_rules(self, projects_by_root: dict) -> list:
+        rules = []
+        for items in projects_by_root.values():
+            rules.extend(items)
+        return rules
+
+    def _assert_allowlisted(self, rules: list) -> None:
+        for rule in rules:
+            extra = set(rule.keys()) - _ALLOWED_RULE_FIELDS
+            self.assertEqual(extra, set(), f"rule has non-allowlisted keys: {extra}")
+            self.assertNotIn("applyTo", rule)
+            self.assertNotIn("excludeAgent", rule)
+
+    def test_g1_global_copilot_instructions_detected(self):
+        """G1: <config_dir>/copilot-instructions.md is a user-scope rule."""
+        (self.config_dir / "copilot-instructions.md").write_text("G1 body", encoding="utf-8")
+        pbr = self._run_global()
+        rules = self._all_rules(pbr)
+        names = {r["file_name"] for r in rules}
+        self.assertIn("copilot-instructions.md", names)
+        self.assertTrue(all(r["scope"] == "user" for r in rules))
+        self._assert_allowlisted(rules)
+
+    def test_g1_grouped_under_config_dir(self):
+        """Global rules group under the config dir so they coalesce with CLI MCP servers."""
+        (self.config_dir / "copilot-instructions.md").write_text("G1", encoding="utf-8")
+        pbr = self._run_global()
+        self.assertIn(str(self.config_dir), pbr)
+
+    def test_g1_frontmatter_left_verbatim_in_content(self):
+        """CRITICAL: applyTo/excludeAgent frontmatter stays INSIDE content, not as keys."""
+        body = '---\napplyTo: "**/*.py"\nexcludeAgent: ["foo"]\n---\nUse functional style.'
+        (self.config_dir / "copilot-instructions.md").write_text(body, encoding="utf-8")
+        rules = self._all_rules(self._run_global())
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertIn("applyTo", rule["content"])  # preserved in content
+        self.assertNotIn("applyTo", rule)           # NOT a dict key
+        self.assertNotIn("excludeAgent", rule)
+        self._assert_allowlisted(rules)
+
+    def test_g2_instructions_tree_recursive_detected(self):
+        """G2: <config_dir>/instructions/**/*.instructions.md (recursive), user scope."""
+        inst = self.config_dir / "instructions"
+        (inst / "sub").mkdir(parents=True)
+        (inst / "top.instructions.md").write_text("top", encoding="utf-8")
+        (inst / "sub" / "nested.instructions.md").write_text("nested", encoding="utf-8")
+        rules = self._all_rules(self._run_global())
+        names = {r["file_name"] for r in rules}
+        self.assertIn("top.instructions.md", names)
+        self.assertIn("nested.instructions.md", names)
+        self.assertTrue(all(r["scope"] == "user" for r in rules))
+        self._assert_allowlisted(rules)
+
+    def test_g2_non_instructions_files_ignored(self):
+        """Only *.instructions.md under instructions/ — a plain .md is not collected."""
+        inst = self.config_dir / "instructions"
+        inst.mkdir(parents=True)
+        (inst / "README.md").write_text("readme", encoding="utf-8")
+        (inst / "x.instructions.md").write_text("x", encoding="utf-8")
+        names = {r["file_name"] for r in self._all_rules(self._run_global())}
+        self.assertIn("x.instructions.md", names)
+        self.assertNotIn("README.md", names)
+
+    def test_copilot_home_relocated_global_file_found(self):
+        """COPILOT_HOME relocates the whole config dir; G1 there is still found."""
+        relocated = Path(self.tmp_dir) / "relocated-cfg"
+        relocated.mkdir(parents=True)
+        (relocated / "copilot-instructions.md").write_text("relocated G1", encoding="utf-8")
+        projects_by_root: dict = {}
+        with patch(f"{_RULES_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_RULES_MOD}.is_running_as_root", return_value=False), \
+             patch.dict(os.environ, {"COPILOT_HOME": str(relocated)}, clear=False):
+            self.extractor._extract_global_rules(projects_by_root)
+        self.assertIn(str(relocated), projects_by_root)
+        rules = self._all_rules(projects_by_root)
+        self.assertEqual({r["file_name"] for r in rules}, {"copilot-instructions.md"})
+        self.assertTrue(all(r["scope"] == "user" for r in rules))
+
+    def test_no_global_rules_yields_empty(self):
+        """An empty config dir contributes no rules (no phantom project)."""
+        self.assertEqual(self._run_global(), {})
+
+
+# ---------------------------------------------------------------------------
+# 10. Rules: project (project-scope) — P1, P2, P3 (+ nested exclusion)
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliRulesProject(unittest.TestCase):
+    """Project-scope rules via the directory walk.
+
+    Calls ``_walk_for_project_rules`` directly on a temp tree and stubs
+    ``should_skip_system_path`` (the temp dir lives under /var, which the real
+    system-skip would prune) — mirrors the established pattern in
+    ``tests/test_scanning_enhancements.py``.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = MacOSCopilotCliRulesExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir)
+        self.repo = self.root / "repo"
+        self.repo.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _walk(self) -> dict:
+        projects_by_root: dict = {}
+        with patch(f"{_RULES_MOD}.should_skip_system_path", return_value=False):
+            self.extractor._walk_for_project_rules(
+                self.root, self.root, projects_by_root, current_depth=0
+            )
+        return projects_by_root
+
+    def _rules_for(self, projects_by_root: dict, root: Path) -> list:
+        return projects_by_root.get(str(root), [])
+
+    def _assert_allowlisted(self, projects_by_root: dict) -> None:
+        for items in projects_by_root.values():
+            for rule in items:
+                extra = set(rule.keys()) - _ALLOWED_RULE_FIELDS
+                self.assertEqual(extra, set(), f"non-allowlisted keys: {extra}")
+                self.assertNotIn("applyTo", rule)
+                self.assertNotIn("excludeAgent", rule)
+
+    def test_p1_github_copilot_instructions_detected(self):
+        """P1: repo .github/copilot-instructions.md -> grouped under the repo root."""
+        github = self.repo / ".github"
+        github.mkdir(parents=True)
+        (github / "copilot-instructions.md").write_text("P1", encoding="utf-8")
+        pbr = self._walk()
+        names = {r["file_name"] for r in self._rules_for(pbr, self.repo)}
+        self.assertIn("copilot-instructions.md", names)
+        self.assertTrue(all(r["scope"] == "project" for r in self._rules_for(pbr, self.repo)))
+        self._assert_allowlisted(pbr)
+
+    def test_p2_github_instructions_tree_detected(self):
+        """P2: .github/instructions/**/*.instructions.md (recursive), project scope.
+
+        NOTE the path is .github/instructions/ — NOT .github/copilot/.
+        """
+        inst = self.repo / ".github" / "instructions" / "deep"
+        inst.mkdir(parents=True)
+        (self.repo / ".github" / "instructions" / "x.instructions.md").write_text("P2", encoding="utf-8")
+        (inst / "y.instructions.md").write_text("P2 deep", encoding="utf-8")
+        pbr = self._walk()
+        names = {r["file_name"] for r in self._rules_for(pbr, self.repo)}
+        self.assertIn("x.instructions.md", names)
+        self.assertIn("y.instructions.md", names)
+        self.assertTrue(all(r["scope"] == "project" for r in self._rules_for(pbr, self.repo)))
+        self._assert_allowlisted(pbr)
+
+    def test_p3_root_agent_files_detected_at_repo_root(self):
+        """P3: repo-root AGENTS.md / CLAUDE.md / GEMINI.md (repo root has .git)."""
+        (self.repo / ".git").mkdir(parents=True)
+        (self.repo / "AGENTS.md").write_text("agents", encoding="utf-8")
+        (self.repo / "CLAUDE.md").write_text("claude", encoding="utf-8")
+        (self.repo / "GEMINI.md").write_text("gemini", encoding="utf-8")
+        pbr = self._walk()
+        names = {r["file_name"] for r in self._rules_for(pbr, self.repo)}
+        self.assertEqual(names, {"AGENTS.md", "CLAUDE.md", "GEMINI.md"})
+        self.assertTrue(all(r["scope"] == "project" for r in self._rules_for(pbr, self.repo)))
+        self._assert_allowlisted(pbr)
+
+    def test_p3_nested_agents_md_not_picked_up(self):
+        """P3 is repo-root ONLY: a NESTED AGENTS.md (subdir, no .git) is excluded."""
+        (self.repo / ".git").mkdir(parents=True)
+        (self.repo / "AGENTS.md").write_text("root agents", encoding="utf-8")
+        nested = self.repo / "pkg" / "sub"
+        nested.mkdir(parents=True)
+        (nested / "AGENTS.md").write_text("nested - must NOT appear", encoding="utf-8")
+        pbr = self._walk()
+        # Only the repo root contributes; the nested dir is never a project key.
+        self.assertIn(str(self.repo), pbr)
+        self.assertNotIn(str(nested), pbr)
+        self.assertNotIn(str(self.repo / "pkg"), pbr)
+        all_paths = {r["file_path"] for items in pbr.values() for r in items}
+        self.assertNotIn(str(nested / "AGENTS.md"), all_paths)
+
+    def test_p3_root_files_ignored_without_git_marker(self):
+        """A bare dir holding AGENTS.md but no .git is not treated as a repo root."""
+        (self.repo / "AGENTS.md").write_text("no git here", encoding="utf-8")
+        pbr = self._walk()
+        self.assertNotIn(str(self.repo), pbr)
+
+    def test_p1_p2_p3_coalesce_into_single_repo_project(self):
+        """All project-scope sources for one repo land under a single project_root."""
+        (self.repo / ".git").mkdir(parents=True)
+        github = self.repo / ".github" / "instructions"
+        github.mkdir(parents=True)
+        (self.repo / ".github" / "copilot-instructions.md").write_text("P1", encoding="utf-8")
+        (github / "x.instructions.md").write_text("P2", encoding="utf-8")
+        (self.repo / "AGENTS.md").write_text("P3", encoding="utf-8")
+        pbr = self._walk()
+        repo_roots = [k for k in pbr if k == str(self.repo)]
+        self.assertEqual(len(repo_roots), 1)
+        names = {r["file_name"] for r in self._rules_for(pbr, self.repo)}
+        self.assertEqual(names, {"copilot-instructions.md", "x.instructions.md", "AGENTS.md"})
+
+    def test_symlinked_directory_skipped_during_walk(self):
+        """A symlinked subdirectory must be skipped (loop/perf guard)."""
+        (self.repo / ".git").mkdir(parents=True)
+        (self.repo / "AGENTS.md").write_text("root", encoding="utf-8")
+        # A real sibling repo whose root files we DON'T want reached via a symlink.
+        other = self.root / "other"
+        (other / ".git").mkdir(parents=True)
+        (other / "AGENTS.md").write_text("other", encoding="utf-8")
+        link = self.repo / "linked"
+        try:
+            link.symlink_to(other, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported on this platform")
+        pbr = self._walk()
+        # The symlink under repo/ is not traversed; 'other' is still reached as a
+        # top-level sibling, but never via repo/linked.
+        self.assertNotIn(str(self.repo / "linked"), pbr)
+
+
+# ---------------------------------------------------------------------------
+# 11. Rules: env-listed dirs (E1, current user only)
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliRulesEnv(unittest.TestCase):
+    """COPILOT_CUSTOM_INSTRUCTIONS_DIRS contributes user-scope rules (current user)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = MacOSCopilotCliRulesExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.custom = Path(self.tmp_dir) / "team-instructions"
+        (self.custom / ".github" / "instructions").mkdir(parents=True)
+        (self.custom / "AGENTS.md").write_text("E1 agents", encoding="utf-8")
+        (self.custom / ".github" / "instructions" / "e1.instructions.md").write_text("E1 inst", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _run_env(self, value: str, as_root: bool = False) -> dict:
+        projects_by_root: dict = {}
+        with patch(f"{_RULES_MOD}.is_running_as_root", return_value=as_root), \
+             patch.dict(os.environ, {"COPILOT_CUSTOM_INSTRUCTIONS_DIRS": value}, clear=False):
+            self.extractor._extract_env_custom_instructions(projects_by_root)
+        return projects_by_root
+
+    def _all_rules(self, pbr: dict) -> list:
+        out = []
+        for items in pbr.values():
+            out.extend(items)
+        return out
+
+    def test_e1_dir_contributes_agents_and_instructions(self):
+        pbr = self._run_env(str(self.custom))
+        self.assertIn(str(self.custom), pbr)
+        names = {r["file_name"] for r in self._rules_for_root(pbr)}
+        self.assertEqual(names, {"AGENTS.md", "e1.instructions.md"})
+
+    def test_e1_rules_are_user_scope_and_allowlisted(self):
+        rules = self._all_rules(self._run_env(str(self.custom)))
+        self.assertTrue(rules)
+        for rule in rules:
+            self.assertEqual(rule["scope"], "user")
+            self.assertEqual(set(rule.keys()) - _ALLOWED_RULE_FIELDS, set())
+            self.assertNotIn("applyTo", rule)
+            self.assertNotIn("excludeAgent", rule)
+
+    def test_e1_multiple_dirs_comma_split_and_blanks_dropped(self):
+        second = Path(self.tmp_dir) / "second"
+        second.mkdir(parents=True)
+        (second / "AGENTS.md").write_text("second", encoding="utf-8")
+        value = f" {self.custom} , , {second} "  # spaces + empty entry
+        pbr = self._run_env(value)
+        self.assertIn(str(self.custom), pbr)
+        self.assertIn(str(second), pbr)
+
+    def test_e1_skipped_entirely_when_running_as_root(self):
+        """Another user's env isn't visible during a root scan -> E1 contributes nothing."""
+        pbr = self._run_env(str(self.custom), as_root=True)
+        self.assertEqual(pbr, {})
+
+    def test_e1_unset_env_yields_nothing(self):
+        projects_by_root: dict = {}
+        with patch(f"{_RULES_MOD}.is_running_as_root", return_value=False), \
+             patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", None)
+            self.extractor._extract_env_custom_instructions(projects_by_root)
+        self.assertEqual(projects_by_root, {})
+
+    def _rules_for_root(self, pbr: dict) -> list:
+        return pbr.get(str(self.custom), [])
+
+
+# ---------------------------------------------------------------------------
+# 12. Rules routing: rules merge into projects[].rules[] via process_single_tool
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliRulesRouting(unittest.TestCase):
+    """The CLI branch merges extracted rules into the tool dict's projects."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.detector = AIToolsDetector(os_name="Darwin")
+        self.tool = {
+            "name": "GitHub Copilot CLI",
+            "version": "0.0.1",
+            "install_path": "/Users/x/.copilot",
+        }
+
+    def test_rules_surface_into_project_rules(self):
+        """A rules-only project (no MCP) surfaces with its rules on the tool dict."""
+        self.detector._copilot_cli_mcp_extractor = MagicMock()
+        self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = [
+            {
+                "project_root": "/Users/x/.copilot",
+                "rules": [{
+                    "file_path": "/Users/x/.copilot/copilot-instructions.md",
+                    "file_name": "copilot-instructions.md",
+                    "content": "be nice",
+                    "size": 7,
+                    "last_modified": "2026-01-01T00:00:00Z",
+                    "truncated": False,
+                    "scope": "user",
+                }],
+            }
+        ]
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(result["name"], "GitHub Copilot CLI")
+        self.assertEqual(len(result["projects"]), 1)
+        project = result["projects"][0]
+        self.assertEqual(project["path"], "/Users/x/.copilot")
+        self.assertEqual(len(project["rules"]), 1)
+        self.assertEqual(project["rules"][0]["scope"], "user")
+        self.assertEqual(project["mcpServers"], [])
+
+    def test_rules_and_mcp_coalesce_under_same_project_root(self):
+        """Rules + MCP servers sharing a project_root end up in ONE project entry."""
+        shared = "/Users/x/.copilot"
+        self.detector._copilot_cli_mcp_extractor = MagicMock()
+        self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = {
+            "projects": [{"path": shared, "mcpServers": [{"name": "serena"}]}]
+        }
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = [
+            {
+                "project_root": shared,
+                "rules": [{
+                    "file_path": f"{shared}/copilot-instructions.md",
+                    "file_name": "copilot-instructions.md",
+                    "content": "x", "size": 1,
+                    "last_modified": "2026-01-01T00:00:00Z",
+                    "truncated": False, "scope": "user",
+                }],
+            }
+        ]
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(len(result["projects"]), 1)
+        project = result["projects"][0]
+        self.assertEqual(project["path"], shared)
+        self.assertEqual(len(project["rules"]), 1)
+        self.assertEqual(project["mcpServers"][0]["name"], "serena")
+
+    def test_rules_failure_does_not_break_tool_processing(self):
+        """A throwing rules extractor must not crash; MCP-only result still returns."""
+        self.detector._copilot_cli_mcp_extractor = MagicMock()
+        self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = {
+            "projects": [{"path": "/Users/x/.copilot", "mcpServers": [{"name": "serena"}]}]
+        }
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.side_effect = RuntimeError("boom")
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(len(result["projects"]), 1)
+        self.assertEqual(result["projects"][0]["mcpServers"][0]["name"], "serena")
+
+    def test_empty_rules_no_phantom_project(self):
+        """No rules and no servers -> no phantom project row."""
+        self.detector._copilot_cli_mcp_extractor = MagicMock()
+        self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(result["projects"], [])
+
+
+# ---------------------------------------------------------------------------
+# 13. Windows rules extraction: OS-specific seams + inherited walk
+# ---------------------------------------------------------------------------
+
+class TestWindowsCopilotCliRulesExtraction(unittest.TestCase):
+    """The Windows extractor overrides only the OS seams; the 6-source walk is
+    inherited from the macOS class. These guard the seams — they would fail if
+    the Windows class regressed to a bare ``pass`` subclass over the macOS-only
+    primitives (which silently scans only the current user and walks ``/`` with
+    POSIX-only skip lists)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.ext = WindowsCopilotCliRulesExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _all_rules(self, pbr: dict) -> list:
+        rules = []
+        for items in pbr.values():
+            rules.extend(items)
+        return rules
+
+    def test_admin_scan_collects_global_rules_from_every_user(self):
+        """C1 regression: global G1 is collected for ALL C:\\Users users, not just
+        the running one. Fails if ``_scan_all_user_homes`` isn't overridden (the
+        macOS base uses is_running_as_root/scan_user_directories, no-ops on Windows)."""
+        users = Path(self.tmp_dir) / "Users"
+        for name in ("alice", "bob"):
+            cfg = users / name / ".copilot"
+            cfg.mkdir(parents=True)
+            (cfg / "copilot-instructions.md").write_text(f"{name} G1", encoding="utf-8")
+
+        def fake_scan(callback):
+            for name in ("alice", "bob"):
+                callback(users / name)
+
+        pbr: dict = {}
+        with patch(f"{_WIN_RULES_MOD}.scan_windows_user_directories", side_effect=fake_scan):
+            self.ext._extract_global_rules(pbr)
+        roots = set(pbr.keys())
+        self.assertIn(str(users / "alice" / ".copilot"), roots)
+        self.assertIn(str(users / "bob" / ".copilot"), roots)
+        rules = self._all_rules(pbr)
+        self.assertEqual(len(rules), 2)
+        self.assertTrue(all(r["scope"] == "user" for r in rules))
+
+    def test_is_privileged_wired_to_admin_check(self):
+        """E1 gating uses the Windows admin check, not the POSIX root check."""
+        with patch(f"{_WIN_RULES_MOD}.is_running_as_admin", return_value=True):
+            self.assertTrue(self.ext._is_privileged())
+        with patch(f"{_WIN_RULES_MOD}.is_running_as_admin", return_value=False):
+            self.assertFalse(self.ext._is_privileged())
+
+    def test_filesystem_root_is_drive_anchor(self):
+        """The project walk starts at the drive anchor, not a hardcoded POSIX root."""
+        self.assertEqual(self.ext._filesystem_root(), Path(Path.home().anchor))
+
+    def test_all_os_seams_overridden_on_windows(self):
+        """Host-independent C1 guard: every OS seam must be overridden on the
+        Windows class itself. Catches a regression to a bare ``pass`` subclass
+        even on a POSIX CI host, where the drive-anchor assertion alone can't."""
+        own = vars(WindowsCopilotCliRulesExtractor)
+        for seam in (
+            "_is_privileged",
+            "_scan_all_user_homes",
+            "_filesystem_root",
+            "_iter_top_level_dirs",
+            "_should_skip",
+        ):
+            self.assertIn(seam, own, f"Windows must override {seam} (else macOS-only behaviour leaks)")
+
+    def test_should_skip_targets_windows_system_dirs(self):
+        """The skip predicate excludes Windows system dirs (so the walk doesn't
+        recurse the entire OS tree). The macOS extractor does NOT skip these —
+        proving the seam genuinely changed behaviour. Synthetic non-system paths
+        are used so macOS's own /var-based system-path skip doesn't confound it."""
+        win = self.ext
+        mac = MacOSCopilotCliRulesExtractor()
+        for sysname in ("Windows", "Program Files", "ProgramData"):
+            p = Path("/data/projects") / sysname
+            self.assertTrue(win._should_skip(p), f"Windows must skip {sysname}")
+            self.assertFalse(mac._should_skip(p), f"macOS must NOT skip {sysname}")
+        self.assertFalse(win._should_skip(Path("/data/projects/myproject")))
+
+    def test_inherited_project_walk_detects_p1_p2_p3(self):
+        """The inherited P1/P2/P3 walk runs end-to-end through the Windows subclass
+        (scoped to a temp repo via the non-root walk branch)."""
+        repos = Path(self.tmp_dir) / "repos"
+        repo = repos / "proj"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".github" / "instructions").mkdir(parents=True)
+        (repo / ".github" / "copilot-instructions.md").write_text("P1", encoding="utf-8")
+        (repo / ".github" / "instructions" / "sec.instructions.md").write_text("P2", encoding="utf-8")
+        (repo / "AGENTS.md").write_text("P3", encoding="utf-8")
+        pbr: dict = {}
+        with patch.object(self.ext, "_should_skip", return_value=False):
+            self.ext._extract_project_level_rules(repos, pbr)
+        names = {r["file_name"] for r in self._all_rules(pbr)}
+        self.assertIn("copilot-instructions.md", names)  # P1
+        self.assertIn("sec.instructions.md", names)       # P2
+        self.assertIn("AGENTS.md", names)                 # P3
+        self.assertTrue(all(r["scope"] == "project" for r in self._all_rules(pbr)))
 
 
 if __name__ == "__main__":

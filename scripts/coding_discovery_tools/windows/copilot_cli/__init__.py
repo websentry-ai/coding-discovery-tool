@@ -12,9 +12,11 @@ only the all-users (``C:\\Users``) scan is Windows-specific.
 from .copilot_cli import WindowsCopilotCliDetector
 from .mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
 from .copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
+from .copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
 
 __all__ = [
     'WindowsCopilotCliDetector',
     'WindowsCopilotCliMCPConfigExtractor',
     'WindowsCopilotCliRulesExtractor',
+    'WindowsCopilotCliSettingsExtractor',
 ]

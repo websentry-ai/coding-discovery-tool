@@ -24,6 +24,7 @@ from .coding_tool_base import (
     BaseOpenCodeRulesExtractor,
     BaseCursorCliRulesExtractor,
     BaseCopilotCliRulesExtractor,
+    BaseCopilotCliSettingsExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
     BaseCursorSettingsExtractor,
@@ -117,6 +118,7 @@ from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRule
 from .macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
 from .macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
 from .macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
+from .macos.copilot_cli.copilot_cli_settings_extractor import MacOSCopilotCliSettingsExtractor
 
 # Windows - Copilot
 from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
@@ -127,6 +129,7 @@ from .windows.github_copilot.copilot_rules_extractor import WindowsGitHubCopilot
 from .windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
 from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
 from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
+from .windows.copilot_cli.copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -1334,6 +1337,29 @@ class CopilotCliRulesExtractorFactory:
             return MacOSCopilotCliRulesExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliRulesExtractor()
+        else:
+            return None
+
+
+class CopilotCliSettingsExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCopilotCliSettingsExtractor]:
+        """
+        Create a GitHub Copilot CLI settings/permissions extractor for the OS.
+
+        Reads the durable user-scope permission config (trusted folders, URL
+        allow/deny); the only OS-specific seam is the all-users scan, so the
+        Windows extractor is a thin subclass — see WindowsCopilotCliSettingsExtractor.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliSettingsExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliSettingsExtractor()
         else:
             return None
 

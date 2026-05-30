@@ -53,6 +53,12 @@ from scripts.coding_discovery_tools.windows.copilot_cli.mcp_config_extractor imp
 from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_rules_extractor import (
     WindowsCopilotCliRulesExtractor,
 )
+from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_settings_extractor import (
+    MacOSCopilotCliSettingsExtractor,
+)
+from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_settings_extractor import (
+    WindowsCopilotCliSettingsExtractor,
+)
 
 # Module path for patching the detector's root-scan helpers.
 _DETECTOR_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli"
@@ -62,6 +68,9 @@ _WIN_DETECTOR_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_
 _RULES_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_rules_extractor"
 # Module path for patching the Windows rules extractor's OS-specific seams.
 _WIN_RULES_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_rules_extractor"
+# Module paths for patching the settings extractor's seams.
+_SETTINGS_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_settings_extractor"
+_WIN_SETTINGS_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_settings_extractor"
 
 # The backend's ALLOWED_RULE_FIELDS — any rule dict carrying a key outside this
 # set is silently dropped whole by ingestion, so every rule we emit MUST be a
@@ -1441,6 +1450,233 @@ class TestWindowsCopilotCliRulesExtraction(unittest.TestCase):
         self.assertIn("sec.instructions.md", names)       # P2
         self.assertIn("AGENTS.md", names)                 # P3
         self.assertTrue(all(r["scope"] == "project" for r in self._all_rules(pbr)))
+
+
+# ---------------------------------------------------------------------------
+# 14. Settings/permissions: durable config (trusted_folders, allowed/denied URLs)
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliSettingsGlobal(unittest.TestCase):
+    """The settings extractor reads the CLI's durable on-disk permission keys
+    from config.json/settings.json and maps them to the Claude-style nested
+    ``permissions`` shape (routed through transform_settings_to_backend_format)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = MacOSCopilotCliSettingsExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.home = Path(self.tmp_dir) / "home"
+        self.config_dir = self.home / ".copilot"
+        self.config_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _run(self) -> list:
+        with patch(f"{_SETTINGS_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_SETTINGS_MOD}.is_running_as_root", return_value=False):
+            return self.extractor.extract_settings()
+
+    def test_trusted_folders_and_urls_snake_case(self):
+        (self.config_dir / "config.json").write_text(
+            '{"trusted_folders": ["/a", "/b"], "allowed_urls": ["https://x"], "denied_urls": ["https://y"]}',
+            encoding="utf-8")
+        recs = self._run()
+        self.assertEqual(len(recs), 1)
+        perms = recs[0]["permissions"]
+        self.assertEqual(perms["additionalDirectories"], ["/a", "/b"])
+        self.assertEqual(perms["allow"], ["https://x"])
+        self.assertEqual(perms["deny"], ["https://y"])
+        self.assertEqual(recs[0]["scope"], "user")
+        self.assertEqual(set(recs[0]["raw_settings"]), {"trusted_folders", "allowed_urls", "denied_urls"})
+
+    def test_camelcase_keys_tolerated(self):
+        (self.config_dir / "config.json").write_text(
+            '{"trustedFolders": ["/c"], "allowedUrls": ["https://z"]}', encoding="utf-8")
+        perms = self._run()[0]["permissions"]
+        self.assertEqual(perms["additionalDirectories"], ["/c"])
+        self.assertEqual(perms["allow"], ["https://z"])
+
+    def test_jsonc_comments_and_trailing_commas_tolerated(self):
+        (self.config_dir / "config.json").write_text(
+            '{\n  // auto-managed\n  "trusted_folders": ["/a"],\n}\n', encoding="utf-8")
+        self.assertEqual(self._run()[0]["permissions"]["additionalDirectories"], ["/a"])
+
+    def test_settings_json_overrides_config_json(self):
+        (self.config_dir / "config.json").write_text('{"allowed_urls": ["https://old"]}', encoding="utf-8")
+        (self.config_dir / "settings.json").write_text('{"allowed_urls": ["https://new"]}', encoding="utf-8")
+        self.assertEqual(self._run()[0]["permissions"]["allow"], ["https://new"])
+
+    def test_settings_json_explicit_empty_wins_over_config(self):
+        # Presence (not truthiness) decides: an explicit empty list in the
+        # migration-target settings.json overrides config.json.
+        (self.config_dir / "config.json").write_text('{"trusted_folders": ["/a"]}', encoding="utf-8")
+        (self.config_dir / "settings.json").write_text('{"trusted_folders": []}', encoding="utf-8")
+        self.assertEqual(self._run()[0]["permissions"]["additionalDirectories"], [])
+
+    def test_empty_posture_record_when_config_has_no_permission_keys(self):
+        (self.config_dir / "config.json").write_text('{"model": "x", "theme": "auto"}', encoding="utf-8")
+        recs = self._run()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["raw_settings"], {"trusted_folders": [], "allowed_urls": [], "denied_urls": []})
+
+    def test_no_config_files_yields_no_record(self):
+        # Empty ~/.copilot (no config.json/settings.json) -> no phantom row.
+        self.assertEqual(self._run(), [])
+
+    def test_settings_path_under_config_dir(self):
+        (self.config_dir / "config.json").write_text('{"trusted_folders": ["/a"]}', encoding="utf-8")
+        self.assertTrue(self._run()[0]["settings_path"].startswith(str(self.config_dir)))
+
+    def test_raw_settings_always_truthy_avoids_strict_reread(self):
+        # raw_settings must be a non-empty 3-key dict so the transformer never
+        # re-reads the JSONC file with strict json.loads.
+        (self.config_dir / "config.json").write_text('{\n  // c\n  "model":"x",\n}\n', encoding="utf-8")
+        r = self._run()[0]
+        self.assertTrue(r["raw_settings"])
+        self.assertEqual(set(r["raw_settings"]), {"trusted_folders", "allowed_urls", "denied_urls"})
+
+    def test_permissions_config_json_future_probe(self):
+        # Documented-but-unshipped permissions-config.json: parsed into raw_settings if present.
+        (self.config_dir / "config.json").write_text('{"trusted_folders": ["/a"]}', encoding="utf-8")
+        (self.config_dir / "permissions-config.json").write_text('{"some": "future"}', encoding="utf-8")
+        self.assertEqual(self._run()[0]["raw_settings"].get("permissions_config"), {"some": "future"})
+
+    def test_corrupt_config_does_not_crash(self):
+        (self.config_dir / "config.json").write_text("{not valid json", encoding="utf-8")
+        self.assertEqual(self._run(), [])  # unparseable + no settings.json -> no record, no crash
+
+
+# ---------------------------------------------------------------------------
+# 15. Settings routing: permissions attaches to the tool dict (per-user isolated)
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliSettingsRouting(unittest.TestCase):
+    """``_process_copilot_cli_tool`` attaches tool-level ``permissions``, isolating
+    each user-install via the install_path filter (the early-return branch bypasses
+    the shared _settings merge, so this must hold on its own)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.detector = AIToolsDetector(os_name="Darwin")
+        self.detector._copilot_cli_mcp_extractor = MagicMock()
+        self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
+        self.tool = {"name": "GitHub Copilot CLI", "version": "1.0.55", "install_path": "/Users/x/.copilot"}
+
+    @staticmethod
+    def _record(settings_path, trusted=None, allow=None, deny=None):
+        return {
+            "tool_name": "GitHub Copilot CLI", "scope": "user", "settings_path": settings_path,
+            "raw_settings": {"trusted_folders": trusted or [], "allowed_urls": allow or [], "denied_urls": deny or []},
+            "permissions": {"additionalDirectories": trusted or [], "allow": allow or [], "deny": deny or []},
+        }
+
+    def test_permissions_attached_to_tool_dict(self):
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.return_value = [
+            self._record("/Users/x/.copilot/config.json", trusted=["/Users/x/app"], allow=["https://gh"])
+        ]
+        result = self.detector.process_single_tool(self.tool)
+        self.assertIn("permissions", result)
+        p = result["permissions"]
+        self.assertEqual(p["settings_source"], "user")
+        self.assertEqual(p["additional_directories"], ["/Users/x/app"])
+        self.assertEqual(p["allow_rules"], ["https://gh"])
+
+    def test_install_path_isolates_other_users(self):
+        # Records for THIS install (x) and another user (y); only x is attached,
+        # and y's data must not leak onto x's row.
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.return_value = [
+            self._record("/Users/y/.copilot/config.json", trusted=["/Users/y/secret"]),
+            self._record("/Users/x/.copilot/config.json", trusted=["/Users/x/app"]),
+        ]
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(result["permissions"]["additional_directories"], ["/Users/x/app"])
+        self.assertNotIn("/Users/y/secret", result["permissions"]["raw_settings"]["trusted_folders"])
+
+    def test_empty_posture_record_attaches(self):
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.return_value = [
+            self._record("/Users/x/.copilot/config.json")  # all empty
+        ]
+        result = self.detector.process_single_tool(self.tool)
+        self.assertIn("permissions", result)
+        self.assertEqual(result["permissions"]["settings_source"], "user")
+        self.assertNotIn("allow_rules", result["permissions"])  # empty allow omitted by transformer
+
+    def test_no_matching_install_yields_no_permissions(self):
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.return_value = [
+            self._record("/Users/other/.copilot/config.json", trusted=["/o"])
+        ]
+        result = self.detector.process_single_tool(self.tool)
+        self.assertNotIn("permissions", result)
+
+    def test_sibling_dir_prefix_collision_excluded(self):
+        # A sibling config dir that string-prefixes install_path (".copilot-old")
+        # must NOT match — the filter is boundary-safe (matches by parent dir).
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.return_value = [
+            self._record("/Users/x/.copilot-old/config.json", trusted=["/stale"])
+        ]
+        result = self.detector.process_single_tool(self.tool)
+        self.assertNotIn("permissions", result)
+
+    def test_settings_failure_does_not_break_tool(self):
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.side_effect = RuntimeError("boom")
+        result = self.detector.process_single_tool(self.tool)
+        self.assertNotIn("permissions", result)
+        self.assertEqual(result["name"], "GitHub Copilot CLI")  # tool still returns
+
+    def test_no_settings_extractor_no_permissions(self):
+        self.detector._copilot_cli_settings_extractor = None
+        result = self.detector.process_single_tool(self.tool)
+        self.assertNotIn("permissions", result)
+
+
+# ---------------------------------------------------------------------------
+# 16. Windows settings extraction: the single OS seam
+# ---------------------------------------------------------------------------
+
+class TestWindowsCopilotCliSettingsExtraction(unittest.TestCase):
+    """The Windows settings extractor overrides ONLY the all-users scan seam; the
+    config parsing/mapping is inherited from the macOS class."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.ext = WindowsCopilotCliSettingsExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_admin_scan_collects_settings_from_every_user(self):
+        users = Path(self.tmp_dir) / "Users"
+        for name in ("alice", "bob"):
+            cfg = users / name / ".copilot"
+            cfg.mkdir(parents=True)
+            (cfg / "config.json").write_text(f'{{"trusted_folders": ["/{name}"]}}', encoding="utf-8")
+
+        def fake_scan(callback):
+            for name in ("alice", "bob"):
+                callback(users / name)
+
+        with patch(f"{_WIN_SETTINGS_MOD}.scan_windows_user_directories", side_effect=fake_scan):
+            recs = self.ext.extract_settings()
+        dirs = sorted(r["permissions"]["additionalDirectories"][0] for r in recs)
+        self.assertEqual(dirs, ["/alice", "/bob"])
+        self.assertEqual(len(recs), 2)
+
+    def test_only_scan_seam_overridden(self):
+        own = vars(WindowsCopilotCliSettingsExtractor)
+        self.assertIn("_scan_all_user_homes", own)
+        # Parsing logic is inherited, not duplicated.
+        for inherited in ("extract_settings", "_extract_for_user"):
+            self.assertNotIn(inherited, own)
 
 
 if __name__ == "__main__":

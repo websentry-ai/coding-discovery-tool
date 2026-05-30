@@ -328,6 +328,35 @@ class BaseCopilotCliRulesExtractor(ABC):
         pass
 
 
+class BaseCopilotCliSettingsExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI settings/permissions.
+
+    For the standalone ``@github/copilot`` CLI (config under ``~/.copilot/``).
+    Mirrors ``BaseClaudeSettingsExtractor`` — returns a list of per-scope settings
+    dicts that the orchestrator routes through
+    ``transform_settings_to_backend_format`` into the tool-level ``permissions``.
+    """
+
+    @abstractmethod
+    def extract_settings(self) -> Optional[List[Dict]]:
+        """
+        Extract GitHub Copilot CLI durable permission settings.
+
+        Reads the user-scope config (``<config_dir>/config.json`` and, during the
+        settings migration, ``<config_dir>/settings.json``) for the keys the CLI
+        actually persists: ``trusted_folders``, ``allowed_urls``, ``denied_urls``
+        (snake_case on disk; camelCase tolerated). ``<config_dir>`` honors
+        ``COPILOT_HOME`` for the running user, else ``<user_home>/.copilot``. When
+        running as root, scans every user's home.
+
+        Returns:
+            List of per-user settings dicts (scope "user"), each with
+            ``tool_name``, ``scope``, ``settings_path``, ``raw_settings`` and a
+            nested ``permissions`` dict; ``None``/empty if nothing is found.
+        """
+        pass
+
+
 class BaseJunieRulesExtractor(ABC):
     """Abstract base class for extracting Junie rules from all projects."""
 

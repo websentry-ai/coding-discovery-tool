@@ -55,6 +55,7 @@ try:
         GitHubCopilotRulesExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
+        CopilotCliSettingsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -106,6 +107,7 @@ except ImportError:
         GitHubCopilotRulesExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
+        CopilotCliSettingsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -202,9 +204,10 @@ class AIToolsDetector:
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
 
-            # GitHub Copilot CLI MCP + rules extractors (macOS/Windows; None elsewhere)
+            # GitHub Copilot CLI MCP + rules + settings extractors (macOS/Windows; None elsewhere)
             self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
             self._copilot_cli_rules_extractor = CopilotCliRulesExtractorFactory.create(self.system)
+            self._copilot_cli_settings_extractor = CopilotCliSettingsExtractorFactory.create(self.system)
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -1313,6 +1316,36 @@ class AIToolsDetector:
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
 
+        # Tool-level permissions: durable Copilot CLI settings (trusted folders,
+        # URL allow/deny) -> backend `permissions` dict via the shared transformer.
+        logger.info(f"  Extracting {tool_name} permissions...")
+        permissions_payload = None
+        if self._copilot_cli_settings_extractor:
+            try:
+                all_settings = self._copilot_cli_settings_extractor.extract_settings() or []
+                install_path = tool.get("install_path", "")
+                # extract_settings() returns every user's record under a root scan,
+                # but this runs once per user-install (install_path == that user's
+                # ~/.copilot config dir). Keep only THIS install's record — each
+                # settings file sits directly in the config dir, so match by parent
+                # dir (boundary-safe; a bare prefix would also match a sibling like
+                # ".copilot-old"). Prevents an all-users scan from leaking another
+                # user's permissions onto this row.
+                own = [
+                    s for s in all_settings
+                    if install_path and s.get("settings_path")
+                    and Path(str(s["settings_path"])).parent == Path(install_path)
+                ]
+                permissions_payload = transform_settings_to_backend_format(own) if own else None
+                if permissions_payload:
+                    logger.info(f"  ✓ Found {tool_name} permissions")
+                else:
+                    logger.info(f"  No {tool_name} permissions found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} permissions: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} permissions extractor not available for this OS")
+
         # Drop empty projects so a serverless config doesn't surface a phantom row.
         projects_list = [
             {
@@ -1327,12 +1360,15 @@ class AIToolsDetector:
         logger.info(f"  ✓ Final project count: {len(projects_list)} project(s)")
         logger.info("=" * 70)
 
-        return {
+        result = {
             "name": tool.get("name"),
             "version": tool.get("version"),
             "install_path": tool.get("install_path"),
             "projects": projects_list,
         }
+        if permissions_payload:
+            result["permissions"] = permissions_payload
+        return result
 
     def process_single_tool(self, tool: Dict) -> Dict:
         """

@@ -26,6 +26,7 @@ from ...mcp_extraction_helpers import (
     extract_ide_global_configs_with_root_support,
     transform_mcp_servers_to_array,
 )
+from .copilot_cli import _resolve_copilot_dir
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +146,12 @@ class MacOSCopilotCliMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract the Copilot CLI MCP config for a single user.
 
-        Reads ``user_home/.copilot/mcp-config.json`` and returns a single-entry
-        list with the ``~/.copilot`` directory as the project path, or an empty
-        list when the file is absent, unparseable, or has no servers.
+        Reads ``mcp-config.json`` from the resolved config dir (``COPILOT_HOME``
+        when set for this user, else ``user_home/.copilot``) and returns a
+        single-entry list with that dir as the project path, or an empty list
+        when the file is absent, unparseable, or has no servers.
         """
-        copilot_dir = user_home / _CLI_DIR_NAME
+        copilot_dir = _resolve_copilot_dir(user_home)
         config_path = copilot_dir / _MCP_CONFIG_FILENAME
 
         config = self._read_cli_mcp_config(config_path, str(copilot_dir))

@@ -12,6 +12,7 @@ all-users/root scanning rather than Codex's global-binary model.
 """
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -25,24 +26,57 @@ logger = logging.getLogger(__name__)
 
 # The CLI home directory is version-dependent in its exact contents. We never
 # gate on a single file, and never on bare-directory existence alone — we
-# require ``~/.copilot/`` to exist AND contain at least one known artifact from
-# this union set (review P0-1). Older CLI builds use ``config.json``; current
-# docs use ``settings.json``.
+# require the config dir to exist AND contain at least one known artifact from
+# this union set (review P0-1). The marker set mirrors GitHub's documented
+# config-dir contents (Copilot CLI "config dir reference"); ``pkg`` is an
+# observed-but-undocumented binary dir kept as an extra real-world signal.
 _CLI_DIR_NAME = ".copilot"
 _CLI_MARKER_FILES = frozenset({
     "settings.json",
     "config.json",
     "mcp-config.json",
     "lsp-config.json",
+    "permissions-config.json",
+    "copilot-instructions.md",
+    "session-store.db",
 })
 _CLI_MARKER_DIRS = frozenset({
-    "session-state",
-    "history-session-state",
+    "agents",
+    "hooks",
+    "ide",
+    "installed-plugins",
     "instructions",
     "logs",
+    "plugin-data",
+    "session-state",
+    "command-history-state",
+    "skills",
     "pkg",
-    "installed-plugins",
 })
+
+
+def _resolve_copilot_dir(user_home: Path) -> Path:
+    """Return the Copilot CLI config directory for ``user_home``.
+
+    Honors the ``COPILOT_HOME`` environment variable, which — per GitHub's docs
+    — *replaces* the entire ``~/.copilot`` path (its value is the complete
+    config dir, not a parent). ``COPILOT_HOME`` is read from the process
+    environment, so it only validly applies to the user the process runs as; we
+    therefore honor it only when ``user_home`` is the running user's own home.
+    During a root/all-users scan, another user's ``COPILOT_HOME`` (set in their
+    shell) is not visible here, so those users fall back to the documented
+    default ``<user_home>/.copilot``. (Reading a per-user ``COPILOT_HOME`` from
+    each user's shell profiles during a root scan is a separate, best-effort
+    follow-up.) The deprecated ``--config-dir`` flag is intentionally ignored.
+    """
+    try:
+        if user_home == Path.home():
+            override = (os.environ.get("COPILOT_HOME") or "").strip()
+            if override:
+                return Path(os.path.expanduser(os.path.expandvars(override)))
+    except OSError as exc:
+        logger.debug(f"Error resolving COPILOT_HOME: {exc}")
+    return user_home / _CLI_DIR_NAME
 
 
 def _copilot_dir_has_known_artifact(copilot_dir: Path) -> bool:
@@ -232,10 +266,11 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         """
         Detect the Copilot CLI for a single user's home directory.
 
-        Returns a tool-info dict when ``user_home/.copilot`` exists and holds at
+        Returns a tool-info dict when the resolved config dir (``COPILOT_HOME``
+        when set for this user, else ``user_home/.copilot``) exists and holds at
         least one known artifact; otherwise None.
         """
-        copilot_dir = user_home / _CLI_DIR_NAME
+        copilot_dir = _resolve_copilot_dir(user_home)
         try:
             if not copilot_dir.is_dir():
                 return None

@@ -17,6 +17,7 @@ scanner (``tests/__init__.py`` patches ``_scan_servers_in_mapping`` -> {}), and
 """
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -32,6 +33,7 @@ from scripts.coding_discovery_tools.coding_tool_factory import (
 from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli import (
     MacOSCopilotCliDetector,
     _parse_cli_version,
+    _resolve_copilot_dir,
 )
 from scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor import (
     MacOSCopilotCliMCPConfigExtractor,
@@ -126,6 +128,22 @@ class TestCopilotCliDetection(unittest.TestCase):
     def test_installed_plugins_dir_marker_detected(self):
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "installed-plugins").mkdir()
+        self.assertIsNotNone(self.detector.detect())
+
+    def test_command_history_state_dir_marker_detected(self):
+        """Documented dir name is 'command-history-state' (not 'history-session-state')."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "command-history-state").mkdir()
+        self.assertIsNotNone(self.detector.detect())
+
+    def test_skills_dir_marker_detected(self):
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "skills").mkdir()
+        self.assertIsNotNone(self.detector.detect())
+
+    def test_permissions_config_marker_detected(self):
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "permissions-config.json").write_text("{}", encoding="utf-8")
         self.assertIsNotNone(self.detector.detect())
 
     def test_unrelated_file_not_detected(self):
@@ -664,6 +682,34 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         """A failed/absent binary yields None (caller falls back to 'unknown'), never raises."""
         with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()):
             self.assertIsNone(WindowsCopilotCliDetector().get_version())
+
+
+class TestCopilotCliConfigDirResolution(unittest.TestCase):
+    """_resolve_copilot_dir honors COPILOT_HOME for the running user, else defaults."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_default_when_copilot_home_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COPILOT_HOME", None)
+            home = Path.home()
+            self.assertEqual(_resolve_copilot_dir(home), home / ".copilot")
+
+    def test_copilot_home_used_for_current_user(self):
+        with patch.dict(os.environ, {"COPILOT_HOME": "/custom/copilot-cfg"}, clear=False):
+            self.assertEqual(_resolve_copilot_dir(Path.home()), Path("/custom/copilot-cfg"))
+
+    def test_copilot_home_ignored_for_other_user(self):
+        """COPILOT_HOME reflects only the running user's env — don't apply it to others."""
+        with patch.dict(os.environ, {"COPILOT_HOME": "/custom/copilot-cfg"}, clear=False):
+            other = Path("/Users/some-other-user")
+            self.assertEqual(_resolve_copilot_dir(other), other / ".copilot")
+
+    def test_blank_copilot_home_falls_back_to_default(self):
+        with patch.dict(os.environ, {"COPILOT_HOME": "   "}, clear=False):
+            home = Path.home()
+            self.assertEqual(_resolve_copilot_dir(home), home / ".copilot")
 
 
 class TestCopilotCliVersionParse(unittest.TestCase):

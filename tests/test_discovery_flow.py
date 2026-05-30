@@ -196,13 +196,37 @@ class TestMainCLI(unittest.TestCase):
 
 
 class TestUnsupportedPlatformGuard(unittest.TestCase):
-    """main() exits cleanly on unsupported platforms instead of crashing in detector init."""
+    """main() runs on supported platforms (macOS/Windows/Linux) and exits
+    cleanly on anything else instead of crashing in detector init."""
 
-    def test_linux_exits_code_3_before_detector_init(self):
+    def test_linux_proceeds_past_os_guard(self):
+        """Linux is supported — it must NOT exit 3 at the OS guard.
+
+        We patch acquire_lock to return False so main() exits 0 at the
+        single-flight lock check (the first exit point after the guard).
+        Linux reaching that exit-0 proves it passed the OS guard rather
+        than hitting the old exit-3.
+        """
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
 
         argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
         with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value=False), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        # 0 (lock-held early exit), NOT 3 (unsupported-OS guard).
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_unsupported_platform_exits_code_3_before_detector_init(self):
+        """A genuinely unsupported platform (e.g. *BSD) still exits 3 cleanly
+        before detector init, so it can't crash + page Sentry."""
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        with patch.object(adm.platform, "system", return_value="FreeBSD"), \
              patch.object(adm, "AIToolsDetector") as mock_detector, \
              patch.object(sys, "argv", argv):
             with self.assertRaises(SystemExit) as cm:

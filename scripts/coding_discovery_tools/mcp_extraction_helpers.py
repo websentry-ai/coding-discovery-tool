@@ -969,15 +969,15 @@ def extract_global_mcp_config_with_root_support(
             # Build user-specific config path
             # global_config_path is like ~/.cursor/mcp.json
             # We need to replace ~ with user_dir
-                try:
-                    user_config_path = user_dir / global_config_path.relative_to(Path.home())
-                    if user_config_path.exists():
-                        config = read_global_mcp_config(user_config_path, tool_name, parent_levels)
-                        if config:
-                            return config
-                except (ValueError, OSError):
-                    # Path might not be relative to home, try direct construction
-                    continue
+            try:
+                user_config_path = user_dir / global_config_path.relative_to(Path.home())
+                if user_config_path.exists():
+                    config = read_global_mcp_config(user_config_path, tool_name, parent_levels)
+                    if config:
+                        return config
+            except (ValueError, OSError):
+                # Path might not be relative to home, try direct construction
+                continue
         
         # Fallback to admin's own global config if no user config found
         if global_config_path.exists():

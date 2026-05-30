@@ -956,12 +956,11 @@ def extract_global_mcp_config_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
-    elif platform.system() == "Linux":
-        try:
-            from .macos_extraction_helpers import is_running_as_root
-            is_admin = is_running_as_root()
-        except ImportError:
-            pass
+    # No Linux branch by design: Linux MCP extractors do not call this helper.
+    # The Linux pattern is per-user accumulation across get_linux_user_homes()
+    # (see linux/cursor/mcp_config_extractor.py for the canonical shape).
+    # Returning the first match from a multi-user walk — what this function
+    # does — would silently drop the other users' configs on Linux.
 
     # When running as admin/root, prioritize checking user directories first
     admin_homes = _iter_admin_user_homes(is_admin, users_dir)

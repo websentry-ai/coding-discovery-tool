@@ -83,8 +83,26 @@ class TestGetCursorDbPath(unittest.TestCase):
         self.assertIsNone(result)
 
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Linux")
+    def test_get_cursor_db_path_linux(self, _mock_sys):
+        """Returns correct Linux path when state.vscdb exists (~/.config/Cursor/...)."""
+        db_path = (
+            self.user_home / ".config" / "Cursor"
+            / "User" / "globalStorage" / "state.vscdb"
+        )
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text("")
+        result = _get_cursor_db_path(self.user_home)
+        self.assertEqual(result, db_path)
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Linux")
+    def test_get_cursor_db_path_linux_file_not_exists(self, _mock_sys):
+        """Returns None when the Linux state.vscdb is missing."""
+        result = _get_cursor_db_path(self.user_home)
+        self.assertIsNone(result)
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="FreeBSD")
     def test_get_cursor_db_path_unsupported_platform(self, _mock_sys):
-        """Returns None for unsupported platform (Linux)."""
+        """Returns None for a genuinely unsupported platform."""
         result = _get_cursor_db_path(self.user_home)
         self.assertIsNone(result)
 

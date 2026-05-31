@@ -138,6 +138,11 @@ from .macos.junie.junie import MacOSJunieDetector
 from .macos.junie.mcp_config_extractor import MacOSJunieMCPConfigExtractor
 from .macos.junie.junie_rules_extractor import MacOSJunieRulesExtractor
 
+# Windows - Junie
+from .windows.junie.junie import WindowsJunieDetector
+from .windows.junie.mcp_config_extractor import WindowsJunieMCPConfigExtractor
+from .windows.junie.junie_rules_extractor import WindowsJunieRulesExtractor
+
 # Windows - JetBrains
 from .windows.jetbrains.jetbrains import WindowsJetBrainsDetector
 from .windows.jetbrains.mcp_config_extractor import WindowsJetBrainsMCPConfigExtractor
@@ -161,6 +166,68 @@ from .windows.cursor_cli.mcp_config_extractor import WindowsCursorCliMCPConfigEx
 # Windows - Shared
 from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
 from .windows import WindowsClaudeCoworkDetector, WindowsClaudeCoworkSkillsExtractor
+
+# Linux - Shared
+from .linux import (
+    LinuxDeviceIdExtractor,
+    LinuxClaudeDetector,
+    LinuxClaudeSettingsExtractor,
+    LinuxClaudeSkillsExtractor,
+    LinuxCursorDetector,
+    LinuxCursorSettingsExtractor,
+    LinuxCursorSkillsExtractor,
+    LinuxWindsurfDetector,
+    LinuxRooDetector,
+    LinuxRooRulesExtractor,
+    LinuxRooMCPConfigExtractor,
+    LinuxClineDetector,
+    LinuxClineRulesExtractor,
+    LinuxClineMCPConfigExtractor,
+    LinuxClineSkillsExtractor,
+    LinuxAntigravityDetector,
+    LinuxAntigravityRulesExtractor,
+    LinuxAntigravityMCPConfigExtractor,
+    LinuxKiloCodeDetector,
+    LinuxKiloCodeRulesExtractor,
+    LinuxKiloCodeMCPConfigExtractor,
+    LinuxGeminiCliDetector,
+    LinuxGeminiCliRulesExtractor,
+    LinuxGeminiCliMCPConfigExtractor,
+    LinuxCursorCliDetector,
+    LinuxCursorCliRulesExtractor,
+    LinuxCursorCliMCPConfigExtractor,
+    LinuxCursorCliSettingsExtractor,
+    LinuxCodexDetector,
+    LinuxCodexRulesExtractor,
+    LinuxCodexMCPConfigExtractor,
+    LinuxOpenCodeDetector,
+    LinuxOpenCodeRulesExtractor,
+    LinuxOpenCodeMCPConfigExtractor,
+    LinuxOpenClawDetector,
+    LinuxReplitDetector,
+    LinuxJetBrainsDetector,
+    LinuxJetBrainsMCPConfigExtractor,
+    LinuxCopilotDetector,
+    LinuxGitHubCopilotRulesExtractor,
+    LinuxGitHubCopilotMCPConfigExtractor,
+    LinuxClaudeCoworkDetector,
+    LinuxClaudeCoworkSkillsExtractor,
+    LinuxJunieDetector,
+    LinuxJunieRulesExtractor,
+    LinuxJunieMCPConfigExtractor,
+)
+
+# Linux - Claude Code
+from .linux.claude_code.claude_rules_extractor import LinuxClaudeRulesExtractor
+from .linux.claude_code.mcp_config_extractor import LinuxClaudeMCPConfigExtractor
+
+# Linux - Cursor
+from .linux.cursor.cursor_rules_extractor import LinuxCursorRulesExtractor
+from .linux.cursor.mcp_config_extractor import LinuxCursorMCPConfigExtractor
+
+# Linux - Windsurf
+from .linux.windsurf.windsurf_rules_extractor import LinuxWindsurfRulesExtractor
+from .linux.windsurf.mcp_config_extractor import LinuxWindsurfMCPConfigExtractor
 
 # Windows - Cursor
 from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
@@ -220,6 +287,8 @@ class DeviceIdExtractorFactory:
             return MacOSDeviceIdExtractor()
         elif os_name == "Windows":
             return WindowsDeviceIdExtractor()
+        elif os_name == "Linux":
+            return LinuxDeviceIdExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -248,6 +317,8 @@ class ToolDetectorFactory:
             return MacOSCursorDetector()
         elif os_name == "Windows":
             return WindowsCursorDetector()
+        elif os_name == "Linux":
+            return LinuxCursorDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -272,6 +343,8 @@ class ToolDetectorFactory:
             return MacOSClaudeDetector()
         elif os_name == "Windows":
             return WindowsClaudeDetector()
+        elif os_name == "Linux":
+            return LinuxClaudeDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -293,6 +366,8 @@ class ToolDetectorFactory:
             return MacOSClaudeCoworkDetector()
         elif os_name == "Windows":
             return WindowsClaudeCoworkDetector()
+        elif os_name == "Linux":
+            return LinuxClaudeCoworkDetector()
         else:
             return None
 
@@ -317,6 +392,8 @@ class ToolDetectorFactory:
             return MacOSWindsurfDetector()
         elif os_name == "Windows":
             return WindowsWindsurfDetector()
+        elif os_name == "Linux":
+            return LinuxWindsurfDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -338,6 +415,8 @@ class ToolDetectorFactory:
             return MacOSRooDetector()
         elif os_name == "Windows":
             return WindowsRooDetector()
+        elif os_name == "Linux":
+            return LinuxRooDetector()
         else:
             return None
 
@@ -359,6 +438,8 @@ class ToolDetectorFactory:
             return MacOSClineDetector()
         elif os_name == "Windows":
             return WindowsClineDetector()
+        elif os_name == "Linux":
+            return LinuxClineDetector()
         else:
             return None
 
@@ -380,6 +461,8 @@ class ToolDetectorFactory:
             return MacOSAntigravityDetector()
         elif os_name == "Windows":
             return WindowsAntigravityDetector()
+        elif os_name == "Linux":
+            return LinuxAntigravityDetector()
         else:
             return None
 
@@ -401,6 +484,8 @@ class ToolDetectorFactory:
             return MacOSKiloCodeDetector()
         elif os_name == "Windows":
             return WindowsKiloCodeDetector()
+        elif os_name == "Linux":
+            return LinuxKiloCodeDetector()
         else:
             return None
 
@@ -422,6 +507,8 @@ class ToolDetectorFactory:
             return MacOSGeminiCliDetector()
         elif os_name == "Windows":
             return WindowsGeminiCliDetector()
+        elif os_name == "Linux":
+            return LinuxGeminiCliDetector()
         else:
             return None
 
@@ -443,6 +530,8 @@ class ToolDetectorFactory:
             return MacOSCursorCliDetector()
         elif os_name == "Windows":
             return WindowsCursorCliDetector()
+        elif os_name == "Linux":
+            return LinuxCursorCliDetector()
         else:
             return None
 
@@ -464,6 +553,8 @@ class ToolDetectorFactory:
             return MacOSCodexDetector()
         elif os_name == "Windows":
             return WindowsCodexDetector()
+        elif os_name == "Linux":
+            return LinuxCodexDetector()
         else:
             return None
 
@@ -485,6 +576,8 @@ class ToolDetectorFactory:
             return MacOSReplitDetector()
         elif os_name == "Windows":
             return WindowsReplitDetector()
+        elif os_name == "Linux":
+            return LinuxReplitDetector()
         else:
             return None
 
@@ -506,6 +599,8 @@ class ToolDetectorFactory:
             return MacOSOpenCodeDetector()
         elif os_name == "Windows":
             return WindowsOpenCodeDetector()
+        elif os_name == "Linux":
+            return LinuxOpenCodeDetector()
         else:
             return None
 
@@ -521,6 +616,8 @@ class ToolDetectorFactory:
             return MacOSOpenClawDetector()
         elif os_name == "Windows":
             return WindowsOpenClawDetector()
+        elif os_name == "Linux":
+            return LinuxOpenClawDetector()
         else:
             return None
 
@@ -535,6 +632,8 @@ class ToolDetectorFactory:
             return MacOSCopilotDetector()
         elif os_name == "Windows":
             return WindowsGitHubCopilotDetector()
+        elif os_name == "Linux":
+            return LinuxCopilotDetector()
         else:
             return None
 
@@ -556,6 +655,8 @@ class ToolDetectorFactory:
             return MacOSJetBrainsDetector()
         elif os_name == "Windows":
             return WindowsJetBrainsDetector()
+        elif os_name == "Linux":
+            return LinuxJetBrainsDetector()
         else:
             return None
 
@@ -569,6 +670,10 @@ class ToolDetectorFactory:
 
         if os_name == "Darwin":
             return MacOSJunieDetector()
+        elif os_name == "Linux":
+            return LinuxJunieDetector()
+        elif os_name == "Windows":
+            return WindowsJunieDetector()
         else:
             return None
 
@@ -682,6 +787,8 @@ class CursorRulesExtractorFactory:
             return MacOSCursorRulesExtractor()
         elif os_name == "Windows":
             return WindowsCursorRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -710,6 +817,8 @@ class ClaudeRulesExtractorFactory:
             return MacOSClaudeRulesExtractor()
         elif os_name == "Windows":
             return WindowsClaudeRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxClaudeRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -738,6 +847,8 @@ class CursorMCPConfigExtractorFactory:
             return MacOSCursorMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCursorMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -766,6 +877,8 @@ class ClaudeMCPConfigExtractorFactory:
             return MacOSClaudeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsClaudeMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxClaudeMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -794,6 +907,8 @@ class ClaudeSettingsExtractorFactory:
             return MacOSClaudeSettingsExtractor()
         elif os_name == "Windows":
             return WindowsClaudeSettingsExtractor()
+        elif os_name == "Linux":
+            return LinuxClaudeSettingsExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -813,6 +928,8 @@ class CursorSettingsExtractorFactory:
             return MacOSCursorSettingsExtractor()
         elif os_name == "Windows":
             return WindowsCursorSettingsExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorSettingsExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -841,6 +958,8 @@ class WindsurfRulesExtractorFactory:
             return MacOSWindsurfRulesExtractor()
         elif os_name == "Windows":
             return WindowsWindsurfRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxWindsurfRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -869,6 +988,8 @@ class WindsurfMCPConfigExtractorFactory:
             return MacOSWindsurfMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsWindsurfMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxWindsurfMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
 
@@ -894,6 +1015,8 @@ class RooMCPConfigExtractorFactory:
             return MacOSRooMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsRooMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxRooMCPConfigExtractor()
         else:
             return None
 
@@ -913,6 +1036,8 @@ class RooRulesExtractorFactory:
             return MacOSRooRulesExtractor()
         elif os_name == "Windows":
             return WindowsRooRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxRooRulesExtractor()
         else:
             return None
 
@@ -938,6 +1063,8 @@ class ClineRulesExtractorFactory:
             return MacOSClineRulesExtractor()
         elif os_name == "Windows":
             return WindowsClineRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxClineRulesExtractor()
         else:
             return None
 
@@ -963,6 +1090,8 @@ class ClineMCPConfigExtractorFactory:
             return MacOSClineMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsClineMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxClineMCPConfigExtractor()
         else:
             return None
 
@@ -988,6 +1117,8 @@ class AntigravityRulesExtractorFactory:
             return MacOSAntigravityRulesExtractor()
         elif os_name == "Windows":
             return WindowsAntigravityRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxAntigravityRulesExtractor()
         else:
             return None
 
@@ -1013,6 +1144,8 @@ class AntigravityMCPConfigExtractorFactory:
             return MacOSAntigravityMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsAntigravityMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxAntigravityMCPConfigExtractor()
         else:
             return None
 
@@ -1038,6 +1171,8 @@ class KiloCodeRulesExtractorFactory:
             return MacOSKiloCodeRulesExtractor()
         elif os_name == "Windows":
             return WindowsKiloCodeRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxKiloCodeRulesExtractor()
         else:
             return None
 
@@ -1063,6 +1198,8 @@ class KiloCodeMCPConfigExtractorFactory:
             return MacOSKiloCodeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsKiloCodeMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxKiloCodeMCPConfigExtractor()
         else:
             return None
 
@@ -1088,6 +1225,8 @@ class GeminiCliRulesExtractorFactory:
             return MacOSGeminiCliRulesExtractor()
         elif os_name == "Windows":
             return WindowsGeminiCliRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxGeminiCliRulesExtractor()
         else:
             return None
 
@@ -1113,6 +1252,8 @@ class GeminiCliMCPConfigExtractorFactory:
             return MacOSGeminiCliMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsGeminiCliMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxGeminiCliMCPConfigExtractor()
         else:
             return None
 
@@ -1138,6 +1279,8 @@ class CodexRulesExtractorFactory:
             return MacOSCodexRulesExtractor()
         elif os_name == "Windows":
             return WindowsCodexRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxCodexRulesExtractor()
         else:
             return None
 
@@ -1163,6 +1306,8 @@ class CodexMCPConfigExtractorFactory:
             return MacOSCodexMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCodexMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxCodexMCPConfigExtractor()
         else:
             return None
 
@@ -1188,6 +1333,8 @@ class OpenCodeRulesExtractorFactory:
             return MacOSOpenCodeRulesExtractor()
         elif os_name == "Windows":
             return WindowsOpenCodeRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxOpenCodeRulesExtractor()
         else:
             return None
 
@@ -1213,6 +1360,8 @@ class OpenCodeMCPConfigExtractorFactory:
             return MacOSOpenCodeMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsOpenCodeMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxOpenCodeMCPConfigExtractor()
         else:
             return None
 
@@ -1238,6 +1387,8 @@ class JetBrainsMCPConfigExtractorFactory:
             return MacOSJetBrainsMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsJetBrainsMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxJetBrainsMCPConfigExtractor()
         else:
             return None
 
@@ -1257,6 +1408,8 @@ class GitHubCopilotMCPConfigExtractorFactory:
             return MacOSGitHubCopilotMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsGitHubCopilotMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxGitHubCopilotMCPConfigExtractor()
         else:
             return None
 
@@ -1276,6 +1429,8 @@ class GitHubCopilotRulesExtractorFactory:
             return MacOSGitHubCopilotRulesExtractor()
         elif os_name == "Windows":
             return WindowsGitHubCopilotRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxGitHubCopilotRulesExtractor()
         else:
             return None
 
@@ -1299,6 +1454,10 @@ class JunieMCPConfigExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSJunieMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxJunieMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsJunieMCPConfigExtractor()
         else:
             return None
 
@@ -1322,6 +1481,10 @@ class JunieRulesExtractorFactory:
 
         if os_name == "Darwin":
             return MacOSJunieRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxJunieRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsJunieRulesExtractor()
         else:
             return None
 
@@ -1347,6 +1510,8 @@ class CursorCliSettingsExtractorFactory:
             return MacOSCursorCliSettingsExtractor()
         elif os_name == "Windows":
             return WindowsCursorCliSettingsExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorCliSettingsExtractor()
         else:
             return None
 
@@ -1372,6 +1537,8 @@ class CursorCliMCPConfigExtractorFactory:
             return MacOSCursorCliMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCursorCliMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorCliMCPConfigExtractor()
         else:
             return None
 
@@ -1391,6 +1558,8 @@ class CursorCliRulesExtractorFactory:
             return MacOSCursorCliRulesExtractor()
         elif os_name == "Windows":
             return WindowsCursorCliRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorCliRulesExtractor()
         else:
             return None
 
@@ -1416,6 +1585,8 @@ class ClaudeSkillsExtractorFactory:
             return MacOSClaudeSkillsExtractor()
         elif os_name == "Windows":
             return WindowsClaudeSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxClaudeSkillsExtractor()
         else:
             return None
 
@@ -1441,6 +1612,8 @@ class CursorSkillsExtractorFactory:
             return MacOSCursorSkillsExtractor()
         elif os_name == "Windows":
             return WindowsCursorSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxCursorSkillsExtractor()
         else:
             return None
 
@@ -1466,6 +1639,8 @@ class ClineSkillsExtractorFactory:
             return MacOSClineSkillsExtractor()
         elif os_name == "Windows":
             return WindowsClineSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxClineSkillsExtractor()
         else:
             return None
 
@@ -1491,5 +1666,7 @@ class ClaudeCoworkSkillsExtractorFactory:
             return MacOSClaudeCoworkSkillsExtractor()
         elif os_name == "Windows":
             return WindowsClaudeCoworkSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxClaudeCoworkSkillsExtractor()
         else:
             return None

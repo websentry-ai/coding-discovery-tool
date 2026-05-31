@@ -7,7 +7,9 @@ This module detects Kilo Code installations by checking for:
 2. Kilo Code extension settings in IDE global storage directories
 """
 
+import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 
@@ -15,6 +17,10 @@ from ...coding_tool_base import BaseToolDetector
 from ...macos_extraction_helpers import is_running_as_root, scan_user_directories
 
 logger = logging.getLogger(__name__)
+
+# Match the trailing semver portion of a VS Code extension folder name,
+# including pre-release suffixes like 1.2.3-pre.5 or 1.0.0-beta.1.
+_VERSION_SUFFIX_RE = re.compile(r"-(\d+\.\d+\.\d+(?:[-+][\w.+-]+)?)$")
 
 
 class MacOSKiloCodeDetector(BaseToolDetector):
@@ -70,71 +76,90 @@ class MacOSKiloCodeDetector(BaseToolDetector):
     def get_version(self) -> Optional[str]:
         """
         Extract Kilo Code version.
-        
-        Note: Version extraction is currently not implemented.
-        
+
+        Delegates to detect() so the install-gating logic (extension settings
+        dir + IDE present in /Applications) stays the single source of truth.
+        A leftover extension folder without a real install must not surface
+        a version when detect() would report nothing.
+
         Returns:
-            None (version extraction removed per requirements)
+            Version string if KiloCode is installed, None otherwise.
         """
+        result = self.detect()
+        if result:
+            version = result.get("version")
+            return version if version != "Unknown" else None
+        return None
+
+    def _get_extension_version_for_user(self, user_home: Path, ide_name: str) -> Optional[str]:
+        """
+        Read the Kilo Code extension version for a single IDE.
+
+        Scoped to one IDE so the version always matches the install_path
+        reported by detect() — looking in another IDE's extensions dir would
+        risk returning a leftover VS Code version against a Cursor install.
+
+        Reads ``package.json`` inside the matching extension folder, falling
+        back to the version suffix in the folder name if package.json is
+        unreadable.
+        """
+        extensions_dir = user_home / ".vscode" / "extensions"
+        if ide_name == "Cursor":
+            extensions_dir = user_home / ".cursor" / "extensions"
+
+        try:
+            if not extensions_dir.exists():
+                return None
+            for ext_dir in extensions_dir.glob(f"{self.KILOCODE_EXTENSION_ID}-*"):
+                package_json = ext_dir / "package.json"
+                if package_json.exists():
+                    try:
+                        with open(package_json, "r", encoding="utf-8") as f:
+                            version = json.load(f).get("version")
+                        if version:
+                            return version
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                m = _VERSION_SUFFIX_RE.search(ext_dir.name)
+                if m:
+                    return m.group(1)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check extensions directory {extensions_dir}: {e}")
         return None
 
     def _check_user_for_kilocode(self, user_home: Path) -> Optional[Dict]:
         """
         Check if Kilo Code is installed for a specific user.
-        
-        Since Kilo Code is an extension, we first check if the extension exists
-        in any IDE. Only if the extension is found, we proceed with detection.
-        
-        This method:
-        1. First checks for Kilo Code extension in any supported IDE
-        2. If extension found, verifies the IDE is installed
-        3. Only returns detection result if extension is present
-        
-        Args:
-            user_home: User's home directory path
-            
-        Returns:
-            Dict with tool info (name, version, install_path) or None if not found
+
+        Walk the supported IDEs once and accept the first one that has BOTH a
+        globalStorage settings dir for the kilocode extension AND a matching
+        ``.app`` under ``/Applications``. We do NOT fall back to a different
+        installed IDE after finding globalStorage elsewhere — that previous
+        behaviour let stale globalStorage from an uninstalled IDE shadow the
+        active install, and the subsequent version lookup read from the wrong
+        IDE's extensions directory (returning the wrong version or falling
+        through to ``"Unknown"`` even when the active IDE had a readable
+        ``package.json``).
         """
-        # First, check if Kilo Code extension exists in any IDE
-        extension_path = None
-        ide_with_extension = None
-        
         for ide_name in self.SUPPORTED_IDES:
             extension_path = self._check_kilocode_extension(user_home, ide_name)
-            if extension_path:
-                ide_with_extension = ide_name
-                logger.debug(f"Found Kilo Code extension in {ide_name} at: {extension_path}")
-                break
-        
-        # If no extension found, return None immediately
-        if not extension_path:
-            logger.debug("Kilo Code extension not found in any IDE")
-            return None
-        
-        # Extension found - verify IDE is installed (for validation)
-        ide_installed = False
-        if ide_with_extension:
-            ide_installed, _ = self._check_ide_installation(ide_with_extension)
-        
-        # If IDE not found, check other IDEs
-        if not ide_installed:
-            for ide_name in self.SUPPORTED_IDES:
-                ide_installed, _ = self._check_ide_installation(ide_name)
-                if ide_installed:
-                    break
-        
-        # Return None if IDE is not installed (extension exists but IDE missing)
-        if not ide_installed:
-            logger.debug("Kilo Code extension found but no IDE installation detected")
-            return None
-        
-        # Use the extension path as install_path
-        return {
-            "name": self.tool_name,
-            "version": "Unknown",
-            "install_path": str(extension_path)
-        }
+            if not extension_path:
+                continue
+            ide_installed, _ = self._check_ide_installation(ide_name)
+            if not ide_installed:
+                logger.debug(
+                    f"Kilo Code globalStorage found in {ide_name}, but {ide_name}.app "
+                    f"is not installed — skipping (stale config)"
+                )
+                continue
+            logger.debug(f"Found Kilo Code in {ide_name} at: {extension_path}")
+            return {
+                "name": self.tool_name,
+                "version": self._get_extension_version_for_user(user_home, ide_name) or "Unknown",
+                "install_path": str(extension_path),
+            }
+        logger.debug("No IDE has both Kilo Code globalStorage and an installed .app")
+        return None
 
     def _check_ide_installation(self, ide_name: str) -> Tuple[bool, Optional[str]]:
         """

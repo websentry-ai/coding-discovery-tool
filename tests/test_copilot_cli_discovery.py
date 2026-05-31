@@ -1546,6 +1546,30 @@ class TestCopilotCliSettingsGlobal(unittest.TestCase):
         (self.config_dir / "config.json").write_text("{not valid json", encoding="utf-8")
         self.assertEqual(self._run(), [])  # unparseable + no settings.json -> no record, no crash
 
+    def test_full_settings_json_flows_into_raw_settings(self):
+        # Gap 2: autonomy/security flags in settings.json reach the risk classifier
+        # via raw_settings (not just the 3 permission keys).
+        (self.config_dir / "config.json").write_text('{"trusted_folders": ["/a"]}', encoding="utf-8")
+        (self.config_dir / "settings.json").write_text(
+            '{"continueOnAutoMode": true, "storeTokenPlaintext": true, "askUser": false, "model": "x"}',
+            encoding="utf-8")
+        raw = self._run()[0]["raw_settings"]
+        self.assertEqual(raw["continueOnAutoMode"], True)
+        self.assertEqual(raw["storeTokenPlaintext"], True)
+        self.assertIn("askUser", raw)
+        self.assertEqual(raw["trusted_folders"], ["/a"])  # resolved permission key still canonical
+
+    def test_config_json_auth_state_never_leaks_into_raw_settings(self):
+        # SECURITY: config.json holds auth/internal state — it must NOT be dumped;
+        # only its permission keys (trusted_folders) are lifted.
+        (self.config_dir / "config.json").write_text(
+            '{"trusted_folders": ["/a"], "github_oauth_token": "SECRET", '
+            '"expAssignmentsCache": {"big": 1}}', encoding="utf-8")
+        raw = self._run()[0]["raw_settings"]
+        self.assertEqual(raw["trusted_folders"], ["/a"])  # permission key lifted
+        self.assertNotIn("github_oauth_token", raw)        # auth NOT leaked
+        self.assertNotIn("expAssignmentsCache", raw)       # internal noise excluded
+
 
 # ---------------------------------------------------------------------------
 # 15. Settings routing: permissions attaches to the tool dict (per-user isolated)

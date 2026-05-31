@@ -126,14 +126,22 @@ class MacOSCopilotCliSettingsExtractor(BaseCopilotCliSettingsExtractor):
         allowed_urls = _resolve_list(settings_data, config_data, _ALLOWED_URLS_KEYS)
         denied_urls = _resolve_list(settings_data, config_data, _DENIED_URLS_KEYS)
 
-        # raw_settings is ALWAYS a non-empty dict so the transformer never falls
-        # back to re-reading the file with strict json.loads (which would choke on
-        # JSONC). It carries the durable keys verbatim for the risk classifier.
-        raw_settings: Dict = {
-            "trusted_folders": trusted_folders,
-            "allowed_urls": allowed_urls,
-            "denied_urls": denied_urls,
-        }
+        # raw_settings feeds the backend risk classifier. Start from the FULL
+        # settings.json — Copilot's "personal settings" file, which also holds
+        # autonomy/security flags (e.g. continueOnAutoMode, askUser,
+        # storeTokenPlaintext) — so the classifier sees those signals and
+        # auto-picks up any new setting GitHub adds, without a code change.
+        # SECURITY: we deliberately do NOT dump config.json — it holds auth state
+        # and other internal data; only its permission keys are lifted (the
+        # resolved trusted_folders, layered below).
+        # The resolved permission keys are layered on top in canonical snake_case
+        # (reflecting the settings.json-wins merge) and guarantee raw_settings is
+        # always a non-empty dict, so the transformer never re-reads the file with
+        # strict json.loads (which would choke on JSONC).
+        raw_settings: Dict = dict(settings_data) if isinstance(settings_data, dict) else {}
+        raw_settings["trusted_folders"] = trusted_folders
+        raw_settings["allowed_urls"] = allowed_urls
+        raw_settings["denied_urls"] = denied_urls
 
         # Forward-compat: surface permissions-config.json if a future CLI writes it.
         permissions_config = _parse_jsonc(config_dir / PERMISSIONS_CONFIG_FILENAME)

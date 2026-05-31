@@ -11,10 +11,12 @@ from .copilot_cli import MacOSCopilotCliDetector
 from .mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
 from .copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
 from .copilot_cli_settings_extractor import MacOSCopilotCliSettingsExtractor
+from .copilot_cli_skills_extractor import MacOSCopilotCliSkillsExtractor
 
 __all__ = [
     'MacOSCopilotCliDetector',
     'MacOSCopilotCliMCPConfigExtractor',
     'MacOSCopilotCliRulesExtractor',
     'MacOSCopilotCliSettingsExtractor',
+    'MacOSCopilotCliSkillsExtractor',
 ]

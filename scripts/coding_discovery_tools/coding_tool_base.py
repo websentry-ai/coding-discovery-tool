@@ -518,6 +518,35 @@ class BaseClineSkillsExtractor(ABC):
         pass
 
 
+class BaseCopilotCliSkillsExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI skills.
+
+    For the standalone ``@github/copilot`` CLI. Copilot CLI has no plugin system,
+    so skills carry ``source="standalone"``.
+    """
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all GitHub Copilot CLI skills from all projects on the machine.
+
+        Each skill is a subdirectory containing a ``SKILL.md``. Searches:
+        - User-level: ~/.copilot/skills/<name>/SKILL.md, ~/.agents/skills/<name>/SKILL.md
+        - Project-level: **/.github/skills/<name>/SKILL.md,
+          **/.claude/skills/<name>/SKILL.md, **/.agents/skills/<name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope "user")
+              Each entry has: skill_name, file_path, file_name, content, size,
+              last_modified, truncated, scope, type, source, project_path
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
 class BaseClaudeSettingsExtractor(ABC):
     """Abstract base class for extracting Claude Code settings (permissions)."""
 

@@ -56,6 +56,7 @@ try:
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
+        CopilotCliSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -108,6 +109,7 @@ except ImportError:
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
+        CopilotCliSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -204,10 +206,11 @@ class AIToolsDetector:
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
 
-            # GitHub Copilot CLI MCP + rules + settings extractors (macOS/Windows; None elsewhere)
+            # GitHub Copilot CLI MCP + rules + settings + skills extractors (macOS/Windows; None elsewhere)
             self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
             self._copilot_cli_rules_extractor = CopilotCliRulesExtractorFactory.create(self.system)
             self._copilot_cli_settings_extractor = CopilotCliSettingsExtractorFactory.create(self.system)
+            self._copilot_cli_skills_extractor = CopilotCliSkillsExtractorFactory.create(self.system)
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -1282,6 +1285,7 @@ class AIToolsDetector:
                                 projects_dict[project_path] = {
                                     "mcpServers": [],
                                     "rules": [],
+                                    "skills": [],
                                 }
                             projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
                     log_mcp_details(projects_dict, tool_name)
@@ -1304,6 +1308,7 @@ class AIToolsDetector:
                             projects_dict[project_root] = {
                                 "mcpServers": [],
                                 "rules": [],
+                                "skills": [],
                             }
                         projects_dict[project_root]["rules"] = self._deduplicate_project_items(rules)
                 if rules_projects:
@@ -1315,6 +1320,45 @@ class AIToolsDetector:
                 logger.warning(f"  Error extracting {tool_name} rules: {e}")
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
+
+        # Skills ride projects[].skills[] (per-project), like rules. This branch
+        # returns early and bypasses the generic skills merge, so handle it here.
+        logger.info(f"  Extracting {tool_name} skills...")
+        if self._copilot_cli_skills_extractor:
+            try:
+                skills_result = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+                user_skills = skills_result.get("user_skills", [])
+                project_skills = skills_result.get("project_skills", [])
+
+                # User-scope skills: group by each entry's project_path (its
+                # ~/.copilot or ~/.agents home key); create the entry if absent.
+                for skill in user_skills:
+                    key = skill.get("project_path") or str(Path.home())
+                    if key not in projects_dict:
+                        projects_dict[key] = {"mcpServers": [], "rules": [], "skills": []}
+                    projects_dict[key].setdefault("skills", []).append(skill)
+
+                # Project-scope skills: merge into projects_dict[root]["skills"], deduped.
+                for skills_project in project_skills:
+                    project_root = skills_project.get("project_root", "")
+                    skills = skills_project.get("skills", [])
+                    if not project_root:
+                        continue
+                    if project_root not in projects_dict:
+                        projects_dict[project_root] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[project_root].setdefault("skills", [])
+                    existing.extend(skills)
+                    projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
+
+                total_skills = len(user_skills) + sum(len(p.get("skills", [])) for p in project_skills)
+                if total_skills:
+                    logger.info(f"  ✓ Found {total_skills} {tool_name} skill(s)")
+                else:
+                    logger.info(f"  No {tool_name} skills found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} skills: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
         # Tool-level permissions: durable Copilot CLI settings (trusted folders,
         # URL allow/deny) -> backend `permissions` dict via the shared transformer.
@@ -1352,6 +1396,7 @@ class AIToolsDetector:
                 "path": path,
                 "mcpServers": data.get("mcpServers", []),
                 "rules": data.get("rules", []),
+                "skills": data.get("skills", []),
             }
             for path, data in projects_dict.items()
             if not self._is_project_empty(data)

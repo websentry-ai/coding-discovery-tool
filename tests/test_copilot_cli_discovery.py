@@ -59,6 +59,18 @@ from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_settings_extra
 from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_settings_extractor import (
     WindowsCopilotCliSettingsExtractor,
 )
+from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_skills_extractor import (
+    MacOSCopilotCliSkillsExtractor,
+)
+from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_skills_extractor import (
+    WindowsCopilotCliSkillsExtractor,
+)
+from scripts.coding_discovery_tools.copilot_cli_skills_helpers import (
+    COPILOT_CLI_PARENT_DIR_NAMES,
+    COPILOT_CLI_USER_DIR_NAMES,
+    COPILOT_CLI_SKILL_CONFIG,
+)
+from scripts.coding_discovery_tools.claude_code_skills_helpers import build_skills_project_list
 
 # Module path for patching the detector's root-scan helpers.
 _DETECTOR_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli"
@@ -71,6 +83,9 @@ _WIN_RULES_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli
 # Module paths for patching the settings extractor's seams.
 _SETTINGS_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_settings_extractor"
 _WIN_SETTINGS_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_settings_extractor"
+# Module paths for patching the skills extractor's seams.
+_SKILLS_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_skills_extractor"
+_WIN_SKILLS_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_skills_extractor"
 
 # The backend's ALLOWED_RULE_FIELDS — any rule dict carrying a key outside this
 # set is silently dropped whole by ingestion, so every rule we emit MUST be a
@@ -469,6 +484,12 @@ class TestCopilotCliRouting(unittest.TestCase):
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
         self.detector = AIToolsDetector(os_name="Darwin")
+        # Mock the skills extractor so process_single_tool doesn't run the real
+        # filesystem walk (which would find real skills on the test machine).
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
 
     def test_cli_tool_routed_to_cli_branch_not_ide(self):
         tool = {
@@ -1262,6 +1283,12 @@ class TestCopilotCliRulesRouting(unittest.TestCase):
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
         self.detector = AIToolsDetector(os_name="Darwin")
+        # Mock the skills extractor so process_single_tool doesn't run the real
+        # filesystem walk (which would find real skills on the test machine).
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
         self.tool = {
             "name": "GitHub Copilot CLI",
             "version": "0.0.1",
@@ -1587,6 +1614,10 @@ class TestCopilotCliSettingsRouting(unittest.TestCase):
         self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
         self.detector._copilot_cli_rules_extractor = MagicMock()
         self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
         self.tool = {"name": "GitHub Copilot CLI", "version": "1.0.55", "install_path": "/Users/x/.copilot"}
 
     @staticmethod
@@ -1701,6 +1732,260 @@ class TestWindowsCopilotCliSettingsExtraction(unittest.TestCase):
         # Parsing logic is inherited, not duplicated.
         for inherited in ("extract_settings", "_extract_for_user"):
             self.assertNotIn(inherited, own)
+
+
+# ---------------------------------------------------------------------------
+# 17. Skills: user (~/.copilot, ~/.agents) + project (.github/.claude/.agents)
+# ---------------------------------------------------------------------------
+
+_ALLOWED_SKILL_FIELDS = {
+    "file_path", "file_name", "content", "size", "last_modified", "truncated", "scope",
+    "skill_name", "type", "project_root", "project_path", "source",
+    "plugin_id", "marketplace_name", "source_type", "is_official",
+}
+
+
+def _skill_md(name: str) -> str:
+    return f"---\nname: {name}\ndescription: does {name}\nlicense: MIT\n---\n# {name}\nbody\n"
+
+
+class TestCopilotCliSkillsConfig(unittest.TestCase):
+    """The Copilot CLI skill config + dir tuples are wired correctly."""
+
+    def test_dir_tuples(self):
+        self.assertEqual(COPILOT_CLI_PARENT_DIR_NAMES, (".github", ".claude", ".agents"))
+        self.assertEqual(COPILOT_CLI_USER_DIR_NAMES, (".copilot", ".agents"))
+
+    def test_skill_config(self):
+        self.assertEqual(COPILOT_CLI_SKILL_CONFIG.type_name, "skill")
+        self.assertEqual(COPILOT_CLI_SKILL_CONFIG.dir_name, "skills")
+        self.assertEqual(COPILOT_CLI_SKILL_CONFIG.layout, "nested")
+        self.assertEqual(
+            COPILOT_CLI_SKILL_CONFIG.name_extractor(Path("/x/.github/skills/deploy/SKILL.md")), "deploy"
+        )
+
+
+class TestCopilotCliSkillsExtraction(unittest.TestCase):
+    """End-to-end skills extraction against a temp filesystem (project walk scoped
+    to the temp repo so it doesn't reach the temp home)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = MacOSCopilotCliSkillsExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.home = Path(self.tmp_dir) / "home"
+        self.repos = Path(self.tmp_dir) / "repos"
+        self.repo = self.repos / "proj"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _add_user_skill(self, tooldir: str, name: str) -> None:
+        d = self.home / tooldir / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(_skill_md(name), encoding="utf-8")
+
+    def _add_project_skill(self, tooldir: str, name: str) -> None:
+        d = self.repo / tooldir / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(_skill_md(name), encoding="utf-8")
+
+    def _run_user(self) -> list:
+        user_skills = []
+        with patch(f"{_SKILLS_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_SKILLS_MOD}.is_running_as_root", return_value=False):
+            self.extractor._extract_user_level_skills(user_skills)
+        return user_skills
+
+    def _run_project(self) -> list:
+        pbr = {}
+        with patch(f"{_SKILLS_MOD}.should_skip_system_path", return_value=False), \
+             patch(f"{_SKILLS_MOD}.should_skip_path", return_value=False):
+            self.extractor._extract_project_level_skills(self.repos, pbr)
+        return build_skills_project_list(pbr)
+
+    def _assert_allowlisted(self, skills: list) -> None:
+        for s in skills:
+            self.assertEqual(set(s) - _ALLOWED_SKILL_FIELDS, set(), f"non-allowlisted keys: {s.get('skill_name')}")
+            self.assertNotIn("description", s)  # frontmatter stays in content, never a dict key
+
+    def test_user_skills_copilot_and_agents(self):
+        self._add_user_skill(".copilot", "deploy")
+        self._add_user_skill(".agents", "review")
+        user = self._run_user()
+        self.assertEqual({s["skill_name"] for s in user}, {"deploy", "review"})
+        self.assertTrue(all(s["scope"] == "user" for s in user))
+        self.assertTrue(all("project_path" in s and "project_root" not in s for s in user))
+        self.assertTrue(all(s.get("source") == "standalone" for s in user))
+        self._assert_allowlisted(user)
+
+    def test_project_skills_all_three_dirs(self):
+        self._add_project_skill(".github", "build")
+        self._add_project_skill(".claude", "test")
+        self._add_project_skill(".agents", "lint")
+        allsk = [s for p in self._run_project() for s in p["skills"]]
+        self.assertEqual({s["skill_name"] for s in allsk}, {"build", "test", "lint"})
+        self.assertTrue(all(s["scope"] == "project" for s in allsk))
+        self.assertTrue(all("project_root" not in s for s in allsk))  # stripped on merge
+        self._assert_allowlisted(allsk)
+
+    def test_skill_name_is_dir_not_filename(self):
+        self._add_project_skill(".github", "webapp-testing")
+        s = self._run_project()[0]["skills"][0]
+        self.assertEqual(s["skill_name"], "webapp-testing")
+        self.assertEqual(s["file_name"], "SKILL.md")
+
+    def test_non_skill_md_ignored(self):
+        self._add_project_skill(".github", "build")
+        (self.repo / ".github" / "skills" / "build" / "README.md").write_text("nope\n", encoding="utf-8")
+        allsk = [s for p in self._run_project() for s in p["skills"]]
+        self.assertEqual([s["file_name"] for s in allsk], ["SKILL.md"])
+
+    def test_frontmatter_stays_in_content(self):
+        self._add_project_skill(".github", "build")
+        s = self._run_project()[0]["skills"][0]
+        self.assertIn("description: does build", s["content"])
+        self.assertNotIn("description", s)
+
+    def test_no_skills_yields_empty(self):
+        self.assertEqual(self._run_user(), [])
+        self.assertEqual(self._run_project(), [])
+
+    def test_all_users_root_scan(self):
+        users = Path(self.tmp_dir) / "Users"
+        for name in ("alice", "bob"):
+            d = users / name / ".copilot" / "skills" / f"{name}-skill"
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(_skill_md(f"{name}-skill"), encoding="utf-8")
+
+        def fake_scan(callback):
+            for name in ("alice", "bob"):
+                callback(users / name)
+
+        user_skills = []
+        with patch(f"{_SKILLS_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_SKILLS_MOD}.scan_user_directories", side_effect=fake_scan):
+            self.extractor._extract_user_level_skills(user_skills)
+        self.assertEqual({s["skill_name"] for s in user_skills}, {"alice-skill", "bob-skill"})
+
+
+# ---------------------------------------------------------------------------
+# 18. Skills routing: skills merge into projects[].skills[] via process_single_tool
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliSkillsRouting(unittest.TestCase):
+    """The CLI branch (which returns early) attaches skills to projects[].skills[]."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.detector = AIToolsDetector(os_name="Darwin")
+        self.detector._copilot_cli_mcp_extractor = MagicMock()
+        self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.return_value = []
+        self.tool = {"name": "GitHub Copilot CLI", "version": "1.0.55", "install_path": "/Users/x/.copilot"}
+
+    @staticmethod
+    def _skill(skill_name, file_path, scope="project"):
+        return {"file_path": file_path, "file_name": "SKILL.md", "content": "x", "size": 1,
+                "last_modified": "t", "truncated": False, "scope": scope,
+                "skill_name": skill_name, "type": "skill", "source": "standalone"}
+
+    def test_project_skills_attach(self):
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [],
+            "project_skills": [{"project_root": "/repo",
+                                "skills": [self._skill("build", "/repo/.github/skills/build/SKILL.md")]}],
+        }
+        result = self.detector.process_single_tool(self.tool)
+        proj = [p for p in result["projects"] if p["path"] == "/repo"]
+        self.assertEqual(len(proj), 1)
+        self.assertEqual([s["skill_name"] for s in proj[0]["skills"]], ["build"])
+
+    def test_user_skills_attach_by_project_path(self):
+        us = self._skill("deploy", "/Users/x/.copilot/skills/deploy/SKILL.md", scope="user")
+        us["project_path"] = "/Users/x/.copilot"
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [us], "project_skills": [],
+        }
+        result = self.detector.process_single_tool(self.tool)
+        proj = [p for p in result["projects"] if p["path"] == "/Users/x/.copilot"]
+        self.assertEqual(len(proj), 1)
+        self.assertEqual([s["skill_name"] for s in proj[0]["skills"]], ["deploy"])
+
+    def test_skills_only_project_survives(self):
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [],
+            "project_skills": [{"project_root": "/repo",
+                                "skills": [self._skill("build", "/repo/.github/skills/build/SKILL.md")]}],
+        }
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(len(result["projects"]), 1)  # not filtered as empty
+
+    def test_no_skills_no_phantom_project(self):
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(result["projects"], [])
+
+    def test_skills_failure_does_not_break_tool(self):
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.side_effect = RuntimeError("boom")
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(result["name"], "GitHub Copilot CLI")
+        self.assertEqual(result["projects"], [])
+
+    def test_no_skills_extractor_ok(self):
+        self.detector._copilot_cli_skills_extractor = None
+        result = self.detector.process_single_tool(self.tool)
+        self.assertEqual(result["projects"], [])
+
+
+# ---------------------------------------------------------------------------
+# 19. Windows skills extraction: all-users scan + standalone structure
+# ---------------------------------------------------------------------------
+
+class TestWindowsCopilotCliSkillsExtraction(unittest.TestCase):
+    """The Windows skills extractor scans all users via scan_windows_user_directories
+    and reuses the shared engine; only the walk/threading is Windows-specific."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.ext = WindowsCopilotCliSkillsExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_user_scan_collects_from_every_user(self):
+        users = Path(self.tmp_dir) / "Users"
+        for name in ("alice", "bob"):
+            d = users / name / ".copilot" / "skills" / f"{name}-s"
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(_skill_md(f"{name}-s"), encoding="utf-8")
+
+        def fake_scan(callback):
+            for name in ("alice", "bob"):
+                callback(users / name)
+
+        user_skills = []
+        with patch(f"{_WIN_SKILLS_MOD}.scan_windows_user_directories", side_effect=fake_scan):
+            self.ext._extract_user_level_skills(user_skills)
+        self.assertEqual({s["skill_name"] for s in user_skills}, {"alice-s", "bob-s"})
+
+    def test_standalone_not_macos_subclass(self):
+        # The skills-family pattern: Windows subclasses the Base ABC directly and
+        # re-implements the walk (threaded) — it is NOT a subclass of the macOS class.
+        from scripts.coding_discovery_tools.coding_tool_base import BaseCopilotCliSkillsExtractor
+        self.assertTrue(issubclass(WindowsCopilotCliSkillsExtractor, BaseCopilotCliSkillsExtractor))
+        self.assertNotIn(MacOSCopilotCliSkillsExtractor, WindowsCopilotCliSkillsExtractor.__mro__)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from .coding_tool_base import (
     BaseCursorCliRulesExtractor,
     BaseCopilotCliRulesExtractor,
     BaseCopilotCliSettingsExtractor,
+    BaseCopilotCliSkillsExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
     BaseCursorSettingsExtractor,
@@ -119,6 +120,7 @@ from .macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
 from .macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
 from .macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
 from .macos.copilot_cli.copilot_cli_settings_extractor import MacOSCopilotCliSettingsExtractor
+from .macos.copilot_cli.copilot_cli_skills_extractor import MacOSCopilotCliSkillsExtractor
 
 # Windows - Copilot
 from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
@@ -130,6 +132,7 @@ from .windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
 from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
 from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
 from .windows.copilot_cli.copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
+from .windows.copilot_cli.copilot_cli_skills_extractor import WindowsCopilotCliSkillsExtractor
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -1360,6 +1363,29 @@ class CopilotCliSettingsExtractorFactory:
             return MacOSCopilotCliSettingsExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliSettingsExtractor()
+        else:
+            return None
+
+
+class CopilotCliSkillsExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCopilotCliSkillsExtractor]:
+        """
+        Create a GitHub Copilot CLI skills extractor for the OS.
+
+        Reuses the shared skills engine; macOS and Windows are independent
+        implementations (Windows parallelizes the walk with a thread pool) — see
+        WindowsCopilotCliSkillsExtractor.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliSkillsExtractor()
         else:
             return None
 

@@ -53,6 +53,10 @@ try:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        CopilotCliMCPConfigExtractorFactory,
+        CopilotCliRulesExtractorFactory,
+        CopilotCliSettingsExtractorFactory,
+        CopilotCliSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -103,6 +107,10 @@ except ImportError:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        CopilotCliMCPConfigExtractorFactory,
+        CopilotCliRulesExtractorFactory,
+        CopilotCliSettingsExtractorFactory,
+        CopilotCliSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -199,6 +207,12 @@ class AIToolsDetector:
 
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
+
+            # GitHub Copilot CLI MCP + rules + settings + skills extractors (macOS/Windows; None elsewhere)
+            self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
+            self._copilot_cli_rules_extractor = CopilotCliRulesExtractorFactory.create(self.system)
+            self._copilot_cli_settings_extractor = CopilotCliSettingsExtractorFactory.create(self.system)
+            self._copilot_cli_skills_extractor = CopilotCliSkillsExtractorFactory.create(self.system)
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -1256,13 +1270,178 @@ class AIToolsDetector:
         
         return filtered_tool
 
+    def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
+        """
+        Process the GitHub Copilot CLI: extract its MCP config + rules and return
+        the standard tool dict.
+
+        The CLI is its own product (distinct from the IDE Copilot extension), so
+        it gets a dedicated branch. Because this branch returns early — before
+        the shared empty-project filter in ``process_single_tool`` — it filters
+        empty projects itself: a project with neither servers nor rules (e.g. a
+        parseable-but-serverless ``mcp-config.json``) must not emit a phantom
+        row (review P1-2).
+
+        Args:
+            tool: Tool info dict from detection.
+
+        Returns:
+            Tool dict with ``name``, ``version``, ``install_path`` and ``projects``.
+        """
+        tool_name = tool.get("name", "")
+        projects_dict: Dict[str, Dict] = {}
+
+        logger.info(f"  Extracting {tool_name} MCP configs...")
+        if self._copilot_cli_mcp_extractor:
+            try:
+                mcp_config = self._copilot_cli_mcp_extractor.extract_mcp_config()
+                if mcp_config and "projects" in mcp_config:
+                    for project in mcp_config["projects"]:
+                        project_path = project.get("path", "")
+                        if project_path:
+                            if project_path not in projects_dict:
+                                projects_dict[project_path] = {
+                                    "mcpServers": [],
+                                    "rules": [],
+                                    "skills": [],
+                                }
+                            projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
+                    log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info("  No GitHub Copilot CLI MCP configs found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
+
+        logger.info(f"  Extracting {tool_name} rules...")
+        if self._copilot_cli_rules_extractor:
+            try:
+                rules_projects = self._copilot_cli_rules_extractor.extract_all_copilot_cli_rules()
+                for rules_project in rules_projects:
+                    project_root = rules_project.get("project_root", "")
+                    rules = rules_project.get("rules", [])
+                    if project_root:
+                        if project_root not in projects_dict:
+                            projects_dict[project_root] = {
+                                "mcpServers": [],
+                                "rules": [],
+                                "skills": [],
+                            }
+                        projects_dict[project_root]["rules"] = self._deduplicate_project_items(rules)
+                if rules_projects:
+                    logger.info(f"  ✓ Found {len(rules_projects)} project(s) with {tool_name} rules")
+                    log_rules_details(projects_dict, tool_name)
+                else:
+                    logger.info(f"  No {tool_name} rules found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} rules: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
+
+        # Skills ride projects[].skills[] (per-project), like rules. This branch
+        # returns early and bypasses the generic skills merge, so handle it here.
+        logger.info(f"  Extracting {tool_name} skills...")
+        if self._copilot_cli_skills_extractor:
+            try:
+                skills_result = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+                user_skills = skills_result.get("user_skills", [])
+                project_skills = skills_result.get("project_skills", [])
+
+                # User-scope skills: coalesce them all under THIS install's config
+                # dir (install_path == the resolved ~/.copilot, COPILOT_HOME-aware)
+                # so they share one row with the global rules + MCP servers, rather
+                # than scattering across each skill's own directory.
+                install_key = tool.get("install_path") or str(Path.home())
+                for skill in user_skills:
+                    if install_key not in projects_dict:
+                        projects_dict[install_key] = {"mcpServers": [], "rules": [], "skills": []}
+                    projects_dict[install_key].setdefault("skills", []).append(skill)
+
+                # Project-scope skills: merge into projects_dict[root]["skills"], deduped.
+                for skills_project in project_skills:
+                    project_root = skills_project.get("project_root", "")
+                    skills = skills_project.get("skills", [])
+                    if not project_root:
+                        continue
+                    if project_root not in projects_dict:
+                        projects_dict[project_root] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[project_root].setdefault("skills", [])
+                    existing.extend(skills)
+                    projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
+
+                total_skills = len(user_skills) + sum(len(p.get("skills", [])) for p in project_skills)
+                if total_skills:
+                    logger.info(f"  ✓ Found {total_skills} {tool_name} skill(s)")
+                else:
+                    logger.info(f"  No {tool_name} skills found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} skills: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+        # Tool-level permissions: durable Copilot CLI settings (trusted folders,
+        # URL allow/deny) -> backend `permissions` dict via the shared transformer.
+        logger.info(f"  Extracting {tool_name} permissions...")
+        permissions_payload = None
+        if self._copilot_cli_settings_extractor:
+            try:
+                all_settings = self._copilot_cli_settings_extractor.extract_settings() or []
+                install_path = tool.get("install_path", "")
+                # extract_settings() returns every user's record under a root scan,
+                # but this runs once per user-install (install_path == that user's
+                # ~/.copilot config dir). Keep only THIS install's record — each
+                # settings file sits directly in the config dir, so match by parent
+                # dir (boundary-safe; a bare prefix would also match a sibling like
+                # ".copilot-old"). Prevents an all-users scan from leaking another
+                # user's permissions onto this row.
+                own = [
+                    s for s in all_settings
+                    if install_path and s.get("settings_path")
+                    and Path(str(s["settings_path"])).parent == Path(install_path)
+                ]
+                permissions_payload = transform_settings_to_backend_format(own) if own else None
+                if permissions_payload:
+                    logger.info(f"  ✓ Found {tool_name} permissions")
+                else:
+                    logger.info(f"  No {tool_name} permissions found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} permissions: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} permissions extractor not available for this OS")
+
+        # Drop empty projects so a serverless config doesn't surface a phantom row.
+        projects_list = [
+            {
+                "path": path,
+                "mcpServers": data.get("mcpServers", []),
+                "rules": data.get("rules", []),
+                "skills": data.get("skills", []),
+            }
+            for path, data in projects_dict.items()
+            if not self._is_project_empty(data)
+        ]
+
+        logger.info(f"  ✓ Final project count: {len(projects_list)} project(s)")
+        logger.info("=" * 70)
+
+        result = {
+            "name": tool.get("name"),
+            "version": tool.get("version"),
+            "install_path": tool.get("install_path"),
+            "projects": projects_list,
+        }
+        if permissions_payload:
+            result["permissions"] = permissions_payload
+        return result
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
-        
+
         Args:
             tool: Tool info dict from detection
-            
+
         Returns:
             Tool dict with projects populated
         """
@@ -1283,7 +1462,13 @@ class AIToolsDetector:
                     tool_dict[key] = tool[key]
 
             return tool_dict
-        
+
+        # Exact-match BEFORE the "github copilot" substring branch below —
+        # otherwise the substring check would swallow the CLI and route it
+        # through the IDE Copilot path (rules + VS Code/JetBrains MCP).
+        if tool_name == "github copilot cli":
+            return self._process_copilot_cli_tool(tool)
+
         if "github copilot" in tool_name:
             logger.info(f"  Extracting {tool_name} rules...")
             projects_dict = {}

@@ -1555,6 +1555,17 @@ class TestCopilotCliSettingsGlobal(unittest.TestCase):
         (self.config_dir / "config.json").write_text('{"trusted_folders": ["/a"]}', encoding="utf-8")
         self.assertTrue(self._run()[0]["settings_path"].startswith(str(self.config_dir)))
 
+    def test_settings_path_prefers_settings_json_when_present(self):
+        # settings_path must reference settings.json (the file backing raw_settings),
+        # NOT config.json (which we deliberately don't read for content).
+        (self.config_dir / "config.json").write_text('{"trusted_folders": ["/a"]}', encoding="utf-8")
+        (self.config_dir / "settings.json").write_text('{"model": "x"}', encoding="utf-8")
+        self.assertTrue(self._run()[0]["settings_path"].endswith("settings.json"))
+
+    def test_settings_path_falls_back_to_config_json_when_no_settings(self):
+        (self.config_dir / "config.json").write_text('{"trusted_folders": ["/a"]}', encoding="utf-8")
+        self.assertTrue(self._run()[0]["settings_path"].endswith("config.json"))
+
     def test_raw_settings_always_truthy_avoids_strict_reread(self):
         # raw_settings must be a non-empty 3-key dict so the transformer never
         # re-reads the JSONC file with strict json.loads.

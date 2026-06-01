@@ -148,7 +148,12 @@ class MacOSCopilotCliSettingsExtractor(BaseCopilotCliSettingsExtractor):
         if permissions_config is not None:
             raw_settings["permissions_config"] = permissions_config
 
-        settings_file = config_path if config_data is not None else settings_path
+        # settings_path should reference the file whose content backs this record:
+        # settings.json (the user-editable "personal settings" file that feeds
+        # raw_settings) when present, else config.json. config.json is deliberately
+        # NOT read for content (it holds auth state — only its permission keys are
+        # lifted), so labeling the path with it would misrepresent the source.
+        settings_file = settings_path if settings_data is not None else config_path
         return {
             "tool_name": TOOL_NAME,
             "scope": "user",

@@ -1868,6 +1868,21 @@ class TestCopilotCliSkillsExtraction(unittest.TestCase):
             self.extractor._extract_user_level_skills(user_skills)
         self.assertEqual({s["skill_name"] for s in user_skills}, {"alice-skill", "bob-skill"})
 
+    def test_copilot_home_relocates_user_skills(self):
+        # COPILOT_HOME relocation is honored for user skills (parity with the
+        # detector/MCP/rules/settings extractors), via the shared _resolve_copilot_dir.
+        relocated = Path(self.tmp_dir) / "relocated-copilot"
+        d = relocated / "skills" / "ralph"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(_skill_md("ralph"), encoding="utf-8")
+        user_skills = []
+        with patch(f"{_SKILLS_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_SKILLS_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.home), \
+             patch.dict(os.environ, {"COPILOT_HOME": str(relocated)}, clear=False):
+            self.extractor._extract_user_level_skills(user_skills)
+        self.assertIn("ralph", {s["skill_name"] for s in user_skills})
+
 
 # ---------------------------------------------------------------------------
 # 18. Skills routing: skills merge into projects[].skills[] via process_single_tool
@@ -1905,17 +1920,26 @@ class TestCopilotCliSkillsRouting(unittest.TestCase):
         self.assertEqual(len(proj), 1)
         self.assertEqual([s["skill_name"] for s in proj[0]["skills"]], ["build"])
 
-    def test_user_skills_attach_by_project_path(self):
-        us = self._skill("deploy", "/Users/x/.copilot/skills/deploy/SKILL.md", scope="user")
-        us["project_path"] = "/Users/x/.copilot"
+    def test_user_skills_coalesce_under_install_path(self):
+        # User skills must coalesce under the install dir (~/.copilot), NOT their
+        # own scattered project_path — even when project_path points elsewhere.
+        us1 = self._skill("deploy", "/Users/x/.copilot/skills/deploy/SKILL.md", scope="user")
+        us1["project_path"] = "/Users/x/.copilot/skills/deploy"   # scattered (own dir)
+        us2 = self._skill("review", "/Users/x/.agents/skills/review/SKILL.md", scope="user")
+        us2["project_path"] = "/Users/x"                           # different key again
         self.detector._copilot_cli_skills_extractor = MagicMock()
         self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
-            "user_skills": [us], "project_skills": [],
+            "user_skills": [us1, us2], "project_skills": [],
         }
         result = self.detector.process_single_tool(self.tool)
+        # both land under the single install_path row (self.tool install_path == /Users/x/.copilot)
         proj = [p for p in result["projects"] if p["path"] == "/Users/x/.copilot"]
         self.assertEqual(len(proj), 1)
-        self.assertEqual([s["skill_name"] for s in proj[0]["skills"]], ["deploy"])
+        self.assertEqual(sorted(s["skill_name"] for s in proj[0]["skills"]), ["deploy", "review"])
+        # the scattered project_path values did NOT create their own rows
+        paths = [p["path"] for p in result["projects"]]
+        self.assertNotIn("/Users/x/.copilot/skills/deploy", paths)
+        self.assertNotIn("/Users/x", paths)
 
     def test_skills_only_project_survives(self):
         self.detector._copilot_cli_skills_extractor = MagicMock()

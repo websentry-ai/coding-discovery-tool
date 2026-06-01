@@ -109,9 +109,31 @@ def extract_copilot_cli_user_level_items(
     extract_single_rule_file_func: Callable,
     configs: List[ItemTypeConfig],
 ) -> None:
-    """Extract user-level Copilot CLI skills from a user's home directory. Delegates to generic."""
+    """Extract user-level Copilot CLI skills from a user's home directory.
+
+    The ``~/.copilot`` skills dir is resolved via ``_resolve_copilot_dir`` so a
+    relocated ``COPILOT_HOME`` is honored — consistent with the detector / MCP /
+    rules / settings extractors. ``~/.agents`` is a fixed home subdirectory not
+    affected by ``COPILOT_HOME``. Both delegate to the shared engine.
+    """
+    # Lazy import to avoid an import cycle (macos/copilot_cli/__init__ -> the skills
+    # extractor -> this helper). _resolve_copilot_dir is OS-agnostic; the Windows
+    # extractors reuse it too.
+    from .macos.copilot_cli.copilot_cli import _resolve_copilot_dir
+
+    # ~/.copilot (or a relocated COPILOT_HOME): reuse the engine by expressing the
+    # resolved dir as <parent>/<name> — for the default this is exactly
+    # user_home/.copilot, so common-case behavior is unchanged.
+    config_dir = _resolve_copilot_dir(user_home)
+    extract_user_level_items(
+        config_dir.parent, user_skills, extract_single_rule_file_func, configs,
+        user_dir_names=(config_dir.name,),
+        parent_dir_names=COPILOT_CLI_PARENT_DIR_NAMES,
+    )
+
+    # ~/.agents (fixed home subdir; not relocated by COPILOT_HOME).
     extract_user_level_items(
         user_home, user_skills, extract_single_rule_file_func, configs,
-        user_dir_names=COPILOT_CLI_USER_DIR_NAMES,
+        user_dir_names=(AGENTS_DIR_NAME,),
         parent_dir_names=COPILOT_CLI_PARENT_DIR_NAMES,
     )

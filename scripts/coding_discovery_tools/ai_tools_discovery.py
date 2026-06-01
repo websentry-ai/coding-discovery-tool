@@ -1330,13 +1330,15 @@ class AIToolsDetector:
                 user_skills = skills_result.get("user_skills", [])
                 project_skills = skills_result.get("project_skills", [])
 
-                # User-scope skills: group by each entry's project_path (its
-                # ~/.copilot or ~/.agents home key); create the entry if absent.
+                # User-scope skills: coalesce them all under THIS install's config
+                # dir (install_path == the resolved ~/.copilot, COPILOT_HOME-aware)
+                # so they share one row with the global rules + MCP servers, rather
+                # than scattering across each skill's own directory.
+                install_key = tool.get("install_path") or str(Path.home())
                 for skill in user_skills:
-                    key = skill.get("project_path") or str(Path.home())
-                    if key not in projects_dict:
-                        projects_dict[key] = {"mcpServers": [], "rules": [], "skills": []}
-                    projects_dict[key].setdefault("skills", []).append(skill)
+                    if install_key not in projects_dict:
+                        projects_dict[install_key] = {"mcpServers": [], "rules": [], "skills": []}
+                    projects_dict[install_key].setdefault("skills", []).append(skill)
 
                 # Project-scope skills: merge into projects_dict[root]["skills"], deduped.
                 for skills_project in project_skills:

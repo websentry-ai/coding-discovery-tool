@@ -323,6 +323,7 @@ class TestCopilotCliMcpExtraction(unittest.TestCase):
         configs = self.extractor._extract_cli_configs_for_user(self.user_home)
         self.assertIn("serena", self._server_names(configs))
         self.assertEqual(configs[0]["path"], str(self.copilot_dir))
+        self.assertEqual(configs[0].get("scope"), "user")
 
     def test_servers_key_surfaces_serena(self):
         """mcp-config.json may use the 'servers' key (VS Code-style)."""
@@ -412,6 +413,171 @@ class TestCopilotCliMcpExtraction(unittest.TestCase):
         """A top-level JSON array (not an object) must not crash."""
         self.config_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
         self.assertEqual(self.extractor._extract_cli_configs_for_user(self.user_home), [])
+
+
+_MCP_MOD = (
+    "scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor"
+)
+
+
+class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
+    """Workspace ``.mcp.json`` at a project root is surfaced for the CLI.
+
+    The tmp tree is rooted under the real home so the production skip predicate
+    (which treats ``/tmp`` as a system path) does not reject it — the real walk
+    and skip run unmocked.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = MacOSCopilotCliMCPConfigExtractor()
+        self.workspace_root = Path(tempfile.mkdtemp(dir=str(Path.home())))
+        self.repo = self.workspace_root / "myrepo"
+        self.repo.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace_root, ignore_errors=True)
+
+    def _write(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _scan_workspace(self):
+        """Run the real workspace walk rooted at the tmp tree."""
+        with patch.object(
+            self.extractor,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ):
+            return self.extractor._extract_workspace_configs()
+
+    def test_workspace_mcp_json_surfaces_serena(self):
+        self._write(self.repo / ".mcp.json", {
+            "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
+        })
+        configs = self._scan_workspace()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.repo))
+        self.assertEqual(configs[0].get("scope"), "project")
+        self.assertEqual({s["name"] for s in configs[0]["mcpServers"]}, {"serena"})
+
+    def test_workspace_node_modules_is_skipped(self):
+        """A ``.mcp.json`` under node_modules must not be surfaced (SKIP_DIRS)."""
+        self._write(self.repo / "node_modules" / "pkg" / ".mcp.json", {
+            "mcpServers": {"vendored": {"command": "node"}},
+        })
+        self.assertEqual(self._scan_workspace(), [])
+
+    def test_no_workspace_mcp_json_yields_nothing(self):
+        self.assertEqual(self._scan_workspace(), [])
+
+    def test_extract_mcp_config_combines_user_and_workspace(self):
+        """``extract_mcp_config`` merges the User config dir and Workspace repo
+        into distinct project rows (the orchestrator lists both on the CLI)."""
+        self._write(self.repo / ".mcp.json", {
+            "mcpServers": {"serena": {"command": "uvx"}},
+        })
+        user_project = {
+            "path": "/Users/x/.copilot",
+            "mcpServers": [{"name": "notion"}],
+        }
+        with patch.object(
+            self.extractor,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ), patch(
+            f"{_MCP_MOD}.extract_ide_global_configs_with_root_support",
+            return_value=[dict(user_project)],
+        ):
+            result = self.extractor.extract_mcp_config()
+
+        self.assertIsNotNone(result)
+        by_path = {p["path"]: p for p in result["projects"]}
+        self.assertIn("/Users/x/.copilot", by_path)
+        self.assertIn(str(self.repo), by_path)
+        self.assertEqual(
+            {s["name"] for s in by_path[str(self.repo)]["mcpServers"]}, {"serena"}
+        )
+
+    def test_end_to_end_workspace_serena_on_cli_row(self):
+        """Guarantee for the reported user: serena in a repo's ``.mcp.json`` lands
+        on the GitHub Copilot CLI tool row via the orchestrator branch."""
+        self._write(self.repo / ".mcp.json", {
+            "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
+        })
+        detector = AIToolsDetector(os_name="Darwin")
+
+        # Real MCP extractor scoped to the tmp tree (User read neutralised below);
+        # sibling extractors stubbed to skip their on-disk walks.
+        real_mcp = MacOSCopilotCliMCPConfigExtractor()
+        detector._copilot_cli_mcp_extractor = real_mcp
+        detector._copilot_cli_rules_extractor = MagicMock()
+        detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
+        detector._copilot_cli_skills_extractor = MagicMock()
+        detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
+        detector._copilot_cli_settings_extractor = MagicMock()
+        detector._copilot_cli_settings_extractor.extract_settings.return_value = []
+
+        tool = {
+            "name": "GitHub Copilot CLI",
+            "version": "0.0.1",
+            "install_path": "/Users/x/.copilot",
+        }
+        with patch.object(
+            real_mcp,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ), patch(
+            f"{_MCP_MOD}.extract_ide_global_configs_with_root_support",
+            return_value=[],
+        ):
+            result = detector.process_single_tool(tool)
+
+        self.assertEqual(result["name"], "GitHub Copilot CLI")
+        repo_rows = [p for p in result["projects"] if p["path"] == str(self.repo)]
+        self.assertEqual(len(repo_rows), 1)
+        self.assertEqual(
+            {s["name"] for s in repo_rows[0]["mcpServers"]}, {"serena"}
+        )
+
+
+class TestWindowsCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
+    """The Windows extractor's workspace seams: the case-insensitive system-dir
+    skip, and surfacing a repo ``.mcp.json`` via the inherited walk."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = WindowsCopilotCliMCPConfigExtractor()
+        self.workspace_root = Path(tempfile.mkdtemp(dir=str(Path.home())))
+        self.repo = self.workspace_root / "myrepo"
+        self.repo.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace_root, ignore_errors=True)
+
+    def test_skip_predicate_handles_system_dirs_and_casing(self):
+        skip = self.extractor._should_skip_workspace_path
+        self.assertTrue(skip(Path("C:/Windows")))
+        self.assertTrue(skip(Path("C:/Program Files")))
+        self.assertTrue(skip(Path("C:/program files")))  # NTFS is case-insensitive
+        self.assertTrue(skip(Path("C:/Users/x/repo/node_modules")))  # SKIP_DIRS
+        self.assertFalse(skip(Path("C:/Users/x/acme-api")))
+
+    def test_workspace_mcp_json_surfaces_serena(self):
+        (self.repo / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
+        }), encoding="utf-8")
+        with patch.object(
+            self.extractor,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ):
+            configs = self.extractor._extract_workspace_configs()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.repo))
+        self.assertEqual({s["name"] for s in configs[0]["mcpServers"]}, {"serena"})
 
 
 class TestCopilotCliMcpHelpers(unittest.TestCase):
@@ -930,6 +1096,7 @@ class TestWindowsCopilotCliMcpExtraction(unittest.TestCase):
         configs = self.extractor._extract_cli_configs_for_user(self.user_home)
         self.assertIn("serena", self._server_names(configs))
         self.assertEqual(configs[0]["path"], str(self.copilot_dir))
+        self.assertEqual(configs[0].get("scope"), "user")
 
     def test_trailing_comma_shared_fix_applies(self):
         """The P1 trailing-comma fix is inherited, not forked, on Windows."""

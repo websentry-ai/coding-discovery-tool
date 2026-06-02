@@ -105,7 +105,12 @@ class LinuxCopilotCliSkillsExtractor(MacOSCopilotCliSkillsExtractor):
                             for config in COPILOT_CLI_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
                                 if type_dir.exists() and type_dir.is_dir():
-                                    if not is_user_level_claude_subdir(type_dir):
+                                    # Pass users_root_path="/home" so /home/<user> dirs
+                                    # are correctly identified as user-level on Linux,
+                                    # not treated as project skills. Without this, running
+                                    # as root derives users_root from Path.home() = /root,
+                                    # which misses /home entirely.
+                                    if not is_user_level_claude_subdir(type_dir, users_root_path="/home"):
                                         extract_copilot_cli_items_from_directory(
                                             type_dir,
                                             projects_by_root,

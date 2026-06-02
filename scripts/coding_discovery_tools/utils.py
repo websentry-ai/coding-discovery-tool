@@ -898,7 +898,7 @@ def _run_auth_status(
         auth_method = parsed.get("authMethod")
         api_key_source = parsed.get("apiKeySource")
         plan = parsed.get("subscriptionType")
-        if plan is None and auth_method in {"api_key", "api_key_helper"}:
+        if plan is None and "api_key" in str(auth_method or "").lower():
             plan = "api_key"
         return (True, plan, auth_method, api_key_source)
 

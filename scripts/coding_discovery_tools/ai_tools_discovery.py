@@ -2135,14 +2135,6 @@ def main():
                             payload_logger.info("  " + "=" * 70)
                             payload_logger.info("")
 
-                        if not args.summary and not args.payload:
-                            logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
-
-                        with time_step("send_report_per_tool_user", "send"):
-                            success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
-                        if success:
-                            if not args.summary and not args.payload:
-                                logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                         # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.
                         # Backend already dedups on payload_hash; this short-circuits the upload
                         # itself when local cache shows no change since last successful upload.
@@ -2154,14 +2146,17 @@ def main():
 
                         cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
                         if local_payload_hash and cached_hash == local_payload_hash:
-                            logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
+                            if not args.summary and not args.payload:
+                                logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
-                            logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
+                            if not args.summary and not args.payload:
+                                logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
                             with time_step("send_report_per_tool_user", "send"):
                                 success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                             if success:
-                                logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                                if not args.summary and not args.payload:
+                                    logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                                 if local_payload_hash:
                                     discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
                             else:

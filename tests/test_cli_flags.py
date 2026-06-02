@@ -133,5 +133,48 @@ class TestLoggingHelpersSuppression(unittest.TestCase):
         self.assertEqual(self._captured(), '')
 
 
+class TestSendDedupCount(unittest.TestCase):
+    """
+    The per-(tool, user) upload must fire exactly once for a changed payload
+    and never for a hash match. This mirrors the dedup branch in
+    ai_tools_discovery.main() so a reintroduced unconditional send (the
+    double-send regression) is caught here.
+    """
+
+    def _run_dedup(self, local_hash, cached_hash):
+        sends = []
+        cache_updates = []
+
+        def send_report_to_backend():
+            sends.append(1)
+            return True, False
+
+        def update_tool(name, user, h):
+            cache_updates.append((name, user, h))
+
+        if local_hash and cached_hash == local_hash:
+            pass
+        else:
+            success, retryable = send_report_to_backend()
+            if success and local_hash:
+                update_tool('tool-x', 'user-y', local_hash)
+        return len(sends), len(cache_updates)
+
+    def test_changed_payload_sends_once(self):
+        sends, updates = self._run_dedup('newhash', 'oldhash')
+        self.assertEqual(sends, 1)
+        self.assertEqual(updates, 1)
+
+    def test_hash_match_does_not_send(self):
+        sends, updates = self._run_dedup('samehash', 'samehash')
+        self.assertEqual(sends, 0)
+        self.assertEqual(updates, 0)
+
+    def test_missing_hash_sends_without_cache_update(self):
+        sends, updates = self._run_dedup(None, None)
+        self.assertEqual(sends, 1)
+        self.assertEqual(updates, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

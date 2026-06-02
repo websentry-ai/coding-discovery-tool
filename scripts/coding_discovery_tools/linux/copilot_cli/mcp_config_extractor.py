@@ -4,7 +4,7 @@ MCP config extraction for the GitHub Copilot CLI on Linux.
 The macOS extractor is fully OS-agnostic (it delegates to
 ``extract_ide_global_configs_with_root_support`` which already handles
 ``/root`` + ``/home/*`` on Linux). This thin subclass renames the class
-for import clarity and wires in ``LinuxCopilotCliDetector``.
+for import clarity.
 """
 
 from ...macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor

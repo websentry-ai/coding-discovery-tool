@@ -19,11 +19,12 @@ from typing import List
 
 from ...linux_extraction_helpers import (
     get_linux_user_homes,
+    get_top_level_directories,
+    is_running_as_root,
     should_skip_path,
     should_skip_system_path,
 )
 from ...macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
-from ...macos_extraction_helpers import get_top_level_directories
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,8 @@ class LinuxCopilotCliRulesExtractor(MacOSCopilotCliRulesExtractor):
     """Extractor for GitHub Copilot CLI rules on Linux systems."""
 
     def _is_privileged(self) -> bool:
-        """Discovery on Linux always runs as root — gates E1 (per-user env)."""
-        return True
+        """True when running as root — gates E1 (per-user env)."""
+        return is_running_as_root()
 
     def _scan_all_user_homes(self, extract_for_user) -> None:
         """Invoke ``extract_for_user(home)`` for every Linux user home."""

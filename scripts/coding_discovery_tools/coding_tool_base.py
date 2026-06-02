@@ -289,6 +289,74 @@ class BaseGitHubCopilotRulesExtractor(ABC):
         pass
 
 
+class BaseCopilotCliRulesExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI rules.
+
+    This is for the standalone ``@github/copilot`` CLI (config under
+    ``~/.copilot/``), a distinct product from the GitHub Copilot IDE
+    extension/plugin. It mirrors the single-product rules bases
+    (``BaseCodexRulesExtractor`` / ``BaseGeminiCliRulesExtractor``) and takes no
+    ``tool_name`` argument — the CLI is one tool, not a family of IDE-coupled
+    variants, so ``BaseGitHubCopilotRulesExtractor`` is intentionally not reused.
+    """
+
+    @abstractmethod
+    def extract_all_copilot_cli_rules(self) -> List[Dict]:
+        """
+        Extract all GitHub Copilot CLI rules from all projects on the machine.
+
+        Searches for (all paths docs-verified):
+        - Global (scope "user"): ``<config_dir>/copilot-instructions.md``
+        - Global (scope "user"): ``<config_dir>/instructions/**/*.instructions.md``
+        - Project (scope "project"): repo-root ``.github/copilot-instructions.md``
+        - Project (scope "project"): ``.github/instructions/**/*.instructions.md``
+        - Project (scope "project"): repo-root ``AGENTS.md`` / ``CLAUDE.md`` /
+          ``GEMINI.md`` (root only, not recursive)
+        - Env (scope "user", current user only): each dir in
+          ``COPILOT_CUSTOM_INSTRUCTIONS_DIRS`` contributes ``AGENTS.md`` and
+          ``.github/instructions/**/*.instructions.md``
+
+        ``<config_dir>`` honors ``COPILOT_HOME`` for the running user, else
+        ``<user_home>/.copilot``.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root directory
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated, scope)
+        """
+        pass
+
+
+class BaseCopilotCliSettingsExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI settings/permissions.
+
+    For the standalone ``@github/copilot`` CLI (config under ``~/.copilot/``).
+    Mirrors ``BaseClaudeSettingsExtractor`` — returns a list of per-scope settings
+    dicts that the orchestrator routes through
+    ``transform_settings_to_backend_format`` into the tool-level ``permissions``.
+    """
+
+    @abstractmethod
+    def extract_settings(self) -> Optional[List[Dict]]:
+        """
+        Extract GitHub Copilot CLI durable permission settings.
+
+        Reads the user-scope config (``<config_dir>/config.json`` and, during the
+        settings migration, ``<config_dir>/settings.json``) for the keys the CLI
+        actually persists: ``trusted_folders``, ``allowed_urls``, ``denied_urls``
+        (snake_case on disk; camelCase tolerated). ``<config_dir>`` honors
+        ``COPILOT_HOME`` for the running user, else ``<user_home>/.copilot``. When
+        running as root, scans every user's home.
+
+        Returns:
+            List of per-user settings dicts (scope "user"), each with
+            ``tool_name``, ``scope``, ``settings_path``, ``raw_settings`` and a
+            nested ``permissions`` dict; ``None``/empty if nothing is found.
+        """
+        pass
+
+
 class BaseJunieRulesExtractor(ABC):
     """Abstract base class for extracting Junie rules from all projects."""
 
@@ -443,6 +511,35 @@ class BaseClineSkillsExtractor(ABC):
             Dict with:
             - user_skills: List of user-level skill dicts (global, scope: "user")
               Each entry has: skill_name, file_path, content, size, last_modified, truncated, scope, type
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
+class BaseCopilotCliSkillsExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI skills.
+
+    For the standalone ``@github/copilot`` CLI. Copilot CLI has no plugin system,
+    so skills carry ``source="standalone"``.
+    """
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all GitHub Copilot CLI skills from all projects on the machine.
+
+        Each skill is a subdirectory containing a ``SKILL.md``. Searches:
+        - User-level: ~/.copilot/skills/<name>/SKILL.md, ~/.agents/skills/<name>/SKILL.md
+        - Project-level: **/.github/skills/<name>/SKILL.md,
+          **/.claude/skills/<name>/SKILL.md, **/.agents/skills/<name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope "user")
+              Each entry has: skill_name, file_path, file_name, content, size,
+              last_modified, truncated, scope, type, source, project_path
             - project_skills: List of project dicts, each containing:
               - project_root: Path to the project root
               - skills: List of skill dicts with metadata

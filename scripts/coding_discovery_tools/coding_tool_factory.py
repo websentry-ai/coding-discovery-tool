@@ -23,6 +23,9 @@ from .coding_tool_base import (
     BaseCodexRulesExtractor,
     BaseOpenCodeRulesExtractor,
     BaseCursorCliRulesExtractor,
+    BaseCopilotCliRulesExtractor,
+    BaseCopilotCliSettingsExtractor,
+    BaseCopilotCliSkillsExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
     BaseCursorSettingsExtractor,
@@ -112,10 +115,24 @@ from .macos.github_copilot.detect_copilot import MacOSCopilotDetector
 from .macos.github_copilot.mcp_config_extractor import MacOSGitHubCopilotMCPConfigExtractor
 from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRulesExtractor
 
+# macOS - Copilot CLI (standalone @github/copilot agentic terminal tool)
+from .macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
+from .macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
+from .macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
+from .macos.copilot_cli.copilot_cli_settings_extractor import MacOSCopilotCliSettingsExtractor
+from .macos.copilot_cli.copilot_cli_skills_extractor import MacOSCopilotCliSkillsExtractor
+
 # Windows - Copilot
 from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
 from .windows.github_copilot.mcp_config_extractor import WindowsGitHubCopilotMCPConfigExtractor
 from .windows.github_copilot.copilot_rules_extractor import WindowsGitHubCopilotRulesExtractor
+
+# Windows - Copilot CLI (standalone @github/copilot agentic terminal tool)
+from .windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
+from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
+from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
+from .windows.copilot_cli.copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
+from .windows.copilot_cli.copilot_cli_skills_extractor import WindowsCopilotCliSkillsExtractor
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -638,6 +655,20 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_copilot_cli_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate GitHub Copilot CLI detector for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+        if os_name == "Darwin":
+            return MacOSCopilotCliDetector()
+        elif os_name == "Windows":
+            return WindowsCopilotCliDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_jetbrains_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate JetBrains IDEs detector for the OS.
@@ -749,6 +780,11 @@ class ToolDetectorFactory:
         copilot_detector = ToolDetectorFactory.create_copilot_detector(os_name)
         if copilot_detector is not None:
             detectors.append(copilot_detector)
+
+        # Add GitHub Copilot CLI detector (macOS + Windows)
+        copilot_cli_detector = ToolDetectorFactory.create_copilot_cli_detector(os_name)
+        if copilot_cli_detector is not None:
+            detectors.append(copilot_cli_detector)
 
         # Add JetBrains detector for macOS
         jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
@@ -1410,6 +1446,99 @@ class GitHubCopilotMCPConfigExtractorFactory:
             return WindowsGitHubCopilotMCPConfigExtractor()
         elif os_name == "Linux":
             return LinuxGitHubCopilotMCPConfigExtractor()
+        else:
+            return None
+
+
+class CopilotCliMCPConfigExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create GitHub Copilot CLI MCP config extractor for the OS.
+
+        The extraction logic is OS-agnostic (the all-users scan is handled by
+        the shared root-support helper), so the Windows extractor is a thin
+        subclass of the macOS one — see WindowsCopilotCliMCPConfigExtractor.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliMCPConfigExtractor()
+        else:
+            return None
+
+
+class CopilotCliRulesExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCopilotCliRulesExtractor]:
+        """
+        Create GitHub Copilot CLI rules extractor for the OS.
+
+        The 6-source detection logic and the depth-bounded walk are shared in
+        the macOS class; the Windows subclass overrides only the OS-specific
+        seams (privilege check, all-users scan, filesystem root, top-level
+        enumeration, system-dir skip) — see WindowsCopilotCliRulesExtractor.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliRulesExtractor()
+        else:
+            return None
+
+
+class CopilotCliSettingsExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCopilotCliSettingsExtractor]:
+        """
+        Create a GitHub Copilot CLI settings/permissions extractor for the OS.
+
+        Reads the durable user-scope permission config (trusted folders, URL
+        allow/deny); the only OS-specific seam is the all-users scan, so the
+        Windows extractor is a thin subclass — see WindowsCopilotCliSettingsExtractor.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliSettingsExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliSettingsExtractor()
+        else:
+            return None
+
+
+class CopilotCliSkillsExtractorFactory:
+    """Factory for creating OS-specific GitHub Copilot CLI skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCopilotCliSkillsExtractor]:
+        """
+        Create a GitHub Copilot CLI skills extractor for the OS.
+
+        Reuses the shared skills engine; macOS and Windows are independent
+        implementations (Windows parallelizes the walk with a thread pool) — see
+        WindowsCopilotCliSkillsExtractor.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCopilotCliSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsCopilotCliSkillsExtractor()
         else:
             return None
 

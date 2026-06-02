@@ -18,6 +18,13 @@ from .jetbrains import LinuxJetBrainsDetector, LinuxJetBrainsMCPConfigExtractor
 from .github_copilot import LinuxCopilotDetector, LinuxGitHubCopilotRulesExtractor, LinuxGitHubCopilotMCPConfigExtractor
 from .claude_cowork import LinuxClaudeCoworkDetector, LinuxClaudeCoworkSkillsExtractor
 from .junie import LinuxJunieDetector, LinuxJunieRulesExtractor, LinuxJunieMCPConfigExtractor
+from .copilot_cli import (
+    LinuxCopilotCliDetector,
+    LinuxCopilotCliMCPConfigExtractor,
+    LinuxCopilotCliRulesExtractor,
+    LinuxCopilotCliSettingsExtractor,
+    LinuxCopilotCliSkillsExtractor,
+)
 
 __all__ = [
     "LinuxDeviceIdExtractor",
@@ -66,4 +73,9 @@ __all__ = [
     "LinuxJunieDetector",
     "LinuxJunieRulesExtractor",
     "LinuxJunieMCPConfigExtractor",
+    "LinuxCopilotCliDetector",
+    "LinuxCopilotCliMCPConfigExtractor",
+    "LinuxCopilotCliRulesExtractor",
+    "LinuxCopilotCliSettingsExtractor",
+    "LinuxCopilotCliSkillsExtractor",
 ]

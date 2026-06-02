@@ -53,6 +53,21 @@ from scripts.coding_discovery_tools.windows.copilot_cli.mcp_config_extractor imp
 from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_rules_extractor import (
     WindowsCopilotCliRulesExtractor,
 )
+from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli import (
+    LinuxCopilotCliDetector,
+)
+from scripts.coding_discovery_tools.linux.copilot_cli.mcp_config_extractor import (
+    LinuxCopilotCliMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_rules_extractor import (
+    LinuxCopilotCliRulesExtractor,
+)
+from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_settings_extractor import (
+    LinuxCopilotCliSettingsExtractor,
+)
+from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_skills_extractor import (
+    LinuxCopilotCliSkillsExtractor,
+)
 from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_settings_extractor import (
     MacOSCopilotCliSettingsExtractor,
 )
@@ -622,7 +637,12 @@ class TestCopilotCliFactoryWiring(unittest.TestCase):
         self.assertEqual(det.tool_name, "GitHub Copilot CLI")
 
     def test_detector_none_on_non_supported_os(self):
-        self.assertIsNone(ToolDetectorFactory.create_copilot_cli_detector("Linux"))
+        self.assertIsNone(ToolDetectorFactory.create_copilot_cli_detector("FreeBSD"))
+
+    def test_detector_created_on_linux(self):
+        det = ToolDetectorFactory.create_copilot_cli_detector("Linux")
+        self.assertIsInstance(det, LinuxCopilotCliDetector)
+        self.assertEqual(det.tool_name, "GitHub Copilot CLI")
 
     def test_extractor_created_on_darwin(self):
         ext = CopilotCliMCPConfigExtractorFactory.create("Darwin")
@@ -634,8 +654,12 @@ class TestCopilotCliFactoryWiring(unittest.TestCase):
         # DRY: the Windows extractor IS-A macOS extractor (shared parser).
         self.assertIsInstance(ext, MacOSCopilotCliMCPConfigExtractor)
 
+    def test_extractor_created_on_linux(self):
+        ext = CopilotCliMCPConfigExtractorFactory.create("Linux")
+        self.assertIsInstance(ext, LinuxCopilotCliMCPConfigExtractor)
+
     def test_extractor_none_on_non_supported_os(self):
-        self.assertIsNone(CopilotCliMCPConfigExtractorFactory.create("Linux"))
+        self.assertIsNone(CopilotCliMCPConfigExtractorFactory.create("FreeBSD"))
 
     def test_cli_detector_registered_in_all_detectors_darwin(self):
         detectors = ToolDetectorFactory.create_all_tool_detectors("Darwin")
@@ -650,6 +674,13 @@ class TestCopilotCliFactoryWiring(unittest.TestCase):
         self.assertEqual(len(cli), 1)
         self.assertIsInstance(cli[0], WindowsCopilotCliDetector)
         # The IDE Copilot detector remains a separate row.
+        self.assertIn("GitHub Copilot", [d.tool_name for d in detectors])
+
+    def test_cli_detector_registered_in_all_detectors_linux(self):
+        detectors = ToolDetectorFactory.create_all_tool_detectors("Linux")
+        cli = [d for d in detectors if d.tool_name == "GitHub Copilot CLI"]
+        self.assertEqual(len(cli), 1)
+        self.assertIsInstance(cli[0], LinuxCopilotCliDetector)
         self.assertIn("GitHub Copilot", [d.tool_name for d in detectors])
 
 

@@ -133,6 +133,12 @@ from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfig
 from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
 from .windows.copilot_cli.copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
 from .windows.copilot_cli.copilot_cli_skills_extractor import WindowsCopilotCliSkillsExtractor
+# Linux - Copilot CLI (standalone @github/copilot agentic terminal tool)
+from .linux.copilot_cli.copilot_cli import LinuxCopilotCliDetector
+from .linux.copilot_cli.mcp_config_extractor import LinuxCopilotCliMCPConfigExtractor
+from .linux.copilot_cli.copilot_cli_rules_extractor import LinuxCopilotCliRulesExtractor
+from .linux.copilot_cli.copilot_cli_settings_extractor import LinuxCopilotCliSettingsExtractor
+from .linux.copilot_cli.copilot_cli_skills_extractor import LinuxCopilotCliSkillsExtractor
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -665,6 +671,8 @@ class ToolDetectorFactory:
             return MacOSCopilotCliDetector()
         elif os_name == "Windows":
             return WindowsCopilotCliDetector()
+        elif os_name == "Linux":
+            return LinuxCopilotCliDetector()
         else:
             return None
 
@@ -1469,6 +1477,8 @@ class CopilotCliMCPConfigExtractorFactory:
             return MacOSCopilotCliMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliMCPConfigExtractor()
         else:
             return None
 
@@ -1493,6 +1503,8 @@ class CopilotCliRulesExtractorFactory:
             return MacOSCopilotCliRulesExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliRulesExtractor()
         else:
             return None
 
@@ -1516,6 +1528,8 @@ class CopilotCliSettingsExtractorFactory:
             return MacOSCopilotCliSettingsExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliSettingsExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliSettingsExtractor()
         else:
             return None
 
@@ -1539,6 +1553,8 @@ class CopilotCliSkillsExtractorFactory:
             return MacOSCopilotCliSkillsExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliSkillsExtractor()
         else:
             return None
 

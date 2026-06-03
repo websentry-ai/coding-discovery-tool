@@ -9,6 +9,7 @@ QUEUE_FILE path (tempfile), _SENTRY_DSN (prevent real calls), time.sleep.
 Tool detection runs un-mocked on whatever OS is available.
 """
 
+import errno
 import json
 import os
 import platform
@@ -17,10 +18,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
@@ -202,7 +204,7 @@ class TestUnsupportedPlatformGuard(unittest.TestCase):
     def test_linux_proceeds_past_os_guard(self):
         """Linux is supported — it must NOT exit 3 at the OS guard.
 
-        We patch acquire_lock to return False so main() exits 0 at the
+        We patch acquire_lock to return "contended" so main() exits 0 at the
         single-flight lock check (the first exit point after the guard).
         Linux reaching that exit-0 proves it passed the OS guard rather
         than hitting the old exit-3.
@@ -211,7 +213,7 @@ class TestUnsupportedPlatformGuard(unittest.TestCase):
 
         argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
         with patch.object(adm.platform, "system", return_value="Linux"), \
-             patch.object(adm.discovery_cache, "acquire_lock", return_value=False), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
              patch.object(adm, "AIToolsDetector"), \
              patch.object(sys, "argv", argv):
             with self.assertRaises(SystemExit) as cm:
@@ -564,6 +566,139 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
         # Permissions block is kept (settings_path is under gowshik_2's home)
         self.assertIn("permissions", filtered_gowshik_2)
+
+
+class TestAcquireLockReasonCodes(unittest.TestCase):
+    """acquire_lock() returns "acquired"/"contended"/"setup_failed" and sets
+    last_lock_error only on setup failure."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        self._patchers = [
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_acquire_lock_setup_failed_on_unwritable_dir(self):
+        with patch.object(
+            Path, "mkdir", side_effect=OSError(errno.EPERM, "Operation not permitted")
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    def test_acquire_lock_contended_on_fresh_lock(self):
+        self.cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        self.cache.LOCK_PATH.write_text("123 now\n")
+        os.utime(self.cache.LOCK_PATH, (time.time(), time.time()))
+
+        self.assertEqual(self.cache.acquire_lock(), "contended")
+        self.assertIsNone(self.cache.last_lock_error)
+
+    def test_acquire_lock_acquired_clean(self):
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertTrue(self.cache.LOCK_PATH.exists())
+
+    def test_acquire_lock_setup_failed_on_steal_stale_unlink_error(self):
+        # Create a STALE lock (mtime older than STALE_LOCK_SECONDS) so
+        # _lock_is_live() is False and acquire_lock takes the steal/unlink path.
+        self.cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        self.cache.LOCK_PATH.write_text("999 then\n")
+        stale = time.time() - (self.cache.STALE_LOCK_SECONDS + 60)
+        os.utime(self.cache.LOCK_PATH, (stale, stale))
+
+        # Start the patch AFTER creating the stale file so setup isn't broken.
+        with patch.object(
+            Path, "unlink", side_effect=OSError(errno.EPERM, "Operation not permitted")
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    def test_acquire_lock_contended_on_open_race(self):
+        # TOCTOU race: LOCK_PATH absent at the exists() checks, but os.open with
+        # O_CREAT|O_EXCL loses the race and raises FileExistsError.
+        with patch.object(self.cache.os, "open", side_effect=FileExistsError()):
+            self.assertEqual(self.cache.acquire_lock(), "contended")
+        self.assertIsNone(self.cache.last_lock_error)
+
+    def test_acquire_lock_setup_failed_on_write_error(self):
+        # mkdir/exists/open succeed on a clean temp dir, but os.write fails.
+        with patch.object(self.cache.os, "write", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+
+class TestMainLockSetupSentry(unittest.TestCase):
+    """main() reports lock setup failures to Sentry and exits 0, but stays
+    quiet on genuine contention. Sentry reporting can never crash the exit."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        self.adm = adm
+        self.argv = [
+            "ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"
+        ]
+
+    def test_main_reports_sentry_on_lock_setup_failure(self):
+        adm = self.adm
+        mock_sentry = Mock()
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
+             patch.object(adm.discovery_cache, "last_lock_error", "EPERM Operation not permitted"), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        mock_sentry.assert_called_once()
+        _, kwargs = mock_sentry.call_args
+        self.assertEqual(kwargs["level"], "error")
+        ctx = kwargs["context"]
+        self.assertEqual(ctx["phase"], "acquire_lock")
+        self.assertIn("unbound_dir", ctx)
+        self.assertTrue(ctx["lock_error"])
+        mock_detector.assert_not_called()
+
+    def test_main_no_sentry_on_genuine_contention(self):
+        adm = self.adm
+        mock_sentry = Mock()
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        mock_sentry.assert_not_called()
+
+    def test_main_sentry_failure_does_not_crash_exit(self):
+        adm = self.adm
+        mock_sentry = Mock(side_effect=RuntimeError("boom"))
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
+             patch.object(adm.discovery_cache, "last_lock_error", "EPERM"), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
 
 
 if __name__ == "__main__":

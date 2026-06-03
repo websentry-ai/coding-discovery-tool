@@ -28,6 +28,8 @@ LOCK_PATH = UNBOUND_DIR / "discovery.lock"
 STALE_LOCK_SECONDS = 15 * 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 
+last_lock_error: Optional[str] = None
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -103,37 +105,47 @@ def _lock_is_live() -> bool:
     return age < STALE_LOCK_SECONDS
 
 
-def acquire_lock() -> bool:
-    """Best-effort exclusive lock. Returns True on success, False if held by a live process."""
+def acquire_lock() -> str:
+    """Best-effort exclusive lock. Returns "acquired", "contended" (held by a live process), or "setup_failed"."""
+    global last_lock_error
+    last_lock_error = None
     try:
         UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as e:
+        last_lock_error = str(e)
         logger.warning(f"could not create {UNBOUND_DIR}: {e}")
-        return False
+        return "setup_failed"
 
     if LOCK_PATH.exists() and _lock_is_live():
-        return False
+        return "contended"
 
     if LOCK_PATH.exists():
         try:
             LOCK_PATH.unlink()
         except OSError as e:
+            last_lock_error = str(e)
             logger.warning(f"could not steal stale lock: {e}")
-            return False
+            return "setup_failed"
 
     try:
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
-        return False
+        return "contended"
     except OSError as e:
+        last_lock_error = str(e)
         logger.warning(f"could not create lock: {e}")
-        return False
+        return "setup_failed"
 
     try:
-        os.write(fd, f"{os.getpid()} {_now_iso()}\n".encode("utf-8"))
-    finally:
-        os.close(fd)
-    return True
+        try:
+            os.write(fd, f"{os.getpid()} {_now_iso()}\n".encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as e:
+        last_lock_error = str(e)
+        logger.warning(f"could not write lock: {e}")
+        return "setup_failed"
+    return "acquired"
 
 
 def release_lock() -> None:

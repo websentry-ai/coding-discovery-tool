@@ -114,10 +114,18 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
 
         results: List[Dict] = []
         for user_home in get_linux_user_homes():
+            # Scope ``self.user_home`` to the user being detected so the
+            # ``get_version()`` call inside ``_detect_for_user`` probes *this*
+            # user's binary (step 1) and returns None rather than another user's
+            # version (step 3 guard) if absent. Without this, every row would
+            # inherit whichever home is iterated first.
             try:
+                self.user_home = user_home
                 result = self._detect_for_user(user_home)
                 if result:
                     results.append(result)
             except (PermissionError, OSError) as exc:
                 logger.debug(f"Skipping user directory {user_home}: {exc}")
+            finally:
+                self.user_home = None
         return results

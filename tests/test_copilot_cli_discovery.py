@@ -2124,5 +2124,58 @@ class TestLinuxCopilotCliMCPWorkspaceSeams(unittest.TestCase):
             )
 
 
+_LINUX_DETECTOR_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli"
+
+
+class TestLinuxCopilotCliMultiUserVersion(unittest.TestCase):
+    """All-users Linux scan must attribute each user's OWN binary version to its
+    row. Regression: ``_detect_all_users`` previously never set ``self.user_home``
+    in the loop, so ``get_version`` (which probes ``self.user_home``) saw None and
+    attributed whichever home was iterated first to every user (or, with the
+    step-3 guard, returned no version at all)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _add_user(self, name: str, version: str) -> Path:
+        """Create a user home with a Copilot marker and a fake binary."""
+        home = Path(self.tmp_dir) / name
+        copilot_dir = home / ".copilot"
+        copilot_dir.mkdir(parents=True)
+        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        binary = home / ".local" / "bin" / "copilot"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        self._versions[str(binary)] = f"GitHub Copilot CLI {version}\n"
+        return home
+
+    def test_each_user_gets_own_binary_version(self):
+        self._versions: dict = {}
+        alice = self._add_user("alice", "1.0.10")
+        bob = self._add_user("bob", "2.5.99")
+
+        def fake_run_command(cmd, *args, **kwargs):
+            # cmd is [binary_path, "--version"]; bare "copilot" (PATH) -> miss.
+            return self._versions.get(cmd[0])
+
+        detector = LinuxCopilotCliDetector()
+        detector.user_home = None  # force the all-users branch
+        with patch(f"{_LINUX_DETECTOR_MOD}.get_linux_user_homes",
+                   return_value=[alice, bob]), \
+             patch(f"{_LINUX_DETECTOR_MOD}.run_command",
+                   side_effect=fake_run_command):
+            results = detector._detect_all_users()
+
+        by_path = {r["install_path"]: r["version"] for r in results}
+        self.assertEqual(by_path[str(alice / ".copilot")], "1.0.10")
+        self.assertEqual(by_path[str(bob / ".copilot")], "2.5.99")
+        # And user_home is reset after the scan (no leaked per-user state).
+        self.assertIsNone(detector.user_home)
+
+
 if __name__ == "__main__":
     unittest.main()

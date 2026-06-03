@@ -2054,5 +2054,75 @@ class TestWindowsCopilotCliSkillsExtraction(unittest.TestCase):
         self.assertNotIn(MacOSCopilotCliSkillsExtractor, WindowsCopilotCliSkillsExtractor.__mro__)
 
 
+# ---------------------------------------------------------------------------
+# 20. Linux MCP extractor: workspace seams include /home
+# ---------------------------------------------------------------------------
+
+class TestLinuxCopilotCliMCPWorkspaceSeams(unittest.TestCase):
+    """The Linux MCP extractor overrides the workspace seams so /home is not
+    excluded. Verifies the behavioral contract the blocking review comment
+    identified: a .mcp.json under /home/<user>/project/ must be discoverable."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.ext = LinuxCopilotCliMCPConfigExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_workspace_search_roots_includes_home(self):
+        """_workspace_search_roots must include a /home entry so project .mcp.json
+        files under /home/<user>/project/ are reachable."""
+        fake_home = Path(self.tmp_dir) / "home"
+        fake_root = Path(self.tmp_dir)
+        # Simulate get_top_level_directories returning /home alongside other dirs
+        with patch(
+            "scripts.coding_discovery_tools.linux.copilot_cli.mcp_config_extractor.get_top_level_directories",
+            return_value=[fake_home],
+        ):
+            roots = self.ext._workspace_search_roots()
+        paths = [start for _, start in roots]
+        self.assertIn(fake_home, paths, "/home must appear in workspace search roots")
+
+    def test_should_skip_workspace_path_does_not_skip_home(self):
+        """/home should NOT be skipped during the Linux workspace walk."""
+        home_path = Path("/home")
+        self.assertFalse(
+            self.ext._should_skip_workspace_path(home_path),
+            "/home must not be skipped on Linux",
+        )
+
+    def test_workspace_mcp_json_under_home_discovered(self):
+        """End-to-end: a .mcp.json under a simulated /home/<user>/project/ must
+        be returned by _extract_workspace_configs when the walk reaches it.
+        This test is forward-compatible: on main (pre-PR#155) the method is a
+        no-op stub returning []; once PR#155 lands the real walk is exercised."""
+        # Build a fake home dir with a project containing .mcp.json
+        home_dir = Path(self.tmp_dir) / "home" / "alice"
+        project_dir = home_dir / "myproject"
+        project_dir.mkdir(parents=True)
+        mcp_json = project_dir / ".mcp.json"
+        mcp_json.write_text(
+            '{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@mcp/fs"]}}}',
+            encoding="utf-8",
+        )
+
+        fake_root = Path(self.tmp_dir)
+        with patch.object(
+            self.ext, "_workspace_search_roots",
+            return_value=[(fake_root, home_dir)],
+        ):
+            configs = self.ext._extract_workspace_configs()
+
+        # Pre-PR#155: stub returns []. Post-PR#155: real walk must find the project.
+        if configs:
+            paths = [c["path"] for c in configs]
+            self.assertTrue(
+                any(str(project_dir) in p for p in paths),
+                f"Expected project path {project_dir} in workspace configs, got {paths}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,11 @@
 """
 GitHub Copilot CLI detection for Linux.
 
-Subclasses the macOS detector, overriding only the all-users branch: Linux
-uses ``get_linux_user_homes()`` (``/root`` + ``/home/*``) instead of the macOS
-``/Users`` scan. Everything else — the marker gate, per-user detection,
-``detect``/``detect_all_tools``, and ``get_version`` — is inherited unchanged.
+Subclasses the macOS detector, overriding:
+- ``_detect_all_users``: uses ``get_linux_user_homes()`` (/root + /home/*)
+- ``get_version``:  probes the detected user's home first, then falls back
+  to PATH, since ``gh copilot`` installs to ``~/.local/share/gh/copilot/``
+  by default and is typically not on PATH during a root scan.
 """
 
 import logging
@@ -44,10 +45,31 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
         """
         Extract Copilot CLI version on Linux.
 
-        Tries ``copilot --version`` on PATH first, then walks common per-user
-        install dirs (``~/.local/share/gh/copilot/``, ``~/.local/bin/``, etc.)
-        across all user homes until a working binary is found.
+        Probes the detected user's home (``self.user_home``) first, then tries
+        ``copilot --version`` on PATH, then walks remaining user homes. This
+        ensures each per-user row gets its own user's binary version rather than
+        whichever home is iterated first — and avoids N full cross-home probes
+        on a multi-user scan.
         """
+        # 1. Try the detected user's own home first.
+        homes_to_probe: List[Path] = []
+        if self.user_home is not None:
+            homes_to_probe.append(self.user_home)
+
+        for user_home in homes_to_probe:
+            for rel in _USER_RELATIVE_BINARY_PATHS:
+                binary = user_home / rel
+                try:
+                    if not binary.is_file():
+                        continue
+                    output = run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                    version = _parse_cli_version(output)
+                    if version:
+                        return version
+                except Exception:
+                    continue
+
+        # 2. Fall back to PATH.
         try:
             output = run_command(["copilot", "--version"], VERSION_TIMEOUT)
             version = _parse_cli_version(output)
@@ -56,7 +78,10 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
         except Exception:
             pass
 
+        # 3. Last resort: scan all user homes (only reached when user_home unset).
         for user_home in get_linux_user_homes():
+            if self.user_home is not None and user_home == self.user_home:
+                continue  # already probed above
             for rel in _USER_RELATIVE_BINARY_PATHS:
                 binary = user_home / rel
                 try:

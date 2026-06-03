@@ -3,7 +3,7 @@ GitHub Copilot CLI rules/instructions extraction for Linux.
 
 Subclasses the macOS extractor, overriding the five OS-specific seams:
 
-  - ``_is_privileged``      → always True on Linux (running as root for discovery)
+  - ``_is_privileged``      → ``is_running_as_root()`` (gates E1 env-var read)
   - ``_scan_all_user_homes`` → uses ``get_linux_user_homes()``
   - ``_filesystem_root``     → ``/`` (same as macOS, different from Windows)
   - ``_iter_top_level_dirs`` → delegates to ``get_top_level_directories``

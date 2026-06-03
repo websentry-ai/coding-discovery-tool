@@ -29,20 +29,36 @@ LOCK_PATH = UNBOUND_DIR / "discovery.lock"
 STALE_LOCK_SECONDS = 15 * 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 
+# Never open the lock through a swapped symlink; 0 on platforms lacking it.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
 last_lock_error: Optional[str] = None
 
 
-def _state_dir_candidates():
+def _state_dir_candidates() -> list:
     """Ordered (path, is_private_temp) candidates for the state dir.
     Home first (preserves existing behavior); deterministic uid-namespaced
-    temp dir as fallback. Split out as a function so tests can inject candidates."""
+    temp dir as fallback. Split out as a function so tests can inject candidates.
+
+    The fixed name is a deliberate trade-off: it must be deterministic so a
+    daemon and a login session of the same uid resolve to the SAME dir (shared
+    cross-process single-flight). A hostile pre-existing entry at that fixed name
+    is refused below (-> setup_failed, surfaced to Sentry by the caller) rather
+    than silently working around it."""
     candidates = [(UNBOUND_DIR, False)]
-    uid = os.getuid() if hasattr(os, "getuid") else "u"
-    candidates.append((Path(tempfile.gettempdir()) / f"unbound-{uid}", True))
+    if hasattr(os, "getuid"):
+        # POSIX: /var/tmp is cross-session AND reboot-stable (unlike per-session
+        # launchd $TMPDIR via tempfile.gettempdir() on macOS, which would split
+        # the lock/cache between a daemon and a login session of the same uid).
+        # Matches utils._get_queue_file_path()'s /var/tmp/...-{uid} idiom.
+        candidates.append((Path(f"/var/tmp/unbound-{os.getuid()}"), True))
+    else:
+        # Windows: no uid; gettempdir() is already per-user there.
+        candidates.append((Path(tempfile.gettempdir()) / "unbound", True))
     return candidates
 
 
-def _is_unsafe_existing(path):
+def _is_unsafe_existing(path: Path) -> bool:
     """True if `path` already exists as a symlink, a non-dir, or a dir we don't
     own — i.e. a path we must NOT trust for a fixed-name dir in a shared temp."""
     try:
@@ -58,12 +74,29 @@ def _is_unsafe_existing(path):
     return False
 
 
-def _try_state_dir(path, is_private):
+def _parent_is_unsafe(path: Path) -> bool:
+    """True if `path`'s parent is world-writable but NOT sticky. Our symlink/
+    ownership hardening only holds if the parent (e.g. /var/tmp) is sticky
+    (mode 1777) so a non-owner can't remove/rename our fixed-name entry."""
+    try:
+        pst = os.lstat(str(path.parent))
+    except OSError:
+        return False  # parent missing; mkdir(parents=True) will handle/fail
+    # world-writable but NOT sticky = anyone can swap our fixed-name entry
+    if (pst.st_mode & stat.S_IWOTH) and not (pst.st_mode & stat.S_ISVTX):
+        return True
+    return False
+
+
+def _try_state_dir(path: Path, is_private: bool) -> bool:
     """Make `path` usable. Returns True if it is a writable dir we can use.
     mkdir-only probe (no file-write probe — see module note). On the private
     temp candidate, refuse hostile pre-existing entries and lock perms to 0700."""
     global last_lock_error
     try:
+        if is_private and _parent_is_unsafe(path):
+            last_lock_error = f"unsafe (non-sticky world-writable) parent for {path}"
+            return False
         if is_private and _is_unsafe_existing(path):
             last_lock_error = f"unsafe pre-existing state dir: {path}"
             return False
@@ -86,8 +119,12 @@ def _try_state_dir(path, is_private):
             if _is_unsafe_existing(path):
                 last_lock_error = f"unsafe state dir after create: {path}"
                 return False
-            if hasattr(os, "getuid") and stat.S_IMODE(os.lstat(str(path)).st_mode) != 0o700:
-                last_lock_error = f"state dir perms not 0700: {path}"
+            # chmod above is best-effort; a pre-existing 0755 dir or a failed
+            # chmod must NOT be trusted — any group/other bit leaks discovery
+            # state (tool inventory, home_user) to other local users.
+            st = os.lstat(str(path))
+            if st.st_mode & 0o077:
+                last_lock_error = f"state dir not private (mode {oct(stat.S_IMODE(st.st_mode))}): {path}"
                 return False
         return True
     except OSError as e:
@@ -95,7 +132,7 @@ def _try_state_dir(path, is_private):
         return False
 
 
-def _ensure_state_dir():
+def _ensure_state_dir() -> bool:
     """Resolve UNBOUND_DIR/CACHE_PATH/LOCK_PATH to the first usable candidate,
     reassigning the module globals when falling back. Returns True if a usable
     dir was found, False otherwise (caller returns 'setup_failed')."""
@@ -196,12 +233,8 @@ def acquire_lock() -> str:
     global last_lock_error
     last_lock_error = None
     if not _ensure_state_dir():
-        return "setup_failed"
-    try:
-        UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        last_lock_error = str(e)
-        logger.warning(f"could not create {UNBOUND_DIR}: {e}")
+        # _ensure_state_dir() already created+verified the dir (or returned
+        # False -> setup_failed); no redundant blind mkdir here (TOCTOU).
         return "setup_failed"
 
     if LOCK_PATH.exists() and _lock_is_live():
@@ -215,11 +248,8 @@ def acquire_lock() -> str:
             logger.warning(f"could not steal stale lock: {e}")
             return "setup_failed"
 
-    _lock_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        _lock_flags |= os.O_NOFOLLOW  # never write the lock through a swapped symlink
     try:
-        fd = os.open(str(LOCK_PATH), _lock_flags, 0o600)
+        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_NOFOLLOW, 0o600)
     except FileExistsError:
         return "contended"
     except OSError as e:

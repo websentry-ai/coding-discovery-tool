@@ -719,10 +719,15 @@ class TestStateDirFallback(unittest.TestCase):
 
     def test_temp_candidate_is_deterministic_not_random(self):
         # Regression guard against swapping in mkdtemp(): the temp candidate
-        # must be the fixed uid-namespaced path under gettempdir().
+        # must be the fixed path. On POSIX it is /var/tmp/unbound-{uid}
+        # (cross-session + reboot-stable, NOT the per-session launchd $TMPDIR
+        # that gettempdir() would return on macOS); on Windows it is
+        # gettempdir()/unbound (already per-user there).
         candidates = self.cache._state_dir_candidates()
-        uid = os.getuid() if hasattr(os, "getuid") else "u"
-        expected = Path(tempfile.gettempdir()) / f"unbound-{uid}"
+        if hasattr(os, "getuid"):
+            expected = Path(f"/var/tmp/unbound-{os.getuid()}")
+        else:
+            expected = Path(tempfile.gettempdir()) / "unbound"
         self.assertEqual(candidates[-1][0], expected)
         self.assertTrue(candidates[-1][1])  # flagged private
 
@@ -747,6 +752,75 @@ class TestStateDirFallback(unittest.TestCase):
             self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
         finally:
             os.chmod(str(bad_home), 0o700)
+
+    def test_foreign_owned_temp_dir_refused(self):
+        # A pre-existing private candidate owned by someone else (ownership
+        # mismatch) must be refused, not trusted. Simulate via _is_unsafe_existing.
+        foreign = Path(self._tmp) / "unbound-foreign"
+        with patch.object(self.cache, "_is_unsafe_existing", return_value=True), \
+             patch.object(
+                 self.cache, "_state_dir_candidates",
+                 return_value=[(foreign, True)],
+             ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_world_readable_temp_dir_refused(self):
+        # A pre-existing 0755 dir whose chmod-to-0700 fails (simulated no-op)
+        # leaks discovery state to other users; the post-create mode recheck
+        # must refuse it.
+        loose = Path(self._tmp) / "unbound-loose"
+        loose.mkdir()
+        os.chmod(str(loose), 0o755)
+        try:
+            with patch.object(self.cache.os, "chmod", lambda *a, **k: None), \
+                 patch.object(
+                     self.cache, "_state_dir_candidates",
+                     return_value=[(loose, True)],
+                 ):
+                self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+            self.assertIn("not private", self.cache.last_lock_error)
+        finally:
+            os.chmod(str(loose), 0o700)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_non_sticky_world_writable_parent_refused(self):
+        # The symlink/ownership hardening only holds if the parent is sticky.
+        # A world-writable, NON-sticky parent lets anyone swap our fixed-name
+        # entry, so the candidate must be refused.
+        parent = Path(self._tmp) / "open_parent"
+        parent.mkdir()
+        os.chmod(str(parent), 0o777)  # world-writable, NOT sticky
+        candidate = parent / "unbound-x"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(candidate, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+            self.assertTrue(self.cache.last_lock_error)
+        finally:
+            os.chmod(str(parent), 0o700)
+
+    def test_fallback_cache_writes_land_in_fallback_dir(self):
+        # End-to-end coherence of the global reassignment: after falling back to
+        # the injected private candidate, cache writes must land UNDER it (via
+        # the reassigned CACHE_PATH), not under the original home dir.
+        good_temp = Path(self._tmp) / "unbound-fallback"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.cache.update_tool("claude-code", "u", "hash123")
+        self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+        self.assertTrue(self.cache.CACHE_PATH.exists())
+        # The write must round-trip through the reassigned fallback path, not
+        # the original home dir.
+        self.assertEqual(
+            self.cache.get_cached_hash("claude-code", "u"), "hash123"
+        )
 
 
 class TestMainLockSetupSentry(unittest.TestCase):

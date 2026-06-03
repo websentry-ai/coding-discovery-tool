@@ -78,10 +78,14 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
         except Exception:
             pass
 
-        # 3. Last resort: scan all user homes (only reached when user_home unset).
+        # 3. Last resort: scan all user homes.
+        # Only reached when user_home is unset (no specific user scoped).
+        # When user_home IS set, return None rather than attributing another
+        # user's binary version to this user's detection row.
+        if self.user_home is not None:
+            return None
+
         for user_home in get_linux_user_homes():
-            if self.user_home is not None and user_home == self.user_home:
-                continue  # already probed above
             for rel in _USER_RELATIVE_BINARY_PATHS:
                 binary = user_home / rel
                 try:

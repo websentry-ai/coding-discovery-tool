@@ -78,6 +78,11 @@ def _parent_is_unsafe(path: Path) -> bool:
     """True if `path`'s parent is world-writable but NOT sticky. Our symlink/
     ownership hardening only holds if the parent (e.g. /var/tmp) is sticky
     (mode 1777) so a non-owner can't remove/rename our fixed-name entry."""
+    if not hasattr(os, "getuid"):
+        # Windows: st_mode reports 0o777 with no sticky bit for normal dirs, so
+        # this POSIX world-writable/sticky check is meaningless (and would reject
+        # every candidate). gettempdir() is already per-user there.
+        return False
     try:
         pst = os.lstat(str(path.parent))
     except OSError:

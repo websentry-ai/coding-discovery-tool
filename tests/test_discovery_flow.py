@@ -726,6 +726,28 @@ class TestStateDirFallback(unittest.TestCase):
         self.assertEqual(candidates[-1][0], expected)
         self.assertTrue(candidates[-1][1])  # flagged private
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses W_OK")
+    def test_home_exists_but_unwritable_falls_back(self):
+        # mkdir succeeds on a pre-existing dir even when it isn't writable;
+        # the os.access probe must still force the fallback (and reassign all
+        # three path globals), not fail later at lock creation.
+        bad_home = Path(self._tmp) / "ro_home"
+        bad_home.mkdir()
+        os.chmod(str(bad_home), 0o500)
+        good_temp = Path(self._tmp) / "unbound-rw"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(bad_home, False), (good_temp, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+            self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+            self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
+        finally:
+            os.chmod(str(bad_home), 0o700)
+
 
 class TestMainLockSetupSentry(unittest.TestCase):
     """main() reports lock setup failures to Sentry and exits 0, but stays

@@ -68,14 +68,26 @@ def _try_state_dir(path, is_private):
             last_lock_error = f"unsafe pre-existing state dir: {path}"
             return False
         path.mkdir(parents=True, exist_ok=True)
+        # mkdir with exist_ok=True is a no-op success on a pre-existing dir, so it
+        # does not prove we can create entries inside it. Probe writability so an
+        # existing-but-unwritable dir falls through to the next candidate instead
+        # of failing later at lock creation (which would skip the fallback).
+        if not os.access(str(path), os.W_OK | os.X_OK):
+            last_lock_error = f"state dir not writable: {path}"
+            return False
         if is_private:
             try:
                 os.chmod(str(path), 0o700)
             except OSError:
                 pass
-            # Re-check after creation in case of a race that swapped it.
+            # Re-check after creation in case of a race that swapped it, and
+            # confirm chmod actually took (it is best-effort above) so we never
+            # trust a private dir left group/other-accessible.
             if _is_unsafe_existing(path):
                 last_lock_error = f"unsafe state dir after create: {path}"
+                return False
+            if hasattr(os, "getuid") and stat.S_IMODE(os.lstat(str(path)).st_mode) != 0o700:
+                last_lock_error = f"state dir perms not 0700: {path}"
                 return False
         return True
     except OSError as e:
@@ -118,6 +130,12 @@ def read_cache() -> dict:
 def atomic_write_cache(data: dict) -> None:
     try:
         UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        # Refuse to write the cache (which can contain MCP configs / tool
+        # inventory / paths) through a symlinked state dir — defends the temp
+        # fallback against a post-resolution dir swap in a shared /tmp.
+        if UNBOUND_DIR.is_symlink():
+            logger.warning(f"discovery-cache write skipped: state dir is a symlink: {UNBOUND_DIR}")
+            return
         fd, tmp = tempfile.mkstemp(prefix=".discovery-cache.", suffix=".tmp", dir=str(UNBOUND_DIR))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -197,8 +215,11 @@ def acquire_lock() -> str:
             logger.warning(f"could not steal stale lock: {e}")
             return "setup_failed"
 
+    _lock_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        _lock_flags |= os.O_NOFOLLOW  # never write the lock through a swapped symlink
     try:
-        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(str(LOCK_PATH), _lock_flags, 0o600)
     except FileExistsError:
         return "contended"
     except OSError as e:

@@ -637,6 +637,9 @@ class TestAcquireLockReasonCodes(unittest.TestCase):
         with patch.object(self.cache.os, "write", side_effect=OSError(errno.ENOSPC, "No space left on device")):
             self.assertEqual(self.cache.acquire_lock(), "setup_failed")
         self.assertTrue(self.cache.last_lock_error)
+        # The lock file created by os.open must be removed on write failure, so a
+        # ghost lock can't make the next run see false contention.
+        self.assertFalse(self.cache.LOCK_PATH.exists())
 
 
 class TestMainLockSetupSentry(unittest.TestCase):

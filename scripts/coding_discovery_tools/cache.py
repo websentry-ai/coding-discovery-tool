@@ -144,6 +144,12 @@ def acquire_lock() -> str:
     except OSError as e:
         last_lock_error = str(e)
         logger.warning(f"could not write lock: {e}")
+        # Remove the lock file we just created so a write failure can't leave a
+        # fresh ghost lock that makes the next run see false contention.
+        try:
+            LOCK_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
         return "setup_failed"
     return "acquired"
 

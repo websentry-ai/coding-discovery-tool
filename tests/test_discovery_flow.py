@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -640,6 +641,90 @@ class TestAcquireLockReasonCodes(unittest.TestCase):
         # The lock file created by os.open must be removed on write failure, so a
         # ghost lock can't make the next run see false contention.
         self.assertFalse(self.cache.LOCK_PATH.exists())
+
+
+class TestStateDirFallback(unittest.TestCase):
+    """_ensure_state_dir falls back to a deterministic uid-namespaced temp dir
+    when home is unusable, refuses hostile pre-existing temp entries, and the
+    fallback path is fixed (never random)."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        # Stash globals the resolver may reassign so tearDown can restore them.
+        self._orig_unbound_dir = cache.UNBOUND_DIR
+        self._orig_cache_path = cache.CACHE_PATH
+        self._orig_lock_path = cache.LOCK_PATH
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        self.cache.UNBOUND_DIR = self._orig_unbound_dir
+        self.cache.CACHE_PATH = self._orig_cache_path
+        self.cache.LOCK_PATH = self._orig_lock_path
+        self.cache.last_lock_error = None
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _unmkdir_able(self, name):
+        # A candidate under a regular file: mkdir raises NotADirectoryError
+        # deterministically and cross-platform.
+        blocker = Path(self._tmp) / name
+        blocker.write_text("x")
+        return Path(blocker) / ".unbound"
+
+    def test_home_unusable_falls_back_to_temp(self):
+        bad_home = self._unmkdir_able("blocker")
+        good_temp = Path(self._tmp) / "unbound-test"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_home, False), (good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+        self.assertTrue(self.cache.LOCK_PATH.exists())
+
+    def test_both_candidates_fail_returns_setup_failed(self):
+        bad_a = self._unmkdir_able("blocker_a")
+        bad_b = self._unmkdir_able("blocker_b")
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_a, False), (bad_b, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_private_temp_symlink_refused(self):
+        target = Path(self._tmp) / "elsewhere"
+        target.mkdir()
+        link = Path(self._tmp) / "unbound-link"
+        os.symlink(str(target), str(link))
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(link, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertIn("unsafe", self.cache.last_lock_error)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_private_temp_created_0700(self):
+        new_dir = Path(self._tmp) / "unbound-fresh"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(new_dir, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertTrue(new_dir.exists())
+        self.assertEqual(stat.S_IMODE(os.lstat(str(new_dir)).st_mode), 0o700)
+
+    def test_temp_candidate_is_deterministic_not_random(self):
+        # Regression guard against swapping in mkdtemp(): the temp candidate
+        # must be the fixed uid-namespaced path under gettempdir().
+        candidates = self.cache._state_dir_candidates()
+        uid = os.getuid() if hasattr(os, "getuid") else "u"
+        expected = Path(tempfile.gettempdir()) / f"unbound-{uid}"
+        self.assertEqual(candidates[-1][0], expected)
+        self.assertTrue(candidates[-1][1])  # flagged private
 
 
 class TestMainLockSetupSentry(unittest.TestCase):

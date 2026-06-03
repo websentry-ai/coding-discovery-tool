@@ -12,6 +12,7 @@ whose mtime is older than ``STALE_LOCK_SECONDS`` as a zombie and steal it.
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -29,6 +30,73 @@ STALE_LOCK_SECONDS = 15 * 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 
 last_lock_error: Optional[str] = None
+
+
+def _state_dir_candidates():
+    """Ordered (path, is_private_temp) candidates for the state dir.
+    Home first (preserves existing behavior); deterministic uid-namespaced
+    temp dir as fallback. Split out as a function so tests can inject candidates."""
+    candidates = [(UNBOUND_DIR, False)]
+    uid = os.getuid() if hasattr(os, "getuid") else "u"
+    candidates.append((Path(tempfile.gettempdir()) / f"unbound-{uid}", True))
+    return candidates
+
+
+def _is_unsafe_existing(path):
+    """True if `path` already exists as a symlink, a non-dir, or a dir we don't
+    own — i.e. a path we must NOT trust for a fixed-name dir in a shared temp."""
+    try:
+        st = os.lstat(str(path))
+    except OSError:
+        return False  # doesn't exist yet — safe to create
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if not stat.S_ISDIR(st.st_mode):
+        return True
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return True
+    return False
+
+
+def _try_state_dir(path, is_private):
+    """Make `path` usable. Returns True if it is a writable dir we can use.
+    mkdir-only probe (no file-write probe — see module note). On the private
+    temp candidate, refuse hostile pre-existing entries and lock perms to 0700."""
+    global last_lock_error
+    try:
+        if is_private and _is_unsafe_existing(path):
+            last_lock_error = f"unsafe pre-existing state dir: {path}"
+            return False
+        path.mkdir(parents=True, exist_ok=True)
+        if is_private:
+            try:
+                os.chmod(str(path), 0o700)
+            except OSError:
+                pass
+            # Re-check after creation in case of a race that swapped it.
+            if _is_unsafe_existing(path):
+                last_lock_error = f"unsafe state dir after create: {path}"
+                return False
+        return True
+    except OSError as e:
+        last_lock_error = str(e)
+        return False
+
+
+def _ensure_state_dir():
+    """Resolve UNBOUND_DIR/CACHE_PATH/LOCK_PATH to the first usable candidate,
+    reassigning the module globals when falling back. Returns True if a usable
+    dir was found, False otherwise (caller returns 'setup_failed')."""
+    global UNBOUND_DIR, CACHE_PATH, LOCK_PATH
+    for path, is_private in _state_dir_candidates():
+        if _try_state_dir(path, is_private):
+            if path != UNBOUND_DIR:
+                logger.warning(f"home state dir unusable; using fallback state dir {path}")
+                UNBOUND_DIR = path
+                CACHE_PATH = path / "discovery-cache.json"
+                LOCK_PATH = path / "discovery.lock"
+            return True
+    return False
 
 
 def _now_iso() -> str:
@@ -109,6 +177,8 @@ def acquire_lock() -> str:
     """Best-effort exclusive lock. Returns "acquired", "contended" (held by a live process), or "setup_failed"."""
     global last_lock_error
     last_lock_error = None
+    if not _ensure_state_dir():
+        return "setup_failed"
     try:
         UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as e:

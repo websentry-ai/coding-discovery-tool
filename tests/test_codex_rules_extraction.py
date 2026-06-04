@@ -35,20 +35,26 @@ class TestCodexProjectRulesRootBranch(unittest.TestCase):
     def test_root_branch_calls_helper_with_root_and_finds_agents_md(self):
         """The '/' branch must not crash and must reach the AGENTS.md.
 
-        The spy on ``should_process_directory`` (returning True) both lets the
-        walk descend deterministically and asserts the call passes BOTH args —
-        the one-arg form is exactly the regression.
+        Calls THROUGH to the real ``should_process_directory`` (not a stub) so a
+        signature/arity regression actually raises ``TypeError`` here — the
+        production failure path, not just an arity assertion. The wrapper also
+        records the args to pin the exact (directory, root_path) contract.
         """
+        from scripts.coding_discovery_tools import macos_extraction_helpers as mac_helpers
+
         projects_by_root: dict = {}
         seen_args = []
+        real_should_process = mac_helpers.should_process_directory
 
-        def spy(*args):
+        def call_through(*args, **kwargs):
             seen_args.append(args)
-            return True
+            return real_should_process(*args, **kwargs)  # real: raises TypeError on bad arity
 
         with patch(f"{_CODEX_MOD}.get_top_level_directories", return_value=[self.proj]), \
-             patch(f"{_CODEX_MOD}.should_process_directory", side_effect=spy), \
+             patch(f"{_CODEX_MOD}.should_process_directory", side_effect=call_through), \
              patch(f"{_CODEX_MOD}.should_skip_system_path", return_value=False):
+            # Pre-fix the production one-arg call makes real_should_process raise
+            # TypeError (not caught by the PermissionError/OSError except) -> fails here.
             self.extractor._extract_project_level_rules(Path("/"), projects_by_root)
 
         self.assertTrue(seen_args, "should_process_directory was never called")

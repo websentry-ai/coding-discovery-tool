@@ -905,7 +905,7 @@ class TestMainLockSetupSentry(unittest.TestCase):
              patch.object(adm.discovery_cache, "release_lock", Mock()), \
              patch.object(adm, "report_to_sentry", mock_sentry), \
              patch.object(adm, "AIToolsDetector", return_value=detector_inst) as mock_detector, \
-             patch.object(adm, "send_scan_event", Mock()), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
              patch.object(adm, "send_discovery_metrics", Mock()), \
              patch.object(adm, "load_pending_reports", return_value=[]), \
              patch.object(adm, "save_failed_reports", Mock()), \

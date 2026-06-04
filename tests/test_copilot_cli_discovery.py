@@ -203,6 +203,19 @@ class TestCopilotCliDetection(unittest.TestCase):
         (copilot_dir / "copilot-instructions.md").write_text("hi", encoding="utf-8")
         self.assertIsNone(self.detector.detect())
 
+    def test_ide_lock_dir_alone_not_detected(self):
+        """ide/ holds the discovery lock the VS Code/JetBrains Copilot EXTENSION
+        writes (microsoft/vscode-copilot-chat#3583), so an IDE-only user has it
+        with no CLI -> SHARED, not a CLI install on its own."""
+        copilot_dir = self._make_copilot_dir()
+        ide_dir = copilot_dir / "ide"
+        ide_dir.mkdir()
+        (ide_dir / "0c.lock").write_text(
+            '{"pid": 1, "ideName": "Visual Studio Code", "workspaceFolders": []}',
+            encoding="utf-8",
+        )
+        self.assertIsNone(self.detector.detect())
+
     def test_only_skills_and_rules_not_detected(self):
         """Repro for device MY4W6QQGCQ / user karthick: a ~/.copilot holding only
         skills/ and copilot-instructions.md (both SHARED, no strong CLI artifact)
@@ -234,7 +247,7 @@ class TestCopilotCliDetection(unittest.TestCase):
         with self.assertLogs(_DETECTOR_MOD, level="INFO") as captured:
             self.assertIsNone(self.detector.detect())
         self.assertTrue(
-            any("only shared Copilot markers" in record.getMessage()
+            any("shared/IDE-written Copilot markers" in record.getMessage()
                 for record in captured.records)
         )
 

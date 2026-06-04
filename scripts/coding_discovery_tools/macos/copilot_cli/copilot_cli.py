@@ -37,14 +37,22 @@ logger = logging.getLogger(__name__)
 #     contents (Copilot CLI "config dir reference"); ``pkg`` is an
 #     observed-but-undocumented binary dir kept as an extra real-world signal.
 #
-#   SHARED: markers under ``~/.copilot/`` that are ALSO read by the GitHub
-#     Copilot VS Code extension / JetBrains plugin's agent mode — notably
-#     ``skills/`` (and ``agents/``, ``instructions/``, ``copilot-instructions.md``).
-#     Per the VS Code Agent Skills docs, ``~/.copilot/skills/`` is a shared
-#     location the IDE agent reads too, so it is NOT exclusive to the CLI:
-#     https://code.visualstudio.com/docs/agent-customization/agent-skills
-#     These can never alone declare a CLI install (doing so produces phantom CLI
-#     rows for IDE-only users); they are tracked solely to log/suppress that case.
+#   SHARED: markers under ``~/.copilot/`` that are NOT exclusive to the CLI,
+#     because another GitHub Copilot surface also produces them. Two ways:
+#       - ALSO read by the Copilot VS Code/JetBrains agent: ``skills/`` (and
+#         ``agents/``, ``instructions/``, ``copilot-instructions.md``). Per the
+#         VS Code Agent Skills docs, ``~/.copilot/skills/`` is a shared location
+#         the IDE agent reads, so it is not exclusive to the CLI:
+#         https://code.visualstudio.com/docs/agent-customization/agent-skills
+#       - WRITTEN by the IDE extension itself: ``ide/``. The Copilot VS Code /
+#         JetBrains extension drops a discovery lock file at
+#         ``~/.copilot/ide/<uuid>.lock`` (containing the IDE name + pid) so the
+#         CLI can connect — see microsoft/vscode-copilot-chat#3583. An IDE-only
+#         user with no standalone CLI therefore has ``~/.copilot/ide/`` even
+#         though the CLI was never installed.
+#     Any of these can be present for an IDE-only user, so none can alone declare
+#     a CLI install (doing so produces phantom CLI rows); they are tracked solely
+#     to log/suppress that case.
 _CLI_DIR_NAME = ".copilot"
 _CLI_STRONG_MARKER_FILES = frozenset({
     "config.json",
@@ -61,7 +69,6 @@ _CLI_STRONG_MARKER_DIRS = frozenset({
     "installed-plugins",
     "plugin-data",
     "hooks",
-    "ide",
     "pkg",
 })
 _CLI_SHARED_MARKER_FILES = frozenset({
@@ -71,6 +78,7 @@ _CLI_SHARED_MARKER_DIRS = frozenset({
     "skills",
     "agents",
     "instructions",
+    "ide",
 })
 
 
@@ -195,8 +203,9 @@ class MacOSCopilotCliDetector(BaseToolDetector):
     - Verifying it contains at least one STRONG (CLI-exclusive) marker (a strong
       marker file or directory) so a stray empty ``~/.copilot`` does not count.
       A dir holding only SHARED markers (skills/agents/instructions/
-      copilot-instructions.md), which the IDE Copilot agent also reads, is the
-      VS Code/JetBrains agent rather than the CLI and is suppressed.
+      copilot-instructions.md, which the IDE Copilot agent reads, or ide/, which
+      the IDE extension writes as a discovery lock) is the VS Code/JetBrains
+      agent rather than the CLI and is suppressed.
 
     When ``user_home`` is set on the instance (the per-user path used by the
     live discovery loop via ``detect_tool_for_user``), detection is scoped to
@@ -330,7 +339,7 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         Returns a tool-info dict when the resolved config dir (``COPILOT_HOME``
         when set for this user, else ``user_home/.copilot``) exists and holds at
         least one STRONG CLI artifact; otherwise None. A dir holding only SHARED
-        markers (skills/agents/instructions/copilot-instructions.md) is the
+        markers (skills/agents/instructions/copilot-instructions.md/ide) is the
         IDE Copilot agent, not the CLI — it is logged and suppressed.
         """
         copilot_dir = _resolve_copilot_dir(user_home)
@@ -344,8 +353,8 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         if not _copilot_dir_has_strong_artifact(copilot_dir):
             if _copilot_dir_has_shared_artifact(copilot_dir):
                 logger.info(
-                    "Skipping %s: only shared Copilot markers present "
-                    "(skills/agents/instructions/copilot-instructions.md) — likely the "
+                    "Skipping %s: only shared/IDE-written Copilot markers present "
+                    "(skills/agents/instructions/copilot-instructions.md/ide) — likely the "
                     "VS Code/JetBrains Copilot agent, not the standalone CLI",
                     copilot_dir,
                 )

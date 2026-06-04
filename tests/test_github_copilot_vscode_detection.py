@@ -77,6 +77,15 @@ class TestVscodeBuiltinCopilotDetection(unittest.TestCase):
         shutil.rmtree(self.copilot)
         self.assertEqual(self._detect(), [])
 
+    def test_non_dict_package_json_does_not_crash(self):
+        # A package.json that parses to a non-object must not raise (it would
+        # otherwise abort all Copilot detection for the run); version -> unknown.
+        self._make_code_user_dir()
+        (self.copilot / "package.json").write_text("[1, 2, 3]", encoding="utf-8")
+        res = self._detect()
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["version"], "unknown")
+
 
 _LINUX_MOD = "scripts.coding_discovery_tools.linux.github_copilot.detect_copilot"
 _WIN_MOD = "scripts.coding_discovery_tools.windows.github_copilot.detect_copilot"

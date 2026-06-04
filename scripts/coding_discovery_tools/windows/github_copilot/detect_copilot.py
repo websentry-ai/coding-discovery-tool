@@ -213,7 +213,7 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                     continue
                 version = "unknown"
                 data = _load_jsonc(copilot_dir / "package.json")
-                if data:
+                if isinstance(data, dict):
                     version = data.get("version", "unknown")
                 logger.debug(f"Detected built-in VS Code Copilot {version} at {copilot_dir}")
                 return [{

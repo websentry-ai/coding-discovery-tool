@@ -47,9 +47,11 @@ def _read_extension_version(ext_dir: Path) -> str:
     """Read ``version`` from a VS Code extension's package.json (best-effort)."""
     try:
         data = json.loads((ext_dir / "package.json").read_text(encoding="utf-8"))
-        return data.get("version", "unknown")
+        if isinstance(data, dict):
+            return data.get("version", "unknown")
     except (OSError, json.JSONDecodeError, ValueError):
-        return "unknown"
+        pass
+    return "unknown"
 
 
 class LinuxCopilotDetector(BaseCopilotDetectorBase):

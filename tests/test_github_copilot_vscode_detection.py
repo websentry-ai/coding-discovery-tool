@@ -78,5 +78,81 @@ class TestVscodeBuiltinCopilotDetection(unittest.TestCase):
         self.assertEqual(self._detect(), [])
 
 
+_LINUX_MOD = "scripts.coding_discovery_tools.linux.github_copilot.detect_copilot"
+_WIN_MOD = "scripts.coding_discovery_tools.windows.github_copilot.detect_copilot"
+
+
+class TestLinuxVscodeBuiltinCopilotDetection(unittest.TestCase):
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        from scripts.coding_discovery_tools.linux.github_copilot.detect_copilot import LinuxCopilotDetector
+        self.Detector = LinuxCopilotDetector
+        self.tmp = tempfile.mkdtemp()
+        self.user_home = Path(self.tmp) / "user"
+        self.user_home.mkdir(parents=True)
+        self.app_ext = Path(self.tmp) / "usr" / "share" / "code" / "resources" / "app" / "extensions"
+        self.copilot = self.app_ext / "copilot"
+        self.copilot.mkdir(parents=True)
+        (self.copilot / "package.json").write_text(json.dumps({"version": "0.51.0"}), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_code_user_dir(self):
+        (self.user_home / ".config" / "Code" / "User").mkdir(parents=True)
+
+    def _detect(self):
+        with patch(f"{_LINUX_MOD}._VSCODE_APP_EXTENSION_ROOTS", [self.app_ext]):
+            return self.Detector()._detect_vscode_for_user(self.user_home)
+
+    def test_builtin_detected_when_user_uses_vscode(self):
+        self._make_code_user_dir()
+        res = self._detect()
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+        self.assertEqual(res[0]["version"], "0.51.0")
+        self.assertEqual(res[0]["install_path"], str(self.copilot))
+
+    def test_builtin_not_attributed_when_user_does_not_use_vscode(self):
+        self.assertEqual(self._detect(), [])
+
+
+class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        from scripts.coding_discovery_tools.windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
+        self.Detector = WindowsGitHubCopilotDetector
+        self.tmp = tempfile.mkdtemp()
+        self.user_home = Path(self.tmp) / "user"
+        self.user_home.mkdir(parents=True)
+        self.app_ext = Path(self.tmp) / "Program Files" / "Microsoft VS Code" / "resources" / "app" / "extensions"
+        self.copilot = self.app_ext / "copilot"
+        self.copilot.mkdir(parents=True)
+        (self.copilot / "package.json").write_text(json.dumps({"version": "0.51.0"}), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_code_user_dir(self):
+        (self.user_home / "AppData" / "Roaming" / "Code" / "User").mkdir(parents=True)
+
+    def _detect(self):
+        # No ~/.vscode/extensions exists -> exercises the fallback path even when
+        # the user has no marketplace extensions at all.
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", [self.app_ext]):
+            return self.Detector()._detect_vscode_for_user(self.user_home)
+
+    def test_builtin_detected_without_marketplace_dir(self):
+        self._make_code_user_dir()
+        res = self._detect()
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+        self.assertEqual(res[0]["version"], "0.51.0")
+        self.assertEqual(res[0]["install_path"], str(self.copilot))
+
+    def test_builtin_not_attributed_when_user_does_not_use_vscode(self):
+        self.assertEqual(self._detect(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

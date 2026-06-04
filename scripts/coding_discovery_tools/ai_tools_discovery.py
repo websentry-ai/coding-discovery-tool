@@ -693,6 +693,28 @@ class AIToolsDetector:
         
         return projects_dict
 
+    @staticmethod
+    def _union_mcp_servers(existing: List[Dict], incoming: List[Dict]) -> List[Dict]:
+        """Combine two MCP-server lists, de-duplicated by server name.
+
+        Multiple config sources can resolve to the same project path — most
+        notably a project whose root is the user's home directory, which yields
+        both a ``~/.claude.json`` ``projects[<home>]`` entry and a home-rooted
+        ``~/.mcp.json`` entry. Unioning (instead of overwriting) keeps both
+        sources' servers; first-seen wins, so the higher-precedence source
+        merged earlier is preserved on a name conflict.
+        """
+        merged = list(existing or [])
+        seen = {s.get("name") for s in merged if isinstance(s, dict)}
+        for server in (incoming or []):
+            name = server.get("name") if isinstance(server, dict) else None
+            if name is not None and name in seen:
+                continue
+            if name is not None:
+                seen.add(name)
+            merged.append(server)
+        return merged
+
     def _merge_mcp_configs_into_projects(
         self,
         mcp_projects: List[Dict],
@@ -700,7 +722,7 @@ class AIToolsDetector:
     ) -> None:
         """
         Merge MCP configs into projects dictionary.
-        
+
         Args:
             mcp_projects: List of MCP project configs
             projects_dict: Dictionary mapping project paths to project configs
@@ -716,8 +738,11 @@ class AIToolsDetector:
             total_mcp_servers += num_servers
             
             if project_path in projects_dict:
-                # Merge MCP config into existing project
-                projects_dict[project_path]["mcpServers"] = mcp_servers
+                # Merge (union) MCP config into existing project so a second
+                # source for the same path can't overwrite the first's servers.
+                projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                    projects_dict[project_path].get("mcpServers", []), mcp_servers
+                )
                 merged_count += 1
                 logger.info(f"  Merged MCP config into existing project: {project_path} ({num_servers} MCP servers)")
                 # Ensure rules field exists
@@ -770,9 +795,14 @@ class AIToolsDetector:
                 additional_mcp_data["disabledMcpjsonServers"] = mcp_project["disabledMcpjsonServers"]
             
             if project_path in projects_dict:
-                # Merge MCP config into existing project
-                projects_dict[project_path]["mcpServers"] = mcp_servers
-                if additional_mcp_data:
+                # Merge (union) MCP config into existing project so a second
+                # source for the same path (e.g. a home-rooted ~/.mcp.json and
+                # ~/.claude.json projects[<home>]) can't overwrite the first's
+                # servers.
+                projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                    projects_dict[project_path].get("mcpServers", []), mcp_servers
+                )
+                if additional_mcp_data and "additionalMcpData" not in projects_dict[project_path]:
                     projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
                 merged_count += 1
                 logger.info(f"  Merged Claude MCP config into existing project: {project_path} ({num_servers} MCP servers)")
@@ -1305,7 +1335,12 @@ class AIToolsDetector:
                                     "rules": [],
                                     "skills": [],
                                 }
-                            projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
+                            # Union so User-scope and Workspace .mcp.json sources
+                            # sharing a path don't overwrite each other.
+                            projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                                projects_dict[project_path].get("mcpServers", []),
+                                project.get("mcpServers", []),
+                            )
                     log_mcp_details(projects_dict, tool_name)
                 else:
                     logger.info("  No GitHub Copilot CLI MCP configs found")

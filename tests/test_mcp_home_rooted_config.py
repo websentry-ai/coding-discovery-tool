@@ -34,6 +34,7 @@ from scripts.coding_discovery_tools.mcp_extraction_helpers import (
     is_home_dotdir_descendant,
     walk_for_claude_project_mcp_configs,
 )
+from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 
 
 def _write_mcp_json(directory: Path, server_name: str = "test-server") -> Path:
@@ -178,6 +179,101 @@ class TestClaudeWalkFileBranchSmoke(unittest.TestCase):
             # ...and the server is still surfaced.
             servers = [s["name"] for p in found for s in p["mcpServers"]]
             self.assertIn("policycenter", servers)
+
+
+class TestUnionMcpServers(unittest.TestCase):
+    """The merge helper combines server lists by name instead of overwriting, so
+    two config sources resolving to the same project path (e.g. a home-rooted
+    ~/.mcp.json and ~/.claude.json projects[<home>]) don't clobber each other."""
+
+    def test_disjoint_lists_are_combined(self):
+        out = AIToolsDetector._union_mcp_servers([{"name": "alpha"}], [{"name": "beta"}])
+        self.assertEqual([s["name"] for s in out], ["alpha", "beta"])
+
+    def test_same_name_deduped_first_wins(self):
+        existing = [{"name": "playwright", "command": "from-claude-json"}]
+        incoming = [{"name": "playwright", "command": "from-mcp-json"},
+                    {"name": "policycenter"}]
+        out = AIToolsDetector._union_mcp_servers(existing, incoming)
+        self.assertEqual([s["name"] for s in out], ["playwright", "policycenter"])
+        # higher-precedence (earlier-merged) definition is preserved
+        self.assertEqual(out[0]["command"], "from-claude-json")
+
+    def test_handles_empty_and_none(self):
+        self.assertEqual(AIToolsDetector._union_mcp_servers([], []), [])
+        self.assertEqual(AIToolsDetector._union_mcp_servers(None, None), [])
+        self.assertEqual(
+            [s["name"] for s in AIToolsDetector._union_mcp_servers(None, [{"name": "x"}])],
+            ["x"],
+        )
+
+
+class TestClaudeMergeHomeCollisionUnion(unittest.TestCase):
+    """Regression for the collision the home-rooted fix can expose: when both
+    ~/.claude.json projects[<home>] and a home-rooted ~/.mcp.json resolve to the
+    same project path, both sources' servers must survive the merge (previously
+    the later source silently overwrote the earlier one)."""
+
+    @staticmethod
+    def _detector():
+        # Bypass heavy __init__; the merge methods use no instance state.
+        return object.__new__(AIToolsDetector)
+
+    def test_two_sources_same_path_union_not_overwrite(self):
+        det = self._detector()
+        home = "/Users/thiago"  # same .parts shape as C:\Users\thiago
+        projects_dict = {}
+        # Source order mirrors extract_mcp_config: ~/.claude.json first, the
+        # project-scope .mcp.json walk last.
+        mcp_projects = [
+            {"path": home, "mcpServers": [{"name": "serverA"}], "scope": "project"},
+            {"path": home, "mcpServers": [{"name": "policycenter"},
+                                          {"name": "playwright"}], "scope": "project"},
+        ]
+        det._merge_claude_mcp_configs_into_projects(mcp_projects, projects_dict)
+        names = {s["name"] for s in projects_dict[home]["mcpServers"]}
+        self.assertEqual(names, {"serverA", "policycenter", "playwright"})
+
+    def test_single_source_unchanged(self):
+        det = self._detector()
+        projects_dict = {}
+        det._merge_claude_mcp_configs_into_projects(
+            [{"path": "/Users/x/proj", "mcpServers": [{"name": "only"}]}], projects_dict
+        )
+        self.assertEqual(
+            [s["name"] for s in projects_dict["/Users/x/proj"]["mcpServers"]], ["only"]
+        )
+
+    def test_default_merge_also_unions(self):
+        det = self._detector()
+        home = "/Users/thiago"
+        projects_dict = {}
+        det._merge_mcp_configs_into_projects(
+            [{"path": home, "mcpServers": [{"name": "a"}]},
+             {"path": home, "mcpServers": [{"name": "b"}]}],
+            projects_dict,
+        )
+        self.assertEqual(
+            {s["name"] for s in projects_dict[home]["mcpServers"]}, {"a", "b"}
+        )
+
+
+class TestCopilotCliSharesWalk(unittest.TestCase):
+    """H2: Copilot CLI's Workspace .mcp.json uses the same project-scope walk,
+    so the home-rooted fix (and a home-rooted ~/.mcp.json) applies to it too."""
+
+    def test_copilot_cli_uses_shared_claude_walk(self):
+        import importlib
+        try:
+            mod = importlib.import_module(
+                "scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor"
+            )
+        except Exception as exc:  # platform-specific import shouldn't fail the suite
+            self.skipTest(f"copilot_cli extractor not importable here: {exc}")
+        self.assertTrue(
+            hasattr(mod, "walk_for_claude_project_mcp_configs"),
+            "Copilot CLI workspace scan must reuse walk_for_claude_project_mcp_configs",
+        )
 
 
 if __name__ == "__main__":

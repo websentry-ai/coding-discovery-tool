@@ -880,8 +880,9 @@ class TestStateDirFallback(unittest.TestCase):
 
 
 class TestMainLockSetupSentry(unittest.TestCase):
-    """main() reports lock setup failures to Sentry and exits 0, but stays
-    quiet on genuine contention. Sentry reporting can never crash the exit."""
+    """WEB-4662: lock setup failure reports to Sentry at warning level and the
+    scan CONTINUES lock-less (no exit). Genuine contention stays quiet and
+    exits 0. Sentry reporting can never crash the run."""
 
     def setUp(self):
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
@@ -890,27 +891,48 @@ class TestMainLockSetupSentry(unittest.TestCase):
             "ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"
         ]
 
-    def test_main_reports_sentry_on_lock_setup_failure(self):
+    def _run_main_setup_failed(self, mock_sentry):
+        """Run main() with acquire_lock -> setup_failed and every scan IO stubbed
+        so the lock-less path executes to completion deterministically."""
         adm = self.adm
-        mock_sentry = Mock()
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev-123"
+        detector_inst.detect_all_tools.return_value = []
         with patch.object(adm.platform, "system", return_value="Linux"), \
              patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
              patch.object(adm.discovery_cache, "last_lock_error", "EPERM Operation not permitted"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock()), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
              patch.object(adm, "report_to_sentry", mock_sentry), \
-             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst) as mock_detector, \
+             patch.object(adm, "send_scan_event", Mock()), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value={}), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
              patch.object(sys, "argv", self.argv):
-            with self.assertRaises(SystemExit) as cm:
+            try:
                 adm.main()
+            except SystemExit:
+                pass
+        return mock_detector
 
-        self.assertEqual(cm.exception.code, 0)
-        mock_sentry.assert_called_once()
-        _, kwargs = mock_sentry.call_args
-        self.assertEqual(kwargs["level"], "error")
+    def test_main_reports_sentry_on_lock_setup_failure(self):
+        mock_sentry = Mock()
+        mock_detector = self._run_main_setup_failed(mock_sentry)
+
+        # Continued lock-less: the detector was constructed despite setup_failed.
+        mock_detector.assert_called_once()
+        # The lock-setup failure is the first thing reported, at warning level.
+        mock_sentry.assert_called()
+        _, kwargs = mock_sentry.call_args_list[0]
+        self.assertEqual(kwargs["level"], "warning")
         ctx = kwargs["context"]
         self.assertEqual(ctx["phase"], "acquire_lock")
         self.assertIn("unbound_dir", ctx)
         self.assertTrue(ctx["lock_error"])
-        mock_detector.assert_not_called()
 
     def test_main_no_sentry_on_genuine_contention(self):
         adm = self.adm
@@ -927,18 +949,13 @@ class TestMainLockSetupSentry(unittest.TestCase):
         mock_sentry.assert_not_called()
 
     def test_main_sentry_failure_does_not_crash_exit(self):
-        adm = self.adm
+        # A raising report_to_sentry at the lock block must be swallowed so the
+        # scan still continues lock-less rather than aborting the run.
         mock_sentry = Mock(side_effect=RuntimeError("boom"))
-        with patch.object(adm.platform, "system", return_value="Linux"), \
-             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
-             patch.object(adm.discovery_cache, "last_lock_error", "EPERM"), \
-             patch.object(adm, "report_to_sentry", mock_sentry), \
-             patch.object(adm, "AIToolsDetector"), \
-             patch.object(sys, "argv", self.argv):
-            with self.assertRaises(SystemExit) as cm:
-                adm.main()
+        mock_detector = self._run_main_setup_failed(mock_sentry)
 
-        self.assertEqual(cm.exception.code, 0)
+        mock_sentry.assert_called()
+        mock_detector.assert_called_once()
 
 
 class TestLockBestEffort(unittest.TestCase):

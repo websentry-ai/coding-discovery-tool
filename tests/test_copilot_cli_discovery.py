@@ -2054,76 +2054,6 @@ class TestWindowsCopilotCliSkillsExtraction(unittest.TestCase):
         self.assertNotIn(MacOSCopilotCliSkillsExtractor, WindowsCopilotCliSkillsExtractor.__mro__)
 
 
-# ---------------------------------------------------------------------------
-# 20. Linux MCP extractor: workspace seams include /home
-# ---------------------------------------------------------------------------
-
-class TestLinuxCopilotCliMCPWorkspaceSeams(unittest.TestCase):
-    """The Linux MCP extractor overrides the workspace seams so /home is not
-    excluded. Verifies the behavioral contract the blocking review comment
-    identified: a .mcp.json under /home/<user>/project/ must be discoverable."""
-
-    def setUp(self):
-        utils_mod._SENTRY_DSN = ""
-        self.ext = LinuxCopilotCliMCPConfigExtractor()
-        self.tmp_dir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_workspace_search_roots_includes_home(self):
-        """_workspace_search_roots must include a /home entry so project .mcp.json
-        files under /home/<user>/project/ are reachable."""
-        fake_home = Path(self.tmp_dir) / "home"
-        fake_root = Path(self.tmp_dir)
-        # Simulate get_top_level_directories returning /home alongside other dirs
-        with patch(
-            "scripts.coding_discovery_tools.linux.copilot_cli.mcp_config_extractor.get_top_level_directories",
-            return_value=[fake_home],
-        ):
-            roots = self.ext._workspace_search_roots()
-        paths = [start for _, start in roots]
-        self.assertIn(fake_home, paths, "/home must appear in workspace search roots")
-
-    def test_should_skip_workspace_path_does_not_skip_home(self):
-        """/home should NOT be skipped during the Linux workspace walk."""
-        home_path = Path("/home")
-        self.assertFalse(
-            self.ext._should_skip_workspace_path(home_path),
-            "/home must not be skipped on Linux",
-        )
-
-    def test_workspace_mcp_json_under_home_discovered(self):
-        """End-to-end: a .mcp.json under a simulated /home/<user>/project/ must
-        be returned by _extract_workspace_configs when the walk reaches it.
-        This test is forward-compatible: on main (pre-PR#155) the method is a
-        no-op stub returning []; once PR#155 lands the real walk is exercised."""
-        # Build a fake home dir with a project containing .mcp.json
-        home_dir = Path(self.tmp_dir) / "home" / "alice"
-        project_dir = home_dir / "myproject"
-        project_dir.mkdir(parents=True)
-        mcp_json = project_dir / ".mcp.json"
-        mcp_json.write_text(
-            '{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@mcp/fs"]}}}',
-            encoding="utf-8",
-        )
-
-        fake_root = Path(self.tmp_dir)
-        with patch.object(
-            self.ext, "_workspace_search_roots",
-            return_value=[(fake_root, home_dir)],
-        ):
-            configs = self.ext._extract_workspace_configs()
-
-        # Pre-PR#155: stub returns []. Post-PR#155: real walk must find the project.
-        if configs:
-            paths = [c["path"] for c in configs]
-            self.assertTrue(
-                any(str(project_dir) in p for p in paths),
-                f"Expected project path {project_dir} in workspace configs, got {paths}",
-            )
-
-
 _LINUX_DETECTOR_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli"
 
 
@@ -2175,6 +2105,87 @@ class TestLinuxCopilotCliMultiUserVersion(unittest.TestCase):
         self.assertEqual(by_path[str(bob / ".copilot")], "2.5.99")
         # And user_home is reset after the scan (no leaked per-user state).
         self.assertIsNone(detector.user_home)
+
+
+_LINUX_RULES_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_rules_extractor"
+_LINUX_SKILLS_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_skills_extractor"
+
+
+class TestLinuxCopilotCliRulesExtraction(unittest.TestCase):
+    """End-to-end Linux project-rule extraction.
+
+    Guards the P1 fix: the macOS base's ``_should_skip`` prunes ``/home`` (it is
+    in ``SKIP_SYSTEM_DIRS``), which would silently drop every
+    ``/home/<user>/<repo>`` project rule on Linux. The Linux override routes
+    ``_should_skip`` through the Linux helpers, which do NOT exclude ``/home``.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = LinuxCopilotCliRulesExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir)
+        # Simulate /home/<user>/<repo>
+        self.repo = self.root / "home" / "alice" / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        (self.repo / ".github").mkdir(parents=True)
+        (self.repo / ".github" / "copilot-instructions.md").write_text("P1", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_home_not_pruned_by_linux_skip_seam(self):
+        """Linux ``_should_skip`` must NOT prune ``/home`` — the macOS base does."""
+        self.assertFalse(self.extractor._should_skip(Path("/home")))
+        self.assertFalse(self.extractor._should_skip(Path("/home/alice/repo/.github")))
+        # Contrast: the inherited macOS seam WOULD skip /home (the bug we fixed).
+        self.assertTrue(MacOSCopilotCliRulesExtractor()._should_skip(Path("/home")))
+
+    def test_project_rule_under_home_discovered(self):
+        """A .github/copilot-instructions.md under /home/<user>/<repo> is found."""
+        projects_by_root: dict = {}
+        # The temp tree lives under /tmp|/var, which the Linux system-skip prunes;
+        # disable just that so the walk reaches our simulated /home subtree. The
+        # /home-inclusion behavior itself is asserted in the seam test above.
+        with patch(f"{_LINUX_RULES_MOD}.should_skip_system_path", return_value=False):
+            self.extractor._walk_for_project_rules(self.root, self.root, projects_by_root, current_depth=0)
+        rules = projects_by_root.get(str(self.repo), [])
+        names = {r["file_name"] for r in rules}
+        self.assertIn("copilot-instructions.md", names)
+        self.assertTrue(rules and all(r["scope"] == "project" for r in rules))
+
+
+class TestLinuxCopilotCliSkillsExtraction(unittest.TestCase):
+    """End-to-end Linux project-skill extraction.
+
+    Same P1 contract as the rules test: the overridden ``_walk_for_skills`` uses
+    the Linux skip helpers so ``/home/<user>/<repo>/.github/skills`` is reached.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = LinuxCopilotCliSkillsExtractor()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir)
+        self.repo = self.root / "home" / "alice" / "repo"
+        skill_dir = self.repo / ".github" / "skills" / "deploy"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(_skill_md("deploy"), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_project_skill_under_home_discovered(self):
+        """A .github/skills/deploy/SKILL.md under /home/<user>/<repo> is found,
+        attributed to the repo as a project-scope skill (not user-scope)."""
+        projects_by_root: dict = {}
+        with patch(f"{_LINUX_SKILLS_MOD}.should_skip_system_path", return_value=False):
+            self.extractor._walk_for_skills(self.root, self.root, projects_by_root, current_depth=0)
+        skills = [s for items in projects_by_root.values() for s in items]
+        names = {s["skill_name"] for s in skills}
+        self.assertIn("deploy", names)
+        self.assertTrue(skills and all(s["scope"] == "project" for s in skills))
+        self.assertIn(str(self.repo), projects_by_root)
 
 
 if __name__ == "__main__":

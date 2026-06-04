@@ -66,7 +66,8 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
                     version = _parse_cli_version(output)
                     if version:
                         return version
-                except Exception:
+                except Exception as exc:
+                    logger.debug(f"Copilot CLI version probe failed for {binary}: {exc}")
                     continue
 
         # 2. Fall back to PATH.
@@ -75,8 +76,8 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
             version = _parse_cli_version(output)
             if version:
                 return version
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"Copilot CLI version probe via PATH failed: {exc}")
 
         # 3. Last resort: scan all user homes.
         # Only reached when user_home is unset (no specific user scoped).
@@ -95,7 +96,8 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
                     version = _parse_cli_version(output)
                     if version:
                         return version
-                except Exception:
+                except Exception as exc:
+                    logger.debug(f"Copilot CLI version probe failed for {binary}: {exc}")
                     continue
         return None
 

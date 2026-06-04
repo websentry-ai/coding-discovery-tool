@@ -42,6 +42,13 @@ def is_home_dotdir_descendant(path: Path) -> bool:
     Only matches the canonical OS layouts (``Users``/``home`` immediately
     below the filesystem root) so non-standard mounts like
     ``/srv/home/<u>/.config`` aren't falsely treated as tool dirs.
+
+    NOTE: this returns True whenever the home-level segment (the 4th path part,
+    directly under ``/Users/<u>`` or ``/home/<u>``) is a hidden name — a hidden
+    *dir* or a hidden *file*. So for a leaf FILE that may sit directly in a home
+    dir — e.g. a project-scope ``~/.mcp.json`` whose project root is the home
+    dir — pass its parent directory instead, otherwise the leaf dotfile is
+    misclassified as a hidden tool dir and wrongly skipped.
     """
     parts = path.parts
     return (
@@ -1279,7 +1286,13 @@ def walk_for_claude_project_mcp_configs(
                     except ValueError:
                         continue
 
-                    if should_skip_func(entry) or is_home_dotdir_descendant(entry):
+                    # File branch: test the PARENT dir, not the file itself. A
+                    # home-rooted project config (``~/.mcp.json``, i.e. project
+                    # root == home) is valid and must be read; only skip it when
+                    # it lives *inside* a hidden home tool dir (e.g.
+                    # ``~/.cursor/.mcp.json``). Passing ``entry`` here would
+                    # misclassify the leaf dotfile as a hidden tool dir.
+                    if should_skip_func(entry) or is_home_dotdir_descendant(entry.parent):
                         continue
 
                     extract_claude_project_mcp_from_file(entry, projects)

@@ -579,6 +579,9 @@ class TestAcquireLockReasonCodes(unittest.TestCase):
         self._tmp = tempfile.mkdtemp()
         unbound_dir = Path(self._tmp) / ".unbound"
         self._patchers = [
+            # _HOME_STATE_DIR is the home candidate _state_dir_candidates() reads;
+            # UNBOUND_DIR/LOCK_PATH/CACHE_PATH are the active paths downstream uses.
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
             patch.object(cache, "UNBOUND_DIR", unbound_dir),
             patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
             patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
@@ -730,6 +733,16 @@ class TestStateDirFallback(unittest.TestCase):
             expected = Path(tempfile.gettempdir()) / "unbound"
         self.assertEqual(candidates[-1][0], expected)
         self.assertTrue(candidates[-1][1])  # flagged private
+
+    def test_home_candidate_uses_immutable_anchor_after_fallback(self):
+        # P1 regression: after a fallback reassigns UNBOUND_DIR to a temp dir,
+        # the next resolution must still offer the real HOME as candidate[0]
+        # (the is_private=False trust is only safe for the user's own home),
+        # so the temp-dir hardening can't be bypassed on a re-entrant call.
+        self.cache.UNBOUND_DIR = Path("/var/tmp/unbound-already-fallen-back")
+        candidates = self.cache._state_dir_candidates()
+        self.assertEqual(candidates[0][0], self.cache._HOME_STATE_DIR)
+        self.assertFalse(candidates[0][1])  # home anchor, not private-temp
 
     @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
     @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses W_OK")

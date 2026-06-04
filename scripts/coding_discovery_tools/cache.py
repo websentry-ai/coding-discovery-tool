@@ -22,7 +22,12 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-UNBOUND_DIR = Path.home() / ".unbound"
+# Immutable home anchor. _ensure_state_dir() may reassign the *active* paths
+# below to a temp fallback, but the home candidate is always derived from this
+# so a second acquire_lock() in the same process re-evaluates home first instead
+# of treating an already-resolved temp dir as a trusted non-private candidate.
+_HOME_STATE_DIR = Path.home() / ".unbound"
+UNBOUND_DIR = _HOME_STATE_DIR
 CACHE_PATH = UNBOUND_DIR / "discovery-cache.json"
 LOCK_PATH = UNBOUND_DIR / "discovery.lock"
 
@@ -45,7 +50,7 @@ def _state_dir_candidates() -> list:
     cross-process single-flight). A hostile pre-existing entry at that fixed name
     is refused below (-> setup_failed, surfaced to Sentry by the caller) rather
     than silently working around it."""
-    candidates = [(UNBOUND_DIR, False)]
+    candidates = [(_HOME_STATE_DIR, False)]
     if hasattr(os, "getuid"):
         # POSIX: /var/tmp is cross-session AND reboot-stable (unlike per-session
         # launchd $TMPDIR via tempfile.gettempdir() on macOS, which would split
@@ -174,13 +179,15 @@ def read_cache() -> dict:
 
 def atomic_write_cache(data: dict) -> None:
     try:
-        UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
         # Refuse to write the cache (which can contain MCP configs / tool
         # inventory / paths) through a symlinked state dir — defends the temp
-        # fallback against a post-resolution dir swap in a shared /tmp.
+        # fallback against a post-resolution dir swap in a shared /tmp. Check
+        # BEFORE mkdir, since mkdir(parents=True) would follow a symlink and
+        # create its target, defeating the guard.
         if UNBOUND_DIR.is_symlink():
             logger.warning(f"discovery-cache write skipped: state dir is a symlink: {UNBOUND_DIR}")
             return
+        UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".discovery-cache.", suffix=".tmp", dir=str(UNBOUND_DIR))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:

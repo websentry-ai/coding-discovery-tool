@@ -126,11 +126,14 @@ def _try_state_dir(path: Path, is_private: bool) -> bool:
                 return False
             # chmod above is best-effort; a pre-existing 0755 dir or a failed
             # chmod must NOT be trusted — any group/other bit leaks discovery
-            # state (tool inventory, home_user) to other local users.
-            st = os.lstat(str(path))
-            if st.st_mode & 0o077:
-                last_lock_error = f"state dir not private (mode {oct(stat.S_IMODE(st.st_mode))}): {path}"
-                return False
+            # state (tool inventory, home_user) to other local users. POSIX only:
+            # on Windows st_mode is synthetic (0o777 for dirs, no real perm bits)
+            # so this check is meaningless there, and %TEMP% is per-user anyway.
+            if hasattr(os, "getuid"):
+                st = os.lstat(str(path))
+                if st.st_mode & 0o077:
+                    last_lock_error = f"state dir not private (mode {oct(stat.S_IMODE(st.st_mode))}): {path}"
+                    return False
         return True
     except OSError as e:
         last_lock_error = str(e)

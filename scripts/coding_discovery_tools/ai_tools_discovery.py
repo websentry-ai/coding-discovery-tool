@@ -2051,8 +2051,32 @@ def main():
     # Acquire single-flight lock. Another discovery process running means we exit
     # quietly — hook fire was redundant. Heartbeat thread keeps the lock mtime fresh
     # so other hooks can detect a zombie (>STALE_LOCK_SECONDS without a tick).
-    if not discovery_cache.acquire_lock():
+    _lock_status = discovery_cache.acquire_lock()
+    if _lock_status == "contended":
         logger.info("Another discovery process is running (lock held); exiting.")
+        sys.exit(0)
+    if _lock_status == "setup_failed":
+        logger.error(
+            "Discovery preflight failed: cannot create lock/cache dir "
+            f"({discovery_cache.UNBOUND_DIR}); exiting."
+        )
+        try:
+            _ctx = dict(sentry_ctx)
+            _ctx.update({
+                "phase": "acquire_lock",
+                "home": os.environ.get("HOME") or os.path.expanduser("~"),
+                "unbound_dir": str(discovery_cache.UNBOUND_DIR),
+                "lock_error": discovery_cache.last_lock_error or "",
+            })
+            if hasattr(os, "getuid"):
+                _ctx["uid"] = os.getuid()
+            report_to_sentry(
+                OSError("discovery lock setup failed"),
+                context=_ctx,
+                level="error",
+            )
+        except Exception:
+            pass
         sys.exit(0)
     _heartbeat_stop = None
 

@@ -874,6 +874,31 @@ def _iter_admin_user_homes(is_admin: bool, users_dir: Optional[Path]) -> List[Pa
     return []
 
 
+def _own_home_already_scanned(admin_homes: List[Path]) -> bool:
+    """True when the current process's home is already among ``admin_homes``.
+
+    The admin/root branches scan every dir under the users root and then
+    separately re-process ``Path.home()`` to cover root's own home. That extra
+    step is correct on macOS/Linux, where the privileged account's home
+    (``/var/root`` / ``/root``) lives *outside* the users root. On Windows the
+    admin is a normal ``C:\\Users\\<name>`` profile already covered by the
+    ``C:\\Users`` scan, so re-processing ``Path.home()`` double-counts its
+    configs (WEB-4673). This guard lets callers skip the re-add only in that
+    case (case-insensitive path match, since Windows paths are not case-sensitive).
+    """
+    def _norm(p: Path) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(str(p.resolve())))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    try:
+        home_n = _norm(Path.home())
+    except Exception:
+        return False
+    return any(_norm(d) == home_n for d in admin_homes)
+
+
 def read_global_mcp_config(
     config_path: Path,
     tool_name: str = "MCP",
@@ -1074,9 +1099,11 @@ def extract_ide_global_configs_with_root_support(
                 logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
                 continue
 
-        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             try:
                 root_configs = extract_configs_for_user_func(Path.home())
                 all_configs.extend(root_configs)
@@ -1380,9 +1407,11 @@ def extract_dual_path_configs_with_root_support(
             except (ValueError, OSError):
                 pass
 
-        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             if preferred_path.exists():
                 root_projects = extract_from_file_func(preferred_path)
                 if root_projects:

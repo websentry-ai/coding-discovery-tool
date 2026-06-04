@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
+import scripts.coding_discovery_tools.mcp_extraction_helpers as mcp_helpers
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 from scripts.coding_discovery_tools.coding_tool_factory import (
     CopilotCliMCPConfigExtractorFactory,
@@ -418,6 +419,7 @@ class TestCopilotCliMcpExtraction(unittest.TestCase):
 _MCP_MOD = (
     "scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor"
 )
+_MCP_HELPERS_MOD = "scripts.coding_discovery_tools.mcp_extraction_helpers"
 
 
 class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
@@ -2188,6 +2190,102 @@ class TestWindowsCopilotCliSkillsExtraction(unittest.TestCase):
         from scripts.coding_discovery_tools.coding_tool_base import BaseCopilotCliSkillsExtractor
         self.assertTrue(issubclass(WindowsCopilotCliSkillsExtractor, BaseCopilotCliSkillsExtractor))
         self.assertNotIn(MacOSCopilotCliSkillsExtractor, WindowsCopilotCliSkillsExtractor.__mro__)
+
+
+class TestAdminScanOwnHomeNotDoubleCounted(unittest.TestCase):
+    """WEB-4673 (bug 2): an admin all-users scan must not re-process the admin's
+    own home when it is already among the scanned user dirs (the Windows case,
+    where the admin is a normal C:\\Users\\<name> profile). On macOS the root home
+    (/var/root) is outside /Users, so it is still added."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.home = Path(self.tmp_dir) / "Alice"
+        self.home.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_helper_true_when_home_in_list(self):
+        with patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home):
+            self.assertTrue(mcp_helpers._own_home_already_scanned([self.home]))
+
+    def test_helper_false_when_home_outside_list(self):
+        other = Path(self.tmp_dir) / "Bob"
+        other.mkdir()
+        with patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home):
+            self.assertFalse(mcp_helpers._own_home_already_scanned([other]))
+
+    def test_global_helper_no_double_count(self):
+        """extract_ide_global_configs_with_root_support: own home processed once."""
+        calls = []
+
+        def extract_func(uh):
+            calls.append(Path(uh))
+            return [{"path": str(Path(uh) / ".copilot"), "mcpServers": [{"name": "s"}]}]
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch("platform.system", return_value="Darwin"):
+            result = mcp_helpers.extract_ide_global_configs_with_root_support(extract_func)
+        self.assertEqual(calls.count(self.home), 1, f"home processed {calls.count(self.home)}x")
+        self.assertEqual(len(result), 1)  # not duplicated
+
+    def test_global_helper_still_adds_root_home_outside_users(self):
+        """macOS case: root's own home (outside /Users) is still added separately."""
+        root_home = Path(self.tmp_dir) / "var_root"
+        root_home.mkdir()
+        calls = []
+
+        def extract_func(uh):
+            calls.append(Path(uh))
+            return []
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=root_home), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_ide_global_configs_with_root_support(extract_func)
+        self.assertIn(self.home, calls)
+        self.assertIn(root_home, calls)  # added via the root re-add step
+
+
+class TestWindowsCopilotCliVersionPerUserBin(unittest.TestCase):
+    """WEB-4673 (bug 1): version is read from the detected user's own npm bin,
+    so it resolves during an admin scan where that bin is not on the scanner's
+    PATH (the old bare-``copilot`` probe returned "unknown")."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.home = Path(self.tmp_dir) / "Alice"
+        self.shim = self.home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+        self.shim.parent.mkdir(parents=True)
+        self.shim.write_text("@echo off", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_probes_per_user_npm_shim(self):
+        det = WindowsCopilotCliDetector()
+        det.user_home = self.home
+        banner = "GitHub Copilot CLI 1.0.59.\nRun 'copilot update' to check for updates."
+        fake = MagicMock(returncode=0, stdout=banner, stderr="")
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = det.get_version()
+        self.assertEqual(version, "1.0.59")
+        # command must target the per-user shim, not bare 'copilot', and use a shell
+        cmd = run.call_args.args[0]
+        self.assertIn(str(self.shim), cmd)
+        self.assertIs(run.call_args.kwargs.get("shell"), True)
+
+    def test_falls_back_to_path_when_user_home_unset(self):
+        det = WindowsCopilotCliDetector()  # user_home is None
+        fake = MagicMock(returncode=0, stdout="GitHub Copilot CLI 1.0.59.", stderr="")
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = det.get_version()
+        self.assertEqual(version, "1.0.59")
+        self.assertEqual(run.call_args.args[0], ["copilot", "--version"])
 
 
 if __name__ == "__main__":

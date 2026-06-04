@@ -138,6 +138,7 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
                     if result.returncode == 0:
                         version = _parse_cli_version(result.stdout or result.stderr)
                         if version:
+                            logger.debug(f"Resolved Copilot CLI version {version!r} from {binary}")
                             return version
                 except Exception as exc:
                     logger.debug(f"Copilot CLI version probe failed for {binary}: {exc}")

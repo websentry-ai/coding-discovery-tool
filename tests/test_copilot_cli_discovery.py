@@ -2249,6 +2249,36 @@ class TestAdminScanOwnHomeNotDoubleCounted(unittest.TestCase):
         self.assertIn(self.home, calls)
         self.assertIn(root_home, calls)  # added via the root re-add step
 
+    def test_claudeai_helper_no_double_count(self):
+        """extract_claudeai_mcp_servers_with_root_support: own ~/.claude scanned once."""
+        (self.home / ".claude").mkdir()
+        calls = []
+
+        def fake_scan(claude_dir, projects):
+            calls.append(Path(claude_dir))
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_MCP_HELPERS_MOD}.extract_claudeai_mcp_servers", side_effect=fake_scan), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_claudeai_mcp_servers_with_root_support([])
+        self.assertEqual(calls.count(self.home / ".claude"), 1)
+
+    def test_plugin_helper_no_double_count(self):
+        """extract_claude_plugin_mcp_configs_with_root_support: own home not re-scanned."""
+        calls = []
+
+        def fake_own(projects, plugin_lookup=None):
+            calls.append("own-home")
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_MCP_HELPERS_MOD}.extract_claude_plugin_mcp_configs", side_effect=fake_own), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_claude_plugin_mcp_configs_with_root_support([])
+        # admin home already covered by the loop -> the own-home re-add is skipped
+        self.assertEqual(calls.count("own-home"), 0)
+
 
 class TestWindowsCopilotCliVersionPerUserBin(unittest.TestCase):
     """WEB-4673 (bug 1): version is read from the detected user's own npm bin,

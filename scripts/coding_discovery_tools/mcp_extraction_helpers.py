@@ -1573,9 +1573,11 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
                 except (PermissionError, OSError) as e:
                     logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
-        # On Darwin/Windows also scan the admin's own home (not in users_dir)
+        # On Darwin also scan the admin's own home (/var/root, not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its claude.ai MCP servers (WEB-4673).
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
     else:
         extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
@@ -1827,9 +1829,11 @@ def extract_claude_plugin_mcp_configs_with_root_support(
 
                 _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
-        # On Darwin/Windows also scan admin's own home plugins (not in users_dir)
+        # On Darwin also scan the admin's own home plugins (not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its plugin MCP configs (WEB-4673).
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
     else:
         extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)

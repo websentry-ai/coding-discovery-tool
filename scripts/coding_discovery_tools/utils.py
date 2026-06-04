@@ -723,6 +723,7 @@ def save_failed_reports(reports: List[Dict]) -> None:
         logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
 
 
 def load_pending_reports() -> List[Dict]:
@@ -744,6 +745,7 @@ def load_pending_reports() -> List[Dict]:
         envelopes = json.loads(QUEUE_FILE.read_text())
     except Exception as e:
         logger.warning(f"Could not load pending reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
         return []
 
     now = datetime.now(timezone.utc)
@@ -1283,6 +1285,35 @@ _SENTRY_TAG_KEYS = (
     "tool_name", "domain", "phase", "http_code",
 )
 
+# Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
+# (including the detect_all_tools loop) and shells out to curl synchronously. On a
+# machine where the Sentry endpoint is slow or blocked (the corporate-proxy / Zscaler
+# fleets this tool targets), an unguarded fan-out of failures would add the curl
+# timeout to every failing step and stretch a fast scan into minutes. These bound it:
+#   - dedup by signature + a hard cap, since Sentry dedups server-side anyway, so N
+#     identical curls buy nothing;
+#   - a circuit breaker that stops calling Sentry for the rest of the run once the
+#     transport looks dead.
+# Single-threaded by design: only the main scan thread calls report_to_sentry() (the
+# heartbeat thread never does), so no locking is needed. A discovery run is a
+# short-lived process, so "per run" == process lifetime; reset_sentry_run_state()
+# restores the clean starting point for long-lived test processes.
+_SENTRY_MAX_EVENTS_PER_RUN = 30
+_SENTRY_BREAKER_THRESHOLD = 3
+_sentry_sent_signatures = set()
+_sentry_event_count = 0
+_sentry_consecutive_fails = 0
+_sentry_dead_this_run = False
+
+
+def reset_sentry_run_state() -> None:
+    """Reset the per-run Sentry dedup / circuit-breaker state."""
+    global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
+    _sentry_sent_signatures.clear()
+    _sentry_event_count = 0
+    _sentry_consecutive_fails = 0
+    _sentry_dead_this_run = False
+
 
 def report_to_sentry(
     exception: Exception,
@@ -1303,6 +1334,18 @@ def report_to_sentry(
             return
 
         ctx = context or {}
+
+        global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
+        # Circuit breaker: once the transport looks dead, stop calling Sentry for the
+        # rest of the run so a blocked endpoint can't add its timeout to every failure.
+        if _sentry_dead_this_run:
+            return
+        # Collapse duplicate events and hard-cap the synchronous curls per run.
+        signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
+        if signature in _sentry_sent_signatures or _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
+            return
+        _sentry_sent_signatures.add(signature)
+        _sentry_event_count += 1
 
         tags = {
             "os": platform.system(),
@@ -1332,6 +1375,7 @@ def report_to_sentry(
 
         sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
         fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-sentry-", suffix=".json")
+        sent_ok = False
         try:
             try:
                 os.write(fd, json.dumps(payload).encode("utf-8"))
@@ -1345,20 +1389,30 @@ def report_to_sentry(
                     "-H", "Content-Type: application/json",
                     "-H", f"X-Sentry-Auth: {sentry_auth}",
                     "-d", f"@{tmp_path}",
-                    "--max-time", "5",
+                    "--max-time", "3",
                     dsn["store_url"],
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=4,
             )
-            if result.returncode == 0:
+            sent_ok = (result.returncode == 0)
+            if sent_ok:
                 logger.debug(f"Sentry event sent ({result.stdout.strip()})")
         finally:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+            # Trip the breaker on any transport failure (non-zero curl, timeout, or a
+            # raised exception that is about to propagate to the outer handler) so a
+            # blackholed endpoint stops being retried after a few attempts.
+            if sent_ok:
+                _sentry_consecutive_fails = 0
+            else:
+                _sentry_consecutive_fails += 1
+                if _sentry_consecutive_fails >= _SENTRY_BREAKER_THRESHOLD:
+                    _sentry_dead_this_run = True
     except Exception as sentry_err:
         # Sentry failures must never crash the script
         logger.debug(f"Sentry reporting failed: {sentry_err}")

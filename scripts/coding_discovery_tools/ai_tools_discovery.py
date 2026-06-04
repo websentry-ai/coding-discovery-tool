@@ -238,8 +238,11 @@ class AIToolsDetector:
             Device serial number or hostname as fallback
         """
         injected = os.environ.get("UNBOUND_DEVICE_SERIAL", "").strip()
-        if is_valid_serial(injected):
-            return injected
+        if injected:
+            if is_valid_serial(injected):
+                logger.info(f"Using injected host device_id from UNBOUND_DEVICE_SERIAL: {injected}")
+                return injected
+            logger.warning(f"Ignoring invalid UNBOUND_DEVICE_SERIAL ({injected!r}); falling back to auto-detection")
         return self._device_id_extractor.extract_device_id()
 
     def detect_all_tools(self, user_home: Optional[Path] = None) -> List[Dict]:

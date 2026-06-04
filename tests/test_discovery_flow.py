@@ -242,6 +242,9 @@ class TestUnsupportedPlatformGuard(unittest.TestCase):
 class TestSentryNeverCrashes(unittest.TestCase):
     """report_to_sentry must never raise, regardless of input."""
 
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_with_empty_dsn(self):
         report_to_sentry(RuntimeError("boom"))
@@ -312,6 +315,9 @@ class TestExtractFrames(unittest.TestCase):
 class TestSentryDebugLogging(unittest.TestCase):
     """Sentry helpers log debug messages for missing DSN and curl failures."""
 
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_logs_debug_when_dsn_missing(self):
         with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
@@ -324,6 +330,40 @@ class TestSentryDebugLogging(unittest.TestCase):
         with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
             report_to_sentry(RuntimeError("test"))
         self.assertTrue(any("Sentry reporting failed" in msg for msg in cm.output))
+
+
+class TestSentryRunGuards(unittest.TestCase):
+    """Per-run dedup + circuit breaker keep report_to_sentry cheap when wired into
+    many failure paths against a slow or blocked endpoint."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
+    def tearDown(self):
+        utils_mod.reset_sentry_run_state()
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_dedup_same_signature_sends_once(self, mock_run):
+        for _ in range(5):
+            report_to_sentry(RuntimeError("x"), {"phase": "extract", "tool_name": "Codex rules"})
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=1, stdout=""))
+    def test_circuit_breaker_stops_after_consecutive_failures(self, mock_run):
+        # Distinct signatures so dedup never short-circuits; after 3 transport
+        # failures the breaker must stop issuing curls for the rest of the run.
+        for i in range(6):
+            report_to_sentry(RuntimeError("x"), {"phase": f"p{i}"})
+        self.assertEqual(mock_run.call_count, 3)
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_cap_limits_events_per_run(self, mock_run):
+        for i in range(40):
+            report_to_sentry(RuntimeError("x"), {"phase": f"p{i}"})
+        self.assertEqual(mock_run.call_count, 30)
 
 
 class TestSettingsTransformPrecedence(unittest.TestCase):

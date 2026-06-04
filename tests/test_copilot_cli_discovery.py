@@ -241,7 +241,7 @@ class TestCopilotCliDetection(unittest.TestCase):
     def test_copilot_home_shared_only_not_detected(self):
         """A COPILOT_HOME-relocated config dir holding only shared markers is
         suppressed too — the gate runs on the resolved dir, wherever it lives."""
-        relocated = Path(tempfile.mkdtemp()) / "relocated-copilot"
+        relocated = Path(self.tmp_dir) / "relocated-copilot"
         (relocated / "skills").mkdir(parents=True)
         detector = MacOSCopilotCliDetector()
         with patch.dict(os.environ, {"COPILOT_HOME": str(relocated)}, clear=False), \

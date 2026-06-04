@@ -142,6 +142,14 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         Only reported when this user actually uses VS Code (has a ``Code/User``
         data dir), so a machine-wide app install isn't attributed to unrelated
         users during a root all-users scan.
+
+        Returns at most ONE entry by design: a single "GitHub Copilot (VS Code)"
+        detection is all that's needed to trigger downstream rules/MCP extraction
+        (which scan the user's VS Code data dir once). Built-in Copilot ships its
+        chat surface inside the same ``copilot`` extension, so emitting a second
+        ``copilot-chat`` row would only double-process and duplicate the same MCP
+        servers — unlike the marketplace path, where ``github.copilot`` and
+        ``github.copilot-chat`` are genuinely separate installs.
         """
         uses_vscode = False
         for rel in _VSCODE_USER_DATA_DIRS:
@@ -152,6 +160,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
             except OSError:
                 continue
         if not uses_vscode:
+            logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
             return []
 
         for ext_root in _VSCODE_APP_EXTENSION_ROOTS:
@@ -162,12 +171,15 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
                         continue
                 except OSError:
                     continue
+                version = _read_extension_version(copilot_dir)
+                logger.debug("Detected built-in VS Code Copilot %s at %s", version, copilot_dir)
                 return [{
                     "name": "GitHub Copilot (VS Code)",
-                    "version": _read_extension_version(copilot_dir),
+                    "version": version,
                     "publisher": "GitHub",
                     "install_path": str(copilot_dir),
                 }]
+        logger.debug("VS Code in use under %s but no built-in Copilot extension found", user_home)
         return []
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:

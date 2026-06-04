@@ -723,6 +723,7 @@ def save_failed_reports(reports: List[Dict]) -> None:
         logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
 
 
 def load_pending_reports() -> List[Dict]:
@@ -744,6 +745,7 @@ def load_pending_reports() -> List[Dict]:
         envelopes = json.loads(QUEUE_FILE.read_text())
     except Exception as e:
         logger.warning(f"Could not load pending reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
         return []
 
     now = datetime.now(timezone.utc)

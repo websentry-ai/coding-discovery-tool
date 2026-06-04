@@ -941,5 +941,130 @@ class TestMainLockSetupSentry(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
 
 
+class TestLockBestEffort(unittest.TestCase):
+    """WEB-4662: the single-flight lock is best-effort.
+
+    - "contended" -> exit 0 immediately, no scan.
+    - "setup_failed" -> run lock-less: scan still happens, no heartbeat, no release.
+    - "acquired" -> heartbeat starts and the lock is released in the finally block.
+    """
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        self.adm = adm
+        self.argv = [
+            "ai_tools_discovery.py", "--api-key", "X", "--domain", "http://127.0.0.1:1"
+        ]
+
+    def test_setup_failed_continues_lockless(self):
+        adm = self.adm
+        heartbeat = Mock()
+        release = Mock()
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", heartbeat), \
+             patch.object(adm.discovery_cache, "release_lock", release), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        # The scan ran lock-less: detector was constructed despite setup_failed.
+        mock_detector.assert_called_once()
+        # No lock was held, so neither heartbeat nor release should fire.
+        heartbeat.assert_not_called()
+        release.assert_not_called()
+
+    def test_contended_still_exits_zero(self):
+        adm = self.adm
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        mock_detector.assert_not_called()
+
+    def test_acquired_starts_heartbeat_and_releases(self):
+        adm = self.adm
+        heartbeat = Mock()
+        release = Mock()
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", heartbeat), \
+             patch.object(adm.discovery_cache, "release_lock", release), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        heartbeat.assert_called_once()
+        release.assert_called_once()
+
+
+class TestCodexProjectRulesNoArgError(unittest.TestCase):
+    """Regression: _extract_project_level_rules(Path("/"), ...) must pass
+    root_path to should_process_directory(). The old call omitted it and
+    raised TypeError: should_process_directory() missing 1 required
+    positional argument: 'root_path'."""
+
+    def test_extract_project_level_rules_root_no_typeerror(self):
+        import scripts.coding_discovery_tools.macos.codex.codex_rules_extractor as codex_mod
+        from scripts.coding_discovery_tools.macos.codex.codex_rules_extractor import (
+            MacOSCodexRulesExtractor,
+        )
+
+        extractor = MacOSCodexRulesExtractor()
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(tmp_dir), True)
+
+        # One real top-level candidate; let should_process_directory run for real
+        # against the tmp path. _walk_for_agents_files is a no-op so we don't
+        # recurse the filesystem.
+        with patch.object(codex_mod, "get_top_level_directories", return_value=[tmp_dir]), \
+             patch.object(MacOSCodexRulesExtractor, "_walk_for_agents_files", Mock()):
+            try:
+                extractor._extract_project_level_rules(Path("/"), {})
+            except TypeError as exc:
+                self.fail(f"should_process_directory call regressed: {exc}")
+
+
+class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
+    """A swallowed extraction error must report to Sentry at warning level
+    (with phase 'extract') and still return [] so the scan continues."""
+
+    def test_extract_failure_reports_warning_and_returns_empty(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        detector = AIToolsDetector()
+        failing = Mock()
+        failing.extract_all_codex_rules.side_effect = RuntimeError("boom")
+        detector._codex_rules_extractor = failing
+
+        mock_sentry = Mock()
+        with patch.object(adm, "report_to_sentry", mock_sentry):
+            result = detector.extract_all_codex_rules()
+
+        self.assertEqual(result, [])
+        mock_sentry.assert_called_once()
+        args, kwargs = mock_sentry.call_args
+        self.assertEqual(kwargs.get("level"), "warning")
+        # context is passed positionally as the 2nd argument.
+        context = args[1]
+        self.assertEqual(context.get("phase"), "extract")
+
+
 if __name__ == "__main__":
     unittest.main()

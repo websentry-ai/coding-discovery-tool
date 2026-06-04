@@ -2188,5 +2188,27 @@ class TestLinuxCopilotCliSkillsExtraction(unittest.TestCase):
         self.assertIn(str(self.repo), projects_by_root)
 
 
+class TestLinuxRootSkillsUserLevelGuard(unittest.TestCase):
+    """Review finding: when scanning as root, root's own user-level skills
+    (``/root/.agents/skills`` etc.) must be recognized as user-level — not
+    re-emitted as project skills. ``/root`` is a home but is NOT under ``/home``,
+    so the ``users_root_path="/home"`` check alone misses it."""
+
+    def _is_user(self, p: str) -> bool:
+        return LinuxCopilotCliSkillsExtractor._is_user_level_skill_dir(Path(p))
+
+    def test_root_home_agents_skills_is_user_level(self):
+        self.assertTrue(self._is_user("/root/.agents/skills"))
+        self.assertTrue(self._is_user("/root/.claude/skills"))
+
+    def test_home_user_skills_still_user_level(self):
+        self.assertTrue(self._is_user("/home/alice/.agents/skills"))
+
+    def test_real_project_skills_not_user_level(self):
+        # Project repos under either /home/<user> or /root stay project-scope.
+        self.assertFalse(self._is_user("/home/alice/repo/.github/skills"))
+        self.assertFalse(self._is_user("/root/repo/.github/skills"))
+
+
 if __name__ == "__main__":
     unittest.main()

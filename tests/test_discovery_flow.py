@@ -659,12 +659,14 @@ class TestStateDirFallback(unittest.TestCase):
         self._orig_unbound_dir = cache.UNBOUND_DIR
         self._orig_cache_path = cache.CACHE_PATH
         self._orig_lock_path = cache.LOCK_PATH
+        self._orig_home_state_dir = cache._HOME_STATE_DIR
         cache.last_lock_error = None
 
     def tearDown(self):
         self.cache.UNBOUND_DIR = self._orig_unbound_dir
         self.cache.CACHE_PATH = self._orig_cache_path
         self.cache.LOCK_PATH = self._orig_lock_path
+        self.cache._HOME_STATE_DIR = self._orig_home_state_dir
         self.cache.last_lock_error = None
         shutil.rmtree(self._tmp, ignore_errors=True)
 
@@ -733,6 +735,47 @@ class TestStateDirFallback(unittest.TestCase):
             expected = Path(tempfile.gettempdir()) / "unbound"
         self.assertEqual(candidates[-1][0], expected)
         self.assertTrue(candidates[-1][1])  # flagged private
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_symlinked_home_state_dir_still_writes_cache(self):
+        # A user may legitimately symlink ~/.unbound to a writable target. The
+        # symlink guard must NOT apply to the trusted home dir, or every cache
+        # write is silently skipped (cold cache, re-upload every run).
+        target = Path(self._tmp) / "real_unbound"
+        target.mkdir()
+        link = Path(self._tmp) / ".unbound-link"
+        os.symlink(str(target), str(link))
+        self.cache._HOME_STATE_DIR = link
+        self.cache.UNBOUND_DIR = link
+        self.cache.CACHE_PATH = link / "discovery-cache.json"
+        self.cache.atomic_write_cache({"tools": {"x": {"u": {"payload_hash": "h"}}}})
+        self.assertTrue((target / "discovery-cache.json").exists())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_symlinked_fallback_dir_write_skipped(self):
+        # The guard still protects the temp fallback: if the resolved (non-home)
+        # dir is a symlink, refuse to write the cache through it.
+        target = Path(self._tmp) / "evil"
+        target.mkdir()
+        link = Path(self._tmp) / "fallback-link"
+        os.symlink(str(target), str(link))
+        self.cache._HOME_STATE_DIR = Path(self._tmp) / ".unbound"  # != link
+        self.cache.UNBOUND_DIR = link
+        self.cache.CACHE_PATH = link / "discovery-cache.json"
+        self.cache.atomic_write_cache({"tools": {}})
+        self.assertFalse((target / "discovery-cache.json").exists())
+
+    def test_last_lock_error_cleared_on_successful_fallback(self):
+        # Home candidate fails (sets last_lock_error) but the temp fallback
+        # succeeds -> a successful acquire must not leave a stale error string.
+        bad_home = self._unmkdir_able("blk")
+        good_temp = Path(self._tmp) / "unbound-ok"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_home, False), (good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertIsNone(self.cache.last_lock_error)
 
     def test_home_candidate_uses_immutable_anchor_after_fallback(self):
         # P1 regression: after a fallback reassigns UNBOUND_DIR to a temp dir,

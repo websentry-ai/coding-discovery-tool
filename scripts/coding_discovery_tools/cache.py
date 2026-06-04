@@ -149,7 +149,7 @@ def _ensure_state_dir() -> bool:
     """Resolve UNBOUND_DIR/CACHE_PATH/LOCK_PATH to the first usable candidate,
     reassigning the module globals when falling back. Returns True if a usable
     dir was found, False otherwise (caller returns 'setup_failed')."""
-    global UNBOUND_DIR, CACHE_PATH, LOCK_PATH
+    global UNBOUND_DIR, CACHE_PATH, LOCK_PATH, last_lock_error
     for path, is_private in _state_dir_candidates():
         if _try_state_dir(path, is_private):
             if path != UNBOUND_DIR:
@@ -157,6 +157,11 @@ def _ensure_state_dir() -> bool:
                 UNBOUND_DIR = path
                 CACHE_PATH = path / "discovery-cache.json"
                 LOCK_PATH = path / "discovery.lock"
+            # An earlier candidate (e.g. an unwritable home) may have set
+            # last_lock_error; clear it now that we have a usable dir so a
+            # successful (possibly fallen-back) acquire never reports a stale
+            # error to any future reader.
+            last_lock_error = None
             return True
     return False
 
@@ -180,12 +185,14 @@ def read_cache() -> dict:
 def atomic_write_cache(data: dict) -> None:
     try:
         # Refuse to write the cache (which can contain MCP configs / tool
-        # inventory / paths) through a symlinked state dir — defends the temp
-        # fallback against a post-resolution dir swap in a shared /tmp. Check
-        # BEFORE mkdir, since mkdir(parents=True) would follow a symlink and
-        # create its target, defeating the guard.
-        if UNBOUND_DIR.is_symlink():
-            logger.warning(f"discovery-cache write skipped: state dir is a symlink: {UNBOUND_DIR}")
+        # inventory / paths) through a symlinked state dir — but ONLY for the
+        # shared-temp fallback, where a post-resolution dir swap is the threat.
+        # The home dir (~/.unbound) is trusted by design and MAY legitimately be
+        # a user-created symlink; guarding it there would silently skip every
+        # cache write and force a cold re-upload each run. Check BEFORE mkdir,
+        # since mkdir(parents=True) would follow a symlink and create its target.
+        if UNBOUND_DIR != _HOME_STATE_DIR and UNBOUND_DIR.is_symlink():
+            logger.warning(f"discovery-cache write skipped: fallback state dir is a symlink: {UNBOUND_DIR}")
             return
         UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".discovery-cache.", suffix=".tmp", dir=str(UNBOUND_DIR))

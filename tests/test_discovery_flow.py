@@ -9,18 +9,21 @@ QUEUE_FILE path (tempfile), _SENTRY_DSN (prevent real calls), time.sleep.
 Tool detection runs un-mocked on whatever OS is available.
 """
 
+import errno
 import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
@@ -202,7 +205,7 @@ class TestUnsupportedPlatformGuard(unittest.TestCase):
     def test_linux_proceeds_past_os_guard(self):
         """Linux is supported — it must NOT exit 3 at the OS guard.
 
-        We patch acquire_lock to return False so main() exits 0 at the
+        We patch acquire_lock to return "contended" so main() exits 0 at the
         single-flight lock check (the first exit point after the guard).
         Linux reaching that exit-0 proves it passed the OS guard rather
         than hitting the old exit-3.
@@ -211,7 +214,7 @@ class TestUnsupportedPlatformGuard(unittest.TestCase):
 
         argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
         with patch.object(adm.platform, "system", return_value="Linux"), \
-             patch.object(adm.discovery_cache, "acquire_lock", return_value=False), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
              patch.object(adm, "AIToolsDetector"), \
              patch.object(sys, "argv", argv):
             with self.assertRaises(SystemExit) as cm:
@@ -564,6 +567,335 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
         # Permissions block is kept (settings_path is under gowshik_2's home)
         self.assertIn("permissions", filtered_gowshik_2)
+
+
+class TestAcquireLockReasonCodes(unittest.TestCase):
+    """acquire_lock() returns "acquired"/"contended"/"setup_failed" and sets
+    last_lock_error only on setup failure."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        self._patchers = [
+            # _HOME_STATE_DIR is the home candidate _state_dir_candidates() reads;
+            # UNBOUND_DIR/LOCK_PATH/CACHE_PATH are the active paths downstream uses.
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_acquire_lock_setup_failed_on_unwritable_dir(self):
+        with patch.object(
+            Path, "mkdir", side_effect=OSError(errno.EPERM, "Operation not permitted")
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    def test_acquire_lock_contended_on_fresh_lock(self):
+        self.cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        self.cache.LOCK_PATH.write_text("123 now\n")
+        os.utime(self.cache.LOCK_PATH, (time.time(), time.time()))
+
+        self.assertEqual(self.cache.acquire_lock(), "contended")
+        self.assertIsNone(self.cache.last_lock_error)
+
+    def test_acquire_lock_acquired_clean(self):
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertTrue(self.cache.LOCK_PATH.exists())
+
+    def test_acquire_lock_setup_failed_on_steal_stale_unlink_error(self):
+        # Create a STALE lock (mtime older than STALE_LOCK_SECONDS) so
+        # _lock_is_live() is False and acquire_lock takes the steal/unlink path.
+        self.cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        self.cache.LOCK_PATH.write_text("999 then\n")
+        stale = time.time() - (self.cache.STALE_LOCK_SECONDS + 60)
+        os.utime(self.cache.LOCK_PATH, (stale, stale))
+
+        # Start the patch AFTER creating the stale file so setup isn't broken.
+        with patch.object(
+            Path, "unlink", side_effect=OSError(errno.EPERM, "Operation not permitted")
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    def test_acquire_lock_contended_on_open_race(self):
+        # TOCTOU race: LOCK_PATH absent at the exists() checks, but os.open with
+        # O_CREAT|O_EXCL loses the race and raises FileExistsError.
+        with patch.object(self.cache.os, "open", side_effect=FileExistsError()):
+            self.assertEqual(self.cache.acquire_lock(), "contended")
+        self.assertIsNone(self.cache.last_lock_error)
+
+    def test_acquire_lock_setup_failed_on_write_error(self):
+        # mkdir/exists/open succeed on a clean temp dir, but os.write fails.
+        with patch.object(self.cache.os, "write", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+        # The lock file created by os.open must be removed on write failure, so a
+        # ghost lock can't make the next run see false contention.
+        self.assertFalse(self.cache.LOCK_PATH.exists())
+
+
+class TestStateDirFallback(unittest.TestCase):
+    """_ensure_state_dir falls back to a deterministic uid-namespaced temp dir
+    when home is unusable, refuses hostile pre-existing temp entries, and the
+    fallback path is fixed (never random)."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        # Stash globals the resolver may reassign so tearDown can restore them.
+        self._orig_unbound_dir = cache.UNBOUND_DIR
+        self._orig_cache_path = cache.CACHE_PATH
+        self._orig_lock_path = cache.LOCK_PATH
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        self.cache.UNBOUND_DIR = self._orig_unbound_dir
+        self.cache.CACHE_PATH = self._orig_cache_path
+        self.cache.LOCK_PATH = self._orig_lock_path
+        self.cache.last_lock_error = None
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _unmkdir_able(self, name):
+        # A candidate under a regular file: mkdir raises NotADirectoryError
+        # deterministically and cross-platform.
+        blocker = Path(self._tmp) / name
+        blocker.write_text("x")
+        return Path(blocker) / ".unbound"
+
+    def test_home_unusable_falls_back_to_temp(self):
+        bad_home = self._unmkdir_able("blocker")
+        good_temp = Path(self._tmp) / "unbound-test"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_home, False), (good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+        self.assertTrue(self.cache.LOCK_PATH.exists())
+
+    def test_both_candidates_fail_returns_setup_failed(self):
+        bad_a = self._unmkdir_able("blocker_a")
+        bad_b = self._unmkdir_able("blocker_b")
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_a, False), (bad_b, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_private_temp_symlink_refused(self):
+        target = Path(self._tmp) / "elsewhere"
+        target.mkdir()
+        link = Path(self._tmp) / "unbound-link"
+        os.symlink(str(target), str(link))
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(link, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertIn("unsafe", self.cache.last_lock_error)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_private_temp_created_0700(self):
+        new_dir = Path(self._tmp) / "unbound-fresh"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(new_dir, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertTrue(new_dir.exists())
+        self.assertEqual(stat.S_IMODE(os.lstat(str(new_dir)).st_mode), 0o700)
+
+    def test_temp_candidate_is_deterministic_not_random(self):
+        # Regression guard against swapping in mkdtemp(): the temp candidate
+        # must be the fixed path. On POSIX it is /var/tmp/unbound-{uid}
+        # (cross-session + reboot-stable, NOT the per-session launchd $TMPDIR
+        # that gettempdir() would return on macOS); on Windows it is
+        # gettempdir()/unbound (already per-user there).
+        candidates = self.cache._state_dir_candidates()
+        if hasattr(os, "getuid"):
+            expected = Path(f"/var/tmp/unbound-{os.getuid()}")
+        else:
+            expected = Path(tempfile.gettempdir()) / "unbound"
+        self.assertEqual(candidates[-1][0], expected)
+        self.assertTrue(candidates[-1][1])  # flagged private
+
+    def test_home_candidate_uses_immutable_anchor_after_fallback(self):
+        # P1 regression: after a fallback reassigns UNBOUND_DIR to a temp dir,
+        # the next resolution must still offer the real HOME as candidate[0]
+        # (the is_private=False trust is only safe for the user's own home),
+        # so the temp-dir hardening can't be bypassed on a re-entrant call.
+        self.cache.UNBOUND_DIR = Path("/var/tmp/unbound-already-fallen-back")
+        candidates = self.cache._state_dir_candidates()
+        self.assertEqual(candidates[0][0], self.cache._HOME_STATE_DIR)
+        self.assertFalse(candidates[0][1])  # home anchor, not private-temp
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses W_OK")
+    def test_home_exists_but_unwritable_falls_back(self):
+        # mkdir succeeds on a pre-existing dir even when it isn't writable;
+        # the os.access probe must still force the fallback (and reassign all
+        # three path globals), not fail later at lock creation.
+        bad_home = Path(self._tmp) / "ro_home"
+        bad_home.mkdir()
+        os.chmod(str(bad_home), 0o500)
+        good_temp = Path(self._tmp) / "unbound-rw"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(bad_home, False), (good_temp, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+            self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+            self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
+        finally:
+            os.chmod(str(bad_home), 0o700)
+
+    def test_foreign_owned_temp_dir_refused(self):
+        # A pre-existing private candidate owned by someone else (ownership
+        # mismatch) must be refused, not trusted. Simulate via _is_unsafe_existing.
+        foreign = Path(self._tmp) / "unbound-foreign"
+        with patch.object(self.cache, "_is_unsafe_existing", return_value=True), \
+             patch.object(
+                 self.cache, "_state_dir_candidates",
+                 return_value=[(foreign, True)],
+             ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_world_readable_temp_dir_refused(self):
+        # A pre-existing 0755 dir whose chmod-to-0700 fails (simulated no-op)
+        # leaks discovery state to other users; the post-create mode recheck
+        # must refuse it.
+        loose = Path(self._tmp) / "unbound-loose"
+        loose.mkdir()
+        os.chmod(str(loose), 0o755)
+        try:
+            with patch.object(self.cache.os, "chmod", lambda *a, **k: None), \
+                 patch.object(
+                     self.cache, "_state_dir_candidates",
+                     return_value=[(loose, True)],
+                 ):
+                self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+            self.assertIn("not private", self.cache.last_lock_error)
+        finally:
+            os.chmod(str(loose), 0o700)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_non_sticky_world_writable_parent_refused(self):
+        # The symlink/ownership hardening only holds if the parent is sticky.
+        # A world-writable, NON-sticky parent lets anyone swap our fixed-name
+        # entry, so the candidate must be refused.
+        parent = Path(self._tmp) / "open_parent"
+        parent.mkdir()
+        os.chmod(str(parent), 0o777)  # world-writable, NOT sticky
+        candidate = parent / "unbound-x"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(candidate, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+            self.assertTrue(self.cache.last_lock_error)
+        finally:
+            os.chmod(str(parent), 0o700)
+
+    def test_fallback_cache_writes_land_in_fallback_dir(self):
+        # End-to-end coherence of the global reassignment: after falling back to
+        # the injected private candidate, cache writes must land UNDER it (via
+        # the reassigned CACHE_PATH), not under the original home dir.
+        good_temp = Path(self._tmp) / "unbound-fallback"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.cache.update_tool("claude-code", "u", "hash123")
+        self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+        self.assertTrue(self.cache.CACHE_PATH.exists())
+        # The write must round-trip through the reassigned fallback path, not
+        # the original home dir.
+        self.assertEqual(
+            self.cache.get_cached_hash("claude-code", "u"), "hash123"
+        )
+
+
+class TestMainLockSetupSentry(unittest.TestCase):
+    """main() reports lock setup failures to Sentry and exits 0, but stays
+    quiet on genuine contention. Sentry reporting can never crash the exit."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        self.adm = adm
+        self.argv = [
+            "ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"
+        ]
+
+    def test_main_reports_sentry_on_lock_setup_failure(self):
+        adm = self.adm
+        mock_sentry = Mock()
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
+             patch.object(adm.discovery_cache, "last_lock_error", "EPERM Operation not permitted"), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        mock_sentry.assert_called_once()
+        _, kwargs = mock_sentry.call_args
+        self.assertEqual(kwargs["level"], "error")
+        ctx = kwargs["context"]
+        self.assertEqual(ctx["phase"], "acquire_lock")
+        self.assertIn("unbound_dir", ctx)
+        self.assertTrue(ctx["lock_error"])
+        mock_detector.assert_not_called()
+
+    def test_main_no_sentry_on_genuine_contention(self):
+        adm = self.adm
+        mock_sentry = Mock()
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        mock_sentry.assert_not_called()
+
+    def test_main_sentry_failure_does_not_crash_exit(self):
+        adm = self.adm
+        mock_sentry = Mock(side_effect=RuntimeError("boom"))
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
+             patch.object(adm.discovery_cache, "last_lock_error", "EPERM"), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
 
 
 if __name__ == "__main__":

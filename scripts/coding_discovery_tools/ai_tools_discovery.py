@@ -1551,12 +1551,53 @@ class AIToolsDetector:
                 except Exception as e:
                     logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
 
+            # Extract skills for GitHub Copilot (VS Code). VS Code Copilot loads
+            # agent skills from the SAME locations as the CLI (.github/.claude/
+            # .agents project skills + ~/.copilot, ~/.claude, ~/.agents user
+            # skills), so the Copilot CLI skills extractor produces exactly the
+            # right results here. None on OSes without that extractor (handled).
+            logger.info(f"  Extracting {tool_name} skills...")
+            if self._copilot_cli_skills_extractor:
+                try:
+                    skills_result = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+                    user_skills = skills_result.get("user_skills", [])
+                    project_skills = skills_result.get("project_skills", [])
+
+                    # User-scope skills coalesce under this install's path so they
+                    # share one row (mirrors the Copilot CLI handling).
+                    install_key = tool.get("install_path") or str(Path.home())
+                    for skill in user_skills:
+                        if install_key not in projects_dict:
+                            projects_dict[install_key] = {"mcpServers": [], "rules": [], "skills": []}
+                        projects_dict[install_key].setdefault("skills", []).append(skill)
+
+                    # Project-scope skills merge into projects_dict[root]["skills"].
+                    for skills_project in project_skills:
+                        project_root = skills_project.get("project_root", "")
+                        skills = skills_project.get("skills", [])
+                        if not project_root:
+                            continue
+                        if project_root not in projects_dict:
+                            projects_dict[project_root] = {"mcpServers": [], "rules": [], "skills": []}
+                        existing = projects_dict[project_root].setdefault("skills", [])
+                        existing.extend(skills)
+                        projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
+
+                    total_skills = len(user_skills) + sum(len(p.get("skills", [])) for p in project_skills)
+                    logger.info(
+                        f"  ✓ Found {total_skills} {tool_name} skill(s)" if total_skills
+                        else f"  No {tool_name} skills found"
+                    )
+                except Exception as e:
+                    logger.warning(f"  Error extracting {tool_name} skills: {e}")
+
             # Convert projects_dict back to list format for tool_dict
             projects_list = [
                 {
                     "path": path,
                     "mcpServers": data.get("mcpServers", []),
-                    "rules": data.get("rules", [])
+                    "rules": data.get("rules", []),
+                    "skills": data.get("skills", [])
                 }
                 for path, data in projects_dict.items()
             ]

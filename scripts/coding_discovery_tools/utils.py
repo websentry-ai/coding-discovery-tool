@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import functools
 import json
 import logging
 import os
@@ -99,6 +100,67 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()
+
+
+@functools.lru_cache(maxsize=1)
+def in_container() -> bool:
+    """Best-effort detection of whether we're running inside a container.
+
+    Combines several signals because no single one is reliable across runtimes
+    and kernels:
+      - ``/.dockerenv`` / ``/run/.containerenv`` — Docker / Podman runtime markers.
+      - root filesystem mounted as ``overlay`` — cgroup-version-agnostic.
+      - ``/proc/1/cgroup`` docker/lxc/kube markers — cgroup v1 ONLY (v2 shows
+        ``0::/`` from inside, so this is a fallback, not the primary check).
+
+    This is for honest behavioural branching, not security — every marker here
+    is forgeable by whoever controls the container. Result is cached for the
+    process lifetime.
+    """
+    try:
+        if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+            return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "/" and parts[2] == "overlay":
+                    return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8") as f:
+            blob = f.read()
+        if any(marker in blob for marker in ("/docker", "/lxc", "kubepods", "/containerd")):
+            return True
+    except OSError:
+        pass
+
+    return False
+
+
+@functools.lru_cache(maxsize=1)
+def get_container_id() -> str:
+    """Identifier for the current container, used to namespace home_user so
+    concurrent containers on one host don't clobber each other's tool data.
+
+    Precedence:
+      1. Injected ``UNBOUND_CONTAINER_ID`` — the STABLE path. The host can
+         derive this from the workspace / devcontainer name so a restarted
+         workspace keeps a single profile (clean upsert).
+      2. Container hostname — the EPHEMERAL fallback. Unique per ``docker run``,
+         so the SAME workspace restarted under a fresh hostname creates a new
+         profile (old ones linger). Acceptable only for one-shot containers;
+         set UNBOUND_CONTAINER_ID for long-lived / restarted workspaces.
+    """
+    injected = os.environ.get("UNBOUND_CONTAINER_ID", "").strip()
+    if injected:
+        return injected
+    return get_hostname()
 
 
 class DsclBatchData(NamedTuple):

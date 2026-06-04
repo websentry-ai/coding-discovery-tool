@@ -65,7 +65,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, is_valid_serial, QUEUE_FILE
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, is_valid_serial, in_container, get_container_id, QUEUE_FILE
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -119,7 +119,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, is_valid_serial, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, is_valid_serial, in_container, get_container_id, QUEUE_FILE
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -229,20 +229,27 @@ class AIToolsDetector:
         """
         Extract unique device identifier (serial number).
 
-        An injected host serial (container launch / socket proxy) takes
-        precedence so a container reports the HOST device, not its ephemeral
-        container hostname. The env var is only set when injected, so native
-        hosts are unaffected and still auto-detect their own serial.
+        Inside a container, an injected host serial takes precedence so the
+        container reports the HOST device, not its ephemeral container hostname.
+        The override is gated on container detection: it is only honored when we
+        detect we're running in a container, so a stray UNBOUND_DEVICE_SERIAL on
+        a native host cannot mask the real auto-detected serial.
 
         Returns:
             Device serial number or hostname as fallback
         """
         injected = os.environ.get("UNBOUND_DEVICE_SERIAL", "").strip()
         if injected:
-            if is_valid_serial(injected):
+            if not in_container():
+                logger.info(
+                    "UNBOUND_DEVICE_SERIAL is set but not running in a container; "
+                    "ignoring injected serial and auto-detecting instead"
+                )
+            elif is_valid_serial(injected):
                 logger.info(f"Using injected host device_id from UNBOUND_DEVICE_SERIAL: {injected}")
                 return injected
-            logger.warning(f"Ignoring invalid UNBOUND_DEVICE_SERIAL ({injected!r}); falling back to auto-detection")
+            else:
+                logger.warning(f"Ignoring invalid UNBOUND_DEVICE_SERIAL ({injected!r}); falling back to auto-detection")
         return self._device_id_extractor.extract_device_id()
 
     def detect_all_tools(self, user_home: Optional[Path] = None) -> List[Dict]:
@@ -1933,8 +1940,18 @@ class AIToolsDetector:
         # Filter out internal keys (starting with _) before sending to backend
         tool_for_report = {k: v for k, v in tool.items() if not k.startswith('_')}
 
+        # In a container, all containers on a host share one injected device_id,
+        # so a plain home_user (e.g. "ubuntu"/"root", fixed per image) would make
+        # concurrent containers clobber each other's tool data on the backend
+        # (the report-ingest replace key is (device, tool_name, home_user)).
+        # Namespace home_user with the container id so each container keeps a
+        # distinct profile under the shared device. Native hosts are unaffected.
+        report_home_user = home_user
+        if home_user and in_container():
+            report_home_user = f"{get_container_id()}_{home_user}"
+
         report = {
-            "home_user": home_user,
+            "home_user": report_home_user,
             "system_user": system_user or home_user,
             "device_id": device_id,
             "tools": [tool_for_report]

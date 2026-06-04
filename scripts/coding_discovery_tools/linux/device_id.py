@@ -1,6 +1,8 @@
 """Device ID extraction for Linux."""
 
 import logging
+import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -54,7 +56,7 @@ class LinuxDeviceIdExtractor(BaseDeviceIdExtractor):
         """
         try:
             if not cache._ensure_state_dir():
-                logger.debug("No usable state dir for device-id; using ephemeral uuid")
+                logger.warning("No usable state dir for device-id; using ephemeral uuid")
                 return str(uuid.uuid4())
 
             device_id_path = cache.UNBOUND_DIR / _DEVICE_ID_FILENAME
@@ -63,17 +65,46 @@ class LinuxDeviceIdExtractor(BaseDeviceIdExtractor):
                 if device_id_path.exists() and device_id_path.is_file():
                     existing = device_id_path.read_text(encoding="utf-8").strip()
                     if existing:
-                        return existing
+                        # Validate the persisted value is a well-formed UUID. A
+                        # truncated/partial write (pre-atomic-write), a manual edit,
+                        # or another tool clobbering the file can leave a non-UUID
+                        # string here; returning it would create a backend device
+                        # row that no valid UUID can ever match. Treat corrupt as
+                        # absent and regenerate.
+                        try:
+                            uuid.UUID(existing)
+                            return existing
+                        except ValueError:
+                            logger.warning(
+                                f"Corrupt (non-UUID) persisted device-id at "
+                                f"{device_id_path!s}; regenerating"
+                            )
             except Exception as e:
-                logger.debug(f"Could not read persisted device-id at {device_id_path}: {e}")
+                logger.warning(f"Could not read persisted device-id at {device_id_path!s}: {e}")
 
             new_id = str(uuid.uuid4())
             try:
+                # Atomic write: a SIGKILL/OOM/power-loss mid-write must never leave
+                # a partial UUID on disk. Write to a temp file in the same dir then
+                # os.replace() (atomic rename on the same filesystem), mirroring
+                # cache.atomic_write_cache().
                 cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
-                device_id_path.write_text(new_id, encoding="utf-8")
+                fd, tmp = tempfile.mkstemp(
+                    prefix=".device-id.", suffix=".tmp", dir=str(cache.UNBOUND_DIR)
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(new_id)
+                    os.replace(tmp, str(device_id_path))
+                finally:
+                    if os.path.exists(tmp):
+                        try:
+                            os.unlink(tmp)
+                        except OSError:
+                            pass
             except Exception as e:
-                logger.debug(f"Could not persist device-id at {device_id_path}: {e}")
+                logger.warning(f"Could not persist device-id at {device_id_path!s}: {e}")
             return new_id
         except Exception as e:
-            logger.debug(f"device-id fallback failed: {e}")
+            logger.warning(f"device-id fallback failed: {e}")
             return str(uuid.uuid4())

@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
@@ -26,32 +26,59 @@ logger = logging.getLogger(__name__)
 
 # The CLI home directory is version-dependent in its exact contents. We never
 # gate on a single file, and never on bare-directory existence alone — we
-# require the config dir to exist AND contain at least one known artifact from
-# this union set (review P0-1). The marker set mirrors GitHub's documented
-# config-dir contents (Copilot CLI "config dir reference"); ``pkg`` is an
-# observed-but-undocumented binary dir kept as an extra real-world signal.
+# require the config dir to exist AND contain at least one STRONG (CLI-exclusive)
+# artifact (review P0-1).
+#
+# Markers are split into two tiers:
+#
+#   STRONG (CLI-exclusive): files/dirs the standalone GitHub Copilot CLI writes
+#     and that no other tool reads. Presence of any one of these is sufficient
+#     to declare a CLI install. The set mirrors GitHub's documented config-dir
+#     contents (Copilot CLI "config dir reference"); ``pkg`` is an
+#     observed-but-undocumented binary dir kept as an extra real-world signal.
+#
+#   SHARED: markers under ``~/.copilot/`` that are NOT exclusive to the CLI,
+#     because another GitHub Copilot surface also produces them. Two ways:
+#       - ALSO read by the Copilot VS Code/JetBrains agent: ``skills/`` (and
+#         ``agents/``, ``instructions/``, ``copilot-instructions.md``). Per the
+#         VS Code Agent Skills docs, ``~/.copilot/skills/`` is a shared location
+#         the IDE agent reads, so it is not exclusive to the CLI:
+#         https://code.visualstudio.com/docs/agent-customization/agent-skills
+#       - WRITTEN by the IDE extension itself: ``ide/``. The Copilot VS Code /
+#         JetBrains extension drops a discovery lock file at
+#         ``~/.copilot/ide/<uuid>.lock`` (containing the IDE name + pid) so the
+#         CLI can connect — see microsoft/vscode-copilot-chat#3583. An IDE-only
+#         user with no standalone CLI therefore has ``~/.copilot/ide/`` even
+#         though the CLI was never installed.
+#     Any of these can be present for an IDE-only user, so none can alone declare
+#     a CLI install (doing so produces phantom CLI rows); they are tracked solely
+#     to log/suppress that case.
 _CLI_DIR_NAME = ".copilot"
-_CLI_MARKER_FILES = frozenset({
-    "settings.json",
+_CLI_STRONG_MARKER_FILES = frozenset({
     "config.json",
     "mcp-config.json",
+    "settings.json",
     "lsp-config.json",
     "permissions-config.json",
-    "copilot-instructions.md",
     "session-store.db",
 })
-_CLI_MARKER_DIRS = frozenset({
-    "agents",
-    "hooks",
-    "ide",
-    "installed-plugins",
-    "instructions",
+_CLI_STRONG_MARKER_DIRS = frozenset({
     "logs",
-    "plugin-data",
     "session-state",
     "command-history-state",
-    "skills",
+    "installed-plugins",
+    "plugin-data",
+    "hooks",
     "pkg",
+})
+_CLI_SHARED_MARKER_FILES = frozenset({
+    "copilot-instructions.md",
+})
+_CLI_SHARED_MARKER_DIRS = frozenset({
+    "skills",
+    "agents",
+    "instructions",
+    "ide",
 })
 
 
@@ -79,32 +106,71 @@ def _resolve_copilot_dir(user_home: Path) -> Path:
     return user_home / _CLI_DIR_NAME
 
 
-def _copilot_dir_has_known_artifact(copilot_dir: Path) -> bool:
-    """Return True if ``copilot_dir`` contains at least one known CLI artifact.
-
-    A known artifact is any of the marker files (as a file) or any of the
-    marker directories (as a directory). Bare directory existence is not
-    sufficient — the layout is version-dependent, so we accept a union of
-    signals but require at least one to actually be present.
+def _dir_has_any_marker(
+    copilot_dir: Path, marker_files: FrozenSet[str], marker_dirs: FrozenSet[str]
+) -> bool:
+    """Return True if ``copilot_dir`` holds any of ``marker_files`` (as a file)
+    or ``marker_dirs`` (as a directory). Errors are swallowed (the tool must
+    never crash) — a marker that can't be stat'd is treated as absent.
     """
     try:
-        for marker in _CLI_MARKER_FILES:
-            candidate = copilot_dir / marker
+        for marker in marker_files:
             try:
-                if candidate.is_file():
+                if (copilot_dir / marker).is_file():
                     return True
             except OSError:
                 continue
-        for marker in _CLI_MARKER_DIRS:
-            candidate = copilot_dir / marker
+        for marker in marker_dirs:
             try:
-                if candidate.is_dir():
+                if (copilot_dir / marker).is_dir():
                     return True
             except OSError:
                 continue
     except OSError as exc:
         logger.debug(f"Error inspecting Copilot CLI dir {copilot_dir}: {exc}")
     return False
+
+
+def _copilot_dir_has_strong_artifact(copilot_dir: Path) -> bool:
+    """Return True if ``copilot_dir`` holds at least one STRONG CLI artifact.
+
+    A strong artifact is any of the STRONG marker files (present as a file) or
+    any of the STRONG marker directories (present as a directory). These are
+    written by the standalone GitHub Copilot CLI and read by no other tool, so a
+    single one is sufficient to declare a CLI install. Bare directory existence
+    is not sufficient — the layout is version-dependent, so we accept a union of
+    signals but require at least one to actually be present.
+
+    SHARED markers (``skills/``, ``agents/``, ``instructions/``,
+    ``copilot-instructions.md``) are intentionally excluded: they are also read
+    by the GitHub Copilot VS Code/JetBrains agent
+    (https://code.visualstudio.com/docs/agent-customization/agent-skills), so on
+    their own they cannot distinguish a CLI install from an IDE-only user and
+    would produce phantom CLI rows. Use ``_copilot_dir_has_shared_artifact`` to
+    detect that case for logging/suppression.
+    """
+    return _dir_has_any_marker(
+        copilot_dir, _CLI_STRONG_MARKER_FILES, _CLI_STRONG_MARKER_DIRS
+    )
+
+
+def _copilot_dir_has_shared_artifact(copilot_dir: Path) -> bool:
+    """Return True if ``copilot_dir`` holds at least one SHARED Copilot marker.
+
+    A shared marker is any of the SHARED marker files (present as a file) or any
+    of the SHARED marker directories (present as a directory): ``skills/``,
+    ``agents/``, ``instructions/``, ``copilot-instructions.md``. These live under
+    ``~/.copilot/`` but are ALSO read by the GitHub Copilot VS Code extension /
+    JetBrains plugin's agent mode
+    (https://code.visualstudio.com/docs/agent-customization/agent-skills), so
+    they cannot, on their own, declare a standalone CLI install — an IDE-only
+    user who never installed the CLI can have them. This predicate exists only to
+    recognise the "shared markers but no strong CLI artifact" case so it can be
+    logged and suppressed rather than reported as a phantom CLI row.
+    """
+    return _dir_has_any_marker(
+        copilot_dir, _CLI_SHARED_MARKER_FILES, _CLI_SHARED_MARKER_DIRS
+    )
 
 
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?")
@@ -134,8 +200,12 @@ class MacOSCopilotCliDetector(BaseToolDetector):
 
     Detection involves:
     - Checking that a user's ``~/.copilot/`` directory exists.
-    - Verifying it contains at least one known CLI artifact (a marker file or
-      marker directory) so a stray empty ``~/.copilot`` does not count.
+    - Verifying it contains at least one STRONG (CLI-exclusive) marker (a strong
+      marker file or directory) so a stray empty ``~/.copilot`` does not count.
+      A dir holding only SHARED markers (skills/agents/instructions/
+      copilot-instructions.md, which the IDE Copilot agent reads, or ide/, which
+      the IDE extension writes as a discovery lock) is the VS Code/JetBrains
+      agent rather than the CLI and is suppressed.
 
     When ``user_home`` is set on the instance (the per-user path used by the
     live discovery loop via ``detect_tool_for_user``), detection is scoped to
@@ -268,7 +338,9 @@ class MacOSCopilotCliDetector(BaseToolDetector):
 
         Returns a tool-info dict when the resolved config dir (``COPILOT_HOME``
         when set for this user, else ``user_home/.copilot``) exists and holds at
-        least one known artifact; otherwise None.
+        least one STRONG CLI artifact; otherwise None. A dir holding only SHARED
+        markers (skills/agents/instructions/copilot-instructions.md/ide) is the
+        IDE Copilot agent, not the CLI — it is logged and suppressed.
         """
         copilot_dir = _resolve_copilot_dir(user_home)
         try:
@@ -278,7 +350,14 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             logger.debug(f"Error checking Copilot CLI dir {copilot_dir}: {exc}")
             return None
 
-        if not _copilot_dir_has_known_artifact(copilot_dir):
+        if not _copilot_dir_has_strong_artifact(copilot_dir):
+            if _copilot_dir_has_shared_artifact(copilot_dir):
+                logger.info(
+                    "Skipping %s: only shared/IDE-written Copilot markers present "
+                    "(skills/agents/instructions/copilot-instructions.md/ide) — likely the "
+                    "VS Code/JetBrains Copilot agent, not the standalone CLI",
+                    copilot_dir,
+                )
             return None
 
         return {

@@ -12,9 +12,11 @@ Two things are OS-specific: the all-users scan (Windows uses
 and ``get_version`` (overridden to pass ``shell=True`` for the npm ``.cmd``
 shim, mirroring ``WindowsCodexDetector`` — without it the inherited probe would
 always read "unknown"). Everything else — the marker gate
-(``_copilot_dir_has_known_artifact``), ``_detect_for_user``, ``detect``, and
+(``_copilot_dir_has_strong_artifact``), ``_detect_for_user``, ``detect``, and
 ``detect_all_tools`` — is inherited from the macOS detector rather than
-re-derived (CLAUDE.md DRY). Mirrors the per-user/admin idiom in
+re-derived (CLAUDE.md DRY). The marker gate inherits the strong-vs-shared
+artifact split (``_copilot_dir_has_strong_artifact``) too. Mirrors the
+per-user/admin idiom in
 ``windows/github_copilot/detect_copilot.py``.
 """
 

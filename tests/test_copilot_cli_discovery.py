@@ -178,10 +178,88 @@ class TestCopilotCliDetection(unittest.TestCase):
         (copilot_dir / "command-history-state").mkdir()
         self.assertIsNotNone(self.detector.detect())
 
-    def test_skills_dir_marker_detected(self):
+    def test_skills_dir_alone_not_detected(self):
+        """skills/ is a SHARED marker (the IDE Copilot agent reads it too), so on
+        its own it is not a standalone CLI install -> not detected."""
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "skills").mkdir()
+        self.assertIsNone(self.detector.detect())
+
+    def test_agents_dir_alone_not_detected(self):
+        """agents/ is a SHARED marker -> not a CLI install on its own."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "agents").mkdir()
+        self.assertIsNone(self.detector.detect())
+
+    def test_instructions_dir_alone_not_detected(self):
+        """instructions/ is a SHARED marker -> not a CLI install on its own."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "instructions").mkdir()
+        self.assertIsNone(self.detector.detect())
+
+    def test_copilot_instructions_md_alone_not_detected(self):
+        """copilot-instructions.md is a SHARED marker -> not a CLI install alone."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "copilot-instructions.md").write_text("hi", encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
+    def test_ide_lock_dir_alone_not_detected(self):
+        """ide/ holds the discovery lock the VS Code/JetBrains Copilot EXTENSION
+        writes (microsoft/vscode-copilot-chat#3583), so an IDE-only user has it
+        with no CLI -> SHARED, not a CLI install on its own."""
+        copilot_dir = self._make_copilot_dir()
+        ide_dir = copilot_dir / "ide"
+        ide_dir.mkdir()
+        (ide_dir / "0c.lock").write_text(
+            '{"pid": 1, "ideName": "Visual Studio Code", "workspaceFolders": []}',
+            encoding="utf-8",
+        )
+        self.assertIsNone(self.detector.detect())
+
+    def test_only_skills_and_rules_not_detected(self):
+        """Repro for device MY4W6QQGCQ / user karthick: a ~/.copilot holding only
+        skills/ and copilot-instructions.md (both SHARED, no strong CLI artifact)
+        is the IDE Copilot agent, not the CLI -> not detected (no phantom row)."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "skills").mkdir()
+        (copilot_dir / "copilot-instructions.md").write_text("rules", encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
+    def test_session_store_db_marker_detected(self):
+        """session-store.db is a STRONG CLI-exclusive marker -> detected."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
         self.assertIsNotNone(self.detector.detect())
+
+    def test_real_install_with_strong_and_shared_markers_detected(self):
+        """A real install (strong markers config.json + session-store.db) that ALSO
+        has shared skills/ is detected — shared markers never veto a strong one."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "config.json").write_text("{}", encoding="utf-8")
+        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
+        (copilot_dir / "skills").mkdir()
+        self.assertIsNotNone(self.detector.detect())
+
+    def test_shared_only_logs_info_and_returns_none(self):
+        """A shared-only ~/.copilot emits an INFO suppression log and returns None."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "skills").mkdir()
+        with self.assertLogs(_DETECTOR_MOD, level="INFO") as captured:
+            self.assertIsNone(self.detector.detect())
+        self.assertTrue(
+            any("shared/IDE-written Copilot markers" in record.getMessage()
+                for record in captured.records)
+        )
+
+    def test_copilot_home_shared_only_not_detected(self):
+        """A COPILOT_HOME-relocated config dir holding only shared markers is
+        suppressed too — the gate runs on the resolved dir, wherever it lives."""
+        relocated = Path(self.tmp_dir) / "relocated-copilot"
+        (relocated / "skills").mkdir(parents=True)
+        detector = MacOSCopilotCliDetector()
+        with patch.dict(os.environ, {"COPILOT_HOME": str(relocated)}, clear=False), \
+                patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False):
+            self.assertIsNone(detector.detect())
 
     def test_permissions_config_marker_detected(self):
         copilot_dir = self._make_copilot_dir()
@@ -871,6 +949,13 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         """A ~/.copilot holding only unknown junk is not a CLI install."""
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "random.txt").write_text("hello", encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
+    def test_shared_only_not_detected(self):
+        """The strong-vs-shared marker split is inherited: a ~/.copilot holding
+        only the SHARED skills/ marker is the IDE Copilot agent, not the CLI."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "skills").mkdir()
         self.assertIsNone(self.detector.detect())
 
     def test_detect_returns_unknown_version_when_binary_absent(self):

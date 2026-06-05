@@ -133,6 +133,41 @@ payload_logger = logging.getLogger(__name__ + ".payload")
 configure_logger()
 
 
+def _normalise_path(p: str) -> str:
+    """Normalise a path string for cross-platform comparison.
+
+    Forward-slashes separators, upper-cases a Windows drive letter, and strips a
+    trailing slash. Shared by ``filter_tool_projects_by_user`` and the per-user
+    Copilot CLI ownership gate so both compare paths identically (DRY).
+    """
+    if not p:
+        return p
+    n = p.replace('\\', '/')
+    if len(n) >= 2 and n[1] == ':':
+        n = n[0].upper() + n[1:]
+    n = n.rstrip('/')
+    return n
+
+
+def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
+    """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
+
+    The CLI's ``install_path`` is a per-user ``~/.copilot`` owned by exactly one
+    user, but the per-user scan loop re-runs for every user. Emit only when the
+    user OWNS the detected install (``install_path`` under their home) OR the
+    per-user filter produced data for them (projects/permissions) — otherwise a
+    non-owner with no data would get a phantom CLI install row. Scoped to the
+    CLI: IDE tools legitimately share a machine-wide ``install_path``.
+    """
+    install_norm = _normalise_path(tool_filtered.get("install_path", ""))
+    user_norm = _normalise_path(str(user_home))
+    owns_install = bool(install_norm) and (
+        install_norm == user_norm or install_norm.startswith(user_norm + "/")
+    )
+    has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
+    return owns_install or has_data
+
+
 class AIToolsDetector:
     """
     Detector for AI coding tools on macOS and Windows.
@@ -1276,21 +1311,11 @@ class AIToolsDetector:
         Returns:
             Tool dict with filtered projects and permissions
         """
-        # Normalise to forward slashes + lowercase drive on Windows
-        def _normalise(p: str) -> str:
-            if not p:
-                return p
-            n = p.replace('\\', '/')
-            if len(n) >= 2 and n[1] == ':':
-                n = n[0].upper() + n[1:]
-            n = n.rstrip('/')
-            return n
-
-        user_home_norm = _normalise(str(user_home))
+        user_home_norm = _normalise_path(str(user_home))
         filtered_projects = []
-        
+
         for project in tool.get('projects', []):
-            project_path_norm = _normalise(project.get('path', ''))
+            project_path_norm = _normalise_path(project.get('path', ''))
             # Checking if project path is under the user's home directory
             if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/'):
                 filtered_projects.append(project)
@@ -1301,7 +1326,7 @@ class AIToolsDetector:
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
-            settings_path_norm = _normalise(perms.get('settings_path', ''))
+            settings_path_norm = _normalise_path(perms.get('settings_path', ''))
             if (settings_source != 'managed'
                     and settings_path_norm
                     and not (settings_path_norm == user_home_norm
@@ -2400,6 +2425,19 @@ def main():
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+
+                        # Ownership gate (Copilot CLI only): suppress a phantom install
+                        # row for a user who neither owns the detected ~/.copilot nor has
+                        # any per-user data (e.g. gowshik_2 carrying gowshik's install_path
+                        # with 0 projects). filter_tool_projects_by_user scopes projects/
+                        # permissions but never rewrites install_path, so the gate is needed.
+                        if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping Copilot CLI for {user_name}: install_path "
+                                f"{tool_filtered.get('install_path')!r} not owned by this "
+                                f"user and no per-user data"
+                            )
+                            continue
 
                         # Detect subscription plan for Claude Code
                         if tool_name.lower() == "claude code":

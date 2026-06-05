@@ -43,15 +43,28 @@ _VSCODE_USER_DATA_DIRS = [
 ]
 
 
-def _read_extension_version(ext_dir: Path) -> str:
-    """Read ``version`` from a VS Code extension's package.json (best-effort)."""
+def _read_builtin_copilot_identity(ext_dir: Path):
+    """Return ``(tool_name, version)`` for a bundled copilot extension from its
+    package.json.
+
+    The consolidated built-in ``copilot`` folder is actually the **Copilot Chat**
+    extension (``name: "copilot-chat"``, ``displayName: "GitHub Copilot Chat"``) —
+    the extension that consumes ``mcp.json`` — so it is labeled ``GitHub Copilot
+    Chat (VS Code)`` (matching the marketplace ``github.copilot-chat`` mapping); a
+    plain ``copilot`` extension stays ``GitHub Copilot (VS Code)``. Best-effort.
+    """
+    name_label, version = "GitHub Copilot (VS Code)", "unknown"
     try:
         data = json.loads((ext_dir / "package.json").read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            return data.get("version", "unknown")
+            version = data.get("version", "unknown")
+            ext_name = str(data.get("name") or "").lower()
+            display = str(data.get("displayName") or "").lower()
+            if "copilot-chat" in ext_name or "chat" in display:
+                name_label = "GitHub Copilot Chat (VS Code)"
     except (OSError, json.JSONDecodeError, ValueError):
         pass
-    return "unknown"
+    return name_label, version
 
 
 class LinuxCopilotDetector(BaseCopilotDetectorBase):
@@ -135,10 +148,10 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
                         continue
                 except OSError:
                     continue
-                version = _read_extension_version(copilot_dir)
-                logger.debug(f"Detected built-in VS Code Copilot {version} at {copilot_dir}")
+                name_label, version = _read_builtin_copilot_identity(copilot_dir)
+                logger.debug(f"Detected built-in VS Code {name_label} {version} at {copilot_dir}")
                 return [{
-                    "name": "GitHub Copilot (VS Code)",
+                    "name": name_label,
                     "version": version,
                     "publisher": "GitHub",
                     "install_path": str(copilot_dir),

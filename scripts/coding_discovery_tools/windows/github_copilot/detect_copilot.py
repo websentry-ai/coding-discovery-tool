@@ -211,13 +211,21 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                         continue
                 except OSError:
                     continue
-                version = "unknown"
+                # The consolidated built-in "copilot" folder is actually the
+                # Copilot Chat extension (name="copilot-chat") — the MCP consumer
+                # — so label it accordingly (matches the marketplace
+                # github.copilot-chat mapping); a plain "copilot" stays generic.
+                version, name_label = "unknown", "GitHub Copilot (VS Code)"
                 data = _load_jsonc(copilot_dir / "package.json")
                 if isinstance(data, dict):
                     version = data.get("version", "unknown")
-                logger.debug(f"Detected built-in VS Code Copilot {version} at {copilot_dir}")
+                    ext_name = str(data.get("name") or "").lower()
+                    display = str(data.get("displayName") or "").lower()
+                    if "copilot-chat" in ext_name or "chat" in display:
+                        name_label = "GitHub Copilot Chat (VS Code)"
+                logger.debug(f"Detected built-in VS Code {name_label} {version} at {copilot_dir}")
                 return [{
-                    "name": "GitHub Copilot (VS Code)",
+                    "name": name_label,
                     "version": version,
                     "publisher": "GitHub",
                     "install_path": str(copilot_dir),

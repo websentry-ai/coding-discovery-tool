@@ -54,7 +54,7 @@ class TestVscodeBuiltinCopilotDetection(unittest.TestCase):
         self._make_code_user_dir()
         res = self._detect()
         self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+        self.assertEqual(res[0]["name"], "GitHub Copilot Chat (VS Code)")
         self.assertEqual(res[0]["version"], "0.51.0")
         self.assertEqual(res[0]["install_path"], str(self.copilot))
 
@@ -86,6 +86,15 @@ class TestVscodeBuiltinCopilotDetection(unittest.TestCase):
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["version"], "unknown")
 
+    def test_builtin_plain_copilot_labeled_generic(self):
+        # A bundle whose manifest is a plain "copilot" (not chat) stays generic.
+        self._make_code_user_dir()
+        (self.copilot / "package.json").write_text(
+            json.dumps({"name": "copilot", "publisher": "GitHub", "version": "1.2.3"}), encoding="utf-8")
+        res = self._detect()
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+
     def test_marketplace_present_does_not_invoke_builtin_fallback(self):
         """Purely-additive guarantee: when a marketplace Copilot extension is
         present, the existing path returns it and the new built-in fallback is
@@ -114,7 +123,7 @@ class TestLinuxVscodeBuiltinCopilotDetection(unittest.TestCase):
         self.app_ext = Path(self.tmp) / "usr" / "share" / "code" / "resources" / "app" / "extensions"
         self.copilot = self.app_ext / "copilot"
         self.copilot.mkdir(parents=True)
-        (self.copilot / "package.json").write_text(json.dumps({"version": "0.51.0"}), encoding="utf-8")
+        (self.copilot / "package.json").write_text(json.dumps({"name": "copilot-chat", "version": "0.51.0"}), encoding="utf-8")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -130,7 +139,7 @@ class TestLinuxVscodeBuiltinCopilotDetection(unittest.TestCase):
         self._make_code_user_dir()
         res = self._detect()
         self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+        self.assertEqual(res[0]["name"], "GitHub Copilot Chat (VS Code)")
         self.assertEqual(res[0]["version"], "0.51.0")
         self.assertEqual(res[0]["install_path"], str(self.copilot))
 
@@ -161,7 +170,7 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
         self.app_ext = Path(self.tmp) / "Program Files" / "Microsoft VS Code" / "resources" / "app" / "extensions"
         self.copilot = self.app_ext / "copilot"
         self.copilot.mkdir(parents=True)
-        (self.copilot / "package.json").write_text(json.dumps({"version": "0.51.0"}), encoding="utf-8")
+        (self.copilot / "package.json").write_text(json.dumps({"name": "copilot-chat", "version": "0.51.0"}), encoding="utf-8")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -179,7 +188,7 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
         self._make_code_user_dir()
         res = self._detect()
         self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+        self.assertEqual(res[0]["name"], "GitHub Copilot Chat (VS Code)")
         self.assertEqual(res[0]["version"], "0.51.0")
         self.assertEqual(res[0]["install_path"], str(self.copilot))
 

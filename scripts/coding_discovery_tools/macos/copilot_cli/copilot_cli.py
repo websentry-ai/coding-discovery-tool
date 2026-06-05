@@ -116,6 +116,47 @@ def _resolve_copilot_dir(user_home: Path) -> Path:
     return user_home / _CLI_DIR_NAME
 
 
+def _resolve_copilot_binary(user_home: Path) -> Optional[Path]:
+    """Return the per-user ``copilot`` CLI binary for ``user_home``, if found.
+
+    The CLI installs to a per-user location that root's PATH does not include
+    during an MDM all-users scan, so probing the bare ``copilot`` name yields
+    nothing and the version reads "unknown". We resolve the binary explicitly
+    from the documented/observed install locations, in order:
+
+      - ``~/.local/bin/copilot`` (npm/standalone user install)
+      - ``~/.bun/bin/copilot`` (Bun global install)
+      - ``~/.nvm/versions/node/*/bin/copilot`` (nvm-managed Node, first match)
+
+    Best-effort only: any error is swallowed and None is returned so the caller
+    falls back to the bare-PATH probe (and ultimately "unknown"). Never raises.
+    """
+    try:
+        for candidate in (
+            user_home / ".local" / "bin" / "copilot",
+            user_home / ".bun" / "bin" / "copilot",
+        ):
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    return candidate
+            except OSError:
+                continue
+        nvm_node_dir = user_home / ".nvm" / "versions" / "node"
+        try:
+            for version_dir in nvm_node_dir.glob("*"):
+                try:
+                    candidate = version_dir / "bin" / "copilot"
+                    if candidate.exists() and os.access(str(candidate), os.X_OK):
+                        return candidate
+                except OSError:
+                    continue
+        except OSError:
+            pass
+    except (PermissionError, OSError) as exc:
+        logger.debug(f"Error resolving Copilot CLI binary for {user_home}: {exc}")
+    return None
+
+
 def _dir_has_any_marker(
     copilot_dir: Path, marker_files: FrozenSet[str], marker_dirs: FrozenSet[str]
 ) -> bool:
@@ -290,10 +331,21 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             banner so the stored value is clean and within the backend's version
             column limit (a raw multi-line banner overflows it).
         """
-        # TODO(copilot-cli): resolve the per-user binary (e.g. ~/.local/bin,
-        # .bun/bin, nvm paths) and probe that explicitly, mirroring
-        # find_claude_binary_for_user, so version populates on root MDM scans
-        # where root's PATH lacks the user's copilot install (review W2).
+        # Resolve the per-user binary first (root's PATH lacks the user's
+        # copilot install during an MDM all-users scan), then fall back to the
+        # bare-PATH probe for the running-user case.
+        try:
+            if self.user_home is not None:
+                binary = _resolve_copilot_binary(self.user_home)
+                if binary is not None:
+                    parsed = _parse_cli_version(
+                        run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                    )
+                    if parsed:
+                        return parsed
+        except Exception as exc:
+            logger.debug(f"Could not extract Copilot CLI version from per-user binary: {exc}")
+
         try:
             output = run_command(["copilot", "--version"], VERSION_TIMEOUT)
             return _parse_cli_version(output)

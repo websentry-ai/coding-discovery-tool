@@ -27,8 +27,8 @@ def find_github_copilot_project_root(rule_file: Path) -> Path:
     For GitHub Copilot rules:
     - Global VS Code rules in %APPDATA%\\Code\\User\\prompts\\ -> User AppData\\Roaming
     - Global JetBrains rules in %LOCALAPPDATA%\\github-copilot\\intellij\\ -> User AppData\\Local
-    - Workspace rules in .github\\ -> parent of .github (project root)
-    - Path-specific instructions in .github\\copilot\\ -> parent of .github (project root)
+    - Workspace rules anywhere under .github\\ (e.g. .github\\instructions\\**,
+      .github\\prompts\\) -> parent of the nearest .github ancestor (project root)
     - AGENTS.md at project root -> parent directory (via default fallback)
 
     Args:
@@ -49,14 +49,13 @@ def find_github_copilot_project_root(rule_file: Path) -> Path:
         if parent.parent.name == "github-copilot":
             return parent.parent
 
-    # Path-specific instructions in .github/copilot/ directory
-    if parent.name == "copilot":
-        if parent.parent.name == ".github":
-            return parent.parent.parent
-
-    # Workspace rules in .github/ directory
-    if parent.name == ".github":
-        return parent.parent
+    # Workspace rules anywhere under .github/ — instructions may be nested
+    # (.github/instructions/frontend/x.instructions.md) and prompts live in
+    # .github/prompts/, so walk to the nearest .github ancestor and return its
+    # parent (the project root).
+    for ancestor in rule_file.parents:
+        if ancestor.name == ".github":
+            return ancestor.parent
 
     return parent
 
@@ -122,7 +121,9 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
 
             if vscode_prompts_path.exists() and vscode_prompts_path.is_dir():
                 try:
-                    for rule_file in vscode_prompts_path.glob("*.instructions.md"):
+                    user_rule_files = list(vscode_prompts_path.glob("*.instructions.md"))
+                    user_rule_files += list(vscode_prompts_path.glob("*.prompt.md"))
+                    for rule_file in user_rule_files:
                         if rule_file.is_file():
                             rule_info = self._extract_rule_with_scope(
                                 rule_file,
@@ -297,8 +298,10 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                                     if project_root:
                                         add_rule_to_project(rule_info, project_root, projects_by_root)
                                         logger.debug(f"Found workspace rule: {copilot_instructions}")
-                            # Check path-specific instructions in .github/copilot/
+                            # Check path-specific instructions in .github/instructions/
                             self._extract_path_specific_instructions(item, projects_by_root)
+                            # Check reusable prompt files in .github/prompts/
+                            self._extract_prompt_files(item, projects_by_root)
                             continue
 
                         # Check AGENTS.md at project root level
@@ -333,24 +336,31 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         self, github_dir: Path, projects_by_root: Dict[str, List[Dict]]
     ) -> None:
         """
-        Extract path-specific instructions from .github\\copilot\\*.md files.
+        Extract path-specific instructions from .github\\instructions\\**.
 
-        These are VS Code path-scoped custom instructions that apply to specific
-        file patterns within a project.
+        These are VS Code path-scoped custom instructions (``*.instructions.md``)
+        that apply to specific file patterns within a project. Per the docs they
+        live under ``.github/instructions/`` and may be nested in subdirectories,
+        so the search is recursive (``rglob``) and depth-gated.
 
         Args:
             github_dir: Path to the .github directory
             projects_by_root: Dict to populate with rule info
         """
-        copilot_dir = github_dir / "copilot"
-        if not copilot_dir.exists() or not copilot_dir.is_dir():
+        instructions_dir = github_dir / "instructions"
+        if not instructions_dir.exists() or not instructions_dir.is_dir():
             return
 
         try:
-            for md_file in copilot_dir.glob("*.md"):
-                if md_file.is_file():
+            for rule_file in instructions_dir.rglob("*.instructions.md"):
+                try:
+                    if len(rule_file.relative_to(github_dir).parts) > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    continue
+                if rule_file.is_file():
                     rule_info = self._extract_rule_with_scope(
-                        md_file,
+                        rule_file,
                         find_github_copilot_project_root,
                         scope="project"
                     )
@@ -359,7 +369,41 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         if project_root:
                             add_rule_to_project(rule_info, project_root, projects_by_root)
         except (PermissionError, OSError) as e:
-            logger.debug(f"Error reading copilot directory {copilot_dir}: {e}")
+            logger.debug(f"Error reading instructions directory {instructions_dir}: {e}")
+
+    def _extract_prompt_files(
+        self, github_dir: Path, projects_by_root: Dict[str, List[Dict]]
+    ) -> None:
+        """
+        Extract reusable prompt files from .github\\prompts\\*.prompt.md.
+
+        These are VS Code prompt files scoped to the project. Per the docs they
+        live directly under ``.github/prompts/`` (non-recursive). They are
+        emitted as ordinary project-scoped rules — the backend ingests them via
+        the same allowlisted rule shape as instructions; no extra fields.
+
+        Args:
+            github_dir: Path to the .github directory
+            projects_by_root: Dict to populate with rule info
+        """
+        prompts_dir = github_dir / "prompts"
+        if not prompts_dir.exists() or not prompts_dir.is_dir():
+            return
+
+        try:
+            for rule_file in prompts_dir.glob("*.prompt.md"):
+                if rule_file.is_file():
+                    rule_info = self._extract_rule_with_scope(
+                        rule_file,
+                        find_github_copilot_project_root,
+                        scope="project"
+                    )
+                    if rule_info:
+                        project_root = rule_info.get('project_root')
+                        if project_root:
+                            add_rule_to_project(rule_info, project_root, projects_by_root)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error reading prompts directory {prompts_dir}: {e}")
 
     def _extract_rule_with_scope(
         self,

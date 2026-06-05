@@ -22,7 +22,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
@@ -1021,6 +1021,22 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()):
             self.assertIsNone(WindowsCopilotCliDetector().get_version())
 
+    def test_version_probed_from_per_user_npm_shim(self):
+        """When user_home is set (the live per-user path), the per-user
+        ``AppData/Roaming/npm/copilot.cmd`` shim is resolved and probed first —
+        so version populates on an admin MDM all-users scan (H2)."""
+        shim = self.user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("@echo off\necho GitHub Copilot CLI 0.0.399.\n", encoding="utf-8")
+        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        fake = MagicMock(returncode=0, stdout=banner, stderr="")
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = self.detector.get_version()
+        self.assertEqual(version, "0.0.399")
+        # The resolved shim path (not the bare name) is what gets probed.
+        self.assertEqual(run.call_args.args[0], [str(shim), "--version"])
+        self.assertIs(run.call_args.kwargs.get("shell"), True)
+
 
 class TestCopilotCliConfigDirResolution(unittest.TestCase):
     """_resolve_copilot_dir honors COPILOT_HOME for the running user, else defaults."""
@@ -1081,6 +1097,74 @@ class TestCopilotCliVersionParse(unittest.TestCase):
         banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
         with patch(f"{_DETECTOR_MOD}.run_command", return_value=banner):
             self.assertEqual(MacOSCopilotCliDetector().get_version(), "0.0.399")
+
+
+# ---------------------------------------------------------------------------
+# 6b. Per-user binary resolution for version (root/MDM scan, H2)
+# ---------------------------------------------------------------------------
+
+_VERSION_BANNER = (
+    "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+)
+
+
+def _write_copilot_stub(binary: Path) -> None:
+    """Create an executable shell stub that prints a realistic version banner."""
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(
+        "#!/bin/sh\n"
+        "printf 'GitHub Copilot CLI 0.0.399.\\n"
+        "Run '\\''copilot update'\\'' to check for updates.\\n'\n",
+        encoding="utf-8",
+    )
+    os.chmod(binary, 0o755)
+
+
+class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
+    """get_version resolves the per-user binary so version populates on a root
+    MDM scan where root's PATH lacks the user's copilot install (H2).
+
+    The detector's user_home is set (the live per-user path), so the binary is
+    resolved from real on-disk stubs under that home and probed directly.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.detector = MacOSCopilotCliDetector()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.user_home = Path(self.tmp_dir) / "user"
+        self.user_home.mkdir(parents=True)
+        self.detector.user_home = self.user_home
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_version_resolved_from_local_bin_stub(self):
+        _write_copilot_stub(self.user_home / ".local" / "bin" / "copilot")
+        self.assertEqual(self.detector.get_version(), "0.0.399")
+
+    def test_version_resolved_from_nvm_stub(self):
+        _write_copilot_stub(
+            self.user_home / ".nvm" / "versions" / "node" / "v20.0.0" / "bin" / "copilot"
+        )
+        self.assertEqual(self.detector.get_version(), "0.0.399")
+
+    def test_falls_back_to_bare_path_when_no_per_user_binary(self):
+        """No per-user binary -> the bare-PATH `copilot --version` probe runs."""
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=_VERSION_BANNER) as run:
+            version = self.detector.get_version()
+        self.assertEqual(version, "0.0.399")
+        run.assert_called_once_with(["copilot", "--version"], ANY)
+
+    def test_unknown_when_nothing_resolves_via_detect(self):
+        """No per-user binary and a failing bare probe -> version is 'unknown'
+        on the emitted row (strong-marker fixture so detection still fires)."""
+        copilot_dir = self.user_home / ".copilot"
+        copilot_dir.mkdir(parents=True)
+        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=None):
+            result = self.detector.detect()
+        self.assertEqual(result["version"], "unknown")
 
 
 # ---------------------------------------------------------------------------

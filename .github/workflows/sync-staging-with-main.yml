@@ -1,0 +1,40 @@
+name: Sync Staging with Main
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  sync-staging:
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.DEPLOY_AUTOMATION_SECRET }}
+
+    - name: Configure Git
+      run: |
+        git config --global user.name 'Unbound Automation'
+        git config --global user.email 'engg@unboundsecurity.ai'
+
+    - name: Sync staging with main
+      run: |
+        git checkout staging
+        git pull origin staging
+        if ! git merge origin/main; then
+          echo "::error::Failed to sync staging with main. This could be because:"
+          echo "::error::1. Staging has diverged from main with its own commits"
+          echo "::error::2. There are merge conflicts that need manual resolution"
+          echo "::error::Please resolve these issues manually before proceeding."
+          exit 1
+        fi
+        git push origin staging
+
+    - name: Sync status
+      run: |
+        echo "✅ Staging branch has been synchronized with main"

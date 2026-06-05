@@ -1340,14 +1340,20 @@ class AIToolsDetector:
         Keying user skills under the owner's home (not this row's install_path)
         lets the per-user project filter scope them correctly under root scans.
         Falls back to the file's parent dir if no marker is found. Never raises.
+
+        Operates on the raw path string (not ``pathlib``) to preserve the
+        original separator style — ``pathlib`` rewrites separators per running
+        OS (``str(WindowsPath('/Users/a'))`` -> ``'\\Users\\a'``), which would
+        break key matching when a POSIX-style path is processed on Windows.
         """
         file_path = skill.get("file_path", "")
         try:
-            path = Path(file_path)
-            for parent in path.parents:
-                if parent.name in (".copilot", ".agents"):
-                    return str(parent.parent)
-            return str(path.parent)
+            for marker in ("/.copilot/", "\\.copilot\\", "/.agents/", "\\.agents\\"):
+                idx = file_path.find(marker)
+                if idx != -1:
+                    return file_path[:idx]
+            sep_idx = max(file_path.rfind("/"), file_path.rfind("\\"))
+            return file_path[:sep_idx] if sep_idx != -1 else file_path
         except Exception:
             return file_path
 

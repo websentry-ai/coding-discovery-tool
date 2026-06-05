@@ -60,7 +60,7 @@ def _read_builtin_copilot_identity(ext_dir: Path):
             version = data.get("version", "unknown")
             ext_name = str(data.get("name") or "").lower()
             display = str(data.get("displayName") or "").lower()
-            if "copilot-chat" in ext_name or "chat" in display:
+            if "copilot-chat" in ext_name or "copilot chat" in display:
                 name_label = "GitHub Copilot Chat (VS Code)"
     except (OSError, json.JSONDecodeError, ValueError):
         pass

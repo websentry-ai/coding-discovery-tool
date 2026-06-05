@@ -158,6 +158,14 @@ class TestLinuxVscodeBuiltinCopilotDetection(unittest.TestCase):
         spy.assert_not_called()
         self.assertEqual([r["version"] for r in res], ["1.250.0"])
 
+    def test_builtin_plain_copilot_labeled_generic(self):
+        self._make_code_user_dir()
+        (self.copilot / "package.json").write_text(
+            json.dumps({"name": "copilot", "version": "1.2.3"}), encoding="utf-8")
+        res = self._detect()
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+
 
 class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
     def setUp(self):
@@ -207,6 +215,14 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
             res = self.Detector()._detect_vscode_for_user(self.user_home)
         spy.assert_not_called()
         self.assertEqual([r["version"] for r in res], ["1.250.0"])
+
+    def test_builtin_plain_copilot_labeled_generic(self):
+        self._make_code_user_dir()
+        (self.copilot / "package.json").write_text(
+            json.dumps({"name": "copilot", "version": "1.2.3"}), encoding="utf-8")
+        res = self._detect()
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
 
 
 if __name__ == "__main__":

@@ -221,7 +221,7 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                     version = data.get("version", "unknown")
                     ext_name = str(data.get("name") or "").lower()
                     display = str(data.get("displayName") or "").lower()
-                    if "copilot-chat" in ext_name or "chat" in display:
+                    if "copilot-chat" in ext_name or "copilot chat" in display:
                         name_label = "GitHub Copilot Chat (VS Code)"
                 logger.debug(f"Detected built-in VS Code {name_label} {version} at {copilot_dir}")
                 return [{

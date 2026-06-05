@@ -1583,7 +1583,13 @@ class AIToolsDetector:
                         existing.extend(skills)
                         projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
 
-                    total_skills = len(user_skills) + sum(len(p.get("skills", [])) for p in project_skills)
+                    # Count what is actually STORED (post-dedup), not the raw
+                    # extractor output, so the log can't overstate persisted skills.
+                    # Dedup roots first to avoid double-counting a shared root.
+                    stored_roots = {sp.get("project_root") for sp in project_skills if sp.get("project_root")}
+                    total_skills = len(user_skills) + sum(
+                        len(projects_dict[r].get("skills", [])) for r in stored_roots if r in projects_dict
+                    )
                     logger.info(
                         f"  ✓ Found {total_skills} {tool_name} skill(s)" if total_skills
                         else f"  No {tool_name} skills found"

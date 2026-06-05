@@ -18,6 +18,7 @@ scanner (``tests/__init__.py`` patches ``_scan_servers_in_mapping`` -> {}), and
 
 import json
 import os
+import platform
 import shutil
 import tempfile
 import unittest
@@ -2134,6 +2135,11 @@ class TestLinuxCopilotCliRulesExtraction(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    @unittest.skipIf(
+        platform.system() == "Windows",
+        "POSIX /home path semantics; the Linux-vs-macOS skip seam is only "
+        "meaningful on POSIX (Path('/home') has no equivalent on Windows).",
+    )
     def test_home_not_pruned_by_linux_skip_seam(self):
         """Linux ``_should_skip`` must NOT prune ``/home`` — the macOS base does."""
         self.assertFalse(self.extractor._should_skip(Path("/home")))

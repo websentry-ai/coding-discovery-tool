@@ -124,6 +124,11 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 for rule_file in rule_files:
                     if not rule_file.is_file():
                         continue
+                    try:
+                        if len(rule_file.relative_to(directory).parts) > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
                     rule_info = self._extract_rule_with_scope(
                         rule_file, find_github_copilot_project_root, scope="user"
                     )

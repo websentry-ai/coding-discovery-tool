@@ -20,12 +20,21 @@ logger = logging.getLogger(__name__)
 class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for GitHub Copilot MCP config on Linux systems."""
 
-    def extract_mcp_config(self) -> Optional[Dict]:
-        projects = []
+    def extract_mcp_config(self, tool_name: Optional[str] = None) -> Optional[Dict]:
+        # Scope MCP sources to the surface: a VS Code row gets VS Code global +
+        # workspace .vscode/mcp.json; a JetBrains row gets JetBrains global only.
+        # tool_name=None keeps the legacy union (back-compat / direct callers).
+        name = (tool_name or "").lower()
+        is_vscode = ("vs code" in name) or ("vscode" in name)
+        want_vscode = (not tool_name) or is_vscode
+        want_jetbrains = (not tool_name) or (not is_vscode)
 
-        projects.extend(self._extract_vscode_configs())
-        projects.extend(self._extract_jetbrains_configs())
-        projects.extend(self._extract_workspace_configs())
+        projects = []
+        if want_vscode:
+            projects.extend(self._extract_vscode_configs())
+            projects.extend(self._extract_workspace_configs())
+        if want_jetbrains:
+            projects.extend(self._extract_jetbrains_configs())
 
         return {"projects": projects} if projects else None
 

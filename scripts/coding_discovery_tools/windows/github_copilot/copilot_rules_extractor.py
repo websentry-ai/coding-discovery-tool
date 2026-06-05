@@ -125,6 +125,11 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 for rule_file in rule_files:
                     if not rule_file.is_file():
                         continue
+                    try:
+                        if len(rule_file.relative_to(directory).parts) > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
                     rule_info = self._extract_rule_with_scope(
                         rule_file, find_github_copilot_project_root, scope="user"
                     )
@@ -132,7 +137,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         project_root = rule_info.get('project_root')
                         if project_root:
                             add_rule_to_project(rule_info, project_root, projects_by_root)
-                            logger.debug(f"Found VS Code global rule: {rule_file}")
+                            logger.debug(f"Found VS Code Copilot user rule: {rule_file}")
             except Exception as e:
                 logger.debug(f"Error extracting GitHub Copilot user rules from {directory}: {e}")
 

@@ -126,11 +126,20 @@ def _resolve_copilot_binary(user_home: Path) -> Optional[Path]:
 
       - ``~/.local/bin/copilot`` (npm/standalone user install)
       - ``~/.bun/bin/copilot`` (Bun global install)
-      - ``~/.nvm/versions/node/*/bin/copilot`` (nvm-managed Node, first match)
+      - ``~/.nvm/versions/node/*/bin/copilot`` (nvm-managed Node; newest Node
+        version first, so a stale copilot under an older Node isn't preferred)
 
     Best-effort only: any error is swallowed and None is returned so the caller
     falls back to the bare-PATH probe (and ultimately "unknown"). Never raises.
     """
+    def _node_version_key(version_dir: Path):
+        # Numeric (major, minor, patch) parsed from an nvm "vX.Y.Z" dir name, so
+        # the newest Node sorts first. A plain string sort would order "v9" after
+        # "v10"; malformed names yield () and sort last. Determinism also makes a
+        # re-scan report the same version.
+        nums = re.findall(r"\d+", version_dir.name)
+        return tuple(int(n) for n in nums)
+
     try:
         for candidate in (
             user_home / ".local" / "bin" / "copilot",
@@ -143,7 +152,7 @@ def _resolve_copilot_binary(user_home: Path) -> Optional[Path]:
                 continue
         nvm_node_dir = user_home / ".nvm" / "versions" / "node"
         try:
-            for version_dir in nvm_node_dir.glob("*"):
+            for version_dir in sorted(nvm_node_dir.glob("*"), key=_node_version_key, reverse=True):
                 try:
                     candidate = version_dir / "bin" / "copilot"
                     if candidate.exists() and os.access(str(candidate), os.X_OK):

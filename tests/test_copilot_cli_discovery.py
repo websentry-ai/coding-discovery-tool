@@ -33,6 +33,7 @@ from scripts.coding_discovery_tools.coding_tool_factory import (
 from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli import (
     MacOSCopilotCliDetector,
     _parse_cli_version,
+    _resolve_copilot_binary,
     _resolve_copilot_dir,
 )
 from scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor import (
@@ -1158,6 +1159,24 @@ class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
             self.user_home / ".nvm" / "versions" / "node" / "v20.0.0" / "bin" / "copilot"
         )
         self.assertEqual(self.detector.get_version(), "0.0.399")
+
+    @unittest.skipUnless(
+        os.name == "posix",
+        "exercises the macOS resolver with chmod 0o755 stubs (X_OK semantics "
+        "differ on Windows); the macOS resolver only runs on Darwin",
+    )
+    def test_nvm_resolution_prefers_newest_node_version(self):
+        """Multiple nvm Node versions each with a copilot binary -> the newest
+        (numeric semver, so v10 > v9) is resolved, deterministically."""
+        nvm = self.user_home / ".nvm" / "versions" / "node"
+        for ver in ("v9.5.0", "v10.0.0", "v18.17.1"):
+            binary = nvm / ver / "bin" / "copilot"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\necho x\n", encoding="utf-8")
+            os.chmod(binary, 0o755)
+        resolved = _resolve_copilot_binary(self.user_home)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.parent.parent.name, "v18.17.1")
 
     def test_falls_back_to_bare_path_when_no_per_user_binary(self):
         """No per-user binary -> the bare-PATH `copilot --version` probe runs."""

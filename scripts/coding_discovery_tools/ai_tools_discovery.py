@@ -1325,7 +1325,10 @@ class AIToolsDetector:
             try:
                 self._copilot_cli_skills_cache = self._copilot_cli_skills_extractor.extract_all_skills() or {}
             except Exception as e:
-                logger.debug(f"  Copilot skills extraction failed: {e}")
+                # Memoized accessor swallows the failure (callers can't see it),
+                # so surface it at WARNING — matching the sibling skills-extraction
+                # error log — rather than DEBUG, which is silent at the prod floor.
+                logger.warning(f"  Copilot skills extraction failed: {e}")
                 self._copilot_cli_skills_cache = {}
         else:
             self._copilot_cli_skills_cache = {}
@@ -1672,7 +1675,9 @@ class AIToolsDetector:
                     owner_home = self._copilot_skill_owner_home(skill)
                     if owner_home not in projects_dict:
                         projects_dict[owner_home] = {"mcpServers": [], "rules": [], "skills": []}
-                    projects_dict[owner_home].setdefault("skills", []).append(skill)
+                    existing = projects_dict[owner_home].setdefault("skills", [])
+                    existing.append(skill)
+                    projects_dict[owner_home]["skills"] = self._deduplicate_project_items(existing)
 
             # Convert projects_dict back to list format for tool_dict
             projects_list = [

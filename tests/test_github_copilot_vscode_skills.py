@@ -230,6 +230,24 @@ class TestVscodeCopilotSkillsAttach(unittest.TestCase):
         by_path = _skills_paths(result["projects"])
         self.assertEqual(by_path.get("/Users/alice"), {agents_skill})
 
+    # 4c. Duplicate user skills (same file_path) are deduped on the owner's
+    # home, matching the project-scope dedup (no double-counting on the row).
+    def test_duplicate_user_skills_deduped_on_owner_home(self):
+        skill_path = "/Users/alice/.copilot/skills/foo/SKILL.md"
+        detector = _make_detector({
+            "user_skills": [_user_skill(skill_path), _user_skill(skill_path)],
+            "project_skills": [],
+        })
+        detector._canonical_vscode_copilot = "github copilot chat (vs code)"
+
+        tool = {"name": "GitHub Copilot Chat (VS Code)", "version": "1.0",
+                "install_path": "/Users/alice/.vscode"}
+        result = detector.process_single_tool(tool)
+
+        alice = [p for p in result["projects"] if p["path"] == "/Users/alice"]
+        self.assertEqual(len(alice), 1)
+        self.assertEqual(len(alice[0]["skills"]), 1)
+
 
 class TestVscodeCopilotSkillsMemoization(unittest.TestCase):
     """The shared walk runs once even when a CLI row and a VS Code row both process."""

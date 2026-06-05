@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
+from ...claude_code_skills_helpers import is_user_level_claude_subdir
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -49,12 +50,12 @@ def find_github_copilot_project_root(rule_file: Path) -> Path:
         if parent.parent.name == "github-copilot":
             return parent.parent
 
-    # Workspace rules anywhere under .github/ — instructions may be nested
-    # (.github/instructions/frontend/x.instructions.md) and prompts live in
-    # .github/prompts/, so walk to the nearest .github ancestor and return its
-    # parent (the project root).
+    # Workspace/user rules nested under a config dir — .github (instructions/
+    # prompts), .claude (Claude-format rules), or .copilot (user instructions).
+    # Walk to the nearest such ancestor and return its parent (project root or
+    # user home).
     for ancestor in rule_file.parents:
-        if ancestor.name == ".github":
+        if ancestor.name in (".github", ".claude", ".copilot"):
             return ancestor.parent
 
     return parent
@@ -113,30 +114,47 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         Location: %APPDATA%\\Code\\User\\prompts\\*.instructions.md
 
         """
-        def extract_for_user(user_home: Path) -> None:
-            """Extract global VS Code rules for a specific user."""
-            vscode_prompts_path = (
-                user_home / "AppData" / "Roaming" / "Code" / "User" / "prompts"
-            )
+        def add_user_rules(directory: Path, patterns) -> None:
+            """Collect each ``patterns`` match under ``directory`` as a user rule."""
+            try:
+                if not directory.is_dir():
+                    return
+                rule_files = []
+                for pattern in patterns:
+                    rule_files += list(directory.glob(pattern))
+                for rule_file in rule_files:
+                    if not rule_file.is_file():
+                        continue
+                    try:
+                        if len(rule_file.relative_to(directory).parts) > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
+                    rule_info = self._extract_rule_with_scope(
+                        rule_file, find_github_copilot_project_root, scope="user"
+                    )
+                    if rule_info:
+                        project_root = rule_info.get('project_root')
+                        if project_root:
+                            add_rule_to_project(rule_info, project_root, projects_by_root)
+                            logger.debug(f"Found VS Code Copilot user rule: {rule_file}")
+            except Exception as e:
+                logger.debug(f"Error extracting GitHub Copilot user rules from {directory}: {e}")
 
-            if vscode_prompts_path.exists() and vscode_prompts_path.is_dir():
-                try:
-                    user_rule_files = list(vscode_prompts_path.glob("*.instructions.md"))
-                    user_rule_files += list(vscode_prompts_path.glob("*.prompt.md"))
-                    for rule_file in user_rule_files:
-                        if rule_file.is_file():
-                            rule_info = self._extract_rule_with_scope(
-                                rule_file,
-                                find_github_copilot_project_root,
-                                scope="user"
-                            )
-                            if rule_info:
-                                project_root = rule_info.get('project_root')
-                                if project_root:
-                                    add_rule_to_project(rule_info, project_root, projects_by_root)
-                                    logger.debug(f"Found VS Code global rule: {rule_file}")
-                except Exception as e:
-                    logger.debug(f"Error extracting GitHub Copilot VS Code rules for {user_home}: {e}")
+        def extract_for_user(user_home: Path) -> None:
+            """Extract global VS Code rules for a specific user.
+
+            Default user-profile instruction locations per the VS Code Copilot
+            custom-instructions docs: the VS Code User prompts dir (instructions +
+            prompt files), ``~/.copilot/instructions`` (Copilot format), and
+            ``~/.claude/rules`` (Claude format).
+            """
+            add_user_rules(
+                user_home / "AppData" / "Roaming" / "Code" / "User" / "prompts",
+                ("*.instructions.md", "*.prompt.md"),
+            )
+            add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",))
+            add_user_rules(user_home / ".claude" / "rules", ("**/*.md",))
 
         if is_running_as_admin():
             self._scan_user_directories(extract_for_user)
@@ -304,6 +322,11 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                             self._extract_prompt_files(item, projects_by_root)
                             continue
 
+                        if item.name == ".claude":
+                            # Workspace (Claude format) instructions: .claude/rules/**/*.md
+                            self._extract_claude_rules(item, projects_by_root)
+                            continue
+
                         # Check AGENTS.md at project root level
                         agents_md = item / "AGENTS.md"
                         if agents_md.exists() and agents_md.is_file():
@@ -404,6 +427,54 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                             add_rule_to_project(rule_info, project_root, projects_by_root)
         except (PermissionError, OSError) as e:
             logger.debug(f"Error reading prompts directory {prompts_dir}: {e}")
+
+    def _extract_claude_rules(
+        self, claude_dir: Path, projects_by_root: Dict[str, List[Dict]]
+    ) -> None:
+        """
+        Extract workspace (Claude-format) instructions from .claude\\rules\\**\\*.md.
+
+        VS Code Copilot reads project instructions from the ``.claude/rules``
+        folder (recursively) per the custom-instructions docs. Emitted as ordinary
+        project-scoped rules (same allowlisted shape as .github instructions).
+
+        Args:
+            claude_dir: Path to the .claude directory
+            projects_by_root: Dict to populate with rule info
+        """
+        rules_dir = claude_dir / "rules"
+        if not rules_dir.exists() or not rules_dir.is_dir():
+            return
+
+        # The user-home ~/.claude/rules is collected as USER scope in
+        # _extract_global_vscode_rules; don't also collect it here as project
+        # scope (add_rule_to_project does not dedupe).
+        if is_user_level_claude_subdir(rules_dir):
+            return
+        # Don't pull rules out of another tool's bundled config dir, e.g. an
+        # installed extension package's .claude under a tool's extensions dir.
+        if traverses_other_tool_config_dir(claude_dir, allow={".claude"}):
+            return
+
+        try:
+            for rule_file in rules_dir.rglob("*.md"):
+                try:
+                    if len(rule_file.relative_to(claude_dir).parts) > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    continue
+                if rule_file.is_file():
+                    rule_info = self._extract_rule_with_scope(
+                        rule_file,
+                        find_github_copilot_project_root,
+                        scope="project"
+                    )
+                    if rule_info:
+                        project_root = rule_info.get('project_root')
+                        if project_root:
+                            add_rule_to_project(rule_info, project_root, projects_by_root)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error reading claude rules directory {rules_dir}: {e}")
 
     def _extract_rule_with_scope(
         self,

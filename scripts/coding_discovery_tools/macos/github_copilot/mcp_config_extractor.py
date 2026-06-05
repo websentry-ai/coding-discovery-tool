@@ -25,23 +25,33 @@ logger = logging.getLogger(__name__)
 class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for GitHub Copilot MCP config on macOS systems."""
 
-    def extract_mcp_config(self) -> Optional[Dict]:
+    def extract_mcp_config(self, tool_name: Optional[str] = None) -> Optional[Dict]:
         """
-        Extract GitHub Copilot MCP configuration on macOS.
+        Extract GitHub Copilot MCP configuration on macOS, scoped to the surface.
+
+        ``tool_name`` is the detected Copilot row this config is for. A VS Code
+        surface reads its own global config and the workspace ``.vscode/mcp.json``;
+        a JetBrains surface reads only its global config. Without scoping, every
+        Copilot row would receive the union of both IDEs' servers, so a
+        JetBrains-only MCP server would appear under VS Code Copilot (and vice
+        versa) on a machine with both. ``tool_name=None`` keeps the legacy union
+        (standalone entry / direct callers). Mirrors the identity-aware rules
+        extractor.
         """
+        name = (tool_name or "").lower()
+        is_vscode = ("vs code" in name) or ("vscode" in name)
+        want_vscode = (not tool_name) or is_vscode
+        want_jetbrains = (not tool_name) or (not is_vscode)
+
         projects = []
 
-        # Extract VS Code global configs
-        vscode_configs = self._extract_vscode_configs()
-        projects.extend(vscode_configs)
+        if want_vscode:
+            # VS Code global + workspace .vscode/mcp.json (JetBrains doesn't read it).
+            projects.extend(self._extract_vscode_configs())
+            projects.extend(self._extract_workspace_configs())
 
-        # Extract JetBrains global configs
-        jetbrains_configs = self._extract_jetbrains_configs()
-        projects.extend(jetbrains_configs)
-
-        # Extract workspace-level .vscode/mcp.json configs
-        workspace_configs = self._extract_workspace_configs()
-        projects.extend(workspace_configs)
+        if want_jetbrains:
+            projects.extend(self._extract_jetbrains_configs())
 
         if not projects:
             return None

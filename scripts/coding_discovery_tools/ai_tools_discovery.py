@@ -1640,7 +1640,9 @@ class AIToolsDetector:
             logger.info(f"  Extracting {tool_name} MCP configs...")
             if self._github_copilot_mcp_extractor:
                 try:
-                    mcp_config = self._github_copilot_mcp_extractor.extract_mcp_config()
+                    mcp_config = self._github_copilot_mcp_extractor.extract_mcp_config(
+                        tool_name=original_tool_name
+                    )
                     if mcp_config and "projects" in mcp_config:
                         # Merge MCP configs into projects_dict
                         for project in mcp_config["projects"]:

@@ -214,6 +214,16 @@ class AIToolsDetector:
             self._copilot_cli_settings_extractor = CopilotCliSettingsExtractorFactory.create(self.system)
             self._copilot_cli_skills_extractor = CopilotCliSkillsExtractorFactory.create(self.system)
 
+            # Shared Copilot skills (~/.copilot/skills etc.) are tool-identity-
+            # independent: both the CLI branch and the VS Code IDE branch attach
+            # them. Memoize so the (potentially whole-disk) walk runs at most once
+            # per scan, no matter how many Copilot rows are processed.
+            self._copilot_cli_skills_cache: Optional[Dict] = None
+            # Canonical VS Code Copilot row that should carry the shared skills,
+            # computed once per scan from the full detected-tools list (prefer the
+            # Chat row). None until set by the detection loop.
+            self._canonical_vscode_copilot: Optional[str] = None
+
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
 
@@ -1300,6 +1310,47 @@ class AIToolsDetector:
         
         return filtered_tool
 
+    def _get_copilot_cli_skills(self) -> Dict:
+        """Return the shared Copilot skills, memoized per scan.
+
+        The result (``{"user_skills": [...], "project_skills": [...]}``) is
+        tool-identity-independent, so the CLI branch and the VS Code IDE branch
+        both reuse it. The underlying ``extract_all_skills()`` walk runs at most
+        once per scan. On Linux / unsupported OS the extractor is ``None`` and
+        this returns ``{}``. Never raises — extraction failures degrade to ``{}``.
+        """
+        if self._copilot_cli_skills_cache is not None:
+            return self._copilot_cli_skills_cache
+        if self._copilot_cli_skills_extractor:
+            try:
+                self._copilot_cli_skills_cache = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+            except Exception as e:
+                logger.debug(f"  Copilot skills extraction failed: {e}")
+                self._copilot_cli_skills_cache = {}
+        else:
+            self._copilot_cli_skills_cache = {}
+        return self._copilot_cli_skills_cache
+
+    @staticmethod
+    def _copilot_skill_owner_home(skill: Dict) -> str:
+        """Derive the owning user's home dir from a user-scope skill's file_path.
+
+        User skills live at ``<home>/.copilot/skills/...`` or
+        ``<home>/.agents/skills/...``; the home is the parent of that marker dir.
+        Keying user skills under the owner's home (not this row's install_path)
+        lets the per-user project filter scope them correctly under root scans.
+        Falls back to the file's parent dir if no marker is found. Never raises.
+        """
+        file_path = skill.get("file_path", "")
+        try:
+            path = Path(file_path)
+            for parent in path.parents:
+                if parent.name in (".copilot", ".agents"):
+                    return str(parent.parent)
+            return str(path.parent)
+        except Exception:
+            return file_path
+
     def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
         """
         Process the GitHub Copilot CLI: extract its MCP config + rules and return
@@ -1379,7 +1430,7 @@ class AIToolsDetector:
         logger.info(f"  Extracting {tool_name} skills...")
         if self._copilot_cli_skills_extractor:
             try:
-                skills_result = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+                skills_result = self._get_copilot_cli_skills()
                 user_skills = skills_result.get("user_skills", [])
                 project_skills = skills_result.get("project_skills", [])
 
@@ -1470,6 +1521,20 @@ class AIToolsDetector:
             result["permissions"] = permissions_payload
         return result
 
+    def _set_canonical_vscode_copilot(self, tools: List[Dict]) -> None:
+        """Pick the single VS Code Copilot row that should carry the shared
+        skills. Prefer the Chat surface; fall back to the plain extension.
+        Computed once from the full detected list so exactly ONE row is
+        enriched (the IDE branch in process_single_tool reads this). None when
+        neither is present."""
+        detected_lower = {t.get("name", "").lower() for t in tools}
+        if "github copilot chat (vs code)" in detected_lower:
+            self._canonical_vscode_copilot = "github copilot chat (vs code)"
+        elif "github copilot (vs code)" in detected_lower:
+            self._canonical_vscode_copilot = "github copilot (vs code)"
+        else:
+            self._canonical_vscode_copilot = None
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
@@ -1524,7 +1589,8 @@ class AIToolsDetector:
                             if project_root not in projects_dict:
                                 projects_dict[project_root] = {
                                     "mcpServers": [],
-                                    "rules": []
+                                    "rules": [],
+                                    "skills": []
                                 }
                             projects_dict[project_root]["rules"] = rules
 
@@ -1549,7 +1615,8 @@ class AIToolsDetector:
                                 if project_path not in projects_dict:
                                     projects_dict[project_path] = {
                                         "mcpServers": [],
-                                        "rules": []
+                                        "rules": [],
+                                        "skills": []
                                     }
                                 projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
 
@@ -1560,12 +1627,54 @@ class AIToolsDetector:
                 except Exception as e:
                     logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
 
+            # SKILLS-ONLY enrichment for the canonical VS Code Copilot surface.
+            # VS Code GitHub Copilot reads the SHARED ~/.copilot (+ project
+            # .github/.claude/.agents) skills — the same set the CLI reports.
+            # Attach them to exactly ONE VS Code row (the Chat row when present)
+            # so a single surface carries skills with full sibling visibility.
+            # Exclude JetBrains (carries an "ide" key) and the non-canonical VS
+            # Code row. This is extraction-only: it cannot re-introduce the #164
+            # CLI false positive (detection is untouched; skills only ride here
+            # when a VS Code Copilot surface was ALREADY detected).
+            is_canonical_vscode = (
+                "ide" not in tool
+                and tool_name.endswith("(vs code)")
+                and tool_name == self._canonical_vscode_copilot
+            )
+            if is_canonical_vscode:
+                logger.info(f"  Attaching shared Copilot skills to {tool_name}...")
+                skills_result = self._get_copilot_cli_skills()
+
+                # Project-scope skills land under their absolute repo root, so
+                # the per-user project filter scopes them correctly.
+                for skills_project in skills_result.get("project_skills", []):
+                    project_root = skills_project.get("project_root", "")
+                    skills = skills_project.get("skills", [])
+                    if not project_root:
+                        continue
+                    if project_root not in projects_dict:
+                        projects_dict[project_root] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[project_root].setdefault("skills", [])
+                    existing.extend(skills)
+                    projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
+
+                # User-scope skills key under the OWNING user's home (derived from
+                # each skill's file_path), NOT this row's install_path — so under
+                # a root/all-users scan filter_tool_projects_by_user scopes each
+                # user's skills to their own home (no cross-user leak).
+                for skill in skills_result.get("user_skills", []):
+                    owner_home = self._copilot_skill_owner_home(skill)
+                    if owner_home not in projects_dict:
+                        projects_dict[owner_home] = {"mcpServers": [], "rules": [], "skills": []}
+                    projects_dict[owner_home].setdefault("skills", []).append(skill)
+
             # Convert projects_dict back to list format for tool_dict
             projects_list = [
                 {
                     "path": path,
                     "mcpServers": data.get("mcpServers", []),
-                    "rules": data.get("rules", [])
+                    "rules": data.get("rules", []),
+                    "skills": data.get("skills", [])
                 }
                 for path, data in projects_dict.items()
             ]
@@ -1980,7 +2089,8 @@ class AIToolsDetector:
         device_id = self.get_device_id()
         user_info = get_user_info()
         tools = self.detect_all_tools()
-        
+        self._set_canonical_vscode_copilot(tools)
+
         tools_with_projects = []
         for tool in tools:
             tool_with_projects = self.process_single_tool(tool)
@@ -2237,6 +2347,9 @@ def main():
         tools = all_tools
         logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
         logger.info("")
+
+        # Pick the single VS Code Copilot row that should carry the shared skills.
+        detector._set_canonical_vscode_copilot(tools)
 
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:

@@ -99,12 +99,59 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
         the CLI as a ``copilot.cmd`` shim, which Windows cannot exec from a bare
         argv list, so the inherited ``run_command`` probe would raise and version
         would always read "unknown". Mirrors ``WindowsCodexDetector``.
+
+        Like the macOS detector, the per-user binary is resolved first (admin's
+        PATH lacks the user's copilot install during an MDM all-users scan)
+        before falling back to the bare ``copilot`` probe.
         Best-effort: returns None on any failure and the caller falls back to
         "unknown".
         """
         try:
+            if self.user_home is not None:
+                binary = self._resolve_windows_binary(self.user_home)
+                if binary is not None:
+                    parsed = self._probe_version([str(binary), "--version"])
+                    if parsed:
+                        return parsed
+        except Exception as exc:
+            logger.debug(f"Could not extract Copilot CLI version from per-user binary on Windows: {exc}")
+
+        return self._probe_version(["copilot", "--version"])
+
+    @staticmethod
+    def _resolve_windows_binary(user_home: Path) -> Optional[Path]:
+        """Return the per-user ``copilot`` CLI binary for ``user_home`` on Windows.
+
+        Checks the documented/observed per-user install locations in order:
+        ``AppData/Roaming/npm/copilot.cmd`` (npm global shim),
+        ``.local/bin/copilot.exe``, ``.bun/bin/copilot.exe``. Best-effort: any
+        error is swallowed and None is returned. Never raises.
+        """
+        try:
+            for candidate in (
+                user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd",
+                user_home / ".local" / "bin" / "copilot.exe",
+                user_home / ".bun" / "bin" / "copilot.exe",
+            ):
+                try:
+                    if candidate.exists():
+                        return candidate
+                except OSError:
+                    continue
+        except (PermissionError, OSError) as exc:
+            logger.debug(f"Error resolving Copilot CLI binary for {user_home}: {exc}")
+        return None
+
+    @staticmethod
+    def _probe_version(command: List[str]) -> Optional[str]:
+        """Run ``command`` with ``shell=True`` and parse the version banner.
+
+        ``shell=True`` is required for the npm ``.cmd`` shim. Best-effort:
+        returns None on any failure (the caller falls back to "unknown").
+        """
+        try:
             result = subprocess.run(
-                ["copilot", "--version"],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=VERSION_TIMEOUT,

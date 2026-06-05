@@ -133,6 +133,41 @@ payload_logger = logging.getLogger(__name__ + ".payload")
 configure_logger()
 
 
+def _normalise_path(p: str) -> str:
+    """Normalise a path string for cross-platform comparison.
+
+    Forward-slashes separators, upper-cases a Windows drive letter, and strips a
+    trailing slash. Shared by ``filter_tool_projects_by_user`` and the per-user
+    Copilot CLI ownership gate so both compare paths identically (DRY).
+    """
+    if not p:
+        return p
+    n = p.replace('\\', '/')
+    if len(n) >= 2 and n[1] == ':':
+        n = n[0].upper() + n[1:]
+    n = n.rstrip('/')
+    return n
+
+
+def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
+    """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
+
+    The CLI's ``install_path`` is a per-user ``~/.copilot`` owned by exactly one
+    user, but the per-user scan loop re-runs for every user. Emit only when the
+    user OWNS the detected install (``install_path`` under their home) OR the
+    per-user filter produced data for them (projects/permissions) — otherwise a
+    non-owner with no data would get a phantom CLI install row. Scoped to the
+    CLI: IDE tools legitimately share a machine-wide ``install_path``.
+    """
+    install_norm = _normalise_path(tool_filtered.get("install_path", ""))
+    user_norm = _normalise_path(str(user_home))
+    owns_install = bool(install_norm) and (
+        install_norm == user_norm or install_norm.startswith(user_norm + "/")
+    )
+    has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
+    return owns_install or has_data
+
+
 class AIToolsDetector:
     """
     Detector for AI coding tools on macOS and Windows.
@@ -213,6 +248,16 @@ class AIToolsDetector:
             self._copilot_cli_rules_extractor = CopilotCliRulesExtractorFactory.create(self.system)
             self._copilot_cli_settings_extractor = CopilotCliSettingsExtractorFactory.create(self.system)
             self._copilot_cli_skills_extractor = CopilotCliSkillsExtractorFactory.create(self.system)
+
+            # Shared Copilot skills (~/.copilot/skills etc.) are tool-identity-
+            # independent: both the CLI branch and the VS Code IDE branch attach
+            # them. Memoize so the (potentially whole-disk) walk runs at most once
+            # per scan, no matter how many Copilot rows are processed.
+            self._copilot_cli_skills_cache: Optional[Dict] = None
+            # Canonical VS Code Copilot row that should carry the shared skills,
+            # computed once per scan from the full detected-tools list (prefer the
+            # Chat row). None until set by the detection loop.
+            self._canonical_vscode_copilot: Optional[str] = None
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -713,6 +758,28 @@ class AIToolsDetector:
         
         return projects_dict
 
+    @staticmethod
+    def _union_mcp_servers(existing: List[Dict], incoming: List[Dict]) -> List[Dict]:
+        """Combine two MCP-server lists, de-duplicated by server name.
+
+        Multiple config sources can resolve to the same project path — most
+        notably a project whose root is the user's home directory, which yields
+        both a ``~/.claude.json`` ``projects[<home>]`` entry and a home-rooted
+        ``~/.mcp.json`` entry. Unioning (instead of overwriting) keeps both
+        sources' servers; first-seen wins, so the higher-precedence source
+        merged earlier is preserved on a name conflict.
+        """
+        merged = list(existing or [])
+        seen = {s.get("name") for s in merged if isinstance(s, dict)}
+        for server in (incoming or []):
+            name = server.get("name") if isinstance(server, dict) else None
+            if name is not None and name in seen:
+                continue
+            if name is not None:
+                seen.add(name)
+            merged.append(server)
+        return merged
+
     def _merge_mcp_configs_into_projects(
         self,
         mcp_projects: List[Dict],
@@ -720,7 +787,7 @@ class AIToolsDetector:
     ) -> None:
         """
         Merge MCP configs into projects dictionary.
-        
+
         Args:
             mcp_projects: List of MCP project configs
             projects_dict: Dictionary mapping project paths to project configs
@@ -736,8 +803,11 @@ class AIToolsDetector:
             total_mcp_servers += num_servers
             
             if project_path in projects_dict:
-                # Merge MCP config into existing project
-                projects_dict[project_path]["mcpServers"] = mcp_servers
+                # Merge (union) MCP config into existing project so a second
+                # source for the same path can't overwrite the first's servers.
+                projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                    projects_dict[project_path].get("mcpServers", []), mcp_servers
+                )
                 merged_count += 1
                 logger.info(f"  Merged MCP config into existing project: {project_path} ({num_servers} MCP servers)")
                 # Ensure rules field exists
@@ -790,9 +860,14 @@ class AIToolsDetector:
                 additional_mcp_data["disabledMcpjsonServers"] = mcp_project["disabledMcpjsonServers"]
             
             if project_path in projects_dict:
-                # Merge MCP config into existing project
-                projects_dict[project_path]["mcpServers"] = mcp_servers
-                if additional_mcp_data:
+                # Merge (union) MCP config into existing project so a second
+                # source for the same path (e.g. a home-rooted ~/.mcp.json and
+                # ~/.claude.json projects[<home>]) can't overwrite the first's
+                # servers.
+                projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                    projects_dict[project_path].get("mcpServers", []), mcp_servers
+                )
+                if additional_mcp_data and "additionalMcpData" not in projects_dict[project_path]:
                     projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
                 merged_count += 1
                 logger.info(f"  Merged Claude MCP config into existing project: {project_path} ({num_servers} MCP servers)")
@@ -1262,21 +1337,11 @@ class AIToolsDetector:
         Returns:
             Tool dict with filtered projects and permissions
         """
-        # Normalise to forward slashes + lowercase drive on Windows
-        def _normalise(p: str) -> str:
-            if not p:
-                return p
-            n = p.replace('\\', '/')
-            if len(n) >= 2 and n[1] == ':':
-                n = n[0].upper() + n[1:]
-            n = n.rstrip('/')
-            return n
-
-        user_home_norm = _normalise(str(user_home))
+        user_home_norm = _normalise_path(str(user_home))
         filtered_projects = []
-        
+
         for project in tool.get('projects', []):
-            project_path_norm = _normalise(project.get('path', ''))
+            project_path_norm = _normalise_path(project.get('path', ''))
             # Checking if project path is under the user's home directory
             if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/'):
                 filtered_projects.append(project)
@@ -1287,7 +1352,7 @@ class AIToolsDetector:
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
-            settings_path_norm = _normalise(perms.get('settings_path', ''))
+            settings_path_norm = _normalise_path(perms.get('settings_path', ''))
             if (settings_source != 'managed'
                     and settings_path_norm
                     and not (settings_path_norm == user_home_norm
@@ -1295,6 +1360,56 @@ class AIToolsDetector:
                 del filtered_tool['permissions']
         
         return filtered_tool
+
+    def _get_copilot_cli_skills(self) -> Dict:
+        """Return the shared Copilot skills, memoized per scan.
+
+        The result (``{"user_skills": [...], "project_skills": [...]}``) is
+        tool-identity-independent, so the CLI branch and the VS Code IDE branch
+        both reuse it. The underlying ``extract_all_skills()`` walk runs at most
+        once per scan. On Linux / unsupported OS the extractor is ``None`` and
+        this returns ``{}``. Never raises — extraction failures degrade to ``{}``.
+        """
+        if self._copilot_cli_skills_cache is not None:
+            return self._copilot_cli_skills_cache
+        if self._copilot_cli_skills_extractor:
+            try:
+                self._copilot_cli_skills_cache = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+            except Exception as e:
+                # Memoized accessor swallows the failure (callers can't see it),
+                # so surface it at WARNING — matching the sibling skills-extraction
+                # error log — rather than DEBUG, which is silent at the prod floor.
+                logger.warning(f"  Copilot skills extraction failed: {e}")
+                self._copilot_cli_skills_cache = {}
+        else:
+            self._copilot_cli_skills_cache = {}
+        return self._copilot_cli_skills_cache
+
+    @staticmethod
+    def _copilot_skill_owner_home(skill: Dict) -> str:
+        """Derive the owning user's home dir from a user-scope skill's file_path.
+
+        User skills live at ``<home>/.copilot/skills/...`` or
+        ``<home>/.agents/skills/...``; the home is the parent of that marker dir.
+        Keying user skills under the owner's home (not this row's install_path)
+        lets the per-user project filter scope them correctly under root scans.
+        Falls back to the file's parent dir if no marker is found. Never raises.
+
+        Operates on the raw path string (not ``pathlib``) to preserve the
+        original separator style — ``pathlib`` rewrites separators per running
+        OS (``str(WindowsPath('/Users/a'))`` -> ``'\\Users\\a'``), which would
+        break key matching when a POSIX-style path is processed on Windows.
+        """
+        file_path = skill.get("file_path", "")
+        try:
+            for marker in ("/.copilot/", "\\.copilot\\", "/.agents/", "\\.agents\\"):
+                idx = file_path.find(marker)
+                if idx != -1:
+                    return file_path[:idx]
+            sep_idx = max(file_path.rfind("/"), file_path.rfind("\\"))
+            return file_path[:sep_idx] if sep_idx != -1 else file_path
+        except Exception:
+            return file_path
 
     def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
         """
@@ -1331,7 +1446,12 @@ class AIToolsDetector:
                                     "rules": [],
                                     "skills": [],
                                 }
-                            projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
+                            # Union so User-scope and Workspace .mcp.json sources
+                            # sharing a path don't overwrite each other.
+                            projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                                projects_dict[project_path].get("mcpServers", []),
+                                project.get("mcpServers", []),
+                            )
                     log_mcp_details(projects_dict, tool_name)
                 else:
                     logger.info("  No GitHub Copilot CLI MCP configs found")
@@ -1370,7 +1490,7 @@ class AIToolsDetector:
         logger.info(f"  Extracting {tool_name} skills...")
         if self._copilot_cli_skills_extractor:
             try:
-                skills_result = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+                skills_result = self._get_copilot_cli_skills()
                 user_skills = skills_result.get("user_skills", [])
                 project_skills = skills_result.get("project_skills", [])
 
@@ -1461,6 +1581,20 @@ class AIToolsDetector:
             result["permissions"] = permissions_payload
         return result
 
+    def _set_canonical_vscode_copilot(self, tools: List[Dict]) -> None:
+        """Pick the single VS Code Copilot row that should carry the shared
+        skills. Prefer the Chat surface; fall back to the plain extension.
+        Computed once from the full detected list so exactly ONE row is
+        enriched (the IDE branch in process_single_tool reads this). None when
+        neither is present."""
+        detected_lower = {t.get("name", "").lower() for t in tools}
+        if "github copilot chat (vs code)" in detected_lower:
+            self._canonical_vscode_copilot = "github copilot chat (vs code)"
+        elif "github copilot (vs code)" in detected_lower:
+            self._canonical_vscode_copilot = "github copilot (vs code)"
+        else:
+            self._canonical_vscode_copilot = None
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
@@ -1515,7 +1649,8 @@ class AIToolsDetector:
                             if project_root not in projects_dict:
                                 projects_dict[project_root] = {
                                     "mcpServers": [],
-                                    "rules": []
+                                    "rules": [],
+                                    "skills": []
                                 }
                             projects_dict[project_root]["rules"] = rules
 
@@ -1531,7 +1666,9 @@ class AIToolsDetector:
             logger.info(f"  Extracting {tool_name} MCP configs...")
             if self._github_copilot_mcp_extractor:
                 try:
-                    mcp_config = self._github_copilot_mcp_extractor.extract_mcp_config()
+                    mcp_config = self._github_copilot_mcp_extractor.extract_mcp_config(
+                        tool_name=original_tool_name
+                    )
                     if mcp_config and "projects" in mcp_config:
                         # Merge MCP configs into projects_dict
                         for project in mcp_config["projects"]:
@@ -1540,7 +1677,8 @@ class AIToolsDetector:
                                 if project_path not in projects_dict:
                                     projects_dict[project_path] = {
                                         "mcpServers": [],
-                                        "rules": []
+                                        "rules": [],
+                                        "skills": []
                                     }
                                 projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
 
@@ -1551,12 +1689,56 @@ class AIToolsDetector:
                 except Exception as e:
                     logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
 
+            # SKILLS-ONLY enrichment for the canonical VS Code Copilot surface.
+            # VS Code GitHub Copilot reads the SHARED ~/.copilot (+ project
+            # .github/.claude/.agents) skills — the same set the CLI reports.
+            # Attach them to exactly ONE VS Code row (the Chat row when present)
+            # so a single surface carries skills with full sibling visibility.
+            # Exclude JetBrains (carries an "ide" key) and the non-canonical VS
+            # Code row. This is extraction-only: it cannot re-introduce the #164
+            # CLI false positive (detection is untouched; skills only ride here
+            # when a VS Code Copilot surface was ALREADY detected).
+            is_canonical_vscode = (
+                "ide" not in tool
+                and tool_name.endswith("(vs code)")
+                and tool_name == self._canonical_vscode_copilot
+            )
+            if is_canonical_vscode:
+                logger.info(f"  Attaching shared Copilot skills to {tool_name}...")
+                skills_result = self._get_copilot_cli_skills()
+
+                # Project-scope skills land under their absolute repo root, so
+                # the per-user project filter scopes them correctly.
+                for skills_project in skills_result.get("project_skills", []):
+                    project_root = skills_project.get("project_root", "")
+                    skills = skills_project.get("skills", [])
+                    if not project_root:
+                        continue
+                    if project_root not in projects_dict:
+                        projects_dict[project_root] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[project_root].setdefault("skills", [])
+                    existing.extend(skills)
+                    projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
+
+                # User-scope skills key under the OWNING user's home (derived from
+                # each skill's file_path), NOT this row's install_path — so under
+                # a root/all-users scan filter_tool_projects_by_user scopes each
+                # user's skills to their own home (no cross-user leak).
+                for skill in skills_result.get("user_skills", []):
+                    owner_home = self._copilot_skill_owner_home(skill)
+                    if owner_home not in projects_dict:
+                        projects_dict[owner_home] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[owner_home].setdefault("skills", [])
+                    existing.append(skill)
+                    projects_dict[owner_home]["skills"] = self._deduplicate_project_items(existing)
+
             # Convert projects_dict back to list format for tool_dict
             projects_list = [
                 {
                     "path": path,
                     "mcpServers": data.get("mcpServers", []),
-                    "rules": data.get("rules", [])
+                    "rules": data.get("rules", []),
+                    "skills": data.get("skills", [])
                 }
                 for path, data in projects_dict.items()
             ]
@@ -1971,7 +2153,8 @@ class AIToolsDetector:
         device_id = self.get_device_id()
         user_info = get_user_info()
         tools = self.detect_all_tools()
-        
+        self._set_canonical_vscode_copilot(tools)
+
         tools_with_projects = []
         for tool in tools:
             tool_with_projects = self.process_single_tool(tool)
@@ -2231,6 +2414,9 @@ def main():
         logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
         logger.info("")
 
+        # Pick the single VS Code Copilot row that should carry the shared skills.
+        detector._set_canonical_vscode_copilot(tools)
+
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
@@ -2269,6 +2455,19 @@ def main():
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+
+                        # Ownership gate (Copilot CLI only): suppress a phantom install
+                        # row for a user who neither owns the detected ~/.copilot nor has
+                        # any per-user data (e.g. gowshik_2 carrying gowshik's install_path
+                        # with 0 projects). filter_tool_projects_by_user scopes projects/
+                        # permissions but never rewrites install_path, so the gate is needed.
+                        if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping Copilot CLI for {user_name}: install_path "
+                                f"{tool_filtered.get('install_path')!r} not owned by this "
+                                f"user and no per-user data"
+                            )
+                            continue
 
                         # Detect subscription plan for Claude Code
                         if tool_name.lower() == "claude code":

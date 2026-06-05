@@ -169,14 +169,18 @@ def _copilot_dir_has_shared_artifact(copilot_dir: Path) -> bool:
 
     A shared marker is any of the SHARED marker files (present as a file) or any
     of the SHARED marker directories (present as a directory): ``skills/``,
-    ``agents/``, ``instructions/``, ``copilot-instructions.md``. These live under
-    ``~/.copilot/`` but are ALSO read by the GitHub Copilot VS Code extension /
-    JetBrains plugin's agent mode
-    (https://code.visualstudio.com/docs/agent-customization/agent-skills), so
-    they cannot, on their own, declare a standalone CLI install — an IDE-only
-    user who never installed the CLI can have them. This predicate exists only to
-    recognise the "shared markers but no strong CLI artifact" case so it can be
-    logged and suppressed rather than reported as a phantom CLI row.
+    ``agents/``, ``instructions/``, ``copilot-instructions.md``, ``ide/``, and
+    ``hooks/``. These live under ``~/.copilot/`` but are NOT exclusive to the CLI:
+    ``skills/``/``agents/``/``instructions/``/``copilot-instructions.md`` are
+    ALSO read by the GitHub Copilot VS Code extension / JetBrains plugin's agent
+    mode (https://code.visualstudio.com/docs/agent-customization/agent-skills);
+    ``ide/`` is WRITTEN by that extension as a discovery lock
+    (microsoft/vscode-copilot-chat#3583); and ``hooks/`` is WRITTEN by Unbound's
+    own MDM onboarding (websentry-ai/setup copilot/hooks/mdm/setup.py). So none of
+    them can, on their own, declare a standalone CLI install — an IDE-only or
+    hook-only user who never installed the CLI can have them. This predicate
+    exists only to recognise the "shared markers but no strong CLI artifact" case
+    so it can be logged and suppressed rather than reported as a phantom CLI row.
     """
     return _dir_has_any_marker(
         copilot_dir, _CLI_SHARED_MARKER_FILES, _CLI_SHARED_MARKER_DIRS

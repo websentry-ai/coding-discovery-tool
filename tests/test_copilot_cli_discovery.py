@@ -978,6 +978,16 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         (copilot_dir / "skills").mkdir()
         self.assertIsNone(self.detector.detect())
 
+    def test_hooks_dir_alone_not_detected(self):
+        """hooks/ is SHARED (Unbound's own MDM onboarding writes ~/.copilot/hooks/
+        unbound.json on every enrolled device), so a hooks-only ~/.copilot is
+        suppressed on Windows too — guards that the SHARED demotion is inherited."""
+        copilot_dir = self._make_copilot_dir()
+        hooks_dir = copilot_dir / "hooks"
+        hooks_dir.mkdir()
+        (hooks_dir / "unbound.json").write_text('{"version": 1}', encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
     def test_detect_returns_unknown_version_when_binary_absent(self):
         """version falls back to 'unknown' when `copilot --version` yields nothing."""
         copilot_dir = self._make_copilot_dir()

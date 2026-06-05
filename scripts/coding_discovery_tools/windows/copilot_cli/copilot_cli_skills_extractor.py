@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCopilotCliSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
     get_windows_system_directories,
@@ -129,7 +129,13 @@ class WindowsCopilotCliSkillsExtractor(BaseCopilotCliSkillsExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item, get_windows_system_directories()):
+                    # Skip other-tool config dirs (e.g. installed extension packages),
+                    # but allow the shared .claude/.agents skill dirs a real repo root
+                    # legitimately carries (collected below as targets).
+                    if (
+                        should_skip_path(item, get_windows_system_directories())
+                        or traverses_other_tool_config_dir(item, allow=SHARED_SKILL_DIRS)
+                    ):
                         continue
 
                     try:

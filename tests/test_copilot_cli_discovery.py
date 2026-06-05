@@ -216,6 +216,26 @@ class TestCopilotCliDetection(unittest.TestCase):
         )
         self.assertIsNone(self.detector.detect())
 
+    def test_hooks_dir_alone_not_detected(self):
+        """hooks/ is written by Unbound's OWN MDM onboarding (websentry-ai/setup
+        copilot/hooks/mdm/setup.py creates ~/.copilot/hooks/ and writes
+        unbound.json on every onboarded device), so it is NOT CLI-exclusive ->
+        SHARED, not a CLI install on its own. Repro for device D2FJV74J5Q / user
+        gowshik: ~/.copilot held only hooks/unbound.json, no copilot binary."""
+        copilot_dir = self._make_copilot_dir()
+        hooks_dir = copilot_dir / "hooks"
+        hooks_dir.mkdir()
+        (hooks_dir / "unbound.json").write_text('{"version": 1}', encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
+    def test_real_install_with_hooks_and_strong_marker_detected(self):
+        """A real CLI install (session-store.db) that ALSO has Unbound's hooks/ is
+        still detected — a shared marker never vetoes a strong one."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
+        (copilot_dir / "hooks").mkdir()
+        self.assertIsNotNone(self.detector.detect())
+
     def test_only_skills_and_rules_not_detected(self):
         """Repro for device MY4W6QQGCQ / user karthick: a ~/.copilot holding only
         skills/ and copilot-instructions.md (both SHARED, no strong CLI artifact)
@@ -247,7 +267,7 @@ class TestCopilotCliDetection(unittest.TestCase):
         with self.assertLogs(_DETECTOR_MOD, level="INFO") as captured:
             self.assertIsNone(self.detector.detect())
         self.assertTrue(
-            any("shared/IDE-written Copilot markers" in record.getMessage()
+            any("Copilot markers present" in record.getMessage()
                 for record in captured.records)
         )
 

@@ -50,9 +50,19 @@ logger = logging.getLogger(__name__)
 #         CLI can connect — see microsoft/vscode-copilot-chat#3583. An IDE-only
 #         user with no standalone CLI therefore has ``~/.copilot/ide/`` even
 #         though the CLI was never installed.
-#     Any of these can be present for an IDE-only user, so none can alone declare
-#     a CLI install (doing so produces phantom CLI rows); they are tracked solely
-#     to log/suppress that case.
+#       - WRITTEN by Unbound's own MDM onboarding: ``hooks/``. The Copilot hook
+#         installer (websentry-ai/setup ``copilot/hooks/mdm/setup.py``) runs for
+#         EVERY onboarded device and does ``(~/.copilot/hooks).mkdir(parents=True)``
+#         then writes ``unbound.json`` + ``unbound.py`` — creating ``~/.copilot/
+#         hooks/`` from scratch on machines that never had the CLI. Treating it as
+#         CLI-exclusive made every hooked device a phantom CLI install (confirmed
+#         in prod: device D2FJV74J5Q / user gowshik — ``~/.copilot`` held only
+#         ``hooks/unbound.json``, no binary). So ``hooks/`` is NOT CLI-exclusive.
+#     Any of these can be present for an IDE-only (or hook-only) user, so none can
+#     alone declare a CLI install (doing so produces phantom CLI rows); they are
+#     tracked solely to log/suppress that case. A genuine CLI always also has a
+#     strong marker (config.json / session-store.db / logs/), so demoting these
+#     never causes a false negative.
 _CLI_DIR_NAME = ".copilot"
 _CLI_STRONG_MARKER_FILES = frozenset({
     "config.json",
@@ -68,7 +78,6 @@ _CLI_STRONG_MARKER_DIRS = frozenset({
     "command-history-state",
     "installed-plugins",
     "plugin-data",
-    "hooks",
     "pkg",
 })
 _CLI_SHARED_MARKER_FILES = frozenset({
@@ -79,6 +88,7 @@ _CLI_SHARED_MARKER_DIRS = frozenset({
     "agents",
     "instructions",
     "ide",
+    "hooks",
 })
 
 
@@ -104,6 +114,56 @@ def _resolve_copilot_dir(user_home: Path) -> Path:
     except OSError as exc:
         logger.debug(f"Error resolving COPILOT_HOME: {exc}")
     return user_home / _CLI_DIR_NAME
+
+
+def _resolve_copilot_binary(user_home: Path) -> Optional[Path]:
+    """Return the per-user ``copilot`` CLI binary for ``user_home``, if found.
+
+    The CLI installs to a per-user location that root's PATH does not include
+    during an MDM all-users scan, so probing the bare ``copilot`` name yields
+    nothing and the version reads "unknown". We resolve the binary explicitly
+    from the documented/observed install locations, in order:
+
+      - ``~/.local/bin/copilot`` (npm/standalone user install)
+      - ``~/.bun/bin/copilot`` (Bun global install)
+      - ``~/.nvm/versions/node/*/bin/copilot`` (nvm-managed Node; newest Node
+        version first, so a stale copilot under an older Node isn't preferred)
+
+    Best-effort only: any error is swallowed and None is returned so the caller
+    falls back to the bare-PATH probe (and ultimately "unknown"). Never raises.
+    """
+    def _node_version_key(version_dir: Path):
+        # Numeric (major, minor, patch) parsed from an nvm "vX.Y.Z" dir name, so
+        # the newest Node sorts first. A plain string sort would order "v9" after
+        # "v10"; malformed names yield () and sort last. Determinism also makes a
+        # re-scan report the same version.
+        nums = re.findall(r"\d+", version_dir.name)
+        return tuple(int(n) for n in nums)
+
+    try:
+        for candidate in (
+            user_home / ".local" / "bin" / "copilot",
+            user_home / ".bun" / "bin" / "copilot",
+        ):
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    return candidate
+            except OSError:
+                continue
+        nvm_node_dir = user_home / ".nvm" / "versions" / "node"
+        try:
+            for version_dir in sorted(nvm_node_dir.glob("*"), key=_node_version_key, reverse=True):
+                try:
+                    candidate = version_dir / "bin" / "copilot"
+                    if candidate.exists() and os.access(str(candidate), os.X_OK):
+                        return candidate
+                except OSError:
+                    continue
+        except OSError:
+            pass
+    except (PermissionError, OSError) as exc:
+        logger.debug(f"Error resolving Copilot CLI binary for {user_home}: {exc}")
+    return None
 
 
 def _dir_has_any_marker(
@@ -159,14 +219,18 @@ def _copilot_dir_has_shared_artifact(copilot_dir: Path) -> bool:
 
     A shared marker is any of the SHARED marker files (present as a file) or any
     of the SHARED marker directories (present as a directory): ``skills/``,
-    ``agents/``, ``instructions/``, ``copilot-instructions.md``. These live under
-    ``~/.copilot/`` but are ALSO read by the GitHub Copilot VS Code extension /
-    JetBrains plugin's agent mode
-    (https://code.visualstudio.com/docs/agent-customization/agent-skills), so
-    they cannot, on their own, declare a standalone CLI install — an IDE-only
-    user who never installed the CLI can have them. This predicate exists only to
-    recognise the "shared markers but no strong CLI artifact" case so it can be
-    logged and suppressed rather than reported as a phantom CLI row.
+    ``agents/``, ``instructions/``, ``copilot-instructions.md``, ``ide/``, and
+    ``hooks/``. These live under ``~/.copilot/`` but are NOT exclusive to the CLI:
+    ``skills/``/``agents/``/``instructions/``/``copilot-instructions.md`` are
+    ALSO read by the GitHub Copilot VS Code extension / JetBrains plugin's agent
+    mode (https://code.visualstudio.com/docs/agent-customization/agent-skills);
+    ``ide/`` is WRITTEN by that extension as a discovery lock
+    (microsoft/vscode-copilot-chat#3583); and ``hooks/`` is WRITTEN by Unbound's
+    own MDM onboarding (websentry-ai/setup copilot/hooks/mdm/setup.py). So none of
+    them can, on their own, declare a standalone CLI install — an IDE-only or
+    hook-only user who never installed the CLI can have them. This predicate
+    exists only to recognise the "shared markers but no strong CLI artifact" case
+    so it can be logged and suppressed rather than reported as a phantom CLI row.
     """
     return _dir_has_any_marker(
         copilot_dir, _CLI_SHARED_MARKER_FILES, _CLI_SHARED_MARKER_DIRS
@@ -203,9 +267,10 @@ class MacOSCopilotCliDetector(BaseToolDetector):
     - Verifying it contains at least one STRONG (CLI-exclusive) marker (a strong
       marker file or directory) so a stray empty ``~/.copilot`` does not count.
       A dir holding only SHARED markers (skills/agents/instructions/
-      copilot-instructions.md, which the IDE Copilot agent reads, or ide/, which
-      the IDE extension writes as a discovery lock) is the VS Code/JetBrains
-      agent rather than the CLI and is suppressed.
+      copilot-instructions.md, which the IDE Copilot agent reads; ide/, which the
+      IDE extension writes as a discovery lock; or hooks/, which Unbound's own MDM
+      onboarding creates) is the VS Code/JetBrains agent or Unbound's hook rather
+      than the CLI, and is suppressed.
 
     When ``user_home`` is set on the instance (the per-user path used by the
     live discovery loop via ``detect_tool_for_user``), detection is scoped to
@@ -275,10 +340,21 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             banner so the stored value is clean and within the backend's version
             column limit (a raw multi-line banner overflows it).
         """
-        # TODO(copilot-cli): resolve the per-user binary (e.g. ~/.local/bin,
-        # .bun/bin, nvm paths) and probe that explicitly, mirroring
-        # find_claude_binary_for_user, so version populates on root MDM scans
-        # where root's PATH lacks the user's copilot install (review W2).
+        # Resolve the per-user binary first (root's PATH lacks the user's
+        # copilot install during an MDM all-users scan), then fall back to the
+        # bare-PATH probe for the running-user case.
+        try:
+            if self.user_home is not None:
+                binary = _resolve_copilot_binary(self.user_home)
+                if binary is not None:
+                    parsed = _parse_cli_version(
+                        run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                    )
+                    if parsed:
+                        return parsed
+        except Exception as exc:
+            logger.debug(f"Could not extract Copilot CLI version from per-user binary: {exc}")
+
         try:
             output = run_command(["copilot", "--version"], VERSION_TIMEOUT)
             return _parse_cli_version(output)
@@ -339,8 +415,9 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         Returns a tool-info dict when the resolved config dir (``COPILOT_HOME``
         when set for this user, else ``user_home/.copilot``) exists and holds at
         least one STRONG CLI artifact; otherwise None. A dir holding only SHARED
-        markers (skills/agents/instructions/copilot-instructions.md/ide) is the
-        IDE Copilot agent, not the CLI — it is logged and suppressed.
+        markers (skills/agents/instructions/copilot-instructions.md/ide/hooks) is
+        the IDE Copilot agent or Unbound's own MDM hook, not the CLI — it is
+        logged and suppressed.
         """
         copilot_dir = _resolve_copilot_dir(user_home)
         try:
@@ -353,9 +430,9 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         if not _copilot_dir_has_strong_artifact(copilot_dir):
             if _copilot_dir_has_shared_artifact(copilot_dir):
                 logger.info(
-                    "Skipping %s: only shared/IDE-written Copilot markers present "
-                    "(skills/agents/instructions/copilot-instructions.md/ide) — likely the "
-                    "VS Code/JetBrains Copilot agent, not the standalone CLI",
+                    "Skipping %s: only shared/IDE-written/hook-written Copilot markers present "
+                    "(skills/agents/instructions/copilot-instructions.md/ide/hooks) — likely the "
+                    "VS Code/JetBrains Copilot agent or Unbound's MDM hook, not the standalone CLI",
                     copilot_dir,
                 )
             return None

@@ -1139,10 +1139,20 @@ class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    @unittest.skipUnless(
+        os.name == "posix",
+        "executes a #!/bin/sh stub; Windows exec path is covered by "
+        "test_version_probed_from_per_user_npm_shim",
+    )
     def test_version_resolved_from_local_bin_stub(self):
         _write_copilot_stub(self.user_home / ".local" / "bin" / "copilot")
         self.assertEqual(self.detector.get_version(), "0.0.399")
 
+    @unittest.skipUnless(
+        os.name == "posix",
+        "executes a #!/bin/sh stub; Windows exec path is covered by "
+        "test_version_probed_from_per_user_npm_shim",
+    )
     def test_version_resolved_from_nvm_stub(self):
         _write_copilot_stub(
             self.user_home / ".nvm" / "versions" / "node" / "v20.0.0" / "bin" / "copilot"

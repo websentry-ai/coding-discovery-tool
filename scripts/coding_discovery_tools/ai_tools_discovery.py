@@ -309,6 +309,7 @@ class AIToolsDetector:
                         tools.append(tool_info)
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
+                report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
 
         return tools
 
@@ -343,6 +344,7 @@ class AIToolsDetector:
             return self._cursor_rules_extractor.extract_all_cursor_rules()
         except Exception as e:
             logger.error(f"Error extracting Cursor rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cursor rules"}, level="warning")
             return []
 
     def extract_all_claude_rules(self) -> Optional[Dict]:
@@ -361,6 +363,7 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Claude rules"}, level="warning")
             return None
 
     def extract_all_claude_skills(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
@@ -384,6 +387,7 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Claude skills"}, level="warning")
             return None
 
     def extract_all_cowork_skills(self) -> Optional[Dict]:
@@ -402,6 +406,7 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Cowork skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cowork skills"}, level="warning")
             return None
 
     def extract_all_cursor_skills(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
@@ -425,6 +430,7 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Cursor skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cursor skills"}, level="warning")
             return None
 
     def extract_all_cline_skills(self) -> Optional[Dict]:
@@ -443,6 +449,7 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Cline skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cline skills"}, level="warning")
             return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
@@ -458,6 +465,7 @@ class AIToolsDetector:
             return self._windsurf_rules_extractor.extract_all_windsurf_rules()
         except Exception as e:
             logger.error(f"Error extracting Windsurf rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Windsurf rules"}, level="warning")
             return []
 
     def extract_all_roo_rules(self) -> List[Dict]:
@@ -470,6 +478,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Roo Code rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Roo Code rules"}, level="warning")
             return []
 
     def extract_all_antigravity_rules(self) -> List[Dict]:
@@ -487,6 +496,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Antigravity rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Antigravity rules"}, level="warning")
             return []
 
     def extract_all_kilocode_rules(self) -> List[Dict]:
@@ -504,6 +514,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Kilo Code rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Kilo Code rules"}, level="warning")
             return []
 
     def extract_all_gemini_cli_rules(self) -> List[Dict]:
@@ -521,6 +532,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Gemini CLI rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Gemini CLI rules"}, level="warning")
             return []
 
     def extract_all_codex_rules(self) -> List[Dict]:
@@ -538,6 +550,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Codex rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Codex rules"}, level="warning")
             return []
 
     def extract_all_opencode_rules(self) -> List[Dict]:
@@ -555,6 +568,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting OpenCode rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "OpenCode rules"}, level="warning")
             return []
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
@@ -575,6 +589,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting GitHub Copilot rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "GitHub Copilot rules"}, level="warning")
             return []
 
     def extract_all_junie_rules(self) -> List[Dict]:
@@ -587,6 +602,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Junie rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Junie rules"}, level="warning")
             return []
 
     def extract_all_cursor_cli_rules(self) -> List[Dict]:
@@ -599,6 +615,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Cursor CLI rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cursor CLI rules"}, level="warning")
             return []
 
     def _process_tool_with_rules_and_mcp(
@@ -663,6 +680,7 @@ class AIToolsDetector:
                     log_rules_details(projects_dict, tool_name)
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
                 projects_dict = {}
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
@@ -687,6 +705,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
         
@@ -733,6 +752,7 @@ class AIToolsDetector:
                     logger.info("  ⚠ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
         
@@ -1061,6 +1081,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No rules found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
 
@@ -1113,6 +1134,7 @@ class AIToolsDetector:
                 logger.info("  ℹ No plugins found")
         except Exception as e:
             logger.debug(f"Error extracting {tool_name} plugins: {e}")
+            report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
             plugins = []
             plugin_lookup = {}
 
@@ -1131,6 +1153,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
 
@@ -1150,6 +1173,7 @@ class AIToolsDetector:
                     logger.warning("  ⚠ No settings found - extract_settings() returned None or empty list")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
@@ -1199,6 +1223,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No skills found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
@@ -1216,6 +1241,7 @@ class AIToolsDetector:
                     projects_dict[user_home]["skills"].extend(plugin_skills)
             except Exception as e:
                 logger.debug(f"Error extracting plugin-bundled skills: {e}")
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
 
         return projects_dict
 
@@ -2238,10 +2264,12 @@ def main():
     if _lock_status == "contended":
         logger.info("Another discovery process is running (lock held); exiting.")
         sys.exit(0)
+    _have_lock = (_lock_status == "acquired")
+    # Lock is best-effort: if the state dir is unwritable, run lock-less rather than skip the scan.
     if _lock_status == "setup_failed":
         logger.error(
             "Discovery preflight failed: cannot create lock/cache dir "
-            f"({discovery_cache.UNBOUND_DIR}); exiting."
+            f"({discovery_cache.UNBOUND_DIR}); continuing without lock."
         )
         try:
             _ctx = dict(sentry_ctx)
@@ -2254,17 +2282,17 @@ def main():
             if hasattr(os, "getuid"):
                 _ctx["uid"] = os.getuid()
             report_to_sentry(
-                OSError("discovery lock setup failed"),
+                OSError("discovery lock setup failed (continuing lock-less)"),
                 context=_ctx,
-                level="error",
+                level="warning",
             )
         except Exception:
             pass
-        sys.exit(0)
     _heartbeat_stop = None
 
     try:
-        _heartbeat_stop = discovery_cache.heartbeat_start()
+        if _have_lock:
+            _heartbeat_stop = discovery_cache.heartbeat_start()
         detector = AIToolsDetector()
 
         # Get device ID once (shared across all user reports)
@@ -2465,7 +2493,7 @@ def main():
                                     )
                                     if tool_filtered.get("projects") and cli_succeeded:
                                         report_to_sentry(
-                                            RuntimeError(f"Claude Code plan detection failed for {user_name}"),
+                                            RuntimeError("Claude Code plan detection failed"),
                                             context={
                                                 **sentry_ctx,
                                                 "phase": "plan_detection",
@@ -2734,7 +2762,8 @@ def main():
             _heartbeat_stop.set()
         except Exception:
             pass
-        discovery_cache.release_lock()
+        if _have_lock:
+            discovery_cache.release_lock()
 
 
 if __name__ == "__main__":

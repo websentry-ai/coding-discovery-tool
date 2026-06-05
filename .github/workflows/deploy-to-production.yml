@@ -1,0 +1,113 @@
+name: Merge to main
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_notes:
+        description: 'Deployment notes/description'
+        required: true
+        type: string
+      ticket_reference:
+        description: 'Related ticket/issue reference'
+        required: false
+        type: string
+      confirm_deployment:
+        description: 'I confirm that staging has been tested and is ready for production'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    # Run on macOS: the test suite is validated on macOS/Windows (see tests.yml),
+    # not Linux. Git merge/push are platform-agnostic.
+    runs-on: macos-latest
+    if: inputs.confirm_deployment == true
+    environment: production
+
+    steps:
+    # Checkout code with full history for proper merging
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.DEPLOY_AUTOMATION_SECRET }}
+
+    # Validate inputs to prevent injection attacks
+    - name: Validate inputs
+      env:
+        DEPLOYMENT_NOTES: ${{ inputs.deployment_notes }}
+        TICKET_REFERENCE: ${{ inputs.ticket_reference }}
+      run: |
+        if echo "$DEPLOYMENT_NOTES" | grep -q '[`$();|&<>]'; then
+          echo "Error: Deployment notes contain potentially dangerous characters"
+          exit 1
+        fi
+
+        if [ -n "$TICKET_REFERENCE" ] && echo "$TICKET_REFERENCE" | grep -q '[`$();|&<>]'; then
+          echo "Error: Ticket reference contains potentially dangerous characters"
+          exit 1
+        fi
+
+        if [ ${#DEPLOYMENT_NOTES} -gt 500 ]; then
+          echo "Error: Deployment notes too long (max 500 characters)"
+          exit 1
+        fi
+
+        if [ -n "$TICKET_REFERENCE" ] && [ ${#TICKET_REFERENCE} -gt 100 ]; then
+          echo "Error: Ticket reference too long (max 100 characters)"
+          exit 1
+        fi
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    # Configure Git for merge commits
+    - name: Configure Git
+      run: |
+        git config --global user.name 'Unbound Automation'
+        git config --global user.email 'engg@unboundsecurity.ai'
+
+    # Use merge commit (--no-ff) to preserve history and make rollbacks easier
+    - name: Merge staging into main
+      run: |
+        git checkout main
+        git pull origin main
+        git fetch origin staging
+        git merge --no-ff origin/staging -m "Merge staging into main for production deployment
+
+        Deployment Notes: ${{ inputs.deployment_notes }}
+        Ticket Reference: ${{ inputs.ticket_reference }}"
+
+    # Verify the merge result before pushing
+    - name: Run post-merge tests
+      run: |
+        python -m unittest discover -s tests -t . -v
+
+    # Push to main - this will trigger CICD deployment
+    - name: Push to main
+      run: |
+        git push origin main
+
+    # Create a tag for deployment tracking
+    - name: Create deployment tag
+      run: |
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        git tag -a "prod_${TIMESTAMP}" -m "Production deployment $TIMESTAMP
+
+        Deployment Notes: ${{ inputs.deployment_notes }}
+        Ticket Reference: ${{ inputs.ticket_reference }}"
+        git push origin "prod_${TIMESTAMP}"
+
+    - name: Deployment status
+      run: |
+        echo "✅ Deployment process completed"
+        echo "🔍 Please monitor:"
+        echo "  - CICD pipeline status"
+        echo "  - Application health checks"
+        echo ""
+        echo "Deployment Notes: ${{ inputs.deployment_notes }}"
+        if [ ! -z "${{ inputs.ticket_reference }}" ]; then
+          echo "Ticket Reference: ${{ inputs.ticket_reference }}"
+        fi

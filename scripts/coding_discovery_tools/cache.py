@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .utils import report_to_sentry
+
 logger = logging.getLogger(__name__)
 
 # Immutable home anchor. _ensure_state_dir() may reassign the *active* paths
@@ -179,6 +181,7 @@ def read_cache() -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError) as e:
         logger.warning(f"discovery-cache read failed, treating as empty: {e}")
+        report_to_sentry(e, {"phase": "cache"}, level="warning")
         return {}
 
 
@@ -208,6 +211,7 @@ def atomic_write_cache(data: dict) -> None:
                     pass
     except OSError as e:
         logger.warning(f"discovery-cache write failed: {e}")
+        report_to_sentry(e, {"phase": "cache"}, level="warning")
 
 
 def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:

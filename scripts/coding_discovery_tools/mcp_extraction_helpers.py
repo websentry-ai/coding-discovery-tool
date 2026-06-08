@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -433,6 +434,39 @@ MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json"]
 
 # VS Code, Cursor, others
 MCP_JSON_FILENAMES = ["mcp.json"]
+
+
+# Shared JSONC strippers for hand-edited MCP config files (// and /* */ comments,
+# trailing commas) that are invalid for json.loads. Group 1 captures full quoted
+# strings so comment-like / comma sequences inside string values are preserved.
+# re.MULTILINE (not re.DOTALL) so the //-comment branch stops at end-of-line.
+_JSONC_PATTERN = re.compile(
+    r'("(?:\\.|[^"\\])*")|(/\*[\s\S]*?\*/)|(//[^\n]*)',
+    re.MULTILINE,
+)
+_TRAILING_COMMA_PATTERN = re.compile(
+    r'("(?:\\.|[^"\\])*")|,(\s*[}\]])'
+)
+
+
+def _strip_jsonc_comments(raw: str) -> str:
+    """Remove // and /* */ comments from JSONC text, preserving string literals."""
+    def _replace(match: "re.Match") -> str:
+        if match.group(1) is not None:
+            return match.group(1)
+        return ""
+
+    return _JSONC_PATTERN.sub(_replace, raw)
+
+
+def _strip_trailing_commas(raw: str) -> str:
+    """Remove trailing commas before } or ], preserving commas inside strings."""
+    def _replace(match: "re.Match") -> str:
+        if match.group(1) is not None:
+            return match.group(1)
+        return match.group(2)
+
+    return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
 def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:

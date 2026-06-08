@@ -10,6 +10,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
 from ...mcp_extraction_helpers import (
+    enumerate_vscode_mcp_files,
     extract_ide_global_configs_with_root_support,
     transform_mcp_servers_to_array,
     _strip_jsonc_comments,
@@ -72,18 +73,26 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_vscode_configs_for_user(self, user_home: Path) -> List[Dict]:
         """
-        Extract VS Code MCP configs for a specific user from
-        ``Code/User/mcp.json``.
+        Extract VS Code MCP configs for a specific user.
+
+        Covers the default ``Code/User/mcp.json``, each named profile's
+        ``Code/User/profiles/<id>/mcp.json``, and the VS Code Insiders channel
+        (``Code - Insiders/User``) — both its default file and its profiles.
+        Each config is attributed to the directory the ``mcp.json`` lives in.
         """
-        configs = []
-        code_user_base = user_home / "Library" / "Application Support" / "Code" / "User"
+        configs: List[Dict] = []
 
-        primary_path = code_user_base / "mcp.json"
+        app_support = user_home / "Library" / "Application Support"
+        code_user_bases = [
+            app_support / "Code" / "User",
+            app_support / "Code - Insiders" / "User",
+        ]
 
-        if primary_path.exists():
-            config = self._read_mcp_config(primary_path, str(code_user_base))
-            if config:
-                configs.append(config)
+        for code_user_base in code_user_bases:
+            for mcp_file in enumerate_vscode_mcp_files(code_user_base):
+                config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
+                if config:
+                    configs.append(config)
 
         return configs
 

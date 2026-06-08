@@ -1,16 +1,14 @@
 """
-JSONC + dead-fallback tests for the GitHub Copilot VS Code MCP extractors
-(WEB-4703, fixes #1 and #3).
+JSONC + dead-fallback tests for the GitHub Copilot VS Code MCP extractors.
 
-Fix #1: the VS Code ``Code/User/mcp.json`` is JSONC in practice (VS Code lets
-users add // and /* */ comments and trailing commas). The github_copilot
-extractors previously called ``json.loads`` on the raw text, so any commented or
-trailing-comma config raised JSONDecodeError and surfaced ZERO servers. They now
-strip JSONC comments and trailing commas first (the same proven path the Copilot
-CLI extractor already used).
+The VS Code ``Code/User/mcp.json`` is JSONC in practice (VS Code lets users add
+// and /* */ comments and trailing commas). The github_copilot extractors strip
+JSONC comments and trailing commas before ``json.loads``; without that, any
+commented or trailing-comma config raises JSONDecodeError and surfaces ZERO
+servers. They reuse the same strippers the Copilot CLI extractor uses.
 
-Fix #3: the dead ``globalStorage/ms-vscode.vscode-github-copilot/mcp.json``
-fallback branch was removed. VS Code Copilot only ever reads the primary
+The dead ``globalStorage/ms-vscode.vscode-github-copilot/mcp.json`` fallback
+branch was removed. VS Code Copilot only ever reads the primary
 ``Code/User/mcp.json``, so a server-bearing file at the old globalStorage path
 must NOT be consulted.
 
@@ -74,10 +72,10 @@ class _GitHubCopilotVscodeMcpMixin:
         self.assertEqual(len(configs), 1)
         return {s["name"] for s in configs[0]["mcpServers"]}
 
-    # -- Fix #1: JSONC tolerance -------------------------------------------
+    # -- JSONC tolerance ---------------------------------------------------
 
     def test_commented_mcp_json_surfaces_server(self):
-        """// and /* */ comments must be stripped (was 0 servers before Fix #1)."""
+        """// and /* */ comments must be stripped (previously surfaced 0 servers)."""
         self._write_primary(
             "{\n"
             "  // VS Code Copilot MCP servers\n"
@@ -89,7 +87,7 @@ class _GitHubCopilotVscodeMcpMixin:
         self.assertIn("serena", self._server_names(self._extract()))
 
     def test_trailing_comma_mcp_json_surfaces_server(self):
-        """A hand-edited trailing comma must parse (was 0 servers before Fix #1)."""
+        """A hand-edited trailing comma must parse (previously surfaced 0 servers)."""
         self._write_primary('{"servers":{"serena":{"command":"uvx"}},}')
         self.assertIn("serena", self._server_names(self._extract()))
 
@@ -123,11 +121,11 @@ class _GitHubCopilotVscodeMcpMixin:
         self._write_primary('{"mcpServers":{"github":{"url":"https://x/mcp"}},}')
         self.assertIn("github", self._server_names(self._extract()))
 
-    # -- Fix #3: primary works, dead fallback gone -------------------------
+    # -- Primary path read; dead fallback removed --------------------------
 
     def test_primary_only_surfaces_and_returns_code_user_base(self):
         """Only the primary Code/User/mcp.json present → servers surface and the
-        returned path is the Code/User base (Fix #3 primary still works)."""
+        returned path is the Code/User base."""
         self._write_primary(json.dumps({"servers": {"serena": {"command": "uvx"}}}))
         configs = self._extract()
         self.assertIn("serena", self._server_names(configs))

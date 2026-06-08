@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -433,6 +434,62 @@ MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json"]
 
 # VS Code, Cursor, others
 MCP_JSON_FILENAMES = ["mcp.json"]
+
+
+# ---------------------------------------------------------------------------
+# JSONC sanitization (shared single source of truth)
+# ---------------------------------------------------------------------------
+# Hand-edited / VS Code-style MCP config files routinely carry // and /* */
+# comments and trailing commas, both invalid for json.loads. These strippers
+# are the single source of truth used by every extractor that reads such files
+# (Copilot CLI and the three github_copilot OS extractors re-export / import
+# from here).
+
+# String-aware JSONC comment stripper. Removes // line comments and /* */ block
+# comments without mangling URLs or quoted strings that contain comment-like
+# sequences. The block-comment branch uses ``[\s\S]*?`` so it spans newlines on
+# its own; we deliberately do NOT enable re.DOTALL, because that would let the
+# ``//.*$`` line-comment branch swallow newlines (and thus the rest of the file)
+# instead of stopping at end-of-line. Only re.MULTILINE is set so ``$`` anchors
+# to each line end.
+_JSONC_PATTERN = re.compile(
+    r'("(?:\\.|[^"\\])*")|(/\*[\s\S]*?\*/)|(//[^\n]*)',
+    re.MULTILINE,
+)
+
+# String-aware trailing-comma stripper. Hand-edited configs often leave a comma
+# before a closing ``}`` or ``]`` (e.g. ``{"mcpServers": {...},}``), which is
+# invalid JSON and would otherwise raise JSONDecodeError -> silently 0 servers
+# (review P1). Group 1 captures a full quoted string so a comma INSIDE a string
+# value (e.g. ``"args": ["a,"]``) is preserved verbatim; otherwise we keep just
+# the bracket and drop the dangling comma. Applied AFTER comment stripping (so
+# ``},  // note`` -> ``}`` first) and BEFORE json.loads.
+_TRAILING_COMMA_PATTERN = re.compile(
+    r'("(?:\\.|[^"\\])*")|,(\s*[}\]])'
+)
+
+
+def _strip_jsonc_comments(raw: str) -> str:
+    """Remove // and /* */ comments from JSONC text, preserving string literals."""
+    def _replace(match: "re.Match") -> str:
+        # Group 1 is a quoted string — keep it verbatim. Comment groups -> "".
+        if match.group(1) is not None:
+            return match.group(1)
+        return ""
+
+    return _JSONC_PATTERN.sub(_replace, raw)
+
+
+def _strip_trailing_commas(raw: str) -> str:
+    """Remove trailing commas before } or ], preserving commas inside strings."""
+    def _replace(match: "re.Match") -> str:
+        # Group 1 is a quoted string — keep it verbatim (commas inside stay).
+        # Otherwise group 2 is the bracket after a dangling comma; drop comma.
+        if match.group(1) is not None:
+            return match.group(1)
+        return match.group(2)
+
+    return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
 def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:

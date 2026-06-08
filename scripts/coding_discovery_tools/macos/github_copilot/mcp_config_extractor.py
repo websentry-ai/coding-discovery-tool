@@ -4,7 +4,6 @@ MCP config extraction for GitHub Copilot on macOS systems.
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -13,6 +12,8 @@ from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
 from ...mcp_extraction_helpers import (
     extract_ide_global_configs_with_root_support,
     transform_mcp_servers_to_array,
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
 )
 from ...macos_extraction_helpers import (
     get_top_level_directories,
@@ -71,22 +72,16 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_vscode_configs_for_user(self, user_home: Path) -> List[Dict]:
         """
-        Extract VS Code MCP configs for a specific user.
+        Extract VS Code MCP configs for a specific user from
+        ``Code/User/mcp.json``.
         """
         configs = []
         code_user_base = user_home / "Library" / "Application Support" / "Code" / "User"
 
         primary_path = code_user_base / "mcp.json"
-        fallback_path = code_user_base / "globalStorage" / "ms-vscode.vscode-github-copilot" / "mcp.json"
 
         if primary_path.exists():
             config = self._read_mcp_config(primary_path, str(code_user_base))
-            if config:
-                configs.append(config)
-                return configs
-
-        if fallback_path.exists():
-            config = self._read_mcp_config(fallback_path, str(fallback_path.parent))
             if config:
                 configs.append(config)
 
@@ -210,10 +205,13 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _read_mcp_config(self, config_path: Path, tool_path: str) -> Optional[Dict]:
         """
-        Read and parse an MCP config file, stripping JSON comments.
+        Read and parse an MCP config file, stripping JSONC comments and
+        trailing commas before parsing.
         """
         try:
             content = config_path.read_text(encoding='utf-8', errors='replace')
+            content = _strip_jsonc_comments(content)
+            content = _strip_trailing_commas(content)
 
             config_data = json.loads(content)
 

@@ -513,6 +513,13 @@ class TestCopilotCliMcpExtraction(unittest.TestCase):
         self.config_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
         self.assertEqual(self.extractor._extract_cli_configs_for_user(self.user_home), [])
 
+    def test_jsonc_strippers_are_single_source_of_truth(self):
+        """The CLI module re-exports the strippers from mcp_extraction_helpers;
+        they must be the SAME objects (one source of truth, not a fork)."""
+        from scripts.coding_discovery_tools import mcp_extraction_helpers
+        self.assertIs(_strip_jsonc_comments, mcp_extraction_helpers._strip_jsonc_comments)
+        self.assertIs(_strip_trailing_commas, mcp_extraction_helpers._strip_trailing_commas)
+
 
 _MCP_MOD = (
     "scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor"

@@ -2309,6 +2309,13 @@ def main():
         # Track failed reports for persistence
         failed_reports = []
 
+        # Manifest of (home_user, tool_name) pairs successfully read this run.
+        # Sent in the final "completed" event so the backend can set-diff against
+        # it to soft-delete (prune) tools that are no longer installed. A tool
+        # that errored on read is intentionally NOT recorded here, so a transient
+        # read failure is never mistaken for an uninstall.
+        scanned_manifest = []
+
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
@@ -2619,6 +2626,9 @@ def main():
                         if local_payload_hash and cached_hash == local_payload_hash:
                             if not args.summary and not args.payload:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
+                            # Tool is still installed (just unchanged): record it so the
+                            # backend does not prune it as uninstalled. Runs once per (tool, user).
+                            scanned_manifest.append({"home_user": user_name, "tool_name": tool_name})
                         else:
                             if not args.summary and not args.payload:
                                 logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
@@ -2630,6 +2640,9 @@ def main():
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                                 if local_payload_hash:
                                     discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
+                                # Successfully read and uploaded: record for the manifest so the
+                                # backend does not prune it as uninstalled. Runs once per (tool, user).
+                                scanned_manifest.append({"home_user": user_name, "tool_name": tool_name})
                             else:
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                                 if retryable:
@@ -2724,11 +2737,13 @@ def main():
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 
-        # Send scan completed event AFTER all scanning
+        # Send scan completed event AFTER all scanning. Only this event carries the
+        # manifest and covered users, which the backend uses to prune uninstalled tools.
         logger.info("Sending scan completed event...")
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
-            args.app_name, sentry_context=sentry_ctx
+            args.app_name, sentry_context=sentry_ctx,
+            manifest=scanned_manifest, covered_home_users=all_users
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

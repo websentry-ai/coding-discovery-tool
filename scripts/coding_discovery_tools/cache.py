@@ -143,14 +143,7 @@ def _try_state_dir(path: Path, is_private: bool) -> bool:
                 if st.st_mode & 0o077:
                     last_lock_error = f"state dir not private (mode {oct(stat.S_IMODE(st.st_mode))}): {path}"
                     return False
-        # WEB-4702: a writable dir is still useless if it already holds a
-        # discovery-cache.json this uid cannot read -- which happens in a shared
-        # HOME when another uid wrote it 0600 (classically root via MDM vs. the
-        # login user). read_cache() would raise EACCES on such a file, so reject
-        # the candidate and fall through to the per-uid /var/tmp dir, mirroring how
-        # utils._get_queue_file_path() uid-namespaces the queue file against the
-        # same hazard. os.access() uses the real uid, so root -- able to read any
-        # file -- keeps using its own home cache unchanged.
+        # Reject a candidate whose existing cache file this uid can't read (foreign-owned 0600 in a shared HOME).
         cache_file = path / _CACHE_FILENAME
         if cache_file.exists() and not os.access(str(cache_file), os.R_OK):
             last_lock_error = f"state dir holds unreadable cache file (foreign-owned?): {cache_file}"
@@ -169,7 +162,10 @@ def _ensure_state_dir() -> bool:
     for path, is_private in _state_dir_candidates():
         if _try_state_dir(path, is_private):
             if path != UNBOUND_DIR:
-                logger.warning(f"home state dir unusable; using fallback state dir {path}")
+                logger.warning(
+                    f"home state dir unusable ({last_lock_error or 'unknown'}); "
+                    f"using fallback state dir {path}"
+                )
                 UNBOUND_DIR = path
                 CACHE_PATH = path / _CACHE_FILENAME
                 LOCK_PATH = path / _LOCK_FILENAME

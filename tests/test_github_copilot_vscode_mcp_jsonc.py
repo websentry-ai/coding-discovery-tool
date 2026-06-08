@@ -29,6 +29,9 @@ import unittest
 from pathlib import Path
 
 import scripts.coding_discovery_tools.utils as utils_mod
+from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+    enumerate_vscode_mcp_files,
+)
 from scripts.coding_discovery_tools.macos.github_copilot.mcp_config_extractor import (
     MacOSGitHubCopilotMCPConfigExtractor,
 )
@@ -58,6 +61,12 @@ class _GitHubCopilotVscodeMcpMixin:
         self.code_user_base = self.user_home.joinpath(*self.code_user_relpath)
         self.code_user_base.mkdir(parents=True)
         self.primary_path = self.code_user_base / "mcp.json"
+        # Insiders base is a sibling of the stable base with the trailing
+        # "Code" segment swapped for "Code - Insiders": code_user_base ends in
+        # ``.../Code/User`` so parent.parent strips ``User`` then ``Code``.
+        self.insiders_base = (
+            self.code_user_base.parent.parent / "Code - Insiders" / "User"
+        )
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -153,6 +162,164 @@ class _GitHubCopilotVscodeMcpMixin:
         """JSON broken beyond comments/commas must not raise; returns empty."""
         self._write_primary("{ this is not valid json {{{")
         self.assertEqual(self._extract(), [])
+
+    # -- Named profiles + Insiders (WEB-4703 fix #2, A+B) ------------------
+
+    def _write_profile(self, base: Path, profile_id: str, servers: dict) -> None:
+        """Write a profile-scoped mcp.json under ``base/profiles/<id>/``."""
+        profile_dir = base / "profiles" / profile_id
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        (profile_dir / "mcp.json").write_text(
+            json.dumps({"servers": servers}), encoding="utf-8"
+        )
+
+    def _configs_by_path(self, configs) -> dict:
+        """Map each returned config's path -> set of its server names."""
+        return {
+            cfg["path"]: {s["name"] for s in cfg["mcpServers"]}
+            for cfg in configs
+        }
+
+    def test_default_only_unchanged_single_config_and_path(self):
+        """Only the default mcp.json ⇒ exactly one config at the base path."""
+        self._write_primary(json.dumps({"servers": {"serena": {"command": "uvx"}}}))
+        configs = self._extract()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.code_user_base))
+        self.assertIn("serena", {s["name"] for s in configs[0]["mcpServers"]})
+
+    def test_named_profile_surfaces_with_profile_dir_path(self):
+        """Default + one named profile ⇒ two configs; the profile config is
+        attributed to its own ``profiles/<id>`` dir."""
+        self._write_primary(json.dumps({"servers": {"serena": {"command": "uvx"}}}))
+        self._write_profile(self.code_user_base, "abc123", {"github": {"url": "https://x/mcp"}})
+
+        by_path = self._configs_by_path(self._extract())
+        self.assertEqual(len(by_path), 2)
+        self.assertEqual(by_path[str(self.code_user_base)], {"serena"})
+        profile_path = str(self.code_user_base / "profiles" / "abc123")
+        self.assertIn(profile_path, by_path)
+        self.assertEqual(by_path[profile_path], {"github"})
+
+    def test_multiple_profiles_each_separate_config(self):
+        """Two named profiles each surface as a separate config keyed by their
+        own profile-dir path (order-independent comparison)."""
+        self._write_primary(json.dumps({"servers": {"serena": {"command": "uvx"}}}))
+        self._write_profile(self.code_user_base, "p1", {"alpha": {"command": "a"}})
+        self._write_profile(self.code_user_base, "p2", {"beta": {"command": "b"}})
+
+        by_path = self._configs_by_path(self._extract())
+        self.assertEqual(
+            by_path,
+            {
+                str(self.code_user_base): {"serena"},
+                str(self.code_user_base / "profiles" / "p1"): {"alpha"},
+                str(self.code_user_base / "profiles" / "p2"): {"beta"},
+            },
+        )
+
+    def test_absent_profiles_dir_no_crash(self):
+        """Default present, no profiles/ dir ⇒ no crash, single default config."""
+        self._write_primary(json.dumps({"servers": {"serena": {"command": "uvx"}}}))
+        configs = self._extract()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.code_user_base))
+
+    def test_profile_dir_exists_but_no_mcp_json_ignored(self):
+        """An empty ``profiles/empty/`` dir is ignored; only the default surfaces."""
+        self._write_primary(json.dumps({"servers": {"serena": {"command": "uvx"}}}))
+        (self.code_user_base / "profiles" / "empty").mkdir(parents=True)
+        configs = self._extract()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.code_user_base))
+
+    def test_insiders_default_mcp_surfaces_with_insiders_path(self):
+        """Default mcp.json under the Insiders base ONLY ⇒ one config attributed
+        to the Insiders base."""
+        self.insiders_base.mkdir(parents=True)
+        (self.insiders_base / "mcp.json").write_text(
+            json.dumps({"servers": {"serena": {"command": "uvx"}}}), encoding="utf-8"
+        )
+        configs = self._extract()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.insiders_base))
+        self.assertIn("serena", {s["name"] for s in configs[0]["mcpServers"]})
+
+    def test_stable_and_insiders_both_surface(self):
+        """Default mcp.json in BOTH stable and Insiders ⇒ two configs, each
+        attributed to its own base path."""
+        self._write_primary(json.dumps({"servers": {"stable_srv": {"command": "s"}}}))
+        self.insiders_base.mkdir(parents=True)
+        (self.insiders_base / "mcp.json").write_text(
+            json.dumps({"servers": {"insiders_srv": {"command": "i"}}}), encoding="utf-8"
+        )
+
+        by_path = self._configs_by_path(self._extract())
+        self.assertEqual(
+            by_path,
+            {
+                str(self.code_user_base): {"stable_srv"},
+                str(self.insiders_base): {"insiders_srv"},
+            },
+        )
+
+    def test_insiders_profile_surfaces(self):
+        """A profile under the Insiders base surfaces with its Insiders
+        profile-dir path."""
+        self.insiders_base.mkdir(parents=True)
+        self._write_profile(self.insiders_base, "x", {"gamma": {"command": "g"}})
+
+        by_path = self._configs_by_path(self._extract())
+        profile_path = str(self.insiders_base / "profiles" / "x")
+        self.assertIn(profile_path, by_path)
+        self.assertEqual(by_path[profile_path], {"gamma"})
+
+
+class TestEnumerateVscodeMcpFiles(unittest.TestCase):
+    """OS-agnostic contract tests for ``enumerate_vscode_mcp_files``."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.base = Path(self.tmp_dir) / "User"
+        self.base.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _write_default(self) -> Path:
+        default_file = self.base / "mcp.json"
+        default_file.write_text("{}", encoding="utf-8")
+        return default_file
+
+    def _write_profile(self, profile_id: str) -> Path:
+        profile_dir = self.base / "profiles" / profile_id
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_file = profile_dir / "mcp.json"
+        profile_file.write_text("{}", encoding="utf-8")
+        return profile_file
+
+    def test_default_only_returns_default_file(self):
+        default_file = self._write_default()
+        self.assertEqual(enumerate_vscode_mcp_files(self.base), [default_file])
+
+    def test_default_plus_two_profiles_sorted_order(self):
+        default_file = self._write_default()
+        # Write out of order to prove sorting.
+        p_b = self._write_profile("bbb")
+        p_a = self._write_profile("aaa")
+        self.assertEqual(
+            enumerate_vscode_mcp_files(self.base),
+            [default_file, p_a, p_b],
+        )
+
+    def test_nonexistent_base_returns_empty(self):
+        missing = Path(self.tmp_dir) / "does_not_exist" / "User"
+        self.assertEqual(enumerate_vscode_mcp_files(missing), [])
+
+    def test_empty_profiles_dir_returns_just_default(self):
+        default_file = self._write_default()
+        (self.base / "profiles").mkdir()
+        self.assertEqual(enumerate_vscode_mcp_files(self.base), [default_file])
 
 
 class TestMacOSGitHubCopilotVscodeMcpJsonc(

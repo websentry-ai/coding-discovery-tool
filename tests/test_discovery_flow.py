@@ -852,12 +852,7 @@ class TestStateDirFallback(unittest.TestCase):
     @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
     @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses R_OK")
     def test_home_with_unreadable_cache_file_falls_back(self):
-        # WEB-4702: the home dir is writable, but it already holds a
-        # discovery-cache.json this uid cannot read -- the cross-uid 0600 case
-        # (root via MDM wrote it; the login user now reads it). The dir-only
-        # writability probe accepts such a home, then read_cache() raises EACCES.
-        # _try_state_dir must also probe the cache file's readability and fall
-        # back to the per-uid temp dir so no EACCES escapes.
+        # Writable home holding an unreadable (foreign-owned 0600) cache must fall back, not raise EACCES.
         poisoned_home = Path(self._tmp) / "poisoned_home"
         poisoned_home.mkdir()
         foreign_cache = poisoned_home / "discovery-cache.json"
@@ -869,12 +864,10 @@ class TestStateDirFallback(unittest.TestCase):
                 self.cache, "_state_dir_candidates",
                 return_value=[(poisoned_home, False), (good_temp, True)],
             ):
-                # No EACCES; lock acquired in the fallback, all path globals moved.
                 self.assertEqual(self.cache.acquire_lock(), "acquired")
             self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
             self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
             self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
-            # read_cache() now targets the readable fallback and must not raise.
             self.assertEqual(self.cache.read_cache(), {})
         finally:
             os.chmod(str(foreign_cache), 0o600)

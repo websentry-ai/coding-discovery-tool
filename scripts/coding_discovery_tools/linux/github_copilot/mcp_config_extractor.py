@@ -12,7 +12,11 @@ from ...linux_extraction_helpers import (
     should_skip_path,
     should_skip_system_path,
 )
-from ...mcp_extraction_helpers import transform_mcp_servers_to_array
+from ...mcp_extraction_helpers import (
+    transform_mcp_servers_to_array,
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,18 +53,9 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         code_user_base = user_home / ".config" / "Code" / "User"
 
         primary_path = code_user_base / "mcp.json"
-        fallback_path = (
-            code_user_base / "globalStorage" / "ms-vscode.vscode-github-copilot" / "mcp.json"
-        )
 
         if primary_path.exists():
             config = self._read_mcp_config(primary_path, str(code_user_base))
-            if config:
-                configs.append(config)
-                return configs
-
-        if fallback_path.exists():
-            config = self._read_mcp_config(fallback_path, str(fallback_path.parent))
             if config:
                 configs.append(config)
 
@@ -143,6 +138,8 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     def _read_mcp_config(self, config_path: Path, tool_path: str) -> Optional[Dict]:
         try:
             content = config_path.read_text(encoding="utf-8", errors="replace")
+            content = _strip_jsonc_comments(content)
+            content = _strip_trailing_commas(content)
             config_data = json.loads(content)
             mcp_servers_obj = config_data.get("servers") or config_data.get("mcpServers", {})
             mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)

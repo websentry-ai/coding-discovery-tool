@@ -436,6 +436,46 @@ MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json"]
 MCP_JSON_FILENAMES = ["mcp.json"]
 
 
+def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
+    """Enumerate the ``mcp.json`` files for ONE VS Code data dir (a
+    ``.../Code/User`` or ``.../Code - Insiders/User`` base).
+
+    Returns existing FILE paths in deterministic order:
+      1. the default ``code_user_base / "mcp.json"`` (only if it exists), then
+      2. each existing ``code_user_base / "profiles" / <id> / "mcp.json"``,
+         in sorted order.
+
+    Bounded: a single-level glob under ``profiles/`` only — never a recursive
+    or full-filesystem walk. If ``profiles/`` doesn't exist it contributes
+    nothing. If ``code_user_base`` itself doesn't exist, returns ``[]`` (the
+    default file's ``.exists()`` is False and the profiles glob yields
+    nothing), so callers need no extra guard — this is what makes the VS Code
+    Insiders base free.
+
+    NEVER raises: all filesystem probes are wrapped; whatever was collected so
+    far is returned. Callers derive attribution as ``mcp_file.parent``.
+    """
+    files: List[Path] = []
+
+    try:
+        default_file = code_user_base / "mcp.json"
+        if default_file.exists():
+            files.append(default_file)
+    except Exception:
+        pass
+
+    try:
+        profiles_dir = code_user_base / "profiles"
+        if profiles_dir.exists():
+            for profile_mcp in sorted(profiles_dir.glob("*/mcp.json")):
+                if profile_mcp.is_file():
+                    files.append(profile_mcp)
+    except Exception:
+        pass
+
+    return files
+
+
 # Shared JSONC strippers for hand-edited MCP config files (// and /* */ comments,
 # trailing commas) that are invalid for json.loads. Group 1 captures full quoted
 # strings so comment-like / comma sequences inside string values are preserved.

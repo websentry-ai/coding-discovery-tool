@@ -287,11 +287,13 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
         # Distinct install_path per tool so the (name:path) dedup keeps all three.
         return {"name": name, "version": "1.0", "install_path": f"/opt/{name}", "projects": []}
 
-    def _run_main_capture_manifest(self):
+    def _run_main_capture_manifest(self, send_report_result=(True, False)):
         """Run main() with three crafted tools for one user:
-          ToolOK        -> hash mismatch -> send path -> send succeeds -> appended
-          ToolHashMatch -> hash match    -> dedup short-circuit         -> appended
-          ToolErr       -> filter raises PermissionError                -> NOT appended
+          ToolOK        -> hash mismatch -> send path -> send result varies -> appended
+          ToolHashMatch -> hash match    -> dedup short-circuit            -> appended
+          ToolErr       -> filter raises PermissionError                   -> NOT appended
+        send_report_result controls send_report_to_backend's (success, retryable)
+        return — pass (False, True) to exercise a read-success / upload-failure.
         Returns the captured (manifest, covered_home_users) from the completed
         send_scan_event call.
         """
@@ -349,7 +351,7 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
              patch.object(adm, "discovery_cache", dc), \
              patch.object(adm, "get_all_users_macos", return_value=["alice"]), \
              patch.object(adm, "compute_payload_hash", side_effect=_hash), \
-             patch.object(adm, "send_report_to_backend", return_value=(True, False)), \
+             patch.object(adm, "send_report_to_backend", return_value=send_report_result), \
              patch.object(adm, "send_scan_event", side_effect=_send_scan_event), \
              patch.object(adm, "send_discovery_metrics", Mock()), \
              patch.object(adm, "load_pending_reports", return_value=[]), \
@@ -378,6 +380,28 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
         # look like an uninstall.
         self.assertNotIn(("alice", "ToolErr"), pairs)
         # Exactly the two non-errored pairs, nothing else.
+        self.assertEqual(len(captured["manifest"]), 2)
+
+    def test_read_success_but_upload_failure_still_in_manifest(self):
+        # A tool whose READ succeeds but whose UPLOAD fails transiently
+        # (send_report_to_backend -> (False, retryable=True)) is still installed.
+        # It MUST stay in the manifest; otherwise the backend would mistake a
+        # transient upload failure for an uninstall and prune a live tool. This
+        # fails before the fix (ToolOK absent when its upload fails) and passes
+        # after (the manifest tracks what was SEEN, not what uploaded).
+        captured = self._run_main_capture_manifest(send_report_result=(False, True))
+
+        self.assertIn("manifest", captured, "completed event was never sent")
+        pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
+
+        # Read-success tool whose upload FAILED is still recorded.
+        self.assertIn(("alice", "ToolOK"), pairs)
+        # Hash-match (no upload at all) still recorded.
+        self.assertIn(("alice", "ToolHashMatch"), pairs)
+        # An errored READ remains excluded — that path is unchanged.
+        self.assertNotIn(("alice", "ToolErr"), pairs)
+        # Manifest is identical to the all-uploads-succeed case: read-success is
+        # what counts, not upload success.
         self.assertEqual(len(captured["manifest"]), 2)
 
     def test_covered_home_users_includes_user_with_no_manifest_entry(self):

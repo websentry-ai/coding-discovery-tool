@@ -502,13 +502,10 @@ def send_scan_event(
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
         sentry_context: Optional context dict forwarded to Sentry on failure
-        manifest: Optional list of {"home_user", "tool_name"} dicts that were
-            successfully scanned this run. Sent only on the "completed" event so
-            the backend can set-diff against it to soft-delete (prune) tools that
-            are no longer installed. Tools that errored on read are excluded.
-        covered_home_users: Optional list of home users this run enumerated. Sent
-            only on the "completed" event; bounds the prune to the covered scope
-            (and includes a user whose last tool was removed).
+        manifest: Optional [{"home_user", "tool_name"}] seen this run; sent only on
+            "completed" so the backend set-diffs it to prune the rest.
+        covered_home_users: Optional home users covered; sent only on "completed" to
+            bound the prune scope.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue

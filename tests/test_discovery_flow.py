@@ -849,6 +849,29 @@ class TestStateDirFallback(unittest.TestCase):
         finally:
             os.chmod(str(bad_home), 0o700)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses R_OK")
+    def test_home_with_unreadable_cache_file_falls_back(self):
+        # Writable home holding an unreadable (foreign-owned 0600) cache must fall back, not raise EACCES.
+        poisoned_home = Path(self._tmp) / "poisoned_home"
+        poisoned_home.mkdir()
+        foreign_cache = poisoned_home / "discovery-cache.json"
+        foreign_cache.write_text('{"tools": {}}')
+        os.chmod(str(foreign_cache), 0o000)  # unreadable by this (non-root) uid
+        good_temp = Path(self._tmp) / "unbound-rw"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(poisoned_home, False), (good_temp, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+            self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+            self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
+            self.assertEqual(self.cache.read_cache(), {})
+        finally:
+            os.chmod(str(foreign_cache), 0o600)
+
     def test_foreign_owned_temp_dir_refused(self):
         # A pre-existing private candidate owned by someone else (ownership
         # mismatch) must be refused, not trusted. Simulate via _is_unsafe_existing.

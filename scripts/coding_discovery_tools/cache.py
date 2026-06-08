@@ -28,10 +28,12 @@ logger = logging.getLogger(__name__)
 # below to a temp fallback, but the home candidate is always derived from this
 # so a second acquire_lock() in the same process re-evaluates home first instead
 # of treating an already-resolved temp dir as a trusted non-private candidate.
+_CACHE_FILENAME = "discovery-cache.json"
+_LOCK_FILENAME = "discovery.lock"
 _HOME_STATE_DIR = Path.home() / ".unbound"
 UNBOUND_DIR = _HOME_STATE_DIR
-CACHE_PATH = UNBOUND_DIR / "discovery-cache.json"
-LOCK_PATH = UNBOUND_DIR / "discovery.lock"
+CACHE_PATH = UNBOUND_DIR / _CACHE_FILENAME
+LOCK_PATH = UNBOUND_DIR / _LOCK_FILENAME
 
 STALE_LOCK_SECONDS = 15 * 60
 HEARTBEAT_INTERVAL_SECONDS = 60
@@ -141,6 +143,11 @@ def _try_state_dir(path: Path, is_private: bool) -> bool:
                 if st.st_mode & 0o077:
                     last_lock_error = f"state dir not private (mode {oct(stat.S_IMODE(st.st_mode))}): {path}"
                     return False
+        # Reject a candidate whose existing cache file this uid can't read (foreign-owned 0600 in a shared HOME).
+        cache_file = path / _CACHE_FILENAME
+        if cache_file.exists() and not os.access(str(cache_file), os.R_OK):
+            last_lock_error = f"state dir holds unreadable cache file (foreign-owned?): {cache_file}"
+            return False
         return True
     except OSError as e:
         last_lock_error = str(e)
@@ -155,10 +162,13 @@ def _ensure_state_dir() -> bool:
     for path, is_private in _state_dir_candidates():
         if _try_state_dir(path, is_private):
             if path != UNBOUND_DIR:
-                logger.warning(f"home state dir unusable; using fallback state dir {path}")
+                logger.warning(
+                    f"home state dir unusable ({last_lock_error or 'unknown'}); "
+                    f"using fallback state dir {path}"
+                )
                 UNBOUND_DIR = path
-                CACHE_PATH = path / "discovery-cache.json"
-                LOCK_PATH = path / "discovery.lock"
+                CACHE_PATH = path / _CACHE_FILENAME
+                LOCK_PATH = path / _LOCK_FILENAME
             # An earlier candidate (e.g. an unwritable home) may have set
             # last_lock_error; clear it now that we have a usable dir so a
             # successful (possibly fallen-back) acquire never reports a stale

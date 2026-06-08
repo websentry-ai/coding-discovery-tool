@@ -461,8 +461,8 @@ def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
         default_file = code_user_base / "mcp.json"
         if default_file.exists():
             files.append(default_file)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("enumerate_vscode_mcp_files: skipping default in %s: %s", code_user_base, exc)
 
     try:
         profiles_dir = code_user_base / "profiles"
@@ -470,8 +470,8 @@ def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
             for profile_mcp in sorted(profiles_dir.glob("*/mcp.json")):
                 if profile_mcp.is_file():
                     files.append(profile_mcp)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("enumerate_vscode_mcp_files: skipping profiles in %s: %s", code_user_base, exc)
 
     return files
 

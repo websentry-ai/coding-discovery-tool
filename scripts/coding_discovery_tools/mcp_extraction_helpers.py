@@ -1224,7 +1224,7 @@ def extract_project_level_mcp_configs_with_fallback_windows(
     walk_for_configs_func: Callable,
     should_skip_func: Callable[[Path], bool]
 ) -> List[Dict]:
-    """
+    r"""
     Windows-specific helper for extracting project-level MCP configs with root path handling.
     
     This function handles the common pattern for Windows:

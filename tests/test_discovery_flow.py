@@ -5,7 +5,8 @@ Tests the outermost entry points: AIToolsDetector, main() CLI, report_to_sentry,
 settings transformation, and project filtering.
 
 Only mocks external environments: HTTP backend (real server on localhost),
-QUEUE_FILE path (tempfile), _SENTRY_DSN (prevent real calls), time.sleep.
+the queue path via AI_DISCOVERY_QUEUE_FILE (tempfile), _SENTRY_DSN (prevent
+real calls), time.sleep.
 Tool detection runs un-mocked on whatever OS is available.
 """
 
@@ -111,17 +112,34 @@ class TestMainCLI(unittest.TestCase):
     def setUp(self):
         self.server.requests.clear()
         self.server.default_code = 200
-        self._queue_file = utils_mod.QUEUE_FILE
+        # Redirect the queue to a per-test temp file (subprocess inherits it via os.environ).
+        self._queue_dir = tempfile.mkdtemp()
+        self._orig_queue_env = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(
+            Path(self._queue_dir) / "ai-discovery-queue.json"
+        )
+        self._queue_file = utils_mod._get_queue_file_path()
         # Ensure clean state
         if self._queue_file.exists():
             self._queue_file.unlink()
+        # Isolate the CLI's HOME so its ~/.unbound state (lock/cache) stays off the real home.
+        self._home_dir = tempfile.mkdtemp(prefix="ai-discovery-test-home-")
 
     def tearDown(self):
         if self._queue_file.exists():
             self._queue_file.unlink(missing_ok=True)
+        if self._orig_queue_env is None:
+            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+        else:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._orig_queue_env
+        shutil.rmtree(self._queue_dir, ignore_errors=True)
+        shutil.rmtree(self._home_dir, ignore_errors=True)
 
     def _run_cli(self, extra_env=None, timeout=600):
         env = os.environ.copy()
+        # Send the CLI's ~/.unbound state + lock to the throwaway HOME from setUp.
+        env["HOME"] = self._home_dir
+        env["USERPROFILE"] = self._home_dir
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -144,6 +162,14 @@ class TestMainCLI(unittest.TestCase):
         result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
+    def test_queue_path_honors_env_override(self):
+        # The env override must resolve to the temp file, never the real /var/tmp queue.
+        self.assertEqual(utils_mod._get_queue_file_path(), self._queue_file)
+        if hasattr(os, "getuid"):
+            self.assertNotEqual(
+                utils_mod._get_queue_file_path(),
+                Path(f"/var/tmp/ai-discovery-queue-{os.getuid()}.json"),
+            )
 
     def test_main_cli_with_queue_drain(self):
         # Pre-populate queue with a distinctive report
@@ -848,6 +874,29 @@ class TestStateDirFallback(unittest.TestCase):
             self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
         finally:
             os.chmod(str(bad_home), 0o700)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses R_OK")
+    def test_home_with_unreadable_cache_file_falls_back(self):
+        # Writable home holding an unreadable (foreign-owned 0600) cache must fall back, not raise EACCES.
+        poisoned_home = Path(self._tmp) / "poisoned_home"
+        poisoned_home.mkdir()
+        foreign_cache = poisoned_home / "discovery-cache.json"
+        foreign_cache.write_text('{"tools": {}}')
+        os.chmod(str(foreign_cache), 0o000)  # unreadable by this (non-root) uid
+        good_temp = Path(self._tmp) / "unbound-rw"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(poisoned_home, False), (good_temp, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+            self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+            self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
+            self.assertEqual(self.cache.read_cache(), {})
+        finally:
+            os.chmod(str(foreign_cache), 0o600)
 
     def test_foreign_owned_temp_dir_refused(self):
         # A pre-existing private candidate owned by someone else (ownership

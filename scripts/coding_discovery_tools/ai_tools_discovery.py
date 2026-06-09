@@ -65,7 +65,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, QUEUE_FILE
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -119,7 +119,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -2686,15 +2686,17 @@ def main():
         with time_step("persist_failed_reports", "queue"):
             if failed_reports:
                 save_failed_reports(failed_reports)
-            elif QUEUE_FILE.exists():
-                # All queued reports succeeded and no new failures — clean up
-                try:
-                    QUEUE_FILE.unlink(missing_ok=True)
-                except PermissionError:
-                    logger.warning(
-                        f"Could not remove queue file {QUEUE_FILE}"
-                        f" (owned by another user)"
-                    )
+            else:
+                queue_file = _get_queue_file_path()
+                if queue_file.exists():
+                    # All queued reports succeeded and no new failures — clean up
+                    try:
+                        queue_file.unlink(missing_ok=True)
+                    except PermissionError:
+                        logger.warning(
+                            f"Could not remove queue file {queue_file}"
+                            f" (owned by another user)"
+                        )
 
         # Forward client-side timing metrics to backend (best-effort, success path only).
         # Backend emits these as Sentry distributions via emit_discovery_metrics.

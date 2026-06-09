@@ -136,8 +136,13 @@ class WindowsReplitDetector(BaseToolDetector):
         """
         roots = []
         local_app = os.environ.get("LOCALAPPDATA")
-        roots.append(Path(local_app) / "Programs" if local_app
-                     else Path.home() / "AppData" / "Local" / "Programs")
+        if local_app:
+            roots.append(Path(local_app) / "Programs")
+        else:
+            try:
+                roots.append(Path.home() / "AppData" / "Local" / "Programs")
+            except (RuntimeError, OSError):
+                pass
         for env, default in (
             ("ProgramFiles", Path("C:\\Program Files")),
             ("ProgramFiles(x86)", Path("C:\\Program Files (x86)")),

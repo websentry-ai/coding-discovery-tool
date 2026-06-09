@@ -82,14 +82,21 @@ class WindowsAntigravityDetector(BaseToolDetector):
         Returns:
             List of Path objects
         """
-        user_home = Path.home()
-        paths = [
-            user_home / "AppData" / "Local" / "Programs" / "antigravity",
-            user_home / "AppData" / "Local" / "Programs" / "Antigravity",
-            user_home / "AppData" / "Local" / "Programs" / "Gemini",
-            user_home / "AppData" / "Local" / "Programs" / "Google Gemini",
-            user_home / "AppData" / "Roaming" / "antigravity",
-            user_home / "AppData" / "Roaming" / "Antigravity",
+        try:
+            user_home = Path.home()
+        except (RuntimeError, OSError):
+            user_home = None
+        paths = []
+        if user_home is not None:
+            paths.extend([
+                user_home / "AppData" / "Local" / "Programs" / "antigravity",
+                user_home / "AppData" / "Local" / "Programs" / "Antigravity",
+                user_home / "AppData" / "Local" / "Programs" / "Gemini",
+                user_home / "AppData" / "Local" / "Programs" / "Google Gemini",
+                user_home / "AppData" / "Roaming" / "antigravity",
+                user_home / "AppData" / "Roaming" / "Antigravity",
+            ])
+        paths.extend([
             Path("C:\\Program Files") / "Antigravity",
             Path("C:\\Program Files") / "antigravity",
             Path("C:\\Program Files") / "Gemini",
@@ -98,7 +105,7 @@ class WindowsAntigravityDetector(BaseToolDetector):
             Path("C:\\Program Files (x86)") / "antigravity",
             Path("C:\\Program Files (x86)") / "Gemini",
             Path("C:\\Program Files (x86)") / "Google Gemini",
-        ]
+        ])
 
         if is_running_as_admin():
             for program_root in self._other_user_program_dirs():

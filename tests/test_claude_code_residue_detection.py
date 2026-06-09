@@ -127,6 +127,7 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
              patch(f"{_MOD}.run_command", return_value=None):
             self.assertIsNone(find_claude_binary_for_user(self.home))
 
+    @unittest.skipIf(os.name == "nt", "os.chmod/os.access(X_OK) have no POSIX semantics on Windows")
     def test_non_executable_binary_not_detected(self):
         """A ``claude`` file that exists but is NOT ``os.X_OK`` -> None.
         Proves detection requires a real *executable*, not just a file."""

@@ -632,7 +632,11 @@ class TestFindGitHubCopilotProjectRoot(unittest.TestCase):
 
 
 class TestGitHubCopilotPathSpecificInstructions(unittest.TestCase):
-    """Tests for _extract_path_specific_instructions."""
+    """Tests for _extract_path_specific_instructions.
+
+    These now read ``.github/instructions/*.instructions.md`` (the documented
+    VS Code location), NOT the legacy ``.github/copilot/*.md`` path.
+    """
 
     def setUp(self):
         self.extractor = MacOSGitHubCopilotRulesExtractor()
@@ -643,28 +647,27 @@ class TestGitHubCopilotPathSpecificInstructions(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_finds_md_files_in_copilot_dir(self):
-        copilot_dir = self.github_dir / "copilot"
-        copilot_dir.mkdir()
-        (copilot_dir / "backend.md").write_text("# Backend rules", encoding="utf-8")
-        (copilot_dir / "frontend.md").write_text("# Frontend rules", encoding="utf-8")
+    def test_finds_instruction_files_in_instructions_dir(self):
+        instructions_dir = self.github_dir / "instructions"
+        instructions_dir.mkdir()
+        (instructions_dir / "backend.instructions.md").write_text("# Backend rules", encoding="utf-8")
+        (instructions_dir / "frontend.instructions.md").write_text("# Frontend rules", encoding="utf-8")
 
         projects_by_root = {}
         self.extractor._extract_path_specific_instructions(self.github_dir, projects_by_root)
 
         self.assertTrue(len(projects_by_root) > 0)
-        # Both files should be found
         all_rules = []
         for rules in projects_by_root.values():
             all_rules.extend(rules)
         file_names = {r["file_name"] for r in all_rules}
-        self.assertIn("backend.md", file_names)
-        self.assertIn("frontend.md", file_names)
+        self.assertIn("backend.instructions.md", file_names)
+        self.assertIn("frontend.instructions.md", file_names)
 
     def test_assigns_project_scope(self):
-        copilot_dir = self.github_dir / "copilot"
-        copilot_dir.mkdir()
-        (copilot_dir / "rules.md").write_text("# Project rules", encoding="utf-8")
+        instructions_dir = self.github_dir / "instructions"
+        instructions_dir.mkdir()
+        (instructions_dir / "rules.instructions.md").write_text("# Project rules", encoding="utf-8")
 
         projects_by_root = {}
         self.extractor._extract_path_specific_instructions(self.github_dir, projects_by_root)
@@ -673,15 +676,33 @@ class TestGitHubCopilotPathSpecificInstructions(unittest.TestCase):
             for rule in rules:
                 self.assertEqual(rule["scope"], "project")
 
-    def test_missing_copilot_dir_no_error(self):
-        """If .github/copilot/ does not exist, the method should return without error."""
+    def test_missing_instructions_dir_no_error(self):
+        """If .github/instructions/ does not exist, return without error."""
         projects_by_root = {}
         self.extractor._extract_path_specific_instructions(self.github_dir, projects_by_root)
         self.assertEqual(projects_by_root, {})
 
-    def test_empty_copilot_dir_no_results(self):
+    def test_empty_instructions_dir_no_results(self):
+        instructions_dir = self.github_dir / "instructions"
+        instructions_dir.mkdir()
+        projects_by_root = {}
+        self.extractor._extract_path_specific_instructions(self.github_dir, projects_by_root)
+        self.assertEqual(projects_by_root, {})
+
+    def test_legacy_copilot_dir_not_collected(self):
+        """The legacy .github/copilot/*.md path is intentionally no longer read."""
         copilot_dir = self.github_dir / "copilot"
         copilot_dir.mkdir()
+        (copilot_dir / "old.md").write_text("# legacy", encoding="utf-8")
+        projects_by_root = {}
+        self.extractor._extract_path_specific_instructions(self.github_dir, projects_by_root)
+        self.assertEqual(projects_by_root, {})
+
+    def test_plain_md_without_infix_not_collected(self):
+        """A .md without the .instructions infix is not a path-specific instruction."""
+        instructions_dir = self.github_dir / "instructions"
+        instructions_dir.mkdir()
+        (instructions_dir / "notes.md").write_text("# notes", encoding="utf-8")
         projects_by_root = {}
         self.extractor._extract_path_specific_instructions(self.github_dir, projects_by_root)
         self.assertEqual(projects_by_root, {})

@@ -242,6 +242,9 @@ class TestUnsupportedPlatformGuard(unittest.TestCase):
 class TestSentryNeverCrashes(unittest.TestCase):
     """report_to_sentry must never raise, regardless of input."""
 
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_with_empty_dsn(self):
         report_to_sentry(RuntimeError("boom"))
@@ -312,6 +315,9 @@ class TestExtractFrames(unittest.TestCase):
 class TestSentryDebugLogging(unittest.TestCase):
     """Sentry helpers log debug messages for missing DSN and curl failures."""
 
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_logs_debug_when_dsn_missing(self):
         with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
@@ -324,6 +330,40 @@ class TestSentryDebugLogging(unittest.TestCase):
         with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
             report_to_sentry(RuntimeError("test"))
         self.assertTrue(any("Sentry reporting failed" in msg for msg in cm.output))
+
+
+class TestSentryRunGuards(unittest.TestCase):
+    """Per-run dedup + circuit breaker keep report_to_sentry cheap when wired into
+    many failure paths against a slow or blocked endpoint."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
+    def tearDown(self):
+        utils_mod.reset_sentry_run_state()
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_dedup_same_signature_sends_once(self, mock_run):
+        for _ in range(5):
+            report_to_sentry(RuntimeError("x"), {"phase": "extract", "tool_name": "Codex rules"})
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=1, stdout=""))
+    def test_circuit_breaker_stops_after_consecutive_failures(self, mock_run):
+        # Distinct signatures so dedup never short-circuits; after 3 transport
+        # failures the breaker must stop issuing curls for the rest of the run.
+        for i in range(6):
+            report_to_sentry(RuntimeError("x"), {"phase": f"p{i}"})
+        self.assertEqual(mock_run.call_count, 3)
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_cap_limits_events_per_run(self, mock_run):
+        for i in range(40):
+            report_to_sentry(RuntimeError("x"), {"phase": f"p{i}"})
+        self.assertEqual(mock_run.call_count, 30)
 
 
 class TestSettingsTransformPrecedence(unittest.TestCase):
@@ -809,6 +849,29 @@ class TestStateDirFallback(unittest.TestCase):
         finally:
             os.chmod(str(bad_home), 0o700)
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses R_OK")
+    def test_home_with_unreadable_cache_file_falls_back(self):
+        # Writable home holding an unreadable (foreign-owned 0600) cache must fall back, not raise EACCES.
+        poisoned_home = Path(self._tmp) / "poisoned_home"
+        poisoned_home.mkdir()
+        foreign_cache = poisoned_home / "discovery-cache.json"
+        foreign_cache.write_text('{"tools": {}}')
+        os.chmod(str(foreign_cache), 0o000)  # unreadable by this (non-root) uid
+        good_temp = Path(self._tmp) / "unbound-rw"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(poisoned_home, False), (good_temp, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+            self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+            self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
+            self.assertEqual(self.cache.read_cache(), {})
+        finally:
+            os.chmod(str(foreign_cache), 0o600)
+
     def test_foreign_owned_temp_dir_refused(self):
         # A pre-existing private candidate owned by someone else (ownership
         # mismatch) must be refused, not trusted. Simulate via _is_unsafe_existing.
@@ -880,8 +943,9 @@ class TestStateDirFallback(unittest.TestCase):
 
 
 class TestMainLockSetupSentry(unittest.TestCase):
-    """main() reports lock setup failures to Sentry and exits 0, but stays
-    quiet on genuine contention. Sentry reporting can never crash the exit."""
+    """WEB-4662: lock setup failure reports to Sentry at warning level and the
+    scan CONTINUES lock-less (no exit). Genuine contention stays quiet and
+    exits 0. Sentry reporting can never crash the run."""
 
     def setUp(self):
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
@@ -890,27 +954,48 @@ class TestMainLockSetupSentry(unittest.TestCase):
             "ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"
         ]
 
-    def test_main_reports_sentry_on_lock_setup_failure(self):
+    def _run_main_setup_failed(self, mock_sentry):
+        """Run main() with acquire_lock -> setup_failed and every scan IO stubbed
+        so the lock-less path executes to completion deterministically."""
         adm = self.adm
-        mock_sentry = Mock()
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev-123"
+        detector_inst.detect_all_tools.return_value = []
         with patch.object(adm.platform, "system", return_value="Linux"), \
              patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
              patch.object(adm.discovery_cache, "last_lock_error", "EPERM Operation not permitted"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock()), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
              patch.object(adm, "report_to_sentry", mock_sentry), \
-             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst) as mock_detector, \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value={}), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
              patch.object(sys, "argv", self.argv):
-            with self.assertRaises(SystemExit) as cm:
+            try:
                 adm.main()
+            except SystemExit:
+                pass
+        return mock_detector
 
-        self.assertEqual(cm.exception.code, 0)
-        mock_sentry.assert_called_once()
-        _, kwargs = mock_sentry.call_args
-        self.assertEqual(kwargs["level"], "error")
+    def test_main_reports_sentry_on_lock_setup_failure(self):
+        mock_sentry = Mock()
+        mock_detector = self._run_main_setup_failed(mock_sentry)
+
+        # Continued lock-less: the detector was constructed despite setup_failed.
+        mock_detector.assert_called_once()
+        # The lock-setup failure is the first thing reported, at warning level.
+        mock_sentry.assert_called()
+        _, kwargs = mock_sentry.call_args_list[0]
+        self.assertEqual(kwargs["level"], "warning")
         ctx = kwargs["context"]
         self.assertEqual(ctx["phase"], "acquire_lock")
         self.assertIn("unbound_dir", ctx)
         self.assertTrue(ctx["lock_error"])
-        mock_detector.assert_not_called()
 
     def test_main_no_sentry_on_genuine_contention(self):
         adm = self.adm
@@ -927,18 +1012,138 @@ class TestMainLockSetupSentry(unittest.TestCase):
         mock_sentry.assert_not_called()
 
     def test_main_sentry_failure_does_not_crash_exit(self):
-        adm = self.adm
+        # A raising report_to_sentry at the lock block must be swallowed so the
+        # scan still continues lock-less rather than aborting the run.
         mock_sentry = Mock(side_effect=RuntimeError("boom"))
-        with patch.object(adm.platform, "system", return_value="Linux"), \
+        mock_detector = self._run_main_setup_failed(mock_sentry)
+
+        mock_sentry.assert_called()
+        mock_detector.assert_called_once()
+
+
+class TestLockBestEffort(unittest.TestCase):
+    """WEB-4662: the single-flight lock is best-effort.
+
+    - "contended" -> exit 0 immediately, no scan.
+    - "setup_failed" -> run lock-less: scan still happens, no heartbeat, no release.
+    - "acquired" -> heartbeat starts and the lock is released in the finally block.
+    """
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        self.adm = adm
+        self.argv = [
+            "ai_tools_discovery.py", "--api-key", "X", "--domain", "http://127.0.0.1:1"
+        ]
+
+    def test_setup_failed_continues_lockless(self):
+        adm = self.adm
+        heartbeat = Mock()
+        release = Mock()
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
              patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
-             patch.object(adm.discovery_cache, "last_lock_error", "EPERM"), \
-             patch.object(adm, "report_to_sentry", mock_sentry), \
-             patch.object(adm, "AIToolsDetector"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", heartbeat), \
+             patch.object(adm.discovery_cache, "release_lock", release), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        # The scan ran lock-less: detector was constructed despite setup_failed.
+        mock_detector.assert_called_once()
+        # No lock was held, so neither heartbeat nor release should fire.
+        heartbeat.assert_not_called()
+        release.assert_not_called()
+
+    def test_contended_still_exits_zero(self):
+        adm = self.adm
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "report_to_sentry", Mock()), \
              patch.object(sys, "argv", self.argv):
             with self.assertRaises(SystemExit) as cm:
                 adm.main()
 
         self.assertEqual(cm.exception.code, 0)
+        mock_detector.assert_not_called()
+
+    def test_acquired_starts_heartbeat_and_releases(self):
+        adm = self.adm
+        heartbeat = Mock()
+        release = Mock()
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", heartbeat), \
+             patch.object(adm.discovery_cache, "release_lock", release), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        heartbeat.assert_called_once()
+        release.assert_called_once()
+
+
+class TestCodexProjectRulesNoArgError(unittest.TestCase):
+    """Regression: _extract_project_level_rules(Path("/"), ...) must pass
+    root_path to should_process_directory(). The old call omitted it and
+    raised TypeError: should_process_directory() missing 1 required
+    positional argument: 'root_path'."""
+
+    def test_extract_project_level_rules_root_no_typeerror(self):
+        import scripts.coding_discovery_tools.macos.codex.codex_rules_extractor as codex_mod
+        from scripts.coding_discovery_tools.macos.codex.codex_rules_extractor import (
+            MacOSCodexRulesExtractor,
+        )
+
+        extractor = MacOSCodexRulesExtractor()
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(tmp_dir), True)
+
+        # One real top-level candidate; let should_process_directory run for real
+        # against the tmp path. _walk_for_agents_files is a no-op so we don't
+        # recurse the filesystem.
+        with patch.object(codex_mod, "get_top_level_directories", return_value=[tmp_dir]), \
+             patch.object(MacOSCodexRulesExtractor, "_walk_for_agents_files", Mock()):
+            try:
+                extractor._extract_project_level_rules(Path("/"), {})
+            except TypeError as exc:
+                self.fail(f"should_process_directory call regressed: {exc}")
+
+
+class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
+    """A swallowed extraction error must report to Sentry at warning level
+    (with phase 'extract') and still return [] so the scan continues."""
+
+    def test_extract_failure_reports_warning_and_returns_empty(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        detector = AIToolsDetector()
+        failing = Mock()
+        failing.extract_all_codex_rules.side_effect = RuntimeError("boom")
+        detector._codex_rules_extractor = failing
+
+        mock_sentry = Mock()
+        with patch.object(adm, "report_to_sentry", mock_sentry):
+            result = detector.extract_all_codex_rules()
+
+        self.assertEqual(result, [])
+        mock_sentry.assert_called_once()
+        args, kwargs = mock_sentry.call_args
+        self.assertEqual(kwargs.get("level"), "warning")
+        # context is passed positionally as the 2nd argument.
+        context = args[1]
+        self.assertEqual(context.get("phase"), "extract")
 
 
 if __name__ == "__main__":

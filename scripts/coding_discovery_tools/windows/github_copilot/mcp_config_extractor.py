@@ -1,15 +1,17 @@
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
 from ...mcp_extraction_helpers import (
+    enumerate_vscode_mcp_files,
     extract_ide_global_configs_with_root_support,
     transform_mcp_servers_to_array,
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
 )
 from ...windows_extraction_helpers import (
     should_skip_path,
@@ -21,28 +23,34 @@ logger = logging.getLogger(__name__)
 class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for GitHub Copilot MCP config on Windows systems."""
 
-    def extract_mcp_config(self) -> Optional[Dict]:
+    def extract_mcp_config(self, tool_name: Optional[str] = None) -> Optional[Dict]:
         """
-        Extract GitHub Copilot MCP configuration on Windows.
+        Extract GitHub Copilot MCP configuration on Windows, scoped to the surface.
 
         - VS Code global: %APPDATA%\\Code\\User\\mcp.json
-        - VS Code (fallback): %APPDATA%\\Code\\User\\globalStorage\\ms-vscode.vscode-github-copilot\\mcp.json
         - JetBrains global: %LOCALAPPDATA%\\github-copilot\\intellij\\mcp.json
         - Workspace: **\\.vscode\\mcp.json
+
+        Scoped by ``tool_name``: a VS Code row reads VS Code global + workspace
+        ``.vscode/mcp.json``; a JetBrains row reads only the JetBrains global.
+        Without scoping every Copilot row gets the union of both IDEs' servers
+        (cross-surface misattribution when both are installed). ``tool_name=None``
+        keeps the legacy union. Mirrors the identity-aware rules extractor.
         """
+        name = (tool_name or "").lower()
+        is_vscode = ("vs code" in name) or ("vscode" in name)
+        want_vscode = (not tool_name) or is_vscode
+        want_jetbrains = (not tool_name) or (not is_vscode)
+
         projects = []
 
-        # Extract VS Code global configs
-        vscode_configs = self._extract_vscode_configs()
-        projects.extend(vscode_configs)
+        if want_vscode:
+            # VS Code global + workspace .vscode/mcp.json (JetBrains doesn't read it).
+            projects.extend(self._extract_vscode_configs())
+            projects.extend(self._extract_workspace_configs())
 
-        # Extract JetBrains global configs
-        jetbrains_configs = self._extract_jetbrains_configs()
-        projects.extend(jetbrains_configs)
-
-        # Extract workspace-level .vscode/mcp.json configs
-        workspace_configs = self._extract_workspace_configs()
-        projects.extend(workspace_configs)
+        if want_jetbrains:
+            projects.extend(self._extract_jetbrains_configs())
 
         if not projects:
             return None
@@ -64,27 +72,25 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract VS Code MCP configs for a specific user.
 
-        - %APPDATA%\\Code\\User\\mcp.json
-        - %APPDATA%\\Code\\User\\globalStorage\\ms-vscode.vscode-github-copilot\\mcp.json
+        Covers the default ``%APPDATA%\\Code\\User\\mcp.json``, each named
+        profile's ``%APPDATA%\\Code\\User\\profiles\\<id>\\mcp.json``, and the
+        VS Code Insiders channel (``%APPDATA%\\Code - Insiders\\User``) — both
+        its default file and its profiles. Each config is attributed to the dir
+        the ``mcp.json`` lives in.
         """
-        configs = []
+        configs: List[Dict] = []
 
         appdata_roaming = user_home / "AppData" / "Roaming"
-        code_user_base = appdata_roaming / "Code" / "User"
+        code_user_bases = [
+            appdata_roaming / "Code" / "User",
+            appdata_roaming / "Code - Insiders" / "User",
+        ]
 
-        primary_path = code_user_base / "mcp.json"
-        fallback_path = code_user_base / "globalStorage" / "ms-vscode.vscode-github-copilot" / "mcp.json"
-
-        if primary_path.exists():
-            config = self._read_mcp_config(primary_path, str(code_user_base))
-            if config:
-                configs.append(config)
-                return configs
-
-        if fallback_path.exists():
-            config = self._read_mcp_config(fallback_path, str(fallback_path.parent))
-            if config:
-                configs.append(config)
+        for code_user_base in code_user_bases:
+            for mcp_file in enumerate_vscode_mcp_files(code_user_base):
+                config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
+                if config:
+                    configs.append(config)
 
         return configs
 
@@ -206,9 +212,11 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _read_mcp_config(self, config_path: Path, tool_path: str) -> Optional[Dict]:
         """
-        Read and parse an MCP config file, stripping JSON comments.
+        Read and parse an MCP config file, stripping JSONC comments and
+        trailing commas before parsing.
 
-        Uses robust JSONC parser to handle comments without breaking URLs.
+        Uses robust JSONC strippers to handle comments and trailing commas
+        without breaking URLs or quoted strings.
 
         Args:
             config_path: Path to the mcp.json file
@@ -219,6 +227,8 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         try:
             content = config_path.read_text(encoding='utf-8', errors='replace')
+            content = _strip_jsonc_comments(content)
+            content = _strip_trailing_commas(content)
 
             config_data = json.loads(content)
 

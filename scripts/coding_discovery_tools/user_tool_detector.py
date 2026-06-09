@@ -233,7 +233,7 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
                 if candidate.exists() and os.access(str(candidate), os.X_OK):
                     return {
                         "name": detector.tool_name,
-                        "version": detector.get_version(),
+                        "version": detector.get_version() or "Unknown",
                         "install_path": str(candidate)
                     }
             except OSError:
@@ -365,9 +365,10 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     # is the SCANNER's, not ``user_home``'s. Under a root/MDM multi-user scan
     # it would resolve root's claude for a user who has none, mis-attributing
     # the install. The explicit candidate list above is comprehensive and
-    # already user_home-relative, so we simply skip ``which`` when root.
-    # (On Windows there is no ``which`` resolution here anyway.)
-    if not is_running_as_root():
+    # already user_home-relative, so we skip ``which`` when root, and on
+    # Windows (where ``which`` is not a command — the .exe/.cmd candidates
+    # above already cover it).
+    if not is_running_as_root() and platform.system() != "Windows":
         which_path = run_command(["which", "claude"], VERSION_TIMEOUT)
         if which_path:
             try:

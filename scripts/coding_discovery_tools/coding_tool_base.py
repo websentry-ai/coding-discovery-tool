@@ -872,6 +872,17 @@ class BaseCursorSettingsExtractor(ABC):
             if isinstance(raw_settings, dict):
                 raw_settings["autoRun"] = merged_auto_run
 
+        applied_fields = [
+            name
+            for name, value in (
+                ("mcp", merged_mcp),
+                ("terminal", merged_terminal),
+                ("autorun", merged_auto_run),
+            )
+            if value is not None
+        ]
+        logger.info(f"  ✓ Applied permissions.json override for fields: {', '.join(applied_fields)}")
+
         return backend_settings
 
     def _extract_from_database(self, db_path: Path, user_home: Path) -> Optional[Dict]:

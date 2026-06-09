@@ -211,6 +211,18 @@ class TestMcpAllowlistOverride(_BaseCursorPermissionsTest):
         self.assertEqual(result["mcp_tool_allowlist"], ["u:one", "u:two", "w:three"])
         self.assertNotIn("sqlite:tool", result["mcp_tool_allowlist"])
 
+    def test_M5_empty_mcp_array_replaces_to_empty(self):
+        """mcpAllowlist: [] is a present key -> intentional override-to-empty.
+
+        A present (even empty) mcpAllowlist overrides entirely (correct Cursor
+        semantics), so the SQLite-derived mcp_tool_allowlist is wiped to [].
+        """
+        composer = {"mcpAllowlist": ["sqlite:tool"]}
+        _create_cursor_db(self.db_path, composer)
+        self._write_global_permissions({"mcpAllowlist": []})
+        result = self._extract()
+        self.assertEqual(result["mcp_tool_allowlist"], [])
+
 
 # ===========================================================================
 # T: terminalAllowlist -> Bash(cmd*) (no trailing space), distinct from SQLite
@@ -250,6 +262,18 @@ class TestTerminalAllowlistOverride(_BaseCursorPermissionsTest):
         self._write_workspace_permissions("projX", {"terminalAllowlist": ["git"]})
         result = self._extract()
         self.assertEqual(result["allow_rules"], ["Bash(npm*)", "Bash(git*)"])
+
+    def test_T5_empty_terminal_array_replaces_to_empty(self):
+        """terminalAllowlist: [] is a present key -> intentional override-to-empty.
+
+        A present (even empty) terminalAllowlist overrides entirely (correct
+        Cursor semantics), so the SQLite-derived yolo allow_rules are wiped to [].
+        """
+        composer = {"yoloCommandAllowlist": ["ls"]}
+        _create_cursor_db(self.db_path, composer)
+        self._write_global_permissions({"terminalAllowlist": []})
+        result = self._extract()
+        self.assertEqual(result["allow_rules"], [])
 
 
 # ===========================================================================
@@ -312,6 +336,18 @@ class TestAutoRunOverride(_BaseCursorPermissionsTest):
         self._write_global_permissions({"autoRun": "not-an-object"})
         result = self._extract()
         self.assertEqual(result, self._parse_only(composer))
+
+    def test_A7_autorun_unknown_subkey_preserved(self):
+        """Unknown autoRun sub-keys survive the merge alongside the arrays."""
+        composer = {"useYoloMode": False}
+        _create_cursor_db(self.db_path, composer)
+        self._write_global_permissions(
+            {"autoRun": {"allow_instructions": ["x"], "mode": "smart"}}
+        )
+        result = self._extract()
+        auto_run = result["raw_settings"]["autoRun"]
+        self.assertEqual(auto_run["mode"], "smart")
+        self.assertEqual(auto_run["allow_instructions"], ["x"])
 
 
 # ===========================================================================
@@ -448,8 +484,10 @@ class TestCollapsedRecordShape(_BaseCursorPermissionsTest):
 class TestMacOSGlobalOverride(unittest.TestCase):
     """macOS extractor: global ~/.cursor/permissions.json layering.
 
-    The macOS workspace walk roots at ``/`` via ``get_top_level_directories``;
-    patch it to ``[]`` so only the deterministic global file is read.
+    The macOS workspace walk now roots at ``user_home`` (matching the Linux
+    sibling). Confining ``user_home`` to a temp tree confines the whole walk,
+    and the global ~/.cursor/permissions.json is read directly via
+    ``_get_user_permissions_path`` (not via the walk), so the assertion holds.
     """
 
     def setUp(self):
@@ -461,11 +499,7 @@ class TestMacOSGlobalOverride(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
-    @patch(
-        "scripts.coding_discovery_tools.macos.cursor.settings_extractor.get_top_level_directories",
-        return_value=[],
-    )
-    def test_macos_global_mcp_override(self, _mock_tld):
+    def test_macos_global_mcp_override(self):
         """macOS reads ~/.cursor/permissions.json and overrides mcp_tool_allowlist."""
         composer = {"mcpAllowlist": ["sqlite:tool"]}
         _create_cursor_db(self.db_path, composer)

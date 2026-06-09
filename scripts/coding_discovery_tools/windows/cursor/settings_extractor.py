@@ -91,6 +91,8 @@ class WindowsCursorSettingsExtractor(BaseCursorSettingsExtractor):
                         if perms_file.exists() and perms_file.is_file():
                             found.append(perms_file)
                 else:
+                    if entry.is_symlink():
+                        continue
                     self._walk_for_permissions(
                         entry, global_cursor, system_dirs, found, current_depth + 1
                     )

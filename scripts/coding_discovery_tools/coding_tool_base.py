@@ -789,8 +789,10 @@ class BaseCursorSettingsExtractor(ABC):
 
         For each known field, concatenates the user file first then each
         workspace in walk order, with order-preserving de-dupe. ``autoRun`` is an
-        object whose nested ``allow_instructions`` / ``block_instructions`` arrays
-        are concatenated independently. Unknown top-level keys are ignored.
+        object: its documented ``allow_instructions`` / ``block_instructions``
+        arrays are concatenated independently across files, while any other
+        sub-keys are preserved via a shallow merge (last file wins). Unknown
+        top-level keys are ignored.
 
         Returns ``{"mcpAllowlist": [...]|None, "terminalAllowlist": [...]|None,
         "autoRun": {...}|None}`` where ``None`` means no file spoke to that field.
@@ -811,20 +813,27 @@ class BaseCursorSettingsExtractor(ABC):
             return self._dedupe_preserve_order(collected) if saw else None
 
         merged_auto_run = None
+        collected_instructions = {"allow_instructions": [], "block_instructions": []}
         for src in sources:
             auto_run = src.get("autoRun")
             if not isinstance(auto_run, dict):
                 continue
             if merged_auto_run is None:
-                merged_auto_run = {"allow_instructions": [], "block_instructions": []}
+                merged_auto_run = {}
+            # Shallow-merge to preserve unknown sub-keys (later file wins).
+            merged_auto_run.update(auto_run)
             for nested_key in ("allow_instructions", "block_instructions"):
                 nested = auto_run.get(nested_key)
                 if isinstance(nested, list):
-                    merged_auto_run[nested_key].extend(nested)
+                    collected_instructions[nested_key].extend(nested)
 
         if merged_auto_run is not None:
+            # Overwrite the documented arrays with their concatenated+deduped
+            # values, leaving any other preserved sub-keys untouched.
             for nested_key in ("allow_instructions", "block_instructions"):
-                merged_auto_run[nested_key] = self._dedupe_preserve_order(merged_auto_run[nested_key])
+                merged_auto_run[nested_key] = self._dedupe_preserve_order(
+                    collected_instructions[nested_key]
+                )
 
         return {
             "mcpAllowlist": merge_list_field("mcpAllowlist"),

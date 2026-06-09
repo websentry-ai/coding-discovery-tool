@@ -53,7 +53,7 @@ class LinuxReplitDetector(BaseToolDetector):
         if install_dir:
             return {
                 "name": self.tool_name,
-                "version": self.get_version(),
+                "version": self.get_version() or "Unknown",
                 "install_path": str(install_dir),
             }
 
@@ -61,7 +61,7 @@ class LinuxReplitDetector(BaseToolDetector):
         if which_path:
             return {
                 "name": self.tool_name,
-                "version": self.get_version(),
+                "version": self.get_version() or "Unknown",
                 "install_path": which_path,
             }
 

@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseToolDetector
 from ...constants import COMMAND_TIMEOUT, VERSION_TIMEOUT
 from ...utils import run_command
-from ...windows_extraction_helpers import is_running_as_admin
+from ...windows_extraction_helpers import is_running_as_admin, other_user_program_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -116,34 +116,10 @@ class WindowsAntigravityDetector(BaseToolDetector):
 
     @staticmethod
     def _other_user_program_dirs() -> List[Path]:
-        """
-        Enumerate ``C:\\Users\\<user>\\AppData\\Local\\Programs`` for every
-        real user, so a SYSTEM/admin (MDM) scan reaches per-user squirrel
-        installs belonging to other users. Skips well-known service / template
-        accounts. Never raises — directory enumeration is wrapped.
-        """
-        program_roots: List[Path] = []
-        users_dir = Path("C:\\Users")
-        try:
-            if not users_dir.exists():
-                return program_roots
-            for user_dir in users_dir.iterdir():
-                try:
-                    if not user_dir.is_dir() or user_dir.name.startswith("."):
-                        continue
-                    if user_dir.name.lower() in (
-                        "public", "default", "default user", "all users",
-                    ):
-                        continue
-                    program_roots.append(
-                        user_dir / "AppData" / "Local" / "Programs"
-                    )
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Could not inspect user dir {user_dir}: {e}")
-                    continue
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not enumerate C:\\Users for Antigravity: {e}")
-        return program_roots
+        """Per-user ``…\\AppData\\Local\\Programs`` dirs for OTHER users under an
+        admin scan. Delegates to the shared helper (the enumeration logic was
+        duplicated here and in the Replit detector)."""
+        return other_user_program_dirs()
 
     def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:
         """

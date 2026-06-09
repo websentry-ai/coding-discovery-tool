@@ -831,6 +831,9 @@ def _load_queue_file_safe() -> List[Dict]:
 
 def _write_file_secure(path: Path, data: bytes) -> None:
     """Write data to a file with restricted permissions (0600 on Unix)."""
+    # Ensure the parent exists so a queue-path override with a missing parent
+    # doesn't silently drop the write (and lose the failed reports).
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     # Restrict permissions to owner-only (rw-------) on Unix systems
     try:

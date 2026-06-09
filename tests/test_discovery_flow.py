@@ -112,10 +112,7 @@ class TestMainCLI(unittest.TestCase):
     def setUp(self):
         self.server.requests.clear()
         self.server.default_code = 200
-        # Redirect the queue to a per-test temp file. The CLI subprocess
-        # inherits os.environ (see _run_cli) and resolves the SAME path via
-        # _get_queue_file_path(), so the pre-written fixture and the drain
-        # target stay consistent across the process boundary.
+        # Redirect the queue to a per-test temp file (subprocess inherits it via os.environ).
         self._queue_dir = tempfile.mkdtemp()
         self._orig_queue_env = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
         os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(
@@ -125,11 +122,7 @@ class TestMainCLI(unittest.TestCase):
         # Ensure clean state
         if self._queue_file.exists():
             self._queue_file.unlink()
-        # Isolate the CLI subprocess's HOME so its home-state files
-        # (~/.unbound/: discovery.lock, discovery-cache.json, config/identity)
-        # land in a throwaway dir, never the real home -- keeps tests off real
-        # state and immune to the single-flight lock held by any other
-        # discovery process.
+        # Isolate the CLI's HOME so its ~/.unbound state (lock/cache) stays off the real home.
         self._home_dir = tempfile.mkdtemp(prefix="ai-discovery-test-home-")
 
     def tearDown(self):
@@ -144,8 +137,7 @@ class TestMainCLI(unittest.TestCase):
 
     def _run_cli(self, extra_env=None, timeout=600):
         env = os.environ.copy()
-        # Isolate the CLI's HOME (USERPROFILE on Windows) so its ~/.unbound
-        # state and single-flight lock go to the throwaway dir from setUp.
+        # Send the CLI's ~/.unbound state + lock to the throwaway HOME from setUp.
         env["HOME"] = self._home_dir
         env["USERPROFILE"] = self._home_dir
         if extra_env:
@@ -171,10 +163,7 @@ class TestMainCLI(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
     def test_queue_path_honors_env_override(self):
-        # setUp redirected AI_DISCOVERY_QUEUE_FILE to a temp file; the resolved
-        # queue path must be that temp file and never the real per-UID /var/tmp
-        # queue. Locks in the isolation so a future change can't reintroduce an
-        # import-time-cached constant that ignores the override.
+        # The env override must resolve to the temp file, never the real /var/tmp queue.
         self.assertEqual(utils_mod._get_queue_file_path(), self._queue_file)
         if hasattr(os, "getuid"):
             self.assertNotEqual(

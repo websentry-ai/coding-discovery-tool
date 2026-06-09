@@ -14,7 +14,11 @@ from typing import Dict, List, Optional
 
 from ...constants import VERSION_TIMEOUT
 from ...linux_extraction_helpers import get_linux_user_homes
-from ...macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector, _parse_cli_version
+from ...macos.copilot_cli.copilot_cli import (
+    MacOSCopilotCliDetector,
+    _parse_cli_version,
+    _resolve_copilot_binary,
+)
 from ...utils import run_command
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,20 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
       by default (not on PATH when running as root scanning another user).
     """
 
+    def _candidate_binaries(self, user_home: Path) -> List[Path]:
+        """Per-user ``copilot`` binaries to probe, in priority order: the shared
+        base locations (``.local/bin``, ``.bun/bin``, newest-nvm — resolved by
+        ``_resolve_copilot_binary``, the same set the macOS detector probes) plus
+        the Linux-specific install dirs (gh extension, ``.npm-global``). Probing
+        the shared resolver keeps Linux and macOS covering the same core paths.
+        """
+        candidates: List[Path] = []
+        base = _resolve_copilot_binary(user_home)
+        if base is not None:
+            candidates.append(base)
+        candidates.extend(user_home / rel for rel in _USER_RELATIVE_BINARY_PATHS)
+        return candidates
+
     def get_version(self) -> Optional[str]:
         """
         Extract Copilot CLI version on Linux.
@@ -57,8 +75,7 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
             homes_to_probe.append(self.user_home)
 
         for user_home in homes_to_probe:
-            for rel in _USER_RELATIVE_BINARY_PATHS:
-                binary = user_home / rel
+            for binary in self._candidate_binaries(user_home):
                 try:
                     if not binary.is_file():
                         continue
@@ -87,8 +104,7 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
             return None
 
         for user_home in get_linux_user_homes():
-            for rel in _USER_RELATIVE_BINARY_PATHS:
-                binary = user_home / rel
+            for binary in self._candidate_binaries(user_home):
                 try:
                     if not binary.is_file():
                         continue

@@ -2509,6 +2509,58 @@ class TestLinuxCopilotCliMultiUserVersion(unittest.TestCase):
         self.assertIsNone(detector.user_home)
 
 
+class TestLinuxCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
+    """The Linux extractor's workspace seams: ``/home`` is NOT pruned (the macOS
+    base WOULD prune it via ``SKIP_SYSTEM_DIRS``), and a repo ``.mcp.json`` is
+    surfaced via the inherited walk. Mirrors the rules/skills ``/home`` guards
+    and the Windows workspace-MCP test."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = LinuxCopilotCliMCPConfigExtractor()
+        # Repo lives under the real home so the inherited walk reaches it without
+        # tripping host system-dir skips (mirrors the Windows workspace test).
+        self.workspace_root = Path(tempfile.mkdtemp(dir=str(Path.home())))
+        self.repo = self.workspace_root / "acme-api"
+        self.repo.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace_root, ignore_errors=True)
+
+    @unittest.skipIf(
+        platform.system() == "Windows",
+        "POSIX /home path semantics; the Linux-vs-macOS skip seam is only "
+        "meaningful on POSIX (Path('/home') has no equivalent on Windows).",
+    )
+    def test_home_not_pruned_by_workspace_skip_seam(self):
+        """Linux ``_should_skip_workspace_path`` must NOT prune ``/home`` — the
+        inherited macOS base does (``SKIP_SYSTEM_DIRS``), which would silently
+        drop every ``/home/<user>/<repo>/.mcp.json`` on Linux."""
+        skip = self.extractor._should_skip_workspace_path
+        self.assertFalse(skip(Path("/home")))
+        self.assertFalse(skip(Path("/home/alice/acme-api")))
+        self.assertTrue(skip(Path("/home/alice/acme-api/node_modules")))  # SKIP_DIRS
+        # Contrast: the inherited macOS base seam WOULD prune /home.
+        self.assertTrue(
+            MacOSCopilotCliMCPConfigExtractor()._should_skip_workspace_path(Path("/home"))
+        )
+
+    def test_workspace_mcp_json_under_repo_surfaces(self):
+        """A project-scope ``.mcp.json`` is surfaced by the inherited walk."""
+        (self.repo / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
+        }), encoding="utf-8")
+        with patch.object(
+            self.extractor,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ):
+            configs = self.extractor._extract_workspace_configs()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.repo))
+        self.assertEqual({s["name"] for s in configs[0]["mcpServers"]}, {"serena"})
+
+
 _LINUX_RULES_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_rules_extractor"
 _LINUX_SKILLS_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_skills_extractor"
 

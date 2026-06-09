@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class WindowsCodexDetector(BaseToolDetector):
-    """
+    r"""
     Detector for Codex CLI installations on Windows systems.
     
     Detection involves:

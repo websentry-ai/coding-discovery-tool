@@ -21,7 +21,7 @@ def read_opencode_mcp_config(
     tool_name: str = "OpenCode",
     parent_levels: int = 5
 ) -> Optional[Dict]:
-    """
+    r"""
     Read and parse OpenCode JSON config file to extract MCP servers.
     
     Checks for MCP config in "mcp" section first, then falls back to root "mcpServers".
@@ -141,7 +141,7 @@ class WindowsOpenCodeMCPConfigExtractor(BaseMCPConfigExtractor):
     GLOBAL_MCP_CONFIG_PATH = Path.home() / "AppData" / "Roaming" / ".config" / "opencode" / "opencode.json"
 
     def extract_mcp_config(self) -> Optional[Dict]:
-        """
+        r"""
         Extract OpenCode MCP configuration on Windows.
         
         Extracts global MCP config from AppData\Roaming\.config\opencode\opencode.json.
@@ -166,7 +166,7 @@ class WindowsOpenCodeMCPConfigExtractor(BaseMCPConfigExtractor):
         }
 
     def _extract_global_config(self) -> Optional[Dict]:
-        """
+        r"""
         Extract global MCP config from AppData\Roaming\.config\opencode\opencode.json
         
         When running as administrator, collects global configs from ALL users.

@@ -31,6 +31,9 @@ from scripts.coding_discovery_tools.linux.cursor.settings_extractor import (
 from scripts.coding_discovery_tools.macos.cursor.settings_extractor import (
     MacOSCursorSettingsExtractor,
 )
+from scripts.coding_discovery_tools.windows.cursor.settings_extractor import (
+    WindowsCursorSettingsExtractor,
+)
 
 
 STORAGE_KEY = (
@@ -275,6 +278,21 @@ class TestTerminalAllowlistOverride(_BaseCursorPermissionsTest):
         result = self._extract()
         self.assertEqual(result["allow_rules"], [])
 
+    def test_T6_terminal_non_string_and_empty_dropped(self):
+        """Junk terminalAllowlist entries (empty string, int, null) are dropped.
+
+        The override-side mapping guards each entry with ``cmd and isinstance``
+        (``coding_tool_base.py`` ~L867), so only the lone valid string survives
+        and no ``Bash(*)`` is ever emitted from the empty string / falsy values.
+        """
+        composer = {"useYoloMode": False}
+        _create_cursor_db(self.db_path, composer)
+        self._write_global_permissions(
+            {"terminalAllowlist": ["git", "", 123, None]}
+        )
+        result = self._extract()
+        self.assertEqual(result["allow_rules"], ["Bash(git*)"])
+
 
 # ===========================================================================
 # A: autoRun written verbatim into raw_settings
@@ -419,6 +437,24 @@ class TestCrossWorkspaceDedupe(_BaseCursorPermissionsTest):
         result = self._extract()
         self.assertEqual(result["mcp_tool_allowlist"], ["a", "b", "c", "d"])
 
+    def test_D2_unhashable_mcp_entries_deduped_via_typeerror_fallback(self):
+        """Dict-valued mcp entries dedupe through the unhashable fallback path.
+
+        ``mcpAllowlist`` values flow verbatim into ``_dedupe_preserve_order``,
+        whose ``value in seen`` set-membership raises ``TypeError`` on unhashable
+        dicts and falls back to the linear ``value in result`` scan
+        (``coding_tool_base.py`` ~L107-109). Two identical dicts must collapse to
+        one while a distinct dict survives, order preserved -- proving the
+        fallback both de-dupes and never raises.
+        """
+        composer = {"useYoloMode": False}
+        _create_cursor_db(self.db_path, composer)
+        self._write_global_permissions(
+            {"mcpAllowlist": [{"a": 1}, {"a": 1}, {"b": 2}]}
+        )
+        result = self._extract()
+        self.assertEqual(result["mcp_tool_allowlist"], [{"a": 1}, {"b": 2}])
+
 
 # ===========================================================================
 # J: JSONC tolerance
@@ -509,6 +545,99 @@ class TestMacOSGlobalOverride(unittest.TestCase):
 
         result = self.extractor._extract_from_database(self.db_path, self.user_home)
         self.assertEqual(result["mcp_tool_allowlist"], ["mac:tool"])
+
+
+# ===========================================================================
+# Windows: real workspace walk drives the Windows-specific extractor
+# ===========================================================================
+
+class TestWindowsWorkspaceWalk(unittest.TestCase):
+    """Windows extractor: real ``_walk_for_permissions`` over a temp workspace tree.
+
+    The Windows ``_iter_workspace_permissions_files`` is the only new path not
+    backed by a pre-tested shared helper (Linux/macOS delegate to
+    ``walk_for_tool_directories``), so the recursion/skip/symlink/depth logic in
+    ``_walk_for_permissions`` is exercised for real here -- it is NOT mocked.
+
+    Driven exactly like ``TestMacOSGlobalOverride``: ``_extract_from_database`` is
+    called directly, so the Windows-only ``_scan_users`` (and its ctypes
+    ``is_running_as_admin``) is bypassed and the test runs on any host. Both
+    ``_get_db_path`` and ``_get_user_permissions_path`` root at the ``user_home``
+    we pass, confining all reads to the temp tree. ``get_windows_system_directories``
+    is patched to an empty set so no component of the OS temp path can accidentally
+    match a skipped system-dir name; ``Path.home`` and ``is_running_as_admin`` are
+    pinned consistently with the Linux/macOS fixtures (temp home, non-elevated).
+    """
+
+    def setUp(self):
+        self._tmp_dir = tempfile.mkdtemp()
+        self.user_home = Path(self._tmp_dir)
+        self.extractor = WindowsCursorSettingsExtractor()
+        self.db_path = self.extractor._get_db_path(self.user_home)
+
+        mod = "scripts.coding_discovery_tools.windows.cursor.settings_extractor"
+        self._home_patch = patch(f"{mod}.Path.home", return_value=self.user_home)
+        self._admin_patch = patch(
+            f"{mod}.is_running_as_admin", return_value=False
+        )
+        # Neutralize the system-dir skip so no OS temp-path component (e.g. a
+        # future "Recovery"/"PerfLogs"-named ancestor) prunes the real walk.
+        self._sysdirs_patch = patch(
+            f"{mod}.get_windows_system_directories", return_value=set()
+        )
+        self._home_patch.start()
+        self._admin_patch.start()
+        self._sysdirs_patch.start()
+
+    def tearDown(self):
+        self._sysdirs_patch.stop()
+        self._admin_patch.stop()
+        self._home_patch.stop()
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+
+    def _write_workspace_permissions(self, workspace_name, payload):
+        """Write <workspace>/.cursor/permissions.json under the temp home."""
+        path = self.user_home / workspace_name / ".cursor" / "permissions.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_W3_windows_workspace_file_applied_via_real_walk(self):
+        """A nested <ws>/.cursor/permissions.json is found by the real Windows walk.
+
+        Mirrors test_W1/test_M4 shape but drives ``WindowsCursorSettingsExtractor``:
+        the workspace mcp field is applied to the collapsed record, proving the
+        walk located the deeply-nested file (no global ~/.cursor present).
+        """
+        composer = {"useYoloMode": False}
+        _create_cursor_db(self.db_path, composer)
+        self._write_workspace_permissions("projX", {"mcpAllowlist": ["w:tool"]})
+
+        result = self.extractor._extract_from_database(self.db_path, self.user_home)
+        self.assertEqual(result["mcp_tool_allowlist"], ["w:tool"])
+
+    def test_W4_windows_global_cursor_not_double_counted(self):
+        """Global ~/.cursor is read once (via path), never re-yielded by the walk.
+
+        Mirrors test_W2 for the Windows extractor: the walk explicitly skips the
+        global .cursor dir, so the global file must not appear in the walk output,
+        yet the effective record still carries its mcp value exactly once.
+        """
+        composer = {"useYoloMode": False}
+        _create_cursor_db(self.db_path, composer)
+        global_path = self.user_home / ".cursor" / "permissions.json"
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        global_path.write_text(
+            json.dumps({"mcpAllowlist": ["g:one"]}), encoding="utf-8"
+        )
+
+        walked = list(
+            self.extractor._iter_workspace_permissions_files(self.user_home)
+        )
+        self.assertNotIn(global_path, walked)
+
+        result = self.extractor._extract_from_database(self.db_path, self.user_home)
+        self.assertEqual(result["mcp_tool_allowlist"], ["g:one"])
 
 
 if __name__ == "__main__":

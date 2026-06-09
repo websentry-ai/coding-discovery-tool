@@ -5,7 +5,8 @@ Tests the outermost entry points: AIToolsDetector, main() CLI, report_to_sentry,
 settings transformation, and project filtering.
 
 Only mocks external environments: HTTP backend (real server on localhost),
-QUEUE_FILE path (tempfile), _SENTRY_DSN (prevent real calls), time.sleep.
+the queue path via AI_DISCOVERY_QUEUE_FILE (tempfile), _SENTRY_DSN (prevent
+real calls), time.sleep.
 Tool detection runs un-mocked on whatever OS is available.
 """
 
@@ -111,17 +112,42 @@ class TestMainCLI(unittest.TestCase):
     def setUp(self):
         self.server.requests.clear()
         self.server.default_code = 200
-        self._queue_file = utils_mod.QUEUE_FILE
+        # Redirect the queue to a per-test temp file. The CLI subprocess
+        # inherits os.environ (see _run_cli) and resolves the SAME path via
+        # _get_queue_file_path(), so the pre-written fixture and the drain
+        # target stay consistent across the process boundary.
+        self._queue_dir = tempfile.mkdtemp()
+        self._orig_queue_env = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(
+            Path(self._queue_dir) / "ai-discovery-queue.json"
+        )
+        self._queue_file = utils_mod._get_queue_file_path()
         # Ensure clean state
         if self._queue_file.exists():
             self._queue_file.unlink()
+        # Isolate the CLI subprocess's HOME so its home-state files
+        # (~/.unbound/: discovery.lock, discovery-cache.json, config/identity)
+        # land in a throwaway dir, never the real home -- keeps tests off real
+        # state and immune to the single-flight lock held by any other
+        # discovery process.
+        self._home_dir = tempfile.mkdtemp(prefix="ai-discovery-test-home-")
 
     def tearDown(self):
         if self._queue_file.exists():
             self._queue_file.unlink(missing_ok=True)
+        if self._orig_queue_env is None:
+            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+        else:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._orig_queue_env
+        shutil.rmtree(self._queue_dir, ignore_errors=True)
+        shutil.rmtree(self._home_dir, ignore_errors=True)
 
     def _run_cli(self, extra_env=None, timeout=600):
         env = os.environ.copy()
+        # Isolate the CLI's HOME (USERPROFILE on Windows) so its ~/.unbound
+        # state and single-flight lock go to the throwaway dir from setUp.
+        env["HOME"] = self._home_dir
+        env["USERPROFILE"] = self._home_dir
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -144,6 +170,17 @@ class TestMainCLI(unittest.TestCase):
         result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
+    def test_queue_path_honors_env_override(self):
+        # setUp redirected AI_DISCOVERY_QUEUE_FILE to a temp file; the resolved
+        # queue path must be that temp file and never the real per-UID /var/tmp
+        # queue. Locks in the isolation so a future change can't reintroduce an
+        # import-time-cached constant that ignores the override.
+        self.assertEqual(utils_mod._get_queue_file_path(), self._queue_file)
+        if hasattr(os, "getuid"):
+            self.assertNotEqual(
+                utils_mod._get_queue_file_path(),
+                Path(f"/var/tmp/ai-discovery-queue-{os.getuid()}.json"),
+            )
 
     def test_main_cli_with_queue_drain(self):
         # Pre-populate queue with a distinctive report

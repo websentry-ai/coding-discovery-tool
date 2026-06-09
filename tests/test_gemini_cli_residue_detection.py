@@ -200,10 +200,30 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
             "install_path": "/custom/prefix/bin/gemini",
         }
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = _detect_gemini_cli(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], "/custom/prefix/bin/gemini")
+
+    def test_which_fallback_skipped_when_root(self):
+        """Under a root/MDM multi-user scan the detector.detect() (``which
+        gemini``) fallback must be SKIPPED — it resolves the SCANNER's PATH, not
+        the user's, so a user with only ~/.gemini residue must NOT be reported.
+        Mirrors the Claude root guard; fails against the pre-guard code."""
+        det = _make_detector()
+        det.detect.return_value = {
+            "name": "Gemini CLI",
+            "version": "1.2.3",
+            "install_path": "/custom/prefix/bin/gemini",
+        }
+        (self.home / ".gemini").mkdir()  # residue only, no real binary
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNone(result)
+        det.detect.assert_not_called()
 
     def test_residue_dir_plus_real_binary_uses_binary(self):
         """When both ``~/.gemini`` residue and a real binary exist, the

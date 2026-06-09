@@ -248,7 +248,13 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
             "install_path": str(bun_bin)
         }
     
-    # Final fallback: Use detector's default detection (checks PATH via 'which gemini')
+    # Final fallback: detector.detect() resolves `which gemini` against the
+    # SCANNER's PATH, not user_home. Under a root/MDM multi-user scan that would
+    # mis-attribute the scanner's gemini to a user who has only residue, so skip
+    # it when root — the explicit user_home candidates above already cover real
+    # installs (mirrors the Claude find_claude_binary_for_user root guard).
+    if is_running_as_root():
+        return None
     return detector.detect()
 
 

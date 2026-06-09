@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...coding_tool_base import BaseCopilotCliRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -300,6 +300,13 @@ class MacOSCopilotCliRulesExtractor(BaseCopilotCliRulesExtractor):
     ) -> None:
         """Extract P3 repo-root AGENTS.md / CLAUDE.md / GEMINI.md.
 
+        All three are doc-valid Copilot CLI instruction files (GitHub Copilot CLI
+        custom-instructions reference), so all are collected. But repos commonly
+        symlink ``AGENTS.md -> CLAUDE.md`` (or keep byte-identical copies), which
+        would emit the SAME instruction content as two rule rows. Dedupe within
+        this repo root by ``realpath`` (symlink) and by content (copy) so shared
+        content is reported once.
+
         Only fires when ``project_dir`` is a repository root (holds ``.git``), so
         a NESTED AGENTS.md inside a subdirectory is intentionally NOT collected.
         """
@@ -309,13 +316,34 @@ class MacOSCopilotCliRulesExtractor(BaseCopilotCliRulesExtractor):
         except OSError:
             return
 
+        seen_realpaths = set()
+        seen_contents = set()
         for file_name in PROJECT_ROOT_RULE_FILES:
-            self._add_rule_file(
-                project_dir / file_name,
-                _find_self_dir_root,
-                "project",
-                projects_by_root,
-            )
+            rule_file = project_dir / file_name
+            try:
+                if not rule_file.is_file():
+                    continue
+                real = os.path.realpath(rule_file)
+                if real in seen_realpaths:
+                    logger.debug(f"Skipping {rule_file}: symlink/realpath dup of a collected root rule")
+                    continue
+                rule_info = extract_single_rule_file(rule_file, _find_self_dir_root, scope="project")
+                if not rule_info:
+                    continue
+                content = rule_info.get("content")
+                if content is not None and content in seen_contents:
+                    logger.debug(f"Skipping {rule_file}: identical content to a collected root rule")
+                    continue
+                project_root = rule_info.get("project_root")
+                if project_root:
+                    add_rule_to_project(rule_info, project_root, projects_by_root)
+                    seen_realpaths.add(real)
+                    if content is not None:
+                        seen_contents.add(content)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Permission/OS error reading root rule {rule_file}: {e}")
+            except Exception as e:
+                logger.debug(f"Error extracting root rule {rule_file}: {e}")
 
     # -- Shared building blocks ---------------------------------------------
 
@@ -425,5 +453,15 @@ class MacOSCopilotCliRulesExtractor(BaseCopilotCliRulesExtractor):
         return list(get_top_level_directories(root_path))
 
     def _should_skip(self, item: Path) -> bool:
-        """Whether a path is skipped during the project walk (project + system dirs)."""
-        return should_skip_path(item) or should_skip_system_path(item)
+        """Whether a path is skipped during the project walk.
+
+        Skips project/system dirs AND other-tool config dirs (``~/.<tool>``) so
+        the walk never descends into another tool's installed-extension packages
+        (e.g. ``~/.antigravity/extensions/<pkg>/.github``) and mis-attributes
+        their bundled instructions to Copilot CLI.
+        """
+        return (
+            should_skip_path(item)
+            or should_skip_system_path(item)
+            or traverses_other_tool_config_dir(item)
+        )

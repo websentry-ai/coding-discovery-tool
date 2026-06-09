@@ -12,7 +12,9 @@ import sqlite3
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, Iterable, List, Tuple, Union
+
+from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
 
 logger = logging.getLogger(__name__)
 
@@ -611,6 +613,25 @@ class BaseCursorSettingsExtractor(ABC):
         """Scan user directories and call callback for each user home."""
         pass
 
+    @abstractmethod
+    def _get_user_permissions_path(self, user_home) -> "Path":
+        """Return the global per-user Cursor permissions file: ~/.cursor/permissions.json."""
+        pass
+
+    @abstractmethod
+    def _iter_workspace_permissions_files(self, user_home) -> Iterable["Path"]:
+        """Yield every <workspace>/.cursor/permissions.json under this user.
+
+        Excludes the global ~/.cursor/permissions.json (yielded separately by
+        ``_get_user_permissions_path``) so it is never double-counted.
+
+        Note: the team-admin dashboard is the ultimate authority ceiling for
+        Cursor permissions (admin dashboard > permissions.json > IDE/SQLite),
+        but it is cloud-only and unreadable locally, so it is intentionally not
+        represented here.
+        """
+        pass
+
     def extract_settings(self) -> Optional[Dict]:
         """Extract Cursor IDE permission settings from SQLite database."""
         settings_list = []
@@ -622,7 +643,7 @@ class BaseCursorSettingsExtractor(ABC):
                 return
 
             try:
-                settings_dict = self._extract_from_database(db_path)
+                settings_dict = self._extract_from_database(db_path, user_home)
                 if settings_dict:
                     logger.info(f"  ✓ Extracted Cursor settings from {db_path}")
                     settings_list.append(settings_dict)
@@ -707,8 +728,170 @@ class BaseCursorSettingsExtractor(ABC):
 
         return backend_settings
 
-    def _extract_from_database(self, db_path: Path) -> Optional[Dict]:
-        """Extract composerState from SQLite database using a temp copy to avoid locks."""
+    def _read_permissions_json(self, path) -> Optional[Dict]:
+        """Read and parse a Cursor ``permissions.json`` file, JSONC-tolerant.
+
+        Strips // and /* */ comments and trailing commas before parsing. Returns
+        the parsed dict, or ``None`` on any failure (missing file, bad JSON, OS
+        error, non-object root). Never raises.
+        """
+        try:
+            raw = Path(path).read_text(encoding="utf-8")
+            cleaned = _strip_trailing_commas(_strip_jsonc_comments(raw))
+            data = json.loads(cleaned)
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.debug(f"Could not read Cursor permissions file {path}: {e}")
+            return None
+
+    def _collect_permissions_files(self, user_home) -> Tuple[Optional[Dict], List[Dict]]:
+        """Collect parsed permissions dicts for a user.
+
+        Reads the single global ``~/.cursor/permissions.json`` plus every
+        per-workspace file. Each read is independently guarded so one unreadable
+        workspace file cannot poison the others.
+
+        Returns:
+            ``(user_dict_or_None, [workspace_dicts])`` — workspace dicts in walk
+            order, only successfully-parsed objects included.
+        """
+        user_dict = self._read_permissions_json(self._get_user_permissions_path(user_home))
+
+        workspace_dicts: List[Dict] = []
+        try:
+            for ws_path in self._iter_workspace_permissions_files(user_home):
+                parsed = self._read_permissions_json(ws_path)
+                if parsed is not None:
+                    workspace_dicts.append(parsed)
+        except Exception as e:
+            logger.debug(f"Error iterating workspace Cursor permissions for {user_home}: {e}")
+
+        return user_dict, workspace_dicts
+
+    @staticmethod
+    def _dedupe_preserve_order(values: Iterable) -> List:
+        """Return list values with order preserved and duplicates removed."""
+        seen = set()
+        result = []
+        for value in values:
+            try:
+                if value in seen:
+                    continue
+                seen.add(value)
+            except TypeError:
+                if value in result:
+                    continue
+            result.append(value)
+        return result
+
+    def _merge_permissions_fields(self, user_dict, workspace_dicts) -> Dict:
+        """Merge the known permissions fields across user + workspace files.
+
+        For each known field, concatenates the user file first then each
+        workspace in walk order, with order-preserving de-dupe. ``autoRun`` is an
+        object: its documented ``allow_instructions`` / ``block_instructions``
+        arrays are concatenated independently across files, while any other
+        sub-keys are preserved via a shallow merge (last file wins). Unknown
+        top-level keys are ignored.
+
+        Returns ``{"mcpAllowlist": [...]|None, "terminalAllowlist": [...]|None,
+        "autoRun": {...}|None}`` where ``None`` means no file spoke to that field.
+        """
+        sources = []
+        if user_dict is not None:
+            sources.append(user_dict)
+        sources.extend(workspace_dicts)
+
+        def merge_list_field(field_name):
+            saw = False
+            collected = []
+            for src in sources:
+                value = src.get(field_name)
+                if isinstance(value, list):
+                    saw = True
+                    collected.extend(value)
+            return self._dedupe_preserve_order(collected) if saw else None
+
+        merged_auto_run = None
+        collected_instructions = {"allow_instructions": [], "block_instructions": []}
+        for src in sources:
+            auto_run = src.get("autoRun")
+            if not isinstance(auto_run, dict):
+                continue
+            if merged_auto_run is None:
+                merged_auto_run = {}
+            # Shallow-merge to preserve unknown sub-keys (later file wins).
+            merged_auto_run.update(auto_run)
+            for nested_key in ("allow_instructions", "block_instructions"):
+                nested = auto_run.get(nested_key)
+                if isinstance(nested, list):
+                    collected_instructions[nested_key].extend(nested)
+
+        if merged_auto_run is not None:
+            # Overwrite the documented arrays with their concatenated+deduped
+            # values, leaving any other preserved sub-keys untouched.
+            for nested_key in ("allow_instructions", "block_instructions"):
+                merged_auto_run[nested_key] = self._dedupe_preserve_order(
+                    collected_instructions[nested_key]
+                )
+
+        return {
+            "mcpAllowlist": merge_list_field("mcpAllowlist"),
+            "terminalAllowlist": merge_list_field("terminalAllowlist"),
+            "autoRun": merged_auto_run,
+        }
+
+    def _apply_permissions_json_override(self, backend_settings, user_home) -> Dict:
+        """Layer ``permissions.json`` over the SQLite-derived backend record.
+
+        Per-field REPLACE semantics: a field present in any permissions.json wins
+        over the SQLite-derived value for that field; silent fields are untouched.
+        When no permissions.json file speaks to any known field, returns
+        ``backend_settings`` unchanged (byte-identical guarantee).
+        """
+        user_dict, workspace_dicts = self._collect_permissions_files(user_home)
+        merged = self._merge_permissions_fields(user_dict, workspace_dicts)
+
+        merged_mcp = merged["mcpAllowlist"]
+        merged_terminal = merged["terminalAllowlist"]
+        merged_auto_run = merged["autoRun"]
+
+        if merged_mcp is None and merged_terminal is None and merged_auto_run is None:
+            return backend_settings
+
+        if merged_mcp is not None:
+            backend_settings["mcp_tool_allowlist"] = merged_mcp
+
+        if merged_terminal is not None:
+            backend_settings["allow_rules"] = [
+                f"Bash({cmd}*)" for cmd in merged_terminal if cmd and isinstance(cmd, str)
+            ]
+
+        if merged_auto_run is not None:
+            raw_settings = backend_settings.get("raw_settings")
+            if isinstance(raw_settings, dict):
+                raw_settings["autoRun"] = merged_auto_run
+
+        applied_fields = [
+            name
+            for name, value in (
+                ("mcp", merged_mcp),
+                ("terminal", merged_terminal),
+                ("autorun", merged_auto_run),
+            )
+            if value is not None
+        ]
+        logger.info(f"  ✓ Applied permissions.json override for fields: {', '.join(applied_fields)}")
+
+        return backend_settings
+
+    def _extract_from_database(self, db_path: Path, user_home: Path) -> Optional[Dict]:
+        """Extract composerState from SQLite database using a temp copy to avoid locks.
+
+        After parsing the SQLite-derived backend record, layers Cursor's
+        ``permissions.json`` files (global + per-workspace) on top as a per-field
+        override (see ``_apply_permissions_json_override``).
+        """
         temp_db_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".vscdb", delete=False) as temp_db:
@@ -736,7 +919,8 @@ class BaseCursorSettingsExtractor(ABC):
                 logger.debug("No composerState found in storage data")
                 return None
 
-            return self._parse_composer_state(composer_state, db_path)
+            backend = self._parse_composer_state(composer_state, db_path)
+            return self._apply_permissions_json_override(backend, user_home)
 
         except sqlite3.Error as e:
             logger.warning(f"SQLite error reading {db_path}: {e}")

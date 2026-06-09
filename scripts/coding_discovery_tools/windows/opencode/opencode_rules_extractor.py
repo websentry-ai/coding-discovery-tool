@@ -1,4 +1,4 @@
-"""
+r"""
 OpenCode rules extraction for Windows systems.
 
 Extracts OpenCode configuration files from:
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def find_opencode_project_root(rule_file: Path) -> Path:
-    """
+    r"""
     Find the project root for an OpenCode rule file.
     
     For global rules: AppData\Roaming\.config\opencode\agent\*.md -> home directory
@@ -83,7 +83,7 @@ class WindowsOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
         return build_project_list(projects_by_root)
 
     def _extract_global_rules(self, projects_by_root: Dict[str, List[Dict]]) -> None:
-        """
+        r"""
         Extract global OpenCode rules from AppData\Roaming\.config\opencode\agent\*.md.
         
         When running as administrator, scans all user directories.

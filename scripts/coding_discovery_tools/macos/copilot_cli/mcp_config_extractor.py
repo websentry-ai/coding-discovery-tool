@@ -1,30 +1,34 @@
 """
 MCP config extraction for the GitHub Copilot CLI.
 
-The CLI stores its MCP servers in ``~/.copilot/mcp-config.json``. The file is
-JSON with comments (``//`` and ``/* */``) and trailing commas are both
-tolerated, since the file is commonly hand-edited (review P1). The server map
-may appear under ``mcpServers``, under ``servers``, or — for the GitHub CLI's
-Claude-style unwrapped form — as a flat top-level object of ``{name: config}``
-entries (review P1-4).
-
-The parsing here is platform-neutral and the all-users branch is handled by
-``extract_ide_global_configs_with_root_support`` (which already supports both
-macOS ``/Users`` and Windows ``C:\\Users`` admin scans), so this extractor is
-OS-agnostic. The Windows package reuses it via a thin subclass; do not fork the
-parser. The class keeps the ``MacOS`` name for historical/import stability.
+The CLI loads MCP servers from the User config (``~/.copilot/mcp-config.json``)
+and Workspace files (``<project>/.mcp.json``); this extractor reads both. The
+User file is parsed here; the Workspace ``.mcp.json`` is read via the shared
+``walk_for_claude_project_mcp_configs``, with OS-specific roots/skip in the
+``_workspace_search_roots`` / ``_should_skip_workspace_path`` seams (overridden
+by the Windows subclass).
 """
 
 import json
 import logging
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...macos_extraction_helpers import (
+    get_top_level_directories,
+    should_skip_path,
+    should_skip_system_path,
+)
 from ...mcp_extraction_helpers import (
     extract_ide_global_configs_with_root_support,
     transform_mcp_servers_to_array,
+    walk_for_claude_project_mcp_configs,
+    # Re-exported here for back-compat: the settings extractor and tests import
+    # these JSONC strippers from this module. Single source of truth lives in
+    # mcp_extraction_helpers.
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
 )
 from .copilot_cli import _resolve_copilot_dir
 
@@ -32,58 +36,8 @@ logger = logging.getLogger(__name__)
 
 _TOOL_NAME = "GitHub Copilot CLI"
 _CLI_DIR_NAME = ".copilot"
-# MCP servers live ONLY in mcp-config.json. The detector accepts config.json /
-# settings.json as install *markers*, but those hold general CLI settings
-# (model, theme, trusted dirs) — not MCP servers — so reading only this file is
-# intentional, not an oversight of the marker-set union (review W3). The CLI's
-# own `--additional-mcp-config` docs confirm it augments ~/.copilot/mcp-config.json.
+# User-scope MCP file. Workspace servers live in .mcp.json (project-scope walk).
 _MCP_CONFIG_FILENAME = "mcp-config.json"
-
-# String-aware JSONC comment stripper. Removes // line comments and /* */ block
-# comments without mangling URLs or quoted strings that contain comment-like
-# sequences. The block-comment branch uses ``[\s\S]*?`` so it spans newlines on
-# its own; we deliberately do NOT enable re.DOTALL, because that would let the
-# ``//.*$`` line-comment branch swallow newlines (and thus the rest of the file)
-# instead of stopping at end-of-line. Only re.MULTILINE is set so ``$`` anchors
-# to each line end.
-_JSONC_PATTERN = re.compile(
-    r'("(?:\\.|[^"\\])*")|(/\*[\s\S]*?\*/)|(//[^\n]*)',
-    re.MULTILINE,
-)
-
-# String-aware trailing-comma stripper. Hand-edited configs often leave a comma
-# before a closing ``}`` or ``]`` (e.g. ``{"mcpServers": {...},}``), which is
-# invalid JSON and would otherwise raise JSONDecodeError -> silently 0 servers
-# (review P1). Group 1 captures a full quoted string so a comma INSIDE a string
-# value (e.g. ``"args": ["a,"]``) is preserved verbatim; otherwise we keep just
-# the bracket and drop the dangling comma. Applied AFTER comment stripping (so
-# ``},  // note`` -> ``}`` first) and BEFORE json.loads.
-_TRAILING_COMMA_PATTERN = re.compile(
-    r'("(?:\\.|[^"\\])*")|,(\s*[}\]])'
-)
-
-
-def _strip_jsonc_comments(raw: str) -> str:
-    """Remove // and /* */ comments from JSONC text, preserving string literals."""
-    def _replace(match: "re.Match") -> str:
-        # Group 1 is a quoted string — keep it verbatim. Comment groups -> "".
-        if match.group(1):
-            return match.group(1)
-        return ""
-
-    return _JSONC_PATTERN.sub(_replace, raw)
-
-
-def _strip_trailing_commas(raw: str) -> str:
-    """Remove trailing commas before } or ], preserving commas inside strings."""
-    def _replace(match: "re.Match") -> str:
-        # Group 1 is a quoted string — keep it verbatim (commas inside stay).
-        # Otherwise group 2 is the bracket after a dangling comma; drop comma.
-        if match.group(1) is not None:
-            return match.group(1)
-        return match.group(2)
-
-    return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
 def _extract_servers_obj(config_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -124,18 +78,16 @@ class MacOSCopilotCliMCPConfigExtractor(BaseMCPConfigExtractor):
         self, plugin_lookup: Optional[Dict] = None
     ) -> Optional[Dict]:
         """
-        Extract GitHub Copilot CLI MCP configuration on macOS.
-
-        Reads ``~/.copilot/mcp-config.json`` for every relevant user (root-aware
-        via ``extract_ide_global_configs_with_root_support``).
-
-        Returns:
-            Dict with a ``projects`` array, or None if no configs found.
+        Extract GitHub Copilot CLI MCP config: User (``~/.copilot/mcp-config.json``,
+        root-aware) plus Workspace (``.mcp.json`` at project roots). Each is a
+        distinct project entry. Returns a ``projects`` dict, or None if empty.
         """
         projects = extract_ide_global_configs_with_root_support(
             self._extract_cli_configs_for_user,
             tool_name=_TOOL_NAME,
         )
+
+        projects.extend(self._extract_workspace_configs())
 
         if not projects:
             return None
@@ -157,6 +109,48 @@ class MacOSCopilotCliMCPConfigExtractor(BaseMCPConfigExtractor):
         config = self._read_cli_mcp_config(config_path, str(copilot_dir))
         return [config] if config else []
 
+    # -- Workspace scope: project-root .mcp.json -----------------------------
+
+    def _extract_workspace_configs(self) -> List[Dict]:
+        """Walk ``_workspace_search_roots`` for project-scope ``.mcp.json`` files.
+
+        Never raises — this runs on customer machines.
+        """
+        projects: List[Dict] = []
+        for root_path, start_dir in self._workspace_search_roots():
+            try:
+                start_depth = len(start_dir.relative_to(root_path).parts)
+            except ValueError:
+                start_depth = 0
+            try:
+                walk_for_claude_project_mcp_configs(
+                    root_path,
+                    start_dir,
+                    projects,
+                    self._should_skip_workspace_path,
+                    current_depth=start_depth,
+                )
+            except (PermissionError, OSError) as exc:
+                logger.debug(f"Skipping workspace scan of {start_dir}: {exc}")
+            except Exception as exc:
+                logger.debug(f"Error scanning workspace dir {start_dir}: {exc}")
+        return projects
+
+    def _workspace_search_roots(self) -> List[Tuple[Path, Path]]:
+        """``(root_path, start_dir)`` pairs for the project walk (macOS): every
+        top-level dir under ``/`` (root-aware), or the home dir as a fallback."""
+        root_path = Path("/")
+        try:
+            return [(root_path, top_dir) for top_dir in get_top_level_directories(root_path)]
+        except (PermissionError, OSError) as exc:
+            logger.debug(f"Falling back to home for workspace scan: {exc}")
+            home = Path.home()
+            return [(home, home)]
+
+    def _should_skip_workspace_path(self, item: Path) -> bool:
+        """Skip predicate for the macOS workspace walk (system + skip dirs)."""
+        return should_skip_path(item) or should_skip_system_path(item)
+
     def _read_cli_mcp_config(
         self, config_path: Path, tool_path: str
     ) -> Optional[Dict]:
@@ -169,7 +163,7 @@ class MacOSCopilotCliMCPConfigExtractor(BaseMCPConfigExtractor):
         must never crash.
 
         Returns:
-            Dict with ``path`` and ``mcpServers`` keys, or None.
+            Dict with ``path``, ``mcpServers`` and ``scope`` keys, or None.
         """
         try:
             if not config_path.is_file():
@@ -187,9 +181,12 @@ class MacOSCopilotCliMCPConfigExtractor(BaseMCPConfigExtractor):
             mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
 
             if mcp_servers_array:
+                # scope mirrors the workspace walk's "project" tag so the combined
+                # projects list is consistently labelled.
                 return {
                     "path": tool_path,
                     "mcpServers": mcp_servers_array,
+                    "scope": "user",
                 }
         except json.JSONDecodeError as exc:
             logger.warning(

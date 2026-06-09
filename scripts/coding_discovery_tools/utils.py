@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import functools
 import json
 import logging
 import os
@@ -99,6 +100,47 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()
+
+
+@functools.lru_cache(maxsize=1)
+def in_container() -> bool:
+    """Best-effort detection of whether we're running inside a container.
+
+    Combines several signals because no single one is reliable across runtimes
+    and kernels:
+      - ``/.dockerenv`` / ``/run/.containerenv`` — Docker / Podman runtime markers.
+      - root filesystem mounted as ``overlay`` — cgroup-version-agnostic.
+      - ``/proc/1/cgroup`` docker/lxc/kube markers — cgroup v1 ONLY (v2 shows
+        ``0::/`` from inside, so this is a fallback, not the primary check).
+
+    This is for honest behavioural branching, not security — every marker here
+    is forgeable by whoever controls the container. Result is cached for the
+    process lifetime.
+    """
+    try:
+        if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+            return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "/" and parts[2] == "overlay":
+                    return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8") as f:
+            blob = f.read()
+        if any(marker in blob for marker in ("/docker", "/lxc", "kubepods", "/containerd")):
+            return True
+    except OSError:
+        pass
+
+    return False
 
 
 class DsclBatchData(NamedTuple):
@@ -692,19 +734,27 @@ def _backoff(attempt: int, delays: List[int]) -> None:
 def _get_queue_file_path() -> Path:
     """Return platform-appropriate queue file path.
 
+    If AI_DISCOVERY_QUEUE_FILE is set (and non-empty) in the environment,
+    that path is used verbatim. This lets the test harness redirect the
+    queue away from the real per-UID /var/tmp file so an interrupted test
+    can never leave a fixture that a later real agent run would drain and
+    POST to production.
+
     On Unix, /var/tmp persists across reboots (unlike /tmp).
     The filename includes the current UID so that different users
     (e.g. root via MDM vs. a regular login user) each get their own
     queue file, avoiding PermissionError on files created with 0600.
     On Windows, fall back to the standard temp directory (already per-user).
     """
+    override = (os.environ.get("AI_DISCOVERY_QUEUE_FILE") or "").strip()
+    if override:
+        return Path(os.path.expanduser(os.path.expandvars(override)))
     if platform.system() == "Windows":
         return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
     uid = os.getuid()
     return Path(f"/var/tmp/ai-discovery-queue-{uid}.json")
 
 
-QUEUE_FILE = _get_queue_file_path()
 QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
@@ -719,10 +769,12 @@ def save_failed_reports(reports: List[Dict]) -> None:
         ]
         # Keep only the most recent entries to prevent unbounded growth
         envelopes = envelopes[-MAX_QUEUE_SIZE:]
-        _write_file_secure(QUEUE_FILE, json.dumps(envelopes).encode())
-        logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
+        queue_file = _get_queue_file_path()
+        _write_file_secure(queue_file, json.dumps(envelopes).encode())
+        logger.info(f"Saved {len(reports)} failed report(s) to {queue_file}")
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
 
 
 def load_pending_reports() -> List[Dict]:
@@ -737,13 +789,15 @@ def load_pending_reports() -> List[Dict]:
             f" -- can be removed with: sudo rm {old_shared}"
         )
 
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
 
     try:
-        envelopes = json.loads(QUEUE_FILE.read_text())
+        envelopes = json.loads(queue_file.read_text())
     except Exception as e:
         logger.warning(f"Could not load pending reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
         return []
 
     now = datetime.now(timezone.utc)
@@ -766,16 +820,20 @@ def load_pending_reports() -> List[Dict]:
 
 def _load_queue_file_safe() -> List[Dict]:
     """Load existing queue file contents, returning an empty list on any error."""
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
     try:
-        return json.loads(QUEUE_FILE.read_text())
+        return json.loads(queue_file.read_text())
     except Exception:
         return []
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
     """Write data to a file with restricted permissions (0600 on Unix)."""
+    # Ensure the parent exists so a queue-path override with a missing parent
+    # doesn't silently drop the write (and lose the failed reports).
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     # Restrict permissions to owner-only (rw-------) on Unix systems
     try:
@@ -1283,6 +1341,35 @@ _SENTRY_TAG_KEYS = (
     "tool_name", "domain", "phase", "http_code",
 )
 
+# Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
+# (including the detect_all_tools loop) and shells out to curl synchronously. On a
+# machine where the Sentry endpoint is slow or blocked (the corporate-proxy / Zscaler
+# fleets this tool targets), an unguarded fan-out of failures would add the curl
+# timeout to every failing step and stretch a fast scan into minutes. These bound it:
+#   - dedup by signature + a hard cap, since Sentry dedups server-side anyway, so N
+#     identical curls buy nothing;
+#   - a circuit breaker that stops calling Sentry for the rest of the run once the
+#     transport looks dead.
+# Single-threaded by design: only the main scan thread calls report_to_sentry() (the
+# heartbeat thread never does), so no locking is needed. A discovery run is a
+# short-lived process, so "per run" == process lifetime; reset_sentry_run_state()
+# restores the clean starting point for long-lived test processes.
+_SENTRY_MAX_EVENTS_PER_RUN = 30
+_SENTRY_BREAKER_THRESHOLD = 3
+_sentry_sent_signatures = set()
+_sentry_event_count = 0
+_sentry_consecutive_fails = 0
+_sentry_dead_this_run = False
+
+
+def reset_sentry_run_state() -> None:
+    """Reset the per-run Sentry dedup / circuit-breaker state."""
+    global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
+    _sentry_sent_signatures.clear()
+    _sentry_event_count = 0
+    _sentry_consecutive_fails = 0
+    _sentry_dead_this_run = False
+
 
 def report_to_sentry(
     exception: Exception,
@@ -1303,6 +1390,18 @@ def report_to_sentry(
             return
 
         ctx = context or {}
+
+        global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
+        # Circuit breaker: once the transport looks dead, stop calling Sentry for the
+        # rest of the run so a blocked endpoint can't add its timeout to every failure.
+        if _sentry_dead_this_run:
+            return
+        # Collapse duplicate events and hard-cap the synchronous curls per run.
+        signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
+        if signature in _sentry_sent_signatures or _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
+            return
+        _sentry_sent_signatures.add(signature)
+        _sentry_event_count += 1
 
         tags = {
             "os": platform.system(),
@@ -1332,6 +1431,7 @@ def report_to_sentry(
 
         sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
         fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-sentry-", suffix=".json")
+        sent_ok = False
         try:
             try:
                 os.write(fd, json.dumps(payload).encode("utf-8"))
@@ -1345,20 +1445,30 @@ def report_to_sentry(
                     "-H", "Content-Type: application/json",
                     "-H", f"X-Sentry-Auth: {sentry_auth}",
                     "-d", f"@{tmp_path}",
-                    "--max-time", "5",
+                    "--max-time", "3",
                     dsn["store_url"],
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=4,
             )
-            if result.returncode == 0:
+            sent_ok = (result.returncode == 0)
+            if sent_ok:
                 logger.debug(f"Sentry event sent ({result.stdout.strip()})")
         finally:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+            # Trip the breaker on any transport failure (non-zero curl, timeout, or a
+            # raised exception that is about to propagate to the outer handler) so a
+            # blackholed endpoint stops being retried after a few attempts.
+            if sent_ok:
+                _sentry_consecutive_fails = 0
+            else:
+                _sentry_consecutive_fails += 1
+                if _sentry_consecutive_fails >= _SENTRY_BREAKER_THRESHOLD:
+                    _sentry_dead_this_run = True
     except Exception as sentry_err:
         # Sentry failures must never crash the script
         logger.debug(f"Sentry reporting failed: {sentry_err}")

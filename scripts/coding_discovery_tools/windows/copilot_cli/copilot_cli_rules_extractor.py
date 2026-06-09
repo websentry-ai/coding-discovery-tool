@@ -14,6 +14,7 @@ special-case the same primitives without duplicating the walk.
 from pathlib import Path
 from typing import List
 
+from ...constants import traverses_other_tool_config_dir
 from ...macos.copilot_cli.copilot_cli_rules_extractor import (
     MacOSCopilotCliRulesExtractor,
 )
@@ -61,5 +62,11 @@ class WindowsCopilotCliRulesExtractor(MacOSCopilotCliRulesExtractor):
             return []
 
     def _should_skip(self, item: Path) -> bool:
-        """Skip project dirs (node_modules/.git/…) AND Windows system dirs."""
-        return should_skip_path(item, get_windows_system_directories())
+        """Skip project dirs (node_modules/.git/…), Windows system dirs, AND
+        other-tool config dirs (``~/.<tool>``) so the walk never descends into
+        another tool's installed-extension packages (e.g.
+        ``.../.antigravity/extensions/<pkg>/.github``)."""
+        return (
+            should_skip_path(item, get_windows_system_directories())
+            or traverses_other_tool_config_dir(item)
+        )

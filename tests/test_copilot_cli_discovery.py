@@ -23,7 +23,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
@@ -34,6 +34,7 @@ from scripts.coding_discovery_tools.coding_tool_factory import (
 from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli import (
     MacOSCopilotCliDetector,
     _parse_cli_version,
+    _resolve_copilot_binary,
     _resolve_copilot_dir,
 )
 from scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor import (
@@ -194,10 +195,107 @@ class TestCopilotCliDetection(unittest.TestCase):
         (copilot_dir / "command-history-state").mkdir()
         self.assertIsNotNone(self.detector.detect())
 
-    def test_skills_dir_marker_detected(self):
+    def test_skills_dir_alone_not_detected(self):
+        """skills/ is a SHARED marker (the IDE Copilot agent reads it too), so on
+        its own it is not a standalone CLI install -> not detected."""
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "skills").mkdir()
+        self.assertIsNone(self.detector.detect())
+
+    def test_agents_dir_alone_not_detected(self):
+        """agents/ is a SHARED marker -> not a CLI install on its own."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "agents").mkdir()
+        self.assertIsNone(self.detector.detect())
+
+    def test_instructions_dir_alone_not_detected(self):
+        """instructions/ is a SHARED marker -> not a CLI install on its own."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "instructions").mkdir()
+        self.assertIsNone(self.detector.detect())
+
+    def test_copilot_instructions_md_alone_not_detected(self):
+        """copilot-instructions.md is a SHARED marker -> not a CLI install alone."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "copilot-instructions.md").write_text("hi", encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
+    def test_ide_lock_dir_alone_not_detected(self):
+        """ide/ holds the discovery lock the VS Code/JetBrains Copilot EXTENSION
+        writes (microsoft/vscode-copilot-chat#3583), so an IDE-only user has it
+        with no CLI -> SHARED, not a CLI install on its own."""
+        copilot_dir = self._make_copilot_dir()
+        ide_dir = copilot_dir / "ide"
+        ide_dir.mkdir()
+        (ide_dir / "0c.lock").write_text(
+            '{"pid": 1, "ideName": "Visual Studio Code", "workspaceFolders": []}',
+            encoding="utf-8",
+        )
+        self.assertIsNone(self.detector.detect())
+
+    def test_hooks_dir_alone_not_detected(self):
+        """hooks/ is written by Unbound's OWN MDM onboarding (websentry-ai/setup
+        copilot/hooks/mdm/setup.py creates ~/.copilot/hooks/ and writes
+        unbound.json on every onboarded device), so it is NOT CLI-exclusive ->
+        SHARED, not a CLI install on its own. Repro for device D2FJV74J5Q / user
+        gowshik: ~/.copilot held only hooks/unbound.json, no copilot binary."""
+        copilot_dir = self._make_copilot_dir()
+        hooks_dir = copilot_dir / "hooks"
+        hooks_dir.mkdir()
+        (hooks_dir / "unbound.json").write_text('{"version": 1}', encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
+    def test_real_install_with_hooks_and_strong_marker_detected(self):
+        """A real CLI install (session-store.db) that ALSO has Unbound's hooks/ is
+        still detected — a shared marker never vetoes a strong one."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
+        (copilot_dir / "hooks").mkdir()
         self.assertIsNotNone(self.detector.detect())
+
+    def test_only_skills_and_rules_not_detected(self):
+        """Repro for device MY4W6QQGCQ / user karthick: a ~/.copilot holding only
+        skills/ and copilot-instructions.md (both SHARED, no strong CLI artifact)
+        is the IDE Copilot agent, not the CLI -> not detected (no phantom row)."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "skills").mkdir()
+        (copilot_dir / "copilot-instructions.md").write_text("rules", encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
+    def test_session_store_db_marker_detected(self):
+        """session-store.db is a STRONG CLI-exclusive marker -> detected."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
+        self.assertIsNotNone(self.detector.detect())
+    def test_real_install_with_strong_and_shared_markers_detected(self):
+        """A real install (strong markers config.json + session-store.db) that ALSO
+        has shared skills/ is detected — shared markers never veto a strong one."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "config.json").write_text("{}", encoding="utf-8")
+        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
+        (copilot_dir / "skills").mkdir()
+        self.assertIsNotNone(self.detector.detect())
+
+    def test_shared_only_logs_info_and_returns_none(self):
+        """A shared-only ~/.copilot emits an INFO suppression log and returns None."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "skills").mkdir()
+        with self.assertLogs(_DETECTOR_MOD, level="INFO") as captured:
+            self.assertIsNone(self.detector.detect())
+        self.assertTrue(
+            any("Copilot markers present" in record.getMessage()
+                for record in captured.records)
+        )
+
+    def test_copilot_home_shared_only_not_detected(self):
+        """A COPILOT_HOME-relocated config dir holding only shared markers is
+        suppressed too — the gate runs on the resolved dir, wherever it lives."""
+        relocated = Path(self.tmp_dir) / "relocated-copilot"
+        (relocated / "skills").mkdir(parents=True)
+        detector = MacOSCopilotCliDetector()
+        with patch.dict(os.environ, {"COPILOT_HOME": str(relocated)}, clear=False), \
+                patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False):
+            self.assertIsNone(detector.detect())
 
     def test_permissions_config_marker_detected(self):
         copilot_dir = self._make_copilot_dir()
@@ -339,6 +437,7 @@ class TestCopilotCliMcpExtraction(unittest.TestCase):
         configs = self.extractor._extract_cli_configs_for_user(self.user_home)
         self.assertIn("serena", self._server_names(configs))
         self.assertEqual(configs[0]["path"], str(self.copilot_dir))
+        self.assertEqual(configs[0].get("scope"), "user")
 
     def test_servers_key_surfaces_serena(self):
         """mcp-config.json may use the 'servers' key (VS Code-style)."""
@@ -428,6 +527,178 @@ class TestCopilotCliMcpExtraction(unittest.TestCase):
         """A top-level JSON array (not an object) must not crash."""
         self.config_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
         self.assertEqual(self.extractor._extract_cli_configs_for_user(self.user_home), [])
+
+    def test_jsonc_strippers_are_single_source_of_truth(self):
+        """The CLI module re-exports the strippers from mcp_extraction_helpers;
+        they must be the SAME objects (one source of truth, not a fork)."""
+        from scripts.coding_discovery_tools import mcp_extraction_helpers
+        self.assertIs(_strip_jsonc_comments, mcp_extraction_helpers._strip_jsonc_comments)
+        self.assertIs(_strip_trailing_commas, mcp_extraction_helpers._strip_trailing_commas)
+
+
+_MCP_MOD = (
+    "scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor"
+)
+
+
+class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
+    """Workspace ``.mcp.json`` at a project root is surfaced for the CLI.
+
+    The tmp tree is rooted under the real home so the production skip predicate
+    (which treats ``/tmp`` as a system path) does not reject it — the real walk
+    and skip run unmocked.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = MacOSCopilotCliMCPConfigExtractor()
+        self.workspace_root = Path(tempfile.mkdtemp(dir=str(Path.home())))
+        self.repo = self.workspace_root / "myrepo"
+        self.repo.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace_root, ignore_errors=True)
+
+    def _write(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _scan_workspace(self):
+        """Run the real workspace walk rooted at the tmp tree."""
+        with patch.object(
+            self.extractor,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ):
+            return self.extractor._extract_workspace_configs()
+
+    def test_workspace_mcp_json_surfaces_serena(self):
+        self._write(self.repo / ".mcp.json", {
+            "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
+        })
+        configs = self._scan_workspace()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.repo))
+        self.assertEqual(configs[0].get("scope"), "project")
+        self.assertEqual({s["name"] for s in configs[0]["mcpServers"]}, {"serena"})
+
+    def test_workspace_node_modules_is_skipped(self):
+        """A ``.mcp.json`` under node_modules must not be surfaced (SKIP_DIRS)."""
+        self._write(self.repo / "node_modules" / "pkg" / ".mcp.json", {
+            "mcpServers": {"vendored": {"command": "node"}},
+        })
+        self.assertEqual(self._scan_workspace(), [])
+
+    def test_no_workspace_mcp_json_yields_nothing(self):
+        self.assertEqual(self._scan_workspace(), [])
+
+    def test_extract_mcp_config_combines_user_and_workspace(self):
+        """``extract_mcp_config`` merges the User config dir and Workspace repo
+        into distinct project rows (the orchestrator lists both on the CLI)."""
+        self._write(self.repo / ".mcp.json", {
+            "mcpServers": {"serena": {"command": "uvx"}},
+        })
+        user_project = {
+            "path": "/Users/x/.copilot",
+            "mcpServers": [{"name": "notion"}],
+        }
+        with patch.object(
+            self.extractor,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ), patch(
+            f"{_MCP_MOD}.extract_ide_global_configs_with_root_support",
+            return_value=[dict(user_project)],
+        ):
+            result = self.extractor.extract_mcp_config()
+
+        self.assertIsNotNone(result)
+        by_path = {p["path"]: p for p in result["projects"]}
+        self.assertIn("/Users/x/.copilot", by_path)
+        self.assertIn(str(self.repo), by_path)
+        self.assertEqual(
+            {s["name"] for s in by_path[str(self.repo)]["mcpServers"]}, {"serena"}
+        )
+
+    def test_end_to_end_workspace_serena_on_cli_row(self):
+        """Guarantee for the reported user: serena in a repo's ``.mcp.json`` lands
+        on the GitHub Copilot CLI tool row via the orchestrator branch."""
+        self._write(self.repo / ".mcp.json", {
+            "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
+        })
+        detector = AIToolsDetector(os_name="Darwin")
+
+        # Real MCP extractor scoped to the tmp tree (User read neutralised below);
+        # sibling extractors stubbed to skip their on-disk walks.
+        real_mcp = MacOSCopilotCliMCPConfigExtractor()
+        detector._copilot_cli_mcp_extractor = real_mcp
+        detector._copilot_cli_rules_extractor = MagicMock()
+        detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
+        detector._copilot_cli_skills_extractor = MagicMock()
+        detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
+        detector._copilot_cli_settings_extractor = MagicMock()
+        detector._copilot_cli_settings_extractor.extract_settings.return_value = []
+
+        tool = {
+            "name": "GitHub Copilot CLI",
+            "version": "0.0.1",
+            "install_path": "/Users/x/.copilot",
+        }
+        with patch.object(
+            real_mcp,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ), patch(
+            f"{_MCP_MOD}.extract_ide_global_configs_with_root_support",
+            return_value=[],
+        ):
+            result = detector.process_single_tool(tool)
+
+        self.assertEqual(result["name"], "GitHub Copilot CLI")
+        repo_rows = [p for p in result["projects"] if p["path"] == str(self.repo)]
+        self.assertEqual(len(repo_rows), 1)
+        self.assertEqual(
+            {s["name"] for s in repo_rows[0]["mcpServers"]}, {"serena"}
+        )
+
+
+class TestWindowsCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
+    """The Windows extractor's workspace seams: the case-insensitive system-dir
+    skip, and surfacing a repo ``.mcp.json`` via the inherited walk."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.extractor = WindowsCopilotCliMCPConfigExtractor()
+        self.workspace_root = Path(tempfile.mkdtemp(dir=str(Path.home())))
+        self.repo = self.workspace_root / "myrepo"
+        self.repo.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace_root, ignore_errors=True)
+
+    def test_skip_predicate_handles_system_dirs_and_casing(self):
+        skip = self.extractor._should_skip_workspace_path
+        self.assertTrue(skip(Path("C:/Windows")))
+        self.assertTrue(skip(Path("C:/Program Files")))
+        self.assertTrue(skip(Path("C:/program files")))  # NTFS is case-insensitive
+        self.assertTrue(skip(Path("C:/Users/x/repo/node_modules")))  # SKIP_DIRS
+        self.assertFalse(skip(Path("C:/Users/x/acme-api")))
+
+    def test_workspace_mcp_json_surfaces_serena(self):
+        (self.repo / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
+        }), encoding="utf-8")
+        with patch.object(
+            self.extractor,
+            "_workspace_search_roots",
+            return_value=[(self.workspace_root, self.workspace_root)],
+        ):
+            configs = self.extractor._extract_workspace_configs()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["path"], str(self.repo))
+        self.assertEqual({s["name"] for s in configs[0]["mcpServers"]}, {"serena"})
 
 
 class TestCopilotCliMcpHelpers(unittest.TestCase):
@@ -739,6 +1010,23 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         (copilot_dir / "random.txt").write_text("hello", encoding="utf-8")
         self.assertIsNone(self.detector.detect())
 
+    def test_shared_only_not_detected(self):
+        """The strong-vs-shared marker split is inherited: a ~/.copilot holding
+        only the SHARED skills/ marker is the IDE Copilot agent, not the CLI."""
+        copilot_dir = self._make_copilot_dir()
+        (copilot_dir / "skills").mkdir()
+        self.assertIsNone(self.detector.detect())
+
+    def test_hooks_dir_alone_not_detected(self):
+        """hooks/ is SHARED (Unbound's own MDM onboarding writes ~/.copilot/hooks/
+        unbound.json on every enrolled device), so a hooks-only ~/.copilot is
+        suppressed on Windows too — guards that the SHARED demotion is inherited."""
+        copilot_dir = self._make_copilot_dir()
+        hooks_dir = copilot_dir / "hooks"
+        hooks_dir.mkdir()
+        (hooks_dir / "unbound.json").write_text('{"version": 1}', encoding="utf-8")
+        self.assertIsNone(self.detector.detect())
+
     def test_detect_returns_unknown_version_when_binary_absent(self):
         """version falls back to 'unknown' when `copilot --version` yields nothing."""
         copilot_dir = self._make_copilot_dir()
@@ -771,6 +1059,22 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         """A failed/absent binary yields None (caller falls back to 'unknown'), never raises."""
         with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()):
             self.assertIsNone(WindowsCopilotCliDetector().get_version())
+
+    def test_version_probed_from_per_user_npm_shim(self):
+        """When user_home is set (the live per-user path), the per-user
+        ``AppData/Roaming/npm/copilot.cmd`` shim is resolved and probed first —
+        so version populates on an admin MDM all-users scan (H2)."""
+        shim = self.user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("@echo off\necho GitHub Copilot CLI 0.0.399.\n", encoding="utf-8")
+        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        fake = MagicMock(returncode=0, stdout=banner, stderr="")
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = self.detector.get_version()
+        self.assertEqual(version, "0.0.399")
+        # The resolved shim path (not the bare name) is what gets probed.
+        self.assertEqual(run.call_args.args[0], [str(shim), "--version"])
+        self.assertIs(run.call_args.kwargs.get("shell"), True)
 
 
 class TestCopilotCliConfigDirResolution(unittest.TestCase):
@@ -832,6 +1136,102 @@ class TestCopilotCliVersionParse(unittest.TestCase):
         banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
         with patch(f"{_DETECTOR_MOD}.run_command", return_value=banner):
             self.assertEqual(MacOSCopilotCliDetector().get_version(), "0.0.399")
+
+
+# ---------------------------------------------------------------------------
+# 6b. Per-user binary resolution for version (root/MDM scan, H2)
+# ---------------------------------------------------------------------------
+
+_VERSION_BANNER = (
+    "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+)
+
+
+def _write_copilot_stub(binary: Path) -> None:
+    """Create an executable shell stub that prints a realistic version banner."""
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(
+        "#!/bin/sh\n"
+        "printf 'GitHub Copilot CLI 0.0.399.\\n"
+        "Run '\\''copilot update'\\'' to check for updates.\\n'\n",
+        encoding="utf-8",
+    )
+    os.chmod(binary, 0o755)
+
+
+class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
+    """get_version resolves the per-user binary so version populates on a root
+    MDM scan where root's PATH lacks the user's copilot install (H2).
+
+    The detector's user_home is set (the live per-user path), so the binary is
+    resolved from real on-disk stubs under that home and probed directly.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.detector = MacOSCopilotCliDetector()
+        self.tmp_dir = tempfile.mkdtemp()
+        self.user_home = Path(self.tmp_dir) / "user"
+        self.user_home.mkdir(parents=True)
+        self.detector.user_home = self.user_home
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @unittest.skipUnless(
+        os.name == "posix",
+        "executes a #!/bin/sh stub; Windows exec path is covered by "
+        "test_version_probed_from_per_user_npm_shim",
+    )
+    def test_version_resolved_from_local_bin_stub(self):
+        _write_copilot_stub(self.user_home / ".local" / "bin" / "copilot")
+        self.assertEqual(self.detector.get_version(), "0.0.399")
+
+    @unittest.skipUnless(
+        os.name == "posix",
+        "executes a #!/bin/sh stub; Windows exec path is covered by "
+        "test_version_probed_from_per_user_npm_shim",
+    )
+    def test_version_resolved_from_nvm_stub(self):
+        _write_copilot_stub(
+            self.user_home / ".nvm" / "versions" / "node" / "v20.0.0" / "bin" / "copilot"
+        )
+        self.assertEqual(self.detector.get_version(), "0.0.399")
+
+    @unittest.skipUnless(
+        os.name == "posix",
+        "exercises the macOS resolver with chmod 0o755 stubs (X_OK semantics "
+        "differ on Windows); the macOS resolver only runs on Darwin",
+    )
+    def test_nvm_resolution_prefers_newest_node_version(self):
+        """Multiple nvm Node versions each with a copilot binary -> the newest
+        (numeric semver, so v10 > v9) is resolved, deterministically."""
+        nvm = self.user_home / ".nvm" / "versions" / "node"
+        for ver in ("v9.5.0", "v10.0.0", "v18.17.1"):
+            binary = nvm / ver / "bin" / "copilot"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\necho x\n", encoding="utf-8")
+            os.chmod(binary, 0o755)
+        resolved = _resolve_copilot_binary(self.user_home)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.parent.parent.name, "v18.17.1")
+
+    def test_falls_back_to_bare_path_when_no_per_user_binary(self):
+        """No per-user binary -> the bare-PATH `copilot --version` probe runs."""
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=_VERSION_BANNER) as run:
+            version = self.detector.get_version()
+        self.assertEqual(version, "0.0.399")
+        run.assert_called_once_with(["copilot", "--version"], ANY)
+
+    def test_unknown_when_nothing_resolves_via_detect(self):
+        """No per-user binary and a failing bare probe -> version is 'unknown'
+        on the emitted row (strong-marker fixture so detection still fires)."""
+        copilot_dir = self.user_home / ".copilot"
+        copilot_dir.mkdir(parents=True)
+        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=None):
+            result = self.detector.detect()
+        self.assertEqual(result["version"], "unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +1362,7 @@ class TestWindowsCopilotCliMcpExtraction(unittest.TestCase):
         configs = self.extractor._extract_cli_configs_for_user(self.user_home)
         self.assertIn("serena", self._server_names(configs))
         self.assertEqual(configs[0]["path"], str(self.copilot_dir))
+        self.assertEqual(configs[0].get("scope"), "user")
 
     def test_trailing_comma_shared_fix_applies(self):
         """The P1 trailing-comma fix is inherited, not forked, on Windows."""

@@ -128,7 +128,7 @@ class MacOSCodexRulesExtractor(BaseCodexRulesExtractor):
             try:
                 top_level_dirs = get_top_level_directories(root_path)
                 for dir_path in top_level_dirs:
-                    if should_process_directory(dir_path):
+                    if should_process_directory(dir_path, root_path):
                         self._walk_for_agents_files(root_path, dir_path, projects_by_root, current_depth=1)
             except (PermissionError, OSError):
                 pass

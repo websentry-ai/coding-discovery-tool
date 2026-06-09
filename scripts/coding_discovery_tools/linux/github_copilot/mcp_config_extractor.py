@@ -12,7 +12,12 @@ from ...linux_extraction_helpers import (
     should_skip_path,
     should_skip_system_path,
 )
-from ...mcp_extraction_helpers import transform_mcp_servers_to_array
+from ...mcp_extraction_helpers import (
+    enumerate_vscode_mcp_files,
+    transform_mcp_servers_to_array,
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +25,21 @@ logger = logging.getLogger(__name__)
 class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for GitHub Copilot MCP config on Linux systems."""
 
-    def extract_mcp_config(self) -> Optional[Dict]:
-        projects = []
+    def extract_mcp_config(self, tool_name: Optional[str] = None) -> Optional[Dict]:
+        # Scope MCP sources to the surface: a VS Code row gets VS Code global +
+        # workspace .vscode/mcp.json; a JetBrains row gets JetBrains global only.
+        # tool_name=None keeps the legacy union (back-compat / direct callers).
+        name = (tool_name or "").lower()
+        is_vscode = ("vs code" in name) or ("vscode" in name)
+        want_vscode = (not tool_name) or is_vscode
+        want_jetbrains = (not tool_name) or (not is_vscode)
 
-        projects.extend(self._extract_vscode_configs())
-        projects.extend(self._extract_jetbrains_configs())
-        projects.extend(self._extract_workspace_configs())
+        projects = []
+        if want_vscode:
+            projects.extend(self._extract_vscode_configs())
+            projects.extend(self._extract_workspace_configs())
+        if want_jetbrains:
+            projects.extend(self._extract_jetbrains_configs())
 
         return {"projects": projects} if projects else None
 
@@ -36,24 +50,26 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         return configs
 
     def _extract_vscode_configs_for_user(self, user_home: Path) -> List[Dict]:
-        configs = []
-        code_user_base = user_home / ".config" / "Code" / "User"
+        """Extract VS Code MCP configs for a specific user.
 
-        primary_path = code_user_base / "mcp.json"
-        fallback_path = (
-            code_user_base / "globalStorage" / "ms-vscode.vscode-github-copilot" / "mcp.json"
-        )
+        Covers the default ``.config/Code/User/mcp.json``, each named profile's
+        ``.config/Code/User/profiles/<id>/mcp.json``, and the VS Code Insiders
+        channel (``.config/Code - Insiders/User``) — both its default file and
+        its profiles. Each config is attributed to the dir the file lives in.
+        """
+        configs: List[Dict] = []
 
-        if primary_path.exists():
-            config = self._read_mcp_config(primary_path, str(code_user_base))
-            if config:
-                configs.append(config)
-                return configs
+        config_base = user_home / ".config"
+        code_user_bases = [
+            config_base / "Code" / "User",
+            config_base / "Code - Insiders" / "User",
+        ]
 
-        if fallback_path.exists():
-            config = self._read_mcp_config(fallback_path, str(fallback_path.parent))
-            if config:
-                configs.append(config)
+        for code_user_base in code_user_bases:
+            for mcp_file in enumerate_vscode_mcp_files(code_user_base):
+                config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
+                if config:
+                    configs.append(config)
 
         return configs
 
@@ -134,6 +150,8 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
     def _read_mcp_config(self, config_path: Path, tool_path: str) -> Optional[Dict]:
         try:
             content = config_path.read_text(encoding="utf-8", errors="replace")
+            content = _strip_jsonc_comments(content)
+            content = _strip_trailing_commas(content)
             config_data = json.loads(content)
             mcp_servers_obj = config_data.get("servers") or config_data.get("mcpServers", {})
             mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)

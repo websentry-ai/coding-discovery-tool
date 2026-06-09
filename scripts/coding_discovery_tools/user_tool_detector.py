@@ -13,6 +13,9 @@ from typing import Dict, Optional
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
+from .constants import VERSION_TIMEOUT
+from .macos_extraction_helpers import is_running_as_root
+from .utils import run_command
 
 logger = logging.getLogger(__name__)
 
@@ -79,41 +82,21 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
 
 
 def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Claude Code installation for a user."""
-    # Check user's .claude directory first
-    claude_dir = user_home / ".claude"
-    if claude_dir.exists():
+    """Detect Claude Code installation for a user.
+
+    Gates on the claude binary, not the ~/.claude config directory. The config
+    directory survives uninstall (residue), so detecting on it produces false
+    positives. ~/.claude remains available to the rules/MCP extractor, which only
+    runs once the tool is detected here.
+    """
+    claude_bin = find_claude_binary_for_user(user_home)
+    if claude_bin:
         return {
             "name": detector.tool_name,
             "version": detector.get_version(),
-            "install_path": str(claude_dir)
+            "install_path": claude_bin
         }
-    
-    # Check user's .nvm versions for claude binary (npm installs - most common)
-    nvm_versions = user_home / ".nvm" / "versions"
-    if nvm_versions.exists():
-        try:
-            for version_dir in nvm_versions.iterdir():
-                if version_dir.is_dir():
-                    claude_bin = version_dir / "bin" / "claude"
-                    if claude_bin.exists():
-                        return {
-                            "name": detector.tool_name,
-                            "version": detector.get_version(),
-                            "install_path": str(claude_bin)
-                        }
-        except (PermissionError, OSError):
-            pass
-    
-    # Fallback: Check Bun global binaries
-    bun_bin = user_home / ".bun" / "bin" / "claude"
-    if bun_bin.exists():
-        return {
-            "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(bun_bin)
-        }
-    
+
     return None
 
 
@@ -192,16 +175,13 @@ def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Di
 
 
 def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Gemini CLI installation for a user."""
-    # Check user's .gemini directory first (global installation/config)
-    gemini_dir = user_home / ".gemini"
-    if gemini_dir.exists() and gemini_dir.is_dir():
-        return {
-            "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(gemini_dir)
-        }
-    
+    """Detect Gemini CLI installation for a user.
+
+    Gates on the gemini binary, not the ~/.gemini config directory. The config
+    directory survives uninstall (residue), so detecting on it produces false
+    positives. ~/.gemini remains available to the rules/MCP extractor, which only
+    runs once the tool is detected here.
+    """
     # Check user's .nvm versions for gemini (npm installs - most common)
     # npm creates symlinks with hash suffixes like .gemini-lUK4BXcM
     nvm_versions = user_home / ".nvm" / "versions" / "node"
@@ -238,7 +218,27 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
                         }
         except (PermissionError, OSError):
             pass
-    
+
+    # Check common user binary locations the nvm/bun scans miss:
+    # Homebrew, the official installer (~/.local/bin), and npm-global prefix.
+    if platform.system() != "Windows":
+        gemini_candidates = [
+            Path("/opt/homebrew/bin/gemini"),
+            Path("/usr/local/bin/gemini"),
+            user_home / ".local" / "bin" / "gemini",
+            user_home / ".npm-global" / "bin" / "gemini",
+        ]
+        for candidate in gemini_candidates:
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    return {
+                        "name": detector.tool_name,
+                        "version": detector.get_version(),
+                        "install_path": str(candidate)
+                    }
+            except OSError:
+                continue
+
     # Fallback: Check Bun global binaries
     bun_bin = user_home / ".bun" / "bin" / "gemini"
     if bun_bin.exists():
@@ -299,8 +299,10 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     """
     Find the absolute path to the claude binary for a specific user.
 
-    On macOS: Homebrew (Apple Silicon and Intel), .local/bin, Bun, nvm.
-    On Windows: .local/bin, AppData npm, AppData Local Programs.
+    On macOS/Linux: Homebrew (Apple Silicon and Intel), .local/bin, Bun,
+    npm-global, yarn-global, nvm, and a ``which claude`` PATH backstop.
+    On Windows: .local/bin, AppData npm (.cmd and bare), AppData Local Programs,
+    and Bun.
 
     Args:
         user_home: Path to the user's home directory
@@ -312,7 +314,9 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
         candidates = [
             user_home / ".local" / "bin" / "claude.exe",
             user_home / "AppData" / "Roaming" / "npm" / "claude.cmd",
+            user_home / "AppData" / "Roaming" / "npm" / "claude.exe",
             user_home / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
+            user_home / ".bun" / "bin" / "claude.exe",
         ]
     else:
         candidates = [
@@ -320,6 +324,9 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             Path("/usr/local/bin/claude"),             # Intel Mac / manual install
             user_home / ".local" / "bin" / "claude",   # Official installer
             user_home / ".bun" / "bin" / "claude",     # Bun global install
+            user_home / ".npm-global" / "bin" / "claude",  # npm global prefix
+            user_home / ".config" / "yarn" / "global"  # yarn global install
+            / "node_modules" / ".bin" / "claude",
         ]
 
     for candidate in candidates:
@@ -352,5 +359,22 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                     continue
     except (PermissionError, OSError):
         pass
+
+    # PATH backstop: catch custom install prefixes the explicit list misses.
+    # Only meaningful in the single-user / non-root case — the resolved PATH
+    # is the SCANNER's, not ``user_home``'s. Under a root/MDM multi-user scan
+    # it would resolve root's claude for a user who has none, mis-attributing
+    # the install. The explicit candidate list above is comprehensive and
+    # already user_home-relative, so we simply skip ``which`` when root.
+    # (On Windows there is no ``which`` resolution here anyway.)
+    if not is_running_as_root():
+        which_path = run_command(["which", "claude"], VERSION_TIMEOUT)
+        if which_path:
+            try:
+                resolved = Path(which_path)
+                if resolved.exists() and os.access(str(resolved), os.X_OK):
+                    return str(resolved)
+            except (PermissionError, OSError):
+                pass
 
     return None

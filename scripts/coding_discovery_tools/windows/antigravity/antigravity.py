@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseToolDetector
 from ...constants import COMMAND_TIMEOUT, VERSION_TIMEOUT
 from ...utils import run_command
+from ...windows_extraction_helpers import is_running_as_admin
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,13 @@ class WindowsAntigravityDetector(BaseToolDetector):
     def detect(self) -> Optional[Dict]:
         """
         Detect Antigravity installation on Windows.
-        
-        Checks for .antigravity directories in common locations and also
-        checks for installed applications.
-        
+
+        Gate purely on the installed application — ``_find_app_path()`` checks
+        ``Programs/`` and ``Program Files/`` for the ``Antigravity.exe`` or the
+        ``resources`` tree, both of which are removed on uninstall. The former
+        ``~/.antigravity`` fallback was a residue config/data dir that survives
+        uninstall and produced false positives.
+
         Returns:
             Dict with tool info or None if not found
         """
@@ -39,17 +43,7 @@ class WindowsAntigravityDetector(BaseToolDetector):
                 "version": self.get_version(app_path),
                 "install_path": str(app_path)
             }
-        
-        # Also check if .antigravity directories exist (indicates tool usage)
-        # This is similar to how cursor and windsurf work
-        home_path = Path.home()
-        if (home_path / ".antigravity").exists():
-            return {
-                "name": self.tool_name,
-                "version": None,
-                "install_path": None
-            }
-        
+
         return None
 
     def _find_app_path(self) -> Optional[Path]:
@@ -70,15 +64,26 @@ class WindowsAntigravityDetector(BaseToolDetector):
                     return app_path
         return None
 
+    # Per-user squirrel install dir names under ...\AppData\Local\Programs.
+    _PROGRAM_DIR_NAMES = ("antigravity", "Antigravity", "Gemini", "Google Gemini")
+
     def _get_search_paths(self) -> List[Path]:
         """
         Get list of paths to search for Antigravity installation.
-        
+
+        Under a SYSTEM/admin scan (MDM), the scanner's own ``Path.home()``
+        only covers the service account. Antigravity (a VS Code fork) installs
+        per-user under ``C:\\Users\\<user>\\AppData\\Local\\Programs`` for OTHER
+        users, which would otherwise be unreachable, so we also enumerate every
+        real user's ``Programs`` dir. The real-artifact gate in
+        ``_find_app_path`` (``Antigravity.exe`` / ``resources`` tree) still
+        applies, restoring multi-user coverage WITHOUT a residue gate.
+
         Returns:
             List of Path objects
         """
         user_home = Path.home()
-        return [
+        paths = [
             user_home / "AppData" / "Local" / "Programs" / "antigravity",
             user_home / "AppData" / "Local" / "Programs" / "Antigravity",
             user_home / "AppData" / "Local" / "Programs" / "Gemini",
@@ -94,6 +99,44 @@ class WindowsAntigravityDetector(BaseToolDetector):
             Path("C:\\Program Files (x86)") / "Gemini",
             Path("C:\\Program Files (x86)") / "Google Gemini",
         ]
+
+        if is_running_as_admin():
+            for program_root in self._other_user_program_dirs():
+                for name in self._PROGRAM_DIR_NAMES:
+                    paths.append(program_root / name)
+
+        return paths
+
+    @staticmethod
+    def _other_user_program_dirs() -> List[Path]:
+        """
+        Enumerate ``C:\\Users\\<user>\\AppData\\Local\\Programs`` for every
+        real user, so a SYSTEM/admin (MDM) scan reaches per-user squirrel
+        installs belonging to other users. Skips well-known service / template
+        accounts. Never raises — directory enumeration is wrapped.
+        """
+        program_roots: List[Path] = []
+        users_dir = Path("C:\\Users")
+        try:
+            if not users_dir.exists():
+                return program_roots
+            for user_dir in users_dir.iterdir():
+                try:
+                    if not user_dir.is_dir() or user_dir.name.startswith("."):
+                        continue
+                    if user_dir.name.lower() in (
+                        "public", "default", "default user", "all users",
+                    ):
+                        continue
+                    program_roots.append(
+                        user_dir / "AppData" / "Local" / "Programs"
+                    )
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Could not inspect user dir {user_dir}: {e}")
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not enumerate C:\\Users for Antigravity: {e}")
+        return program_roots
 
     def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:
         """

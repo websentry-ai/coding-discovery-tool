@@ -97,9 +97,11 @@ class LinuxOpenClawDetector(BaseOpenClawDetector):
         return self._check_single_user_dir(Path.home())
 
     def _check_single_user_dir(self, user_home: Path) -> Optional[Path]:
+        # NOTE: the bare ``~/.openclaw`` dir is intentionally excluded — it is a
+        # residue config/data dir that survives uninstall. Gate on the real
+        # binary instead.
         user_paths = [
             user_home / ".openclaw" / "bin" / "openclaw",
-            user_home / ".openclaw",
         ]
         for p in user_paths:
             if p.exists():

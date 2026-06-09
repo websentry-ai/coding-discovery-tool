@@ -37,10 +37,25 @@ class LinuxReplitDetector(BaseToolDetector):
         return "Replit"
 
     def detect(self) -> Optional[Dict]:
-        for user_home in get_linux_user_homes():
-            result = self._check_user_data_directory(user_home)
-            if result:
-                return result
+        """
+        Detect Replit by requiring a real install resource tree, with the
+        ``which replit`` lookup as a backstop.
+
+        A genuine Replit Desktop install ships a ``resources/app/package.json``
+        under one of the conventional install dirs. We gate on that resource
+        tree rather than on the bare ``~/.config/Replit`` /
+        ``~/.local/share/Replit`` dirs — those are residue config/data that
+        survive uninstall and produced false positives. ``.local/share/Replit``
+        is now only honoured as part of a resource-tree check (it is one of the
+        candidate install dirs), not as a bare-dir-exists gate.
+        """
+        install_dir = self._find_install_dir()
+        if install_dir:
+            return {
+                "name": self.tool_name,
+                "version": self.get_version(),
+                "install_path": str(install_dir),
+            }
 
         which_path = self._check_replit_command()
         if which_path:
@@ -50,6 +65,23 @@ class LinuxReplitDetector(BaseToolDetector):
                 "install_path": which_path,
             }
 
+        return None
+
+    def _find_install_dir(self) -> Optional[Path]:
+        """
+        Return the first candidate install dir that holds a real Replit
+        resource tree (``resources/app/package.json``), which is removed on
+        uninstall. Returns None if none qualify.
+        """
+        for install_dir in self._candidate_install_dirs():
+            try:
+                if not install_dir.is_dir():
+                    continue
+                if (install_dir / "resources" / "app" / "package.json").exists():
+                    return install_dir
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not check Replit install dir {install_dir}: {e}")
+                continue
         return None
 
     def get_version(self) -> Optional[str]:
@@ -102,24 +134,6 @@ class LinuxReplitDetector(BaseToolDetector):
                     return output
         except Exception as e:
             logger.debug(f"replit --version failed: {e}")
-        return None
-
-    def _check_user_data_directory(self, user_home: Path) -> Optional[Dict]:
-        candidates = [
-            user_home / ".config" / "Replit",
-            user_home / ".local" / "share" / "Replit",
-        ]
-        for path in candidates:
-            try:
-                if path.exists() and path.is_dir():
-                    logger.debug(f"Found Replit user data at: {path}")
-                    return {
-                        "name": self.tool_name,
-                        "version": self.get_version(),
-                        "install_path": str(path),
-                    }
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Could not check Replit path {path}: {e}")
         return None
 
     def _check_replit_command(self) -> Optional[str]:

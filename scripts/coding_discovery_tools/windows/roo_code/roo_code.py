@@ -21,6 +21,7 @@ from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...windows_extraction_helpers import is_running_as_admin
+from ..antigravity.antigravity import WindowsAntigravityDetector
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,9 @@ class WindowsRooDetector(BaseToolDetector):
         """
         results = []
 
-        # Check globalStorage-based IDEs (VS Code, Cursor, Windsurf)
+        # Check globalStorage-based IDEs (VS Code, Cursor, Windsurf).
+        # Win/Linux globalStorage rows are not yet IDE-install-gated (deferred
+        # follow-up); only the Antigravity branch below is gated here.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_roo_extension(user_home, ide_folder)
 
@@ -126,19 +129,37 @@ class WindowsRooDetector(BaseToolDetector):
                 })
                 logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
 
-        antigravity_info = self._check_antigravity_extension(user_home)
-        if antigravity_info:
-            extension_path, version = antigravity_info
-            results.append({
-                "name": "Roo Code (Antigravity)",
-                "version": version or "Unknown",
-                "publisher": "Roo Veterinary Inc",
-                "ide": "Antigravity",
-                "install_path": str(extension_path)
-            })
-            logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
+        # Gate on the Antigravity install being present — ~/.antigravity/
+        # extensions survives uninstall, so the extensions.json entry alone is
+        # not proof of install. Reuse the Windows Antigravity detector's
+        # install-dir probe (Programs/ + Program Files/ for the exe/resources).
+        if self._is_antigravity_installed():
+            antigravity_info = self._check_antigravity_extension(user_home)
+            if antigravity_info:
+                extension_path, version = antigravity_info
+                results.append({
+                    "name": "Roo Code (Antigravity)",
+                    "version": version or "Unknown",
+                    "publisher": "Roo Veterinary Inc",
+                    "ide": "Antigravity",
+                    "install_path": str(extension_path)
+                })
+                logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
 
         return results
+
+    def _is_antigravity_installed(self) -> bool:
+        """
+        Return True if a real Antigravity install dir is present, reusing the
+        Windows Antigravity detector's ``_find_app_path()`` (checks Programs/
+        and Program Files/ for Antigravity.exe or the resources tree — both
+        removed on uninstall). Wrapped so a probe error never crashes detection.
+        """
+        try:
+            return WindowsAntigravityDetector()._find_app_path() is not None
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check Antigravity install presence: {e}")
+            return False
 
     def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[Path, Optional[str]]]:
         """

@@ -36,13 +36,36 @@ class LinuxAntigravityDetector(BaseToolDetector):
         return "Antigravity"
 
     def detect(self) -> Optional[Dict]:
-        for user_home in get_linux_user_homes():
-            antigravity_dir = user_home / ".antigravity"
-            if antigravity_dir.exists() and antigravity_dir.is_dir():
+        """
+        Detect Antigravity by requiring a real install resource tree.
+
+        Antigravity is a VS Code fork, so a genuine install ships a
+        ``resources/app/product.json`` (or ``package.json``) under one of the
+        conventional install dirs. We gate on that resource tree EXISTING —
+        rather than on ``~/.antigravity`` (a residue config/data dir that
+        survives uninstall) and rather than on a *parseable* ``version`` key.
+        An install whose product/package json lacks a ``version`` is still a
+        real install, so version parsing is decoupled: ``get_version()`` is
+        called independently and a missing version is reported as
+        ``"Unknown"`` (matching Replit-Linux / KiloCode).
+        """
+        for install_dir in self._candidate_install_dirs():
+            try:
+                if not install_dir.exists() or not install_dir.is_dir():
+                    continue
+            except (PermissionError, OSError):
+                continue
+            for filename in ("product.json", "package.json"):
+                resource = install_dir / "resources" / "app" / filename
+                try:
+                    if not resource.exists() or not resource.is_file():
+                        continue
+                except (PermissionError, OSError):
+                    continue
                 return {
                     "name": self.tool_name,
-                    "version": self.get_version(),
-                    "install_path": str(antigravity_dir),
+                    "version": self.get_version() or "Unknown",
+                    "install_path": str(install_dir),
                 }
         return None
 

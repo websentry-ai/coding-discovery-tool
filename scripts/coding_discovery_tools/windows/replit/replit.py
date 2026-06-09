@@ -2,8 +2,11 @@
 Replit detection for Windows.
 
 Replit is an online IDE and coding platform.
-This module detects Replit installations by checking for:
-User data directory in %APPDATA%\\Replit\\ (AppData\\Roaming\\Replit)
+This module detects Replit installations by checking for a real install
+directory under %LOCALAPPDATA%\\Programs or Program Files that contains
+Replit.exe or a resources\\app\\package.json resource tree. These artifacts are
+removed on uninstall (unlike the %APPDATA%\\Roaming\\Replit data dir, which
+survives uninstall and caused false positives).
 """
 
 import json
@@ -15,6 +18,7 @@ from typing import Optional, Dict
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...utils import run_command
+from ...windows_extraction_helpers import is_running_as_admin
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +27,9 @@ class WindowsReplitDetector(BaseToolDetector):
     """
     Detector for Replit installations on Windows systems.
 
-    Detection involves:
-    - Checking if user data directory exists in AppData\\Roaming\\Replit
+    Detection gates on a real install directory containing Replit.exe or a
+    resources\\app\\package.json resource tree, both removed on uninstall.
     """
-
-    # User data directory name
-    USER_DATA_DIR_NAME = "Replit"
 
     # Replit Desktop is an Electron app; squirrel.windows installs it
     # per-user under %LOCALAPPDATA%\Programs\<name> (newer builds drop the
@@ -43,24 +44,48 @@ class WindowsReplitDetector(BaseToolDetector):
     def detect(self) -> Optional[Dict]:
         """
         Detect Replit installation on Windows.
-        
-        When running as administrator, scans all user directories to find installations
-        across multiple user accounts.
-        
+
+        Gate on a real install directory: one of the conventional
+        ``%LOCALAPPDATA%\\Programs`` / ``Program Files`` locations that contains
+        ``Replit.exe`` or a ``resources\\app\\package.json`` resource tree. Both
+        artifacts are removed on uninstall. The former
+        ``%APPDATA%\\Roaming\\Replit`` data-dir gate was residue that survives
+        uninstall and produced false positives.
+
         Returns:
             Dict containing tool info (name, version, install_path) or None if not found
         """
-        user_data_path = self._check_user_data_directory()
-        if user_data_path:
+        install_path = self._find_install_dir()
+        if install_path:
             return {
                 "name": self.tool_name,
                 # ``or "Unknown"`` keeps the version field consistent with
-                # KiloCode — without it, a data-dir-only install emits
-                # ``"version": null`` while KiloCode emits ``"Unknown"``.
+                # KiloCode — without it the version field could be ``null``
+                # while KiloCode emits ``"Unknown"``.
                 "version": self.get_version() or "Unknown",
-                "install_path": str(user_data_path)
+                "install_path": str(install_path)
             }
-        
+
+        return None
+
+    def _find_install_dir(self) -> Optional[Path]:
+        """
+        Return the first candidate install dir that holds a real Replit
+        install artifact (``Replit.exe`` or ``resources\\app\\package.json``),
+        which is removed on uninstall. Returns None if none qualify.
+        """
+        for app_path in self._candidate_install_paths():
+            try:
+                if not app_path.is_dir():
+                    continue
+                for exe_name in ("Replit.exe", "replit.exe"):
+                    if (app_path / exe_name).exists():
+                        return app_path
+                if (app_path / "resources" / "app" / "package.json").exists():
+                    return app_path
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not check Replit install dir {app_path}: {e}")
+                continue
         return None
 
     def get_version(self) -> Optional[str]:
@@ -99,6 +124,15 @@ class WindowsReplitDetector(BaseToolDetector):
         them are unset — matching the symmetry the Windows KiloCode helper
         already has, so a restricted service account (env stripped) still
         gets full coverage.
+
+        Under a SYSTEM/admin scan (MDM), the scanner's own
+        ``%LOCALAPPDATA%`` only covers the service account. squirrel.windows
+        installs Replit per-user at ``C:\\Users\\<user>\\AppData\\Local\\
+        Programs\\Replit`` for OTHER users, which would otherwise be
+        unreachable, so we also enumerate every real user's ``Programs`` dir.
+        The real-artifact gate in ``_find_install_dir`` (``Replit.exe`` /
+        ``resources\\app\\package.json``) still applies, so this restores
+        multi-user coverage WITHOUT a residue gate.
         """
         roots = []
         local_app = os.environ.get("LOCALAPPDATA")
@@ -111,11 +145,45 @@ class WindowsReplitDetector(BaseToolDetector):
             base = os.environ.get(env)
             roots.append(Path(base) if base else default)
 
+        if is_running_as_admin():
+            roots.extend(self._other_user_program_dirs())
+
         candidates = []
         for base in roots:
             for name in self.INSTALL_DIR_NAMES:
                 candidates.append(base / name)
         return candidates
+
+    @staticmethod
+    def _other_user_program_dirs() -> list:
+        """
+        Enumerate ``C:\\Users\\<user>\\AppData\\Local\\Programs`` for every
+        real user, so a SYSTEM/admin (MDM) scan reaches per-user squirrel
+        installs that belong to other users. Skips the well-known service /
+        template accounts. Never raises — directory enumeration is wrapped.
+        """
+        program_roots = []
+        users_dir = Path("C:\\Users")
+        try:
+            if not users_dir.exists():
+                return program_roots
+            for user_dir in users_dir.iterdir():
+                try:
+                    if not user_dir.is_dir() or user_dir.name.startswith("."):
+                        continue
+                    if user_dir.name.lower() in (
+                        "public", "default", "default user", "all users",
+                    ):
+                        continue
+                    program_roots.append(
+                        user_dir / "AppData" / "Local" / "Programs"
+                    )
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Could not inspect user dir {user_dir}: {e}")
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not enumerate C:\\Users for Replit: {e}")
+        return program_roots
 
     def _read_version_from_package_json(self, app_path: Path) -> Optional[str]:
         pkg = app_path / "resources" / "app" / "package.json"
@@ -153,74 +221,3 @@ class WindowsReplitDetector(BaseToolDetector):
             except Exception as e:
                 logger.debug(f"PowerShell version lookup failed for {exe}: {e}")
         return None
-
-    def _check_user_data_directory(self) -> Optional[Path]:
-        """
-        Check if Replit user data directory exists.
-        
-        When running as administrator, scans all user directories.
-        Otherwise, checks current user's directory.
-        
-        Returns:
-            Path to user data directory if found, None otherwise
-        """
-        # When running as administrator, scan all user directories
-        if self._is_running_as_admin():
-            users_dir = Path("C:\\Users")
-            if users_dir.exists():
-                for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                        try:
-                            user_data_path = self._get_user_data_path(user_dir)
-                            if user_data_path:
-                                return user_data_path
-                        except (PermissionError, OSError) as e:
-                            logger.debug(f"Skipping user directory {user_dir}: {e}")
-                            continue
-        
-        # Check current user's directory
-        user_data_path = self._get_user_data_path(Path.home())
-        if user_data_path:
-            return user_data_path
-        
-        return None
-
-    def _get_user_data_path(self, user_home: Path) -> Optional[Path]:
-        """
-        Get Replit user data directory path for a specific user.
-        
-        Args:
-            user_home: User's home directory path
-            
-        Returns:
-            Path to user data directory if it exists, None otherwise
-        """
-        user_data_path = user_home / "AppData" / "Roaming" / self.USER_DATA_DIR_NAME
-        
-        try:
-            if user_data_path.exists() and user_data_path.is_dir():
-                logger.debug(f"Found Replit user data at: {user_data_path}")
-                return user_data_path
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check Replit user data path {user_data_path}: {e}")
-        
-        return None
-
-    def _is_running_as_admin(self) -> bool:
-        """
-        Check if the current process is running as administrator.
-        
-        Returns:
-            True if running as administrator, False otherwise
-        """
-        try:
-            import ctypes
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except Exception:
-            # Fallback: check if current user is Administrator or SYSTEM
-            try:
-                import getpass
-                current_user = getpass.getuser().lower()
-                return current_user in ["administrator", "system"]
-            except Exception:
-                return False

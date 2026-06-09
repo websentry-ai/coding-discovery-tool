@@ -126,11 +126,13 @@ class MacOSRooDetector(BaseToolDetector):
             if extension_info:
                 extension_path, version = extension_info
 
-                # Verify the IDE is installed
+                # Verify the IDE is installed. Require BOTH the globalStorage
+                # extension dir AND the host IDE's .app to be present — stale
+                # globalStorage from an uninstalled IDE must not surface a row
+                # (matches kilocode.py:149).
                 ide_installed, _ = self._check_ide_installation(ide_folder)
 
-                if ide_installed or extension_path:
-                    # Even if IDE app not found, extension exists so include it
+                if ide_installed and extension_path:
                     results.append({
                         "name": f"Roo Code ({ide_display_name})",
                         "version": version or "Unknown",
@@ -140,18 +142,22 @@ class MacOSRooDetector(BaseToolDetector):
                     })
                     logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
 
-        # Check Antigravity (uses different extension storage)
-        antigravity_info = self._check_antigravity_extension(user_home)
-        if antigravity_info:
-            extension_path, version = antigravity_info
-            results.append({
-                "name": "Roo Code (Antigravity)",
-                "version": version or "Unknown",
-                "publisher": "Roo Veterinary Inc",
-                "ide": "Antigravity",
-                "install_path": str(extension_path)
-            })
-            logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
+        # Check Antigravity (uses different extension storage). Gate on the
+        # Antigravity .app being present — ~/.antigravity/extensions survives
+        # uninstall, so the extensions.json entry alone is not proof of install.
+        antigravity_installed, _ = self._check_ide_installation("Antigravity")
+        if antigravity_installed:
+            antigravity_info = self._check_antigravity_extension(user_home)
+            if antigravity_info:
+                extension_path, version = antigravity_info
+                results.append({
+                    "name": "Roo Code (Antigravity)",
+                    "version": version or "Unknown",
+                    "publisher": "Roo Veterinary Inc",
+                    "ide": "Antigravity",
+                    "install_path": str(extension_path)
+                })
+                logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
 
         return results
 

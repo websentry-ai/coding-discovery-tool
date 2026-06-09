@@ -144,12 +144,14 @@ class MacOSOpenClawDetector(BaseOpenClawDetector):
         Callback function to check for OpenClaw in a specific user's home directory.
         Used by both normal execution and scan_user_directories.
         """
+        # NOTE: the bare ``~/.openclaw`` dir is intentionally excluded — it is a
+        # residue config/data dir that survives uninstall. Gate on the real
+        # binary (``.openclaw/bin/openclaw``) and the per-user .app bundle.
         user_paths = [
             user_home / "Applications/OpenClaw.app",
             user_home / ".openclaw/bin/openclaw",
-            user_home / ".openclaw"
         ]
-        
+
         for p in user_paths:
             if p.exists():
                 return p

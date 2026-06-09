@@ -94,7 +94,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         return "JetBrains IDEs"
 
     def detect(self) -> Optional[List[Dict]]:
-        """
+        r"""
         Detect JetBrains IDE installations on Windows.
 
         Scans %APPDATA%\JetBrains directory for installed IDEs.

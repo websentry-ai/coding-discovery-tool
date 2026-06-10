@@ -162,6 +162,45 @@ def resolve_npm_global_tool_bin(
     return None
 
 
+def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
+    """Under a root/MDM multi-user scan, decide whether a MACHINE-GLOBAL binary
+    (Homebrew / /usr/local / /usr/bin) should be attributed to ``user_home``.
+
+    - Owned by a REGULAR user (Homebrew on macOS and manual /usr/local installs
+      are owned by the installing user): attribute to that owner ONLY — this is
+      what prevents one user's install fanning out to every user (the 93b5fc2
+      cross-user FP).
+    - Owned by ROOT/system (uid 0, e.g. /usr/bin/claude from apt/dnf): genuinely
+      system-wide and available to every user, so attribute to whoever is being
+      scanned.
+
+    Never raises: any stat/pwd failure returns False (do not attribute).
+
+    Args:
+        candidate: Absolute path to a machine-global binary.
+        user_home: Home dir of the user currently being scanned.
+
+    Returns:
+        True if the binary should be attributed to ``user_home``, else False.
+    """
+    try:
+        uid = os.stat(str(candidate)).st_uid
+    except (OSError, PermissionError):
+        return False
+    if uid == 0:
+        return True  # system-wide -> available to every scanned user
+    if pwd is None:
+        return False  # POSIX-only; should never be hit on Windows
+    try:
+        owner_home = Path(pwd.getpwuid(uid).pw_dir)
+    except (KeyError, OSError, AttributeError):
+        return False
+    try:
+        return owner_home.resolve() == user_home.resolve()
+    except (OSError, RuntimeError):
+        return owner_home == user_home
+
+
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()

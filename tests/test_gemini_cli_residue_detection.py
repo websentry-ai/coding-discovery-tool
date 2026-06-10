@@ -20,6 +20,36 @@ import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.user_tool_detector import _detect_gemini_cli
 
 _MOD = "scripts.coding_discovery_tools.user_tool_detector"
+# The owner-attribution helper (machine_global_binary_owned_by_user) lives in
+# utils and reads os.stat(...).st_uid + pwd.getpwuid(uid).pw_dir. W1 tests mock
+# those on the utils module so attribution never depends on the real FS owner
+# (this dev Mac actually has /opt/homebrew/bin/claude owned by a real user).
+_UTILS = "scripts.coding_discovery_tools.utils"
+
+
+def _stat_for_uid(target: Path, uid: int):
+    """os.stat side_effect: return a fake stat (chosen ``uid``) for ``target``,
+    pass through to the real os.stat for every other path."""
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if str(path) == str(target):
+            return Mock(st_uid=uid)
+        return real_stat(path, *args, **kwargs)
+
+    return fake_stat
+
+
+def _pwd_home(uid_to_home: dict):
+    """pwd.getpwuid side_effect mapping uid -> a pw_dir; unknown uid -> KeyError
+    (mirrors the real pwd behaviour the helper guards against)."""
+
+    def fake_getpwuid(uid):
+        if uid in uid_to_home:
+            return Mock(pw_dir=str(uid_to_home[uid]))
+        raise KeyError(uid)
+
+    return fake_getpwuid
 
 # Absolute-literal candidate paths baked into ``_detect_gemini_cli``. They
 # cannot be redirected to a tmp file via a constant patch, so the test that
@@ -329,6 +359,141 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
             result = _detect_gemini_cli(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(npm_bin))
+
+    # --- W1: machine-global owner attribution under root -----------------
+    # Recovers the Homebrew-only false-NEGATIVE from 93b5fc2 WITHOUT
+    # re-opening the cross-user false-positive: under root, a machine-global
+    # binary is attributed to its OWNER (Homebrew/usr-local) or to every
+    # scanned user when root-owned (apt/dnf), instead of being dropped.
+
+    def test_homebrew_owned_by_this_user_detected_when_root(self):
+        """W1: root scan, /opt/homebrew/bin/gemini present and owned by a uid
+        whose home == the scanned user_home -> attributed (detected). Fails
+        against pre-W1 code, which dropped all machine-global candidates under
+        root."""
+        self._with_abs(_HOMEBREW)  # present + executable
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501)), \
+             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(_HOMEBREW))
+
+    def test_homebrew_owned_by_other_user_not_detected_when_root(self):
+        """W1 (the FP guard): root scan, /opt/homebrew/bin/gemini owned by a
+        DIFFERENT user's home -> that candidate is skipped; with no user-local
+        binary the result is None (one user's Homebrew install is not fanned
+        out to every user)."""
+        self._with_abs(_HOMEBREW)
+        other_home = self.home.parent / "someone_else"
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502)), \
+             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other_home})), \
+             patch(f"{_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNone(result)
+
+    def test_root_owned_machine_global_detected_when_root(self):
+        """W1: root scan, /opt/homebrew/bin/gemini owned by uid 0 (system-wide,
+        e.g. apt/dnf) -> attributed to whoever is being scanned (detected). No
+        pwd lookup is needed for uid 0."""
+        self._with_abs(_HOMEBREW)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 0)), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(_HOMEBREW))
+
+    def test_machine_global_detected_when_not_root_no_owner_check(self):
+        """W1: when NOT root, a present machine-global binary is detected
+        directly with NO owner check (single-user case is unchanged)."""
+        self._with_abs(_HOMEBREW)
+        det = _make_detector()
+        # os.stat must NOT be consulted in the non-root path; if it were and we
+        # didn't mock it, the real (missing) path would still detect, but we
+        # assert the helper is bypassed by leaving stat/pwd unmocked.
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(_HOMEBREW))
+
+    def test_stat_failure_never_crashes_when_root(self):
+        """W1: root scan, os.stat on the machine-global candidate raises OSError
+        -> the helper returns False (skip), the candidate is dropped, and no
+        exception escapes. With no user-local binary the result is None."""
+        self._with_abs(_HOMEBREW)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=OSError("boom")), \
+             patch(f"{_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNone(result)
+
+
+class TestMachineGlobalBinaryOwnedByUser(unittest.TestCase):
+    """Focused unit tests for the shared ``machine_global_binary_owned_by_user``
+    helper — the four branches: uid0 -> True, owner-match -> True,
+    owner-mismatch -> False, stat-raises -> False."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.cand = Path("/opt/homebrew/bin/sometool")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_uid_zero_returns_true(self):
+        """A root-owned (uid 0) machine-global binary is system-wide -> True,
+        regardless of the scanned user."""
+        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 0)):
+            self.assertTrue(
+                utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)
+            )
+
+    def test_owner_home_matches_returns_true(self):
+        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 501)), \
+             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})):
+            self.assertTrue(
+                utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)
+            )
+
+    def test_owner_home_mismatch_returns_false(self):
+        other = self.home.parent / "other_user"
+        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 502)), \
+             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other})):
+            self.assertFalse(
+                utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)
+            )
+
+    def test_stat_raises_returns_false(self):
+        with patch(f"{_UTILS}.os.stat", side_effect=OSError("nope")):
+            self.assertFalse(
+                utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)
+            )
+
+    def test_unknown_owner_uid_returns_false(self):
+        """uid resolves via stat but pwd.getpwuid raises KeyError (orphaned uid)
+        -> False (do not attribute)."""
+        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 999)), \
+             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({})):
+            self.assertFalse(
+                utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)
+            )
 
 
 if __name__ == "__main__":

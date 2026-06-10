@@ -15,7 +15,11 @@ from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
 from .constants import VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
-from .utils import resolve_npm_global_tool_bin, run_command
+from .utils import (
+    machine_global_binary_owned_by_user,
+    resolve_npm_global_tool_bin,
+    run_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -242,22 +246,27 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     else:
         # Check common user binary locations the nvm/bun scans miss.
         # ~/.local/bin and the npm-global prefix are user_home-relative (always
-        # safe). Homebrew and /usr/local are MACHINE-GLOBAL — under a root/MDM
-        # multi-user scan, probing them per-user would attribute one shared
-        # install to every user, so only add them when NOT root (same reasoning
-        # as the `which` backstop guard).
-        gemini_candidates = [
+        # safe). Homebrew and /usr/local are MACHINE-GLOBAL — they are ALWAYS
+        # probed, but under a root/MDM multi-user scan each is owner-attributed
+        # so one user's Homebrew install isn't fanned out to every user (the
+        # 93b5fc2 cross-user FP); a root-owned system-wide binary attributes to
+        # each scanned user. User_home-relative candidates are path-scoped and
+        # always pass (no owner check).
+        machine_global = [
+            Path("/opt/homebrew/bin/gemini"),
+            Path("/usr/local/bin/gemini"),
+        ]
+        user_relative = [
             user_home / ".local" / "bin" / "gemini",
             user_home / ".npm-global" / "bin" / "gemini",
         ]
-        if not is_running_as_root():
-            gemini_candidates = [
-                Path("/opt/homebrew/bin/gemini"),
-                Path("/usr/local/bin/gemini"),
-            ] + gemini_candidates
-        for candidate in gemini_candidates:
+        is_root = is_running_as_root()
+        for candidate in machine_global + user_relative:
             try:
                 if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    if is_root and candidate in machine_global \
+                            and not machine_global_binary_owned_by_user(candidate, user_home):
+                        continue
                     return {
                         "name": detector.tool_name,
                         "version": detector.get_version() or "Unknown",
@@ -355,6 +364,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     Returns:
         Absolute path to claude binary as string, or None if not found
     """
+    machine_global: list = []
     if platform.system() == "Windows":
         candidates = [
             user_home / ".local" / "bin" / "claude.exe",
@@ -367,26 +377,35 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             user_home / ".bun" / "bin" / "claude.exe",
         ]
     else:
-        candidates = [
+        user_relative = [
             user_home / ".local" / "bin" / "claude",   # Official installer
             user_home / ".bun" / "bin" / "claude",     # Bun global install
             user_home / ".npm-global" / "bin" / "claude",  # npm global prefix
             user_home / ".config" / "yarn" / "global"  # yarn global install
             / "node_modules" / ".bin" / "claude",
         ]
-        # Homebrew, /usr/local and /usr/bin are MACHINE-GLOBAL — under a
-        # root/MDM multi-user scan, probing them per-user would attribute one
-        # shared install to every user, so only add them when NOT root.
-        if not is_running_as_root():
-            candidates = [
-                Path("/opt/homebrew/bin/claude"),      # Apple Silicon Homebrew
-                Path("/usr/local/bin/claude"),         # Intel Mac / manual install
-                Path("/usr/bin/claude"),               # apt/dnf system package
-            ] + candidates
+        # Homebrew, /usr/local and /usr/bin are MACHINE-GLOBAL — they are
+        # ALWAYS probed, but under a root/MDM multi-user scan each is
+        # owner-attributed (see the loop below) so one user's Homebrew install
+        # isn't fanned out to every user (the 93b5fc2 cross-user FP); a
+        # root-owned system-wide binary attributes to each scanned user.
+        machine_global = [
+            Path("/opt/homebrew/bin/claude"),      # Apple Silicon Homebrew
+            Path("/usr/local/bin/claude"),         # Intel Mac / manual install
+            Path("/usr/bin/claude"),               # apt/dnf system package
+        ]
+        candidates = machine_global + user_relative
 
+    is_root = is_running_as_root()
     for candidate in candidates:
         try:
             if candidate.exists():
+                # Machine-global binaries under root are owner-attributed; a
+                # candidate owned by a different user is skipped so it isn't
+                # fanned out to every scanned user.
+                if is_root and candidate in machine_global \
+                        and not machine_global_binary_owned_by_user(candidate, user_home):
+                    continue
                 if os.access(str(candidate), os.X_OK):
                     return str(candidate)
                 logger.debug(

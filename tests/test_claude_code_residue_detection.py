@@ -26,11 +26,40 @@ from scripts.coding_discovery_tools.user_tool_detector import (
 )
 
 _MOD = "scripts.coding_discovery_tools.user_tool_detector"
+# The owner-attribution helper (machine_global_binary_owned_by_user) lives in
+# utils and reads os.stat(...).st_uid + pwd.getpwuid(uid).pw_dir. W1 tests mock
+# those on the utils module so attribution never depends on the real FS owner
+# (this dev Mac actually has /opt/homebrew/bin/claude owned by a real user).
+_UTILS = "scripts.coding_discovery_tools.utils"
 
 # Absolute-literal candidate paths baked into ``find_claude_binary_for_user``.
 _HOMEBREW = Path("/opt/homebrew/bin/claude")
 _USR_LOCAL = Path("/usr/local/bin/claude")
 _USR_BIN = Path("/usr/bin/claude")
+
+
+def _stat_for_uid(target: Path, uid: int):
+    """os.stat side_effect: return a fake stat (chosen ``uid``) for ``target``,
+    pass through to the real os.stat for every other path."""
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if str(path) == str(target):
+            return Mock(st_uid=uid)
+        return real_stat(path, *args, **kwargs)
+
+    return fake_stat
+
+
+def _pwd_home(uid_to_home: dict):
+    """pwd.getpwuid side_effect mapping uid -> a pw_dir; unknown uid -> KeyError."""
+
+    def fake_getpwuid(uid):
+        if uid in uid_to_home:
+            return Mock(pw_dir=str(uid_to_home[uid]))
+        raise KeyError(uid)
+
+    return fake_getpwuid
 
 
 def _make_detector():
@@ -318,6 +347,75 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertNotEqual(result["install_path"], str(self.home / ".claude"))
         self.assertEqual(result["install_path"], str(self.home / ".local" / "bin" / "claude"))
+
+    # --- W1: machine-global owner attribution under root -----------------
+    # Recovers the Homebrew-only false-NEGATIVE from 93b5fc2 WITHOUT
+    # re-opening the cross-user false-positive: under root, a machine-global
+    # claude binary is attributed to its OWNER (Homebrew/usr-local) or to every
+    # scanned user when root-owned (apt/dnf /usr/bin), instead of being dropped.
+
+    def test_homebrew_owned_by_this_user_detected_when_root(self):
+        """W1: root scan, /opt/homebrew/bin/claude present and owned by a uid
+        whose home == the scanned user_home -> attributed (returned). Fails
+        against pre-W1 code, which dropped all machine-global candidates under
+        root."""
+        self._with_abs(_HOMEBREW)  # present + executable
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501)), \
+             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(self.home)
+        self.assertEqual(result, str(_HOMEBREW))
+
+    def test_homebrew_owned_by_other_user_not_detected_when_root(self):
+        """W1 (the FP guard): root scan, /opt/homebrew/bin/claude owned by a
+        DIFFERENT user's home -> skipped; with no user-local binary the finder
+        returns None (one user's Homebrew install is not fanned out)."""
+        self._with_abs(_HOMEBREW)
+        other_home = self.home.parent / "someone_else"
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502)), \
+             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other_home})), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(self.home)
+        self.assertIsNone(result)
+
+    def test_usr_bin_root_owned_detected_when_root(self):
+        """W1: root scan, /usr/bin/claude owned by uid 0 (apt/dnf system-wide)
+        -> attributed to whoever is being scanned (returned). No pwd lookup is
+        needed for uid 0. Fails against pre-W1 code, which dropped /usr/bin
+        under root."""
+        self._with_abs(_USR_BIN)
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_USR_BIN, 0)), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(self.home)
+        self.assertEqual(result, str(_USR_BIN))
+
+    def test_machine_global_detected_when_not_root_no_owner_check(self):
+        """W1: when NOT root, a present machine-global binary is returned
+        directly with NO owner check (single-user case unchanged)."""
+        self._with_abs(_HOMEBREW)
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(self.home)
+        self.assertEqual(result, str(_HOMEBREW))
+
+    def test_stat_failure_never_crashes_when_root(self):
+        """W1: root scan, os.stat on the machine-global candidate raises OSError
+        -> helper returns False (skip), candidate dropped, no exception escapes.
+        With no user-local binary the finder returns None."""
+        self._with_abs(_HOMEBREW)
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat", side_effect=OSError("boom")), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(self.home)
+        self.assertIsNone(result)
 
 
 class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):

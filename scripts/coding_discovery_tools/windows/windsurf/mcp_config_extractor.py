@@ -33,25 +33,23 @@ class WindowsWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
             Dict with projects array containing MCP configs, or None if no configs found
         """
         projects = []
-        
-        # Extract global config
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
-        
+
+        # Extract global config(s) — one per user when running as admin
+        projects.extend(self._extract_global_config())
+
         # Extract project-level configs
         project_configs = self._extract_project_level_configs()
         projects.extend(project_configs)
-        
+
         # Return None if no configs found
         if not projects:
             return None
-        
+
         return {
             "projects": projects
         }
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_config(self) -> List[Dict]:
         """Extract global MCP config from ~/.codeium/windsurf/mcp_config.json"""
         # Note: Windows uses parent_levels=1 because path is ~/.codeium/windsurf/mcp_config.json
         # and we want ~/.codeium/windsurf as the path

@@ -251,7 +251,6 @@ class TestCopilotCliDetection(unittest.TestCase):
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
         self.assertIsNotNone(self.detector.detect())
-
     def test_real_install_with_strong_and_shared_markers_detected(self):
         """A real install (strong markers config.json + session-store.db) that ALSO
         has shared skills/ is detected — shared markers never veto a strong one."""

@@ -11,7 +11,9 @@ import json
 import logging
 import os
 import platform
+import signal
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -19,7 +21,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Callable
 
-SCRIPT_VERSION = "1.0.0"
+# Self-imposed run timeout (seconds). Discovery enforces its OWN deadline rather
+# than only being force-killed by the parent onboard/setup subprocess timeout, so
+# on a slow/hung scan it can release its lock + report the run failed BEFORE it is
+# killed — a SIGKILL leaves a fresh-mtime lock that would otherwise block the next
+# run. Kept in sync with the parent timeouts in setup/mdm/onboard.py and
+# unbound-cli's discover.js (which pass --timeout and use a larger kill backstop).
+# 30 minutes. Pass --timeout <=0 to disable.
+DEFAULT_RUN_TIMEOUT_SECONDS = 1800
+
+SCRIPT_VERSION = "1.1.0"
 
 try:
     from .coding_tool_base import BaseMCPConfigExtractor
@@ -65,7 +76,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -119,7 +130,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -2134,6 +2145,7 @@ class AIToolsDetector:
             "home_user": home_user,
             "system_user": system_user or home_user,
             "device_id": device_id,
+            "is_container": in_container(),
             "tools": [tool_for_report]
         }
 
@@ -2173,6 +2185,13 @@ def main():
     parser.add_argument('--api-key', type=str, help='API key for authentication and report submission (or set UNBOUND_API_KEY env)')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
+    parser.add_argument(
+        '--timeout', type=int, default=DEFAULT_RUN_TIMEOUT_SECONDS,
+        help='Self-imposed run timeout in seconds (default: %(default)s). On '
+             'expiry the run is reported as failed, the lock is released, and the '
+             'process exits non-zero so a parent never has to force-kill it. '
+             'Pass <=0 to disable.',
+    )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
         '--dump',
@@ -2289,6 +2308,115 @@ def main():
         except Exception:
             pass
     _heartbeat_stop = None
+
+    # --- Self-timeout + termination cleanup (WEB-4755) ---
+    # Discovery owns its deadline so it can release its lock and report the run
+    # as failed BEFORE the parent onboard/setup force-kills it. Without this, a
+    # SIGKILL on the parent's timeout left a fresh-mtime lock that blocked the
+    # next run for the full stale-lock window and never reported the failure.
+    # These run from a watchdog THREAD (timeout) AND the main thread (signal /
+    # normal except), so they use plain list flags rather than a Lock: a Lock
+    # acquired on the main thread would deadlock if a signal re-entered it on the
+    # same thread, and the only downside of a flag race is a harmless double-send
+    # of one idempotent "failed" event.
+    _cleanup_done = [False]
+    _finished = [False]
+
+    def _mark_run_failed(error_type: str, message: str) -> None:
+        """Best-effort: tell the backend this run failed. Idempotent (a flag race
+        at worst double-sends one idempotent event). No-ops until run_id exists
+        (nothing to correlate)."""
+        if _cleanup_done[0]:
+            return
+        _cleanup_done[0] = True
+        if not (device_id and run_id):
+            return
+        try:
+            send_scan_event(
+                args.domain, args.api_key, device_id, run_id, "failed",
+                args.app_name,
+                scan_error={
+                    "error_type": error_type,
+                    "message": message,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                },
+                sentry_context=sentry_ctx,
+            )
+        except Exception:
+            pass
+
+    def _release_lock_and_heartbeat() -> None:
+        try:
+            if _heartbeat_stop is not None:
+                _heartbeat_stop.set()
+        except Exception:
+            pass
+        if _have_lock:
+            try:
+                discovery_cache.release_lock()
+            except Exception:
+                pass
+
+    def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15) -> None:
+        """Run the best-effort failure report on a daemon thread bounded by
+        join_timeout, so a slow/retrying backend can't block exit. Used by both
+        the abort path and the normal except path (which were asymmetric)."""
+        t = threading.Thread(
+            target=_mark_run_failed, args=(error_type, message), daemon=True,
+        )
+        t.start()
+        t.join(timeout=join_timeout)
+
+    def _abort(error_type: str, message: str) -> None:
+        # No-op if the run already finished cleanly — guards the sliver between
+        # the try-body completing and finally cancelling the watchdog, where a
+        # late Timer fire would otherwise os._exit(1) over a successful exit 0.
+        if _finished[0]:
+            return
+        logger.error(message)
+        # Release the lock FIRST so a follow-up run is never blocked even if the
+        # reports below stall. Surface the abort to Sentry (the observability path
+        # an endpoint scanner actually has — no Prometheus here), on top of the
+        # "failed" scan event whose error_type already lets the backend graph
+        # timeout vs signal vs crash.
+        _release_lock_and_heartbeat()
+        try:
+            report_to_sentry(
+                RuntimeError(message),
+                {**sentry_ctx, "phase": "abort", "abort_reason": error_type},
+                level="warning",
+            )
+        except Exception:
+            pass
+        _report_failed_bounded(error_type, message)
+        os._exit(1)
+
+    def _on_watchdog_timeout() -> None:
+        # Runs in the watchdog thread — can't safely raise into main, so it
+        # cleans up and exits the process itself.
+        _abort("Timeout", f"Discovery exceeded its {args.timeout}s timeout; aborting and cleaning up.")
+
+    def _on_term_signal(signum, _frame) -> None:
+        # Delivered to the main thread (e.g. the parent's graceful SIGTERM, or
+        # Ctrl-C). Clean up then exit non-zero.
+        _abort("Terminated", f"Discovery received signal {signum}; cleaning up and exiting.")
+
+    _watchdog = None
+    if args.timeout and args.timeout > 0:
+        _watchdog = threading.Timer(args.timeout, _on_watchdog_timeout)
+        _watchdog.daemon = True
+        _watchdog.start()
+    # Save + restore prior handlers so importing/calling main() (tests) doesn't
+    # leave process-wide handlers installed. signal.signal only works on the main
+    # thread, so guard against ValueError/OSError elsewhere.
+    _prev_signal_handlers = {}
+    for _signame in ("SIGTERM", "SIGINT"):
+        _sig = getattr(signal, _signame, None)
+        if _sig is not None:
+            try:
+                _prev_signal_handlers[_sig] = signal.signal(_sig, _on_term_signal)
+            except (ValueError, OSError):
+                pass
 
     try:
         if _have_lock:
@@ -2685,15 +2813,17 @@ def main():
         with time_step("persist_failed_reports", "queue"):
             if failed_reports:
                 save_failed_reports(failed_reports)
-            elif QUEUE_FILE.exists():
-                # All queued reports succeeded and no new failures — clean up
-                try:
-                    QUEUE_FILE.unlink(missing_ok=True)
-                except PermissionError:
-                    logger.warning(
-                        f"Could not remove queue file {QUEUE_FILE}"
-                        f" (owned by another user)"
-                    )
+            else:
+                queue_file = _get_queue_file_path()
+                if queue_file.exists():
+                    # All queued reports succeeded and no new failures — clean up
+                    try:
+                        queue_file.unlink(missing_ok=True)
+                    except PermissionError:
+                        logger.warning(
+                            f"Could not remove queue file {queue_file}"
+                            f" (owned by another user)"
+                        )
 
         # Forward client-side timing metrics to backend (best-effort, success path only).
         # Backend emits these as Sentry distributions via emit_discovery_metrics.
@@ -2736,28 +2866,29 @@ def main():
         logger.info("")
 
     except Exception as e:
-        # Send scan failed event on script crash
-        try:
-            if device_id and run_id:
-                logger.error("Sending scan failed event due to error...")
-                scan_error = {
-                    "error_type": type(e).__name__,
-                    "message": str(e),
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }
-                send_scan_event(
-                    args.domain, args.api_key, device_id, run_id, "failed",
-                    args.app_name, scan_error=scan_error, sentry_context=sentry_ctx
-                )
-            else:
-                logger.warning("Skipping scan failed event - device_id or run_id not initialized")
-        except Exception:
-            pass  # Don't let error reporting crash the error handler
+        # Report the crash as a failed run (idempotent — the watchdog/signal
+        # paths may have already reported, in which case this is a no-op).
+        if device_id and run_id:
+            logger.error("Sending scan failed event due to error...")
+            _report_failed_bounded(type(e).__name__, str(e))
+        else:
+            logger.warning("Skipping scan failed event - device_id or run_id not initialized")
 
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
     finally:
+        # Set FIRST so a watchdog Timer that fires in this teardown window
+        # (cancel() doesn't stop an already-dispatched callback) no-ops in _abort
+        # instead of os._exit(1)-ing over a clean finish.
+        _finished[0] = True
+        if _watchdog is not None:
+            _watchdog.cancel()
+        for _sig, _prev in _prev_signal_handlers.items():
+            try:
+                signal.signal(_sig, _prev)
+            except (ValueError, OSError):
+                pass
         try:
             _heartbeat_stop.set()
         except Exception:

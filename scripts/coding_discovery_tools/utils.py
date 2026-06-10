@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import functools
 import json
 import logging
 import os
@@ -99,6 +100,47 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()
+
+
+@functools.lru_cache(maxsize=1)
+def in_container() -> bool:
+    """Best-effort detection of whether we're running inside a container.
+
+    Combines several signals because no single one is reliable across runtimes
+    and kernels:
+      - ``/.dockerenv`` / ``/run/.containerenv`` — Docker / Podman runtime markers.
+      - root filesystem mounted as ``overlay`` — cgroup-version-agnostic.
+      - ``/proc/1/cgroup`` docker/lxc/kube markers — cgroup v1 ONLY (v2 shows
+        ``0::/`` from inside, so this is a fallback, not the primary check).
+
+    This is for honest behavioural branching, not security — every marker here
+    is forgeable by whoever controls the container. Result is cached for the
+    process lifetime.
+    """
+    try:
+        if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+            return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "/" and parts[2] == "overlay":
+                    return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8") as f:
+            blob = f.read()
+        if any(marker in blob for marker in ("/docker", "/lxc", "kubepods", "/containerd")):
+            return True
+    except OSError:
+        pass
+
+    return False
 
 
 class DsclBatchData(NamedTuple):
@@ -692,19 +734,27 @@ def _backoff(attempt: int, delays: List[int]) -> None:
 def _get_queue_file_path() -> Path:
     """Return platform-appropriate queue file path.
 
+    If AI_DISCOVERY_QUEUE_FILE is set (and non-empty) in the environment,
+    that path is used verbatim. This lets the test harness redirect the
+    queue away from the real per-UID /var/tmp file so an interrupted test
+    can never leave a fixture that a later real agent run would drain and
+    POST to production.
+
     On Unix, /var/tmp persists across reboots (unlike /tmp).
     The filename includes the current UID so that different users
     (e.g. root via MDM vs. a regular login user) each get their own
     queue file, avoiding PermissionError on files created with 0600.
     On Windows, fall back to the standard temp directory (already per-user).
     """
+    override = (os.environ.get("AI_DISCOVERY_QUEUE_FILE") or "").strip()
+    if override:
+        return Path(os.path.expanduser(os.path.expandvars(override)))
     if platform.system() == "Windows":
         return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
     uid = os.getuid()
     return Path(f"/var/tmp/ai-discovery-queue-{uid}.json")
 
 
-QUEUE_FILE = _get_queue_file_path()
 QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
@@ -719,8 +769,9 @@ def save_failed_reports(reports: List[Dict]) -> None:
         ]
         # Keep only the most recent entries to prevent unbounded growth
         envelopes = envelopes[-MAX_QUEUE_SIZE:]
-        _write_file_secure(QUEUE_FILE, json.dumps(envelopes).encode())
-        logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
+        queue_file = _get_queue_file_path()
+        _write_file_secure(queue_file, json.dumps(envelopes).encode())
+        logger.info(f"Saved {len(reports)} failed report(s) to {queue_file}")
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
         report_to_sentry(e, {"phase": "queue"}, level="warning")
@@ -738,11 +789,12 @@ def load_pending_reports() -> List[Dict]:
             f" -- can be removed with: sudo rm {old_shared}"
         )
 
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
 
     try:
-        envelopes = json.loads(QUEUE_FILE.read_text())
+        envelopes = json.loads(queue_file.read_text())
     except Exception as e:
         logger.warning(f"Could not load pending reports: {e}")
         report_to_sentry(e, {"phase": "queue"}, level="warning")
@@ -768,16 +820,20 @@ def load_pending_reports() -> List[Dict]:
 
 def _load_queue_file_safe() -> List[Dict]:
     """Load existing queue file contents, returning an empty list on any error."""
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
     try:
-        return json.loads(QUEUE_FILE.read_text())
+        return json.loads(queue_file.read_text())
     except Exception:
         return []
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
     """Write data to a file with restricted permissions (0600 on Unix)."""
+    # Ensure the parent exists so a queue-path override with a missing parent
+    # doesn't silently drop the write (and lose the failed reports).
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     # Restrict permissions to owner-only (rw-------) on Unix systems
     try:

@@ -671,5 +671,58 @@ class TestOpenCodeWindowsMultiUserRoot(unittest.TestCase):
         self.assertEqual(_server_names(configs), {"alice-oc-win"})
 
 
+class TestAccumulatePerUserError(unittest.TestCase):
+    """A single user's filesystem error must skip only that user.
+
+    Locks in the regression where ``exists()`` sat outside the per-user ``try``
+    in ``_accumulate_per_user_with_fallback``: on Python 3.9 ``Path.exists()``
+    re-raises ``EACCES`` (a permission-locked / NFS-mounted home), which would
+    then propagate out of the helper and the orchestrator would drop the whole
+    tool's config — losing every other user, not just the unreadable one.
+    """
+
+    class _FakeChild:
+        def __init__(self, path_str, *, raises=False):
+            self._path_str = path_str
+            self._raises = raises
+
+        def exists(self):
+            if self._raises:
+                raise PermissionError(13, "Permission denied")
+            return True
+
+    class _FakeHome:
+        def __init__(self, child):
+            self._child = child
+
+        def __truediv__(self, _rel):  # user_dir / <relative config path>
+            return self._child
+
+    @staticmethod
+    def _reader(path, tool_name, parent_levels):
+        return {"path": path._path_str, "mcpServers": [{"name": path._path_str}]}
+
+    def test_per_user_oserror_skips_only_that_user(self):
+        # The unreadable user is iterated FIRST, proving an early error does not
+        # abort the walk for the users that follow it.
+        bad = self._FakeChild("/Users/bob/.cursor", raises=True)
+        good = self._FakeChild("/Users/alice/.cursor")
+        user_homes = [self._FakeHome(bad), self._FakeHome(good)]
+
+        # global_config_path only has to support relative_to(Path.home()); the
+        # fallback branch is never reached because a per-user config is found.
+        gcp = Path.home() / ".cursor" / "mcp.json"
+
+        result = helpers._accumulate_per_user_with_fallback(
+            user_homes, gcp, self._reader, "Cursor", 2
+        )
+
+        self.assertEqual(
+            [c["path"] for c in result],
+            ["/Users/alice/.cursor"],
+            "the unreadable user is skipped; the readable user still survives",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1050,20 +1050,28 @@ def _accumulate_per_user_with_fallback(
         configs: List[Dict] = []
         seen_paths = set()
         for user_dir in user_homes:
-            # Build user-specific config path by swapping ~ for user_dir.
+            # Build the user-specific config path by swapping ~ for user_dir.
+            # relative_to() AND exists() both stay inside the try so a single
+            # user's path or filesystem error skips only that user — matching
+            # the four prior inline loops exactly. Note Path.exists() re-raises
+            # on Python 3.9 for an OSError that isn't ENOENT/ENOTDIR/EBADF/ELOOP
+            # (e.g. EACCES on a permission-locked or NFS-mounted home), so
+            # pulling exists() out of the guard would let one user's error
+            # propagate and drop the whole tool's config.
             try:
                 user_config_path = user_dir / global_config_path.relative_to(Path.home())
+                if user_config_path.exists():
+                    config = reader_fn(user_config_path, tool_name, parent_levels)
+                    # Accumulate each user's config (de-dup by path). On Windows
+                    # the admin's own home is itself under C:\Users, so dedup
+                    # prevents a double-count when the fallback below would also
+                    # pick it up.
+                    if config and config["path"] not in seen_paths:
+                        seen_paths.add(config["path"])
+                        configs.append(config)
             except (ValueError, OSError):
-                # Path might not be relative to home; skip this user.
+                # Path not relative to home, or a per-user filesystem error; skip.
                 continue
-            if user_config_path.exists():
-                config = reader_fn(user_config_path, tool_name, parent_levels)
-                # Accumulate each user's config (de-dup by path). On Windows the
-                # admin's own home is itself under C:\Users, so dedup prevents a
-                # double-count when the fallback below would also pick it up.
-                if config and config["path"] not in seen_paths:
-                    seen_paths.add(config["path"])
-                    configs.append(config)
 
         # Fallback to admin's own global config ONLY if no user config was found.
         # This preserves the original single-user-root behavior exactly.

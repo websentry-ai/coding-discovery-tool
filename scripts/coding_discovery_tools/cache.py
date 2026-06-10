@@ -256,12 +256,50 @@ def get_cached_hash(tool_name: str, home_user: str, cache: Optional[dict] = None
     return None
 
 
+def _read_lock_pid() -> Optional[int]:
+    """The lock file's first whitespace-delimited token is the owner PID
+    (written as ``"{pid} {iso}\\n"``). Returns None if it can't be parsed."""
+    try:
+        with LOCK_PATH.open("r", encoding="utf-8") as f:
+            tokens = f.readline().split()
+        return int(tokens[0]) if tokens else None
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """POSIX liveness probe via signal 0. Conservative: on any error other than
+    'no such process' (e.g. EPERM = exists but other-owned) treat as alive."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _lock_is_live() -> bool:
+    """True if the lock is held by a still-running process.
+
+    On POSIX a lock whose recorded PID is dead is NOT live, so a discovery run
+    killed without a chance to clean up (e.g. SIGKILL when the parent
+    onboard/setup subprocess timeout fires) does not block the next run for the
+    full STALE_LOCK_SECONDS window. A live owner still needs a fresh heartbeat to
+    count as live, matching the original zombie tolerance and guarding against
+    PID reuse. Falls back to mtime freshness when the PID can't be read or
+    checked (e.g. Windows)."""
     try:
         age = time.time() - LOCK_PATH.stat().st_mtime
     except OSError:
         return False
-    return age < STALE_LOCK_SECONDS
+    fresh = age < STALE_LOCK_SECONDS
+    pid = _read_lock_pid()
+    if pid is not None and os.name == "posix":
+        return _pid_alive(pid) and fresh
+    return fresh
 
 
 def acquire_lock() -> str:

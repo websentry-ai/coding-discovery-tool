@@ -103,6 +103,12 @@ def main():
         print(f"error: scan produced no result [{ctx}]", file=sys.stderr)
         return 1
 
+    scan = server_obj.get("scan") or {}
+    if not (scan.get("tools") or []):
+        reason = (scan.get("error") or {}).get("code") or "no tools"
+        print(f"skip: not reporting ({reason}, tools=0) [{ctx}]", file=sys.stderr)
+        return 0
+
     try:
         result = report(args.domain, args.api_key, server_obj)
     except Exception as e:

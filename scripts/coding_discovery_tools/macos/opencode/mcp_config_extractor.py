@@ -5,7 +5,7 @@ MCP config extraction for OpenCode on macOS systems.
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
@@ -78,26 +78,30 @@ def extract_opencode_global_mcp_config_with_root_support(
     global_config_path: Path,
     tool_name: str = "OpenCode",
     parent_levels: int = 3
-) -> Optional[Dict]:
+) -> List[Dict]:
     """
     Extract global OpenCode MCP config with support for root/admin user.
-    
+
     Reuses the pattern from extract_global_mcp_config_with_root_support
     but calls read_opencode_mcp_config for JSON parsing with "mcp" section support.
-    
+
+    When running as root, accumulates each user's config (de-duplicated by path).
+    Single-user and non-root machines yield a 0-or-1 element list, identical to
+    the single dict (or None) returned previously.
+
     Args:
         global_config_path: Path to the global MCP config file (relative to home)
         tool_name: Name of the tool (for logging)
         parent_levels: Number of parent directories to go up for the path
-    
+
     Returns:
-        Dict with 'path' and 'mcpServers' keys, or None if no config found
+        List of config dicts with 'path' and 'mcpServers' keys (empty if none found)
     """
     import platform
-    
+
     is_admin = False
     users_dir = None
-    
+
     if platform.system() == "Darwin":
         try:
             from ...macos_extraction_helpers import is_running_as_root
@@ -105,29 +109,36 @@ def extract_opencode_global_mcp_config_with_root_support(
             users_dir = Path("/Users")
         except ImportError:
             pass
-    
+
     # When running as admin/root, check all user directories
     if is_admin and users_dir and users_dir.exists():
+        configs: List[Dict] = []
+        seen_paths = set()
         for user_dir in users_dir.iterdir():
             if user_dir.is_dir() and not user_dir.name.startswith('.'):
                 try:
                     user_config_path = user_dir / global_config_path.relative_to(Path.home())
                     if user_config_path.exists():
                         config = read_opencode_mcp_config(user_config_path, tool_name, parent_levels)
-                        if config:
-                            return config
+                        if config and config["path"] not in seen_paths:
+                            seen_paths.add(config["path"])
+                            configs.append(config)
                 except (ValueError, OSError):
                     continue
-        
-        # Fallback to admin's own global config
-        if global_config_path.exists():
-            return read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
-    else:
-        # For regular users, check their own home directory
-        if global_config_path.exists():
-            return read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
-    
-    return None
+
+        # Fallback to admin's own global config ONLY if no user config was found.
+        if not configs and global_config_path.exists():
+            config = read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
+            if config:
+                configs.append(config)
+        return configs
+
+    # For regular users, check their own home directory (0-or-1 element list)
+    if global_config_path.exists():
+        config = read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
+        if config:
+            return [config]
+    return []
 
 
 class MacOSOpenCodeMCPConfigExtractor(BaseMCPConfigExtractor):
@@ -146,26 +157,23 @@ class MacOSOpenCodeMCPConfigExtractor(BaseMCPConfigExtractor):
             Dict with projects array containing MCP configs, or None if no configs found
         """
         projects = []
-        
-        # Extract global config
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
-        
+
+        # Extract global config(s) — one per user when running as root
+        projects.extend(self._extract_global_config())
+
         # Return None if no configs found
         if not projects:
             return None
-        
+
         return {
             "projects": projects
         }
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_config(self) -> List[Dict]:
         """
         Extract global MCP config from ~/.config/opencode/opencode.json
-        
+
         When running as root, collects global configs from ALL users.
-        Returns the first non-empty config found, or None if none found.
         """
         return extract_opencode_global_mcp_config_with_root_support(
             self.GLOBAL_MCP_CONFIG_PATH,

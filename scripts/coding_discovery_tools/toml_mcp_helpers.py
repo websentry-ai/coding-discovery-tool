@@ -237,16 +237,31 @@ def extract_codex_global_mcp_config_with_admin_support(
     is_admin_fn: Callable[[], Tuple[bool, Optional[Path]]],
     tool_name: str = TOOL_NAME,
     parent_levels: int = PARENT_LEVELS
-) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
+) -> List[Dict[str, Union[str, List[Dict[str, Any]]]]]:
     """
     Extract global Codex MCP config with support for admin/root users.
 
     Accepts a platform-specific callable returning (is_admin, users_dir).
-    When admin, searches all user directories; falls back to the current user's path.
+    When admin, searches every user directory and accumulates each user's
+    global config (de-duplicated by the config's ``path`` key). This fixes a
+    multi-user data loss where only the FIRST user's config was returned.
+
+    The admin's own ``global_config_path`` is kept as a FALLBACK ONLY (used only
+    when no per-user config was found), preserving the original single-user-root
+    semantics exactly.
+
+    Single-user and non-admin machines are unaffected: the result is a 0-or-1
+    element list, identical in content to the single dict (or None) returned
+    previously.
+
+    Returns:
+        List of config dicts with 'path' and 'mcpServers' keys (empty if none found)
     """
     is_admin, users_dir = is_admin_fn()
 
     if is_admin and users_dir and users_dir.exists():
+        configs: List[Dict[str, Union[str, List[Dict[str, Any]]]]] = []
+        seen_paths = set()
         for user_dir in users_dir.iterdir():
             if not user_dir.is_dir() or user_dir.name.startswith('.'):
                 continue
@@ -254,12 +269,26 @@ def extract_codex_global_mcp_config_with_admin_support(
                 user_config_path = user_dir / global_config_path.relative_to(Path.home())
                 if user_config_path.exists():
                     config = read_codex_toml_mcp_config(user_config_path, tool_name, parent_levels)
-                    if config:
-                        return config
+                    # Accumulate each user's config (de-dup by path). On Windows the
+                    # admin's own home is itself under C:\Users, so dedup prevents a
+                    # double-count when the fallback below would also pick it up.
+                    if config and config["path"] not in seen_paths:
+                        seen_paths.add(config["path"])
+                        configs.append(config)
             except (ValueError, OSError):
                 continue
 
-    if global_config_path.exists():
-        return read_codex_toml_mcp_config(global_config_path, tool_name, parent_levels)
+        # Fallback to admin's own global config ONLY if no user config was found.
+        # This preserves the original single-user-root behavior exactly.
+        if not configs and global_config_path.exists():
+            config = read_codex_toml_mcp_config(global_config_path, tool_name, parent_levels)
+            if config:
+                configs.append(config)
+        return configs
 
-    return None
+    # For regular users, check their own home directory (0-or-1 element list)
+    if global_config_path.exists():
+        config = read_codex_toml_mcp_config(global_config_path, tool_name, parent_levels)
+        if config:
+            return [config]
+    return []

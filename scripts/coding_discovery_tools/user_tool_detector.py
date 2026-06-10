@@ -189,7 +189,11 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     # Check user's .nvm versions for gemini (npm installs - most common)
     # npm creates symlinks with hash suffixes like .gemini-lUK4BXcM
     nvm_versions = user_home / ".nvm" / "versions" / "node"
-    if nvm_versions.exists():
+    try:
+        nvm_present = nvm_versions.exists()
+    except OSError:
+        nvm_present = False
+    if nvm_present:
         try:
             for version_dir in nvm_versions.iterdir():
                 if not version_dir.is_dir():
@@ -289,7 +293,11 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
 
     # Fallback: Check Bun global binaries
     bun_bin = user_home / ".bun" / "bin" / "gemini"
-    if bun_bin.exists():
+    try:
+        bun_present = bun_bin.exists()
+    except OSError:
+        bun_present = False
+    if bun_present:
         return {
             "name": detector.tool_name,
             "version": detector.get_version(),

@@ -40,6 +40,22 @@ def _stat_for_uid(target: Path, uid: int):
     return fake_stat
 
 
+def _stat_raises_for(target: Path, exc: OSError = None):
+    """os.stat side_effect: raise for ``target`` only, pass through otherwise.
+    A real stat failure is per-file, not global — scoping it here keeps unrelated
+    probes (the nvm/bun ``.exists()`` walks) working so the test exercises the
+    helper's never-crash path, not an unrelated unguarded ``.exists()``."""
+    real_stat = os.stat
+    err = exc or OSError("boom")
+
+    def fake_stat(path, *args, **kwargs):
+        if str(path) == str(target):
+            raise err
+        return real_stat(path, *args, **kwargs)
+
+    return fake_stat
+
+
 def _pwd_home(uid_to_home: dict):
     """pwd.getpwuid side_effect mapping uid -> a pw_dir; unknown uid -> KeyError
     (mirrors the real pwd behaviour the helper guards against)."""
@@ -436,7 +452,7 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         det = _make_detector()
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=OSError("boom")), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_raises_for(_HOMEBREW)), \
              patch(f"{_MOD}.resolve_npm_global_tool_bin", return_value=None), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = _detect_gemini_cli(det, self.home)

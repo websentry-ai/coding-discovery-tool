@@ -51,6 +51,21 @@ def _stat_for_uid(target: Path, uid: int):
     return fake_stat
 
 
+def _stat_raises_for(target: Path, exc: OSError = None):
+    """os.stat side_effect: raise for ``target`` only, pass through otherwise.
+    A real stat failure is per-file, not global — scoping it keeps unrelated
+    probes working so the test exercises the helper's never-crash path."""
+    real_stat = os.stat
+    err = exc or OSError("boom")
+
+    def fake_stat(path, *args, **kwargs):
+        if str(path) == str(target):
+            raise err
+        return real_stat(path, *args, **kwargs)
+
+    return fake_stat
+
+
 def _pwd_home(uid_to_home: dict):
     """pwd.getpwuid side_effect mapping uid -> a pw_dir; unknown uid -> KeyError."""
 
@@ -412,7 +427,7 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         self._with_abs(_HOMEBREW)
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=OSError("boom")), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_raises_for(_HOMEBREW)), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertIsNone(result)

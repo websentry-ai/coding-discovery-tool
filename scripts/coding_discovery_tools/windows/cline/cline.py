@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
-from ...windows_extraction_helpers import is_running_as_admin
+from ...windows_extraction_helpers import is_running_as_admin, is_windows_ide_installed
+from ..antigravity.antigravity import WindowsAntigravityDetector
 
 logger = logging.getLogger(__name__)
 
@@ -111,34 +112,82 @@ class WindowsClineDetector(BaseToolDetector):
         """
         results = []
 
+        # Require BOTH the globalStorage extension dir AND the host editor to
+        # be installed (mirrors macOS): the ``globalStorage/<ext-id>`` dir
+        # survives an editor uninstall, so it alone is not proof of install.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_cline_extension(user_home, ide_folder)
 
             if extension_info:
                 extension_path, version = extension_info
 
+                host_installed, _ = self._check_ide_installation(ide_folder, user_home)
+
+                if host_installed and extension_path:
+                    results.append({
+                        "name": f"Cline ({ide_display_name})",
+                        "version": version or "Unknown",
+                        "publisher": "Saoud Rizwan",
+                        "ide": ide_display_name,
+                        "install_path": str(extension_path)
+                    })
+                    logger.info(f"Detected: Cline ({ide_display_name}) v{version or 'Unknown'}")
+
+        # Gate on the Antigravity install being present — ~/.antigravity/
+        # extensions survives uninstall, so the extensions.json entry alone is
+        # not proof of install. Reuse the Windows Antigravity detector's
+        # install-dir probe (Programs/ + Program Files/ for the exe/resources).
+        if self._is_antigravity_installed(user_home):
+            antigravity_info = self._check_antigravity_extension(user_home)
+            if antigravity_info:
+                extension_path, version = antigravity_info
                 results.append({
-                    "name": f"Cline ({ide_display_name})",
+                    "name": "Cline (Antigravity)",
                     "version": version or "Unknown",
                     "publisher": "Saoud Rizwan",
-                    "ide": ide_display_name,
+                    "ide": "Antigravity",
                     "install_path": str(extension_path)
                 })
-                logger.info(f"Detected: Cline ({ide_display_name}) v{version or 'Unknown'}")
-
-        antigravity_info = self._check_antigravity_extension(user_home)
-        if antigravity_info:
-            extension_path, version = antigravity_info
-            results.append({
-                "name": "Cline (Antigravity)",
-                "version": version or "Unknown",
-                "publisher": "Saoud Rizwan",
-                "ide": "Antigravity",
-                "install_path": str(extension_path)
-            })
-            logger.info(f"Detected: Cline (Antigravity) v{version or 'Unknown'}")
+                logger.info(f"Detected: Cline (Antigravity) v{version or 'Unknown'}")
 
         return results
+
+    def _check_ide_installation(self, ide_name: str, user_home: Path) -> Tuple[bool, Optional[str]]:
+        """
+        Check whether the host editor (VS Code / Cursor / Windsurf) is installed
+        on Windows for the user being scanned.
+
+        Delegates to the shared ``is_windows_ide_installed`` probe, which checks
+        the user's ``%LOCALAPPDATA%\\Programs\\<IDE>`` install, machine-wide
+        ``Program Files``/``Program Files (x86)``, and the editor launcher on
+        PATH. ANY of those counts as installed, so a real Cline user is never
+        hidden. Never raises.
+
+        Args:
+            ide_name: The ``SUPPORTED_IDES`` key (Code / Cursor / Windsurf).
+            user_home: Home dir of the user being scanned.
+
+        Returns:
+            Tuple of (is_installed, install_path_or_exe_path).
+        """
+        try:
+            return is_windows_ide_installed(ide_name, user_home)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check {ide_name} install presence: {e}")
+            return False, None
+
+    def _is_antigravity_installed(self, user_home: Path) -> bool:
+        """
+        Return True iff Antigravity is installed FOR ``user_home`` — the user's
+        own per-user install or a machine-wide one — so a per-user Antigravity
+        owned by ANOTHER user (reachable via the all-users admin enumeration) is
+        not attributed here. Wrapped so a probe error never crashes detection.
+        """
+        try:
+            return WindowsAntigravityDetector().is_installed_for_user(user_home)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check Antigravity install presence: {e}")
+            return False
 
     def _check_cline_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[Path, Optional[str]]]:
         """

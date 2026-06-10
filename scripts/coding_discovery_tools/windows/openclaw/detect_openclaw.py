@@ -106,44 +106,49 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
         return shutil.which("openclaw") or shutil.which("openclaw.exe")
 
     def _get_installation_paths(self) -> List[Path]:
-        """Get list of paths to check for OpenClaw installation."""
+        """Get list of paths to check for OpenClaw installation.
+
+        Only real install dirs removed on uninstall are listed: the
+        ``Programs\\OpenClaw`` (per-user squirrel) and ``Program Files``
+        (system) locations. The Electron *userData* dirs
+        (``%LOCALAPPDATA%\\OpenClaw``, ``%APPDATA%\\OpenClaw``, and the
+        per-user ``AppData\\Local|Roaming\\OpenClaw`` siblings) are
+        intentionally excluded — together with the bare
+        ``%USERPROFILE%\\.openclaw`` dir, they are residue config/data that
+        survive uninstall and produced false positives. Real installs are
+        still covered by PATH (``shutil.which``), the running-process probe,
+        and the deep ``_search_for_executable`` walk.
+        """
         paths = []
 
-        # User-specific paths
+        # User-specific paths — only the squirrel ``Programs`` install dir,
+        # which is removed on uninstall (the userData dirs are not).
         local_appdata = os.environ.get("LOCALAPPDATA", "")
-        appdata = os.environ.get("APPDATA", "")
-        userprofile = os.environ.get("USERPROFILE", "")
 
         if local_appdata:
             paths.append(Path(local_appdata) / "Programs" / "OpenClaw")
-            paths.append(Path(local_appdata) / "OpenClaw")
-
-        if appdata:
-            paths.append(Path(appdata) / "OpenClaw")
-
-        if userprofile:
-            paths.append(Path(userprofile) / ".openclaw")
 
         # System-wide paths
         paths.append(Path(r"C:\Program Files\OpenClaw"))
         paths.append(Path(r"C:\Program Files (x86)\OpenClaw"))
 
-        # If running as admin, also check other users' directories
+        # If running as admin, also check other users' ``Programs`` install
+        # dirs. The userData siblings are deliberately omitted (residue).
         if is_running_as_admin():
             users_dir = Path(r"C:\Users")
-            if users_dir.exists():
-                try:
+            try:
+                if users_dir.exists():
                     for user_dir in users_dir.iterdir():
                         if user_dir.is_dir() and not user_dir.name.startswith('.'):
                             # Skip system directories
                             if user_dir.name.lower() in ['public', 'default', 'default user', 'all users']:
                                 continue
                             paths.append(user_dir / "AppData" / "Local" / "Programs" / "OpenClaw")
-                            paths.append(user_dir / "AppData" / "Local" / "OpenClaw")
-                            paths.append(user_dir / "AppData" / "Roaming" / "OpenClaw")
-                            paths.append(user_dir / ".openclaw")
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Error scanning user directories: {e}")
+                            # bare ``<user>\.openclaw`` and the
+                            # ``AppData\Local|Roaming\OpenClaw`` userData dirs
+                            # excluded — residue that survives uninstall.
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Error scanning user directories: {e}")
 
         return paths
 

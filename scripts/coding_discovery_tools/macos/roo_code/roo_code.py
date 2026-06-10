@@ -126,11 +126,13 @@ class MacOSRooDetector(BaseToolDetector):
             if extension_info:
                 extension_path, version = extension_info
 
-                # Verify the IDE is installed
-                ide_installed, _ = self._check_ide_installation(ide_folder)
+                # Verify the IDE is installed. Require BOTH the globalStorage
+                # extension dir AND the host IDE's .app to be present — stale
+                # globalStorage from an uninstalled IDE must not surface a row
+                # (matches kilocode.py:149).
+                ide_installed, _ = self._check_ide_installation(ide_folder, user_home)
 
-                if ide_installed or extension_path:
-                    # Even if IDE app not found, extension exists so include it
+                if ide_installed and extension_path:
                     results.append({
                         "name": f"Roo Code ({ide_display_name})",
                         "version": version or "Unknown",
@@ -140,43 +142,58 @@ class MacOSRooDetector(BaseToolDetector):
                     })
                     logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
 
-        # Check Antigravity (uses different extension storage)
-        antigravity_info = self._check_antigravity_extension(user_home)
-        if antigravity_info:
-            extension_path, version = antigravity_info
-            results.append({
-                "name": "Roo Code (Antigravity)",
-                "version": version or "Unknown",
-                "publisher": "Roo Veterinary Inc",
-                "ide": "Antigravity",
-                "install_path": str(extension_path)
-            })
-            logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
+        # Check Antigravity (uses different extension storage). Gate on the
+        # Antigravity .app being present — ~/.antigravity/extensions survives
+        # uninstall, so the extensions.json entry alone is not proof of install.
+        antigravity_installed, _ = self._check_ide_installation("Antigravity", user_home)
+        if antigravity_installed:
+            antigravity_info = self._check_antigravity_extension(user_home)
+            if antigravity_info:
+                extension_path, version = antigravity_info
+                results.append({
+                    "name": "Roo Code (Antigravity)",
+                    "version": version or "Unknown",
+                    "publisher": "Roo Veterinary Inc",
+                    "ide": "Antigravity",
+                    "install_path": str(extension_path)
+                })
+                logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
 
         return results
 
-    def _check_ide_installation(self, ide_name: str) -> Tuple[bool, Optional[str]]:
+    def _check_ide_installation(
+        self, ide_name: str, user_home: Optional[Path] = None
+    ) -> Tuple[bool, Optional[str]]:
         """
-        Check if a specific IDE is installed in /Applications.
+        Check if a specific IDE is installed in the machine-wide
+        ``/Applications`` OR the user-local ``~/Applications`` — the latter
+        covers per-user .app installs (a drag-install into the home folder).
+        Checking both avoids a false negative that would hide a real Roo user
+        whose editor lives in ``~/Applications``.
 
         Args:
             ide_name: Name of the IDE folder (Code, Cursor, Windsurf, or Antigravity)
+            user_home: Home dir of the user being scanned (for ``~/Applications``).
+                Defaults to ``Path.home()`` when not supplied.
 
         Returns:
             Tuple of (is_installed: bool, install_path: Optional[str])
         """
         app_names = self.IDE_APP_NAMES.get(ide_name, [])
+        if user_home is None:
+            user_home = Path.home()
+        app_dirs = [self.APPLICATIONS_DIR, user_home / "Applications"]
 
-        for app_name in app_names:
-            ide_path = self.APPLICATIONS_DIR / app_name
-
-            try:
-                if ide_path.exists() and ide_path.is_dir():
-                    logger.debug(f"Found {ide_name} installation at: {ide_path}")
-                    return True, str(ide_path)
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Could not check IDE path {ide_path}: {e}")
-                continue
+        for app_dir in app_dirs:
+            for app_name in app_names:
+                ide_path = app_dir / app_name
+                try:
+                    if ide_path.exists() and ide_path.is_dir():
+                        logger.debug(f"Found {ide_name} installation at: {ide_path}")
+                        return True, str(ide_path)
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Could not check IDE path {ide_path}: {e}")
+                    continue
 
         return False, None
 

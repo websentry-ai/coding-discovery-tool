@@ -97,6 +97,110 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     return None
 
 
+def resolve_npm_global_tool_bin(
+    tool: str, user_home: Path, is_root: bool
+) -> Optional[str]:
+    """Resolve the install path of an npm-global Node CLI (e.g. ``gemini``,
+    ``openclaw``) whose real binary lives at ``<npm global prefix>/bin/<tool>``.
+
+    The npm global prefix varies (Homebrew node, nvm, pnpm), so we resolve it
+    dynamically with ``npm prefix -g`` AND probe a set of static fallbacks.
+
+    GUARD (cross-user FP class fixed in commit 93b5fc2): ``npm prefix -g``
+    resolves the SCANNER's npm config — under a root/MDM multi-user scan that is
+    NOT the target user's prefix, so honouring it would attribute the scanner's
+    install to a user who has only residue. The ``npm prefix -g`` probe and the
+    machine-global ``/opt/homebrew/bin`` fallback are therefore gated behind
+    ``not is_root``. The ``user_home``-relative fallbacks (``~/.npm-global/bin``,
+    nvm under ``user_home``, pnpm under ``user_home``) are correctly scoped to
+    the user and stay unconditional. Never raises.
+
+    Args:
+        tool: The CLI/binary name (e.g. ``"gemini"`` / ``"openclaw"``).
+        user_home: Home dir of the user being scanned.
+        is_root: Whether the scan is running as root/SYSTEM.
+
+    Returns:
+        Absolute path to the resolved executable as a string, or None.
+    """
+    candidates: List[Path] = []
+
+    # 1. Dynamic npm global prefix — SCANNER-scoped, so non-root only.
+    if not is_root:
+        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        if prefix:
+            prefix = prefix.strip()
+            if prefix:
+                candidates.append(Path(prefix) / "bin" / tool)
+
+    # 2. Machine-global Homebrew prefix — non-root only (shared install).
+    if not is_root:
+        candidates.append(Path("/opt/homebrew/bin") / tool)
+
+    # 3. user_home-relative fallbacks — always safe (scoped to this user).
+    candidates.append(user_home / ".npm-global" / "bin" / tool)
+    candidates.append(user_home / ".local" / "share" / "pnpm" / tool)  # pnpm global
+    try:
+        nvm_node = user_home / ".nvm" / "versions" / "node"
+        if nvm_node.exists():
+            for version_dir in sorted(nvm_node.iterdir()):
+                try:
+                    if version_dir.is_dir():
+                        candidates.append(version_dir / "bin" / tool)
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
+
+    for candidate in candidates:
+        try:
+            if candidate.exists() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except (PermissionError, OSError):
+            continue
+
+    return None
+
+
+def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
+    """Under a root/MDM multi-user scan, decide whether a MACHINE-GLOBAL binary
+    (Homebrew / /usr/local / /usr/bin) should be attributed to ``user_home``.
+
+    - Owned by a REGULAR user (Homebrew on macOS and manual /usr/local installs
+      are owned by the installing user): attribute to that owner ONLY — this is
+      what prevents one user's install fanning out to every user (the 93b5fc2
+      cross-user FP).
+    - Owned by ROOT/system (uid 0, e.g. /usr/bin/claude from apt/dnf): genuinely
+      system-wide and available to every user, so attribute to whoever is being
+      scanned.
+
+    Never raises: any stat/pwd failure returns False (do not attribute).
+
+    Args:
+        candidate: Absolute path to a machine-global binary.
+        user_home: Home dir of the user currently being scanned.
+
+    Returns:
+        True if the binary should be attributed to ``user_home``, else False.
+    """
+    try:
+        uid = os.stat(str(candidate)).st_uid
+    except (OSError, PermissionError):
+        return False
+    if uid == 0:
+        return True  # system-wide -> available to every scanned user
+    if pwd is None:
+        return False  # POSIX-only; should never be hit on Windows
+    try:
+        owner_home = Path(pwd.getpwuid(uid).pw_dir)
+    except (KeyError, OSError, AttributeError):
+        return False
+    try:
+        return owner_home.resolve() == user_home.resolve()
+    except (OSError, RuntimeError):
+        return owner_home == user_home
+
+
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()

@@ -421,7 +421,13 @@ class TestOpenCodeMultiUserRoot(unittest.TestCase):
                 def home():
                     return alice
 
+            # The per-user relative-path resolution (``relative_to(Path.home())``)
+            # now lives in the shared ``mcp_extraction_helpers`` helper, so the
+            # shim must also be installed on ``helpers.Path`` for ``Path.home()``
+            # to resolve into the temp tree there. The ``Path("/Users")`` literal
+            # still runs in ``oc_macos`` (detection stayed at the call site).
             with mock.patch.object(oc_macos, "Path", _PathShim), \
+                 mock.patch.object(helpers, "Path", _PathShim), \
                  mock.patch(
                      "scripts.coding_discovery_tools.macos_extraction_helpers.is_running_as_root",
                      return_value=True,
@@ -483,7 +489,13 @@ class TestOpenCodeWindowsMultiUserRoot(unittest.TestCase):
         """Drive the real Windows helper with ``_is_running_as_admin`` forced to
         ``is_admin`` and ``C:\\Users``/``home()`` redirected into the temp tree."""
         shim = self._make_path_shim(users_root, home_dir)
+        # The per-user relative-path resolution (``relative_to(Path.home())``) now
+        # lives in the shared ``mcp_extraction_helpers`` helper, so the shim must
+        # also be installed on ``helpers.Path`` for ``Path.home()`` to resolve
+        # into the temp tree there. The ``Path("C:\\Users")`` literal still runs
+        # in ``oc_windows`` (detection stayed at the call site).
         with mock.patch.object(oc_windows, "Path", shim), \
+             mock.patch.object(helpers, "Path", shim), \
              mock.patch.object(
                  oc_windows, "_is_running_as_admin", return_value=is_admin
              ):
@@ -639,7 +651,13 @@ class TestOpenCodeWindowsMultiUserRoot(unittest.TestCase):
                 def home():
                     return alice
 
+            # ``relative_to(Path.home())`` now runs inside the shared helper, so
+            # the shim is installed on ``helpers.Path`` too (its ``home() ==
+            # alice`` anchors resolution there). The ``Path("C:\\Users")`` ->
+            # ``_DupIterUsers`` redirect stays in ``oc_windows`` (the call-site
+            # walk); the helper only ever constructs ``Path.home()``.
             with mock.patch.object(oc_windows, "Path", _DupPathShim), \
+                 mock.patch.object(helpers, "Path", _DupPathShim), \
                  mock.patch.object(
                      oc_windows, "_is_running_as_admin", return_value=True
                  ):

@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
-    extract_global_mcp_config_with_root_support,
+    _accumulate_per_user_with_fallback,
     transform_mcp_servers_to_array,
 )
 
@@ -82,8 +82,9 @@ def extract_opencode_global_mcp_config_with_root_support(
     """
     Extract global OpenCode MCP config with support for admin user.
 
-    Reuses the pattern from extract_global_mcp_config_with_root_support
-    but calls read_opencode_mcp_config for JSON parsing with "mcp" section support.
+    Delegates the accumulate + de-dup + fallback-only inner loop to the shared
+    _accumulate_per_user_with_fallback helper, but calls read_opencode_mcp_config
+    for JSON parsing with "mcp" section support.
 
     When running as administrator, accumulates each user's config (de-duplicated
     by path). Single-user and non-admin machines yield a 0-or-1 element list,
@@ -97,35 +98,26 @@ def extract_opencode_global_mcp_config_with_root_support(
     Returns:
         List of config dicts with 'path' and 'mcpServers' keys (empty if none found)
     """
-    configs: List[Dict] = []
-    seen_paths = set()
-
-    # When running as administrator, check all user directories
+    # Resolve this tool's own admin user-home list (the C:\Users walk), then
+    # defer the accumulate + de-dup + fallback-only inner loop to the shared
+    # helper. Detection (_is_running_as_admin) stays here per call site; the
+    # helper's empty-list path reproduces the original unified fallback exactly.
+    user_homes: List[Path] = []
     if _is_running_as_admin():
         users_dir = Path("C:\\Users")
         if users_dir.exists():
-            for user_dir in users_dir.iterdir():
-                if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                    try:
-                        user_config_path = user_dir / global_config_path.relative_to(Path.home())
-                        if user_config_path.exists():
-                            config = read_opencode_mcp_config(user_config_path, tool_name, parent_levels)
-                            # De-dup by path: the admin's own home is itself under
-                            # C:\Users, so this prevents a double-count vs the fallback.
-                            if config and config["path"] not in seen_paths:
-                                seen_paths.add(config["path"])
-                                configs.append(config)
-                    except (ValueError, OSError):
-                        continue
+            user_homes = [
+                user_dir for user_dir in users_dir.iterdir()
+                if user_dir.is_dir() and not user_dir.name.startswith('.')
+            ]
 
-    # Fallback to current user's config ONLY if nothing was found above.
-    # This preserves the original single-user behavior exactly.
-    if not configs and global_config_path.exists():
-        config = read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
-        if config:
-            configs.append(config)
-
-    return configs
+    return _accumulate_per_user_with_fallback(
+        user_homes,
+        global_config_path,
+        read_opencode_mcp_config,
+        tool_name,
+        parent_levels,
+    )
 
 
 def _is_running_as_admin() -> bool:

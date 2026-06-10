@@ -1004,8 +1004,81 @@ def read_global_mcp_config(
         logger.warning(f"Permission denied reading global {tool_name} MCP config {config_path}: {e}")
     except Exception as e:
         logger.warning(f"Error reading global {tool_name} MCP config {config_path}: {e}")
-    
+
     return None
+
+
+def _accumulate_per_user_with_fallback(
+    user_homes: List[Path],
+    global_config_path: Path,
+    reader_fn: Callable[[Path, str, int], Optional[Dict]],
+    tool_name: str,
+    parent_levels: int,
+) -> List[Dict]:
+    """Accumulate every user's global MCP config, with admin's own as fallback.
+
+    This is the single home of the accumulate + de-dup + fallback-only inner
+    loop that was previously copy-pasted across the JSON, Codex (TOML), and the
+    two OpenCode extractors. It has exactly two seams: ``user_homes`` (the
+    already-resolved list of user home dirs — empty when not admin, so the
+    caller owns all admin/platform detection) and ``reader_fn`` (the tool's
+    config reader).
+
+    Detection deliberately stays at each call site. In particular this helper
+    must NEVER grow a Linux branch: Linux uses a separate per-user extractor
+    class, and a multi-user walk that returns accumulated-or-first-match here
+    would silently drop users on Linux.
+
+    Behavior contract (byte-identical to the four prior inline loops):
+      - admin (``user_homes`` non-empty): collect each user's config, de-dup by
+        the config's ``path`` key; if and only if NO per-user config was found,
+        fall back to the admin's own ``global_config_path``.
+      - non-admin (``user_homes`` empty): return a 0-or-1 element list from the
+        admin's own ``global_config_path``.
+
+    Args:
+        user_homes: Resolved user home directories ([] when not admin).
+        global_config_path: Path to the global MCP config file (relative to home).
+        reader_fn: Reader taking (config_path, tool_name, parent_levels) -> Optional[Dict].
+        tool_name: Name of the tool (for logging, passed through to reader_fn).
+        parent_levels: Number of parent directories to go up for the path.
+
+    Returns:
+        List of config dicts with 'path' and 'mcpServers' keys (empty if none found).
+    """
+    if user_homes:
+        configs: List[Dict] = []
+        seen_paths = set()
+        for user_dir in user_homes:
+            # Build user-specific config path by swapping ~ for user_dir.
+            try:
+                user_config_path = user_dir / global_config_path.relative_to(Path.home())
+            except (ValueError, OSError):
+                # Path might not be relative to home; skip this user.
+                continue
+            if user_config_path.exists():
+                config = reader_fn(user_config_path, tool_name, parent_levels)
+                # Accumulate each user's config (de-dup by path). On Windows the
+                # admin's own home is itself under C:\Users, so dedup prevents a
+                # double-count when the fallback below would also pick it up.
+                if config and config["path"] not in seen_paths:
+                    seen_paths.add(config["path"])
+                    configs.append(config)
+
+        # Fallback to admin's own global config ONLY if no user config was found.
+        # This preserves the original single-user-root behavior exactly.
+        if not configs and global_config_path.exists():
+            config = reader_fn(global_config_path, tool_name, parent_levels)
+            if config:
+                configs.append(config)
+        return configs
+
+    # For regular users, check their own home directory (0-or-1 element list).
+    if global_config_path.exists():
+        config = reader_fn(global_config_path, tool_name, parent_levels)
+        if config:
+            return [config]
+    return []
 
 
 def extract_global_mcp_config_with_root_support(
@@ -1064,43 +1137,16 @@ def extract_global_mcp_config_with_root_support(
     # Returning the first match from a multi-user walk — what this function
     # does — would silently drop the other users' configs on Linux.
 
-    # When running as admin/root, prioritize checking user directories first
-    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
-    if admin_homes:
-        configs: List[Dict] = []
-        seen_paths = set()
-        for user_dir in admin_homes:
-            # Build user-specific config path
-            # global_config_path is like ~/.cursor/mcp.json
-            # We need to replace ~ with user_dir
-            try:
-                user_config_path = user_dir / global_config_path.relative_to(Path.home())
-                if user_config_path.exists():
-                    config = read_global_mcp_config(user_config_path, tool_name, parent_levels)
-                    # Accumulate each user's config (de-dup by path). On Windows the
-                    # admin's own home is itself under C:\Users, so dedup prevents a
-                    # double-count when the fallback below would also pick it up.
-                    if config and config["path"] not in seen_paths:
-                        seen_paths.add(config["path"])
-                        configs.append(config)
-            except (ValueError, OSError):
-                # Path might not be relative to home, try direct construction
-                continue
-
-        # Fallback to admin's own global config ONLY if no user config was found.
-        # This preserves the original single-user-root behavior exactly.
-        if not configs and global_config_path.exists():
-            config = read_global_mcp_config(global_config_path, tool_name, parent_levels)
-            if config:
-                configs.append(config)
-        return configs
-
-    # For regular users, check their own home directory (0-or-1 element list)
-    if global_config_path.exists():
-        config = read_global_mcp_config(global_config_path, tool_name, parent_levels)
-        if config:
-            return [config]
-    return []
+    # When running as admin/root, prioritize checking user directories first.
+    # The accumulate + de-dup + fallback-only inner loop lives in the shared
+    # helper; detection (above) stays here per call site.
+    return _accumulate_per_user_with_fallback(
+        _iter_admin_user_homes(is_admin, users_dir),
+        global_config_path,
+        read_global_mcp_config,
+        tool_name,
+        parent_levels,
+    )
 
 
 def extract_ide_global_configs_with_root_support(

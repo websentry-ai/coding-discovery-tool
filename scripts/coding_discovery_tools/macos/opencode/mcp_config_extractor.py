@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
-    extract_global_mcp_config_with_root_support,
+    _accumulate_per_user_with_fallback,
     transform_mcp_servers_to_array,
 )
 
@@ -82,8 +82,9 @@ def extract_opencode_global_mcp_config_with_root_support(
     """
     Extract global OpenCode MCP config with support for root/admin user.
 
-    Reuses the pattern from extract_global_mcp_config_with_root_support
-    but calls read_opencode_mcp_config for JSON parsing with "mcp" section support.
+    Delegates the accumulate + de-dup + fallback-only inner loop to the shared
+    _accumulate_per_user_with_fallback helper, but calls read_opencode_mcp_config
+    for JSON parsing with "mcp" section support.
 
     When running as root, accumulates each user's config (de-duplicated by path).
     Single-user and non-root machines yield a 0-or-1 element list, identical to
@@ -110,35 +111,24 @@ def extract_opencode_global_mcp_config_with_root_support(
         except ImportError:
             pass
 
-    # When running as admin/root, check all user directories
+    # Resolve this tool's own admin user-home list (Darwin /Users walk), then
+    # defer the accumulate + de-dup + fallback-only inner loop to the shared
+    # helper. Detection stays here per call site.
     if is_admin and users_dir and users_dir.exists():
-        configs: List[Dict] = []
-        seen_paths = set()
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                try:
-                    user_config_path = user_dir / global_config_path.relative_to(Path.home())
-                    if user_config_path.exists():
-                        config = read_opencode_mcp_config(user_config_path, tool_name, parent_levels)
-                        if config and config["path"] not in seen_paths:
-                            seen_paths.add(config["path"])
-                            configs.append(config)
-                except (ValueError, OSError):
-                    continue
+        user_homes = [
+            user_dir for user_dir in users_dir.iterdir()
+            if user_dir.is_dir() and not user_dir.name.startswith('.')
+        ]
+    else:
+        user_homes = []
 
-        # Fallback to admin's own global config ONLY if no user config was found.
-        if not configs and global_config_path.exists():
-            config = read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
-            if config:
-                configs.append(config)
-        return configs
-
-    # For regular users, check their own home directory (0-or-1 element list)
-    if global_config_path.exists():
-        config = read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
-        if config:
-            return [config]
-    return []
+    return _accumulate_per_user_with_fallback(
+        user_homes,
+        global_config_path,
+        read_opencode_mcp_config,
+        tool_name,
+        parent_levels,
+    )
 
 
 class MacOSOpenCodeMCPConfigExtractor(BaseMCPConfigExtractor):

@@ -224,6 +224,100 @@ class TestMainCLI(unittest.TestCase):
         self.assertGreaterEqual(len(data), 1)
 
 
+class TestSelfTimeoutCleanup(unittest.TestCase):
+    """WEB-4755: discovery self-enforces --timeout. On expiry it exits non-zero
+    (instead of hanging until a parent force-kills it) and removes its lock so
+    the next run isn't blocked."""
+
+    class _SlowHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            time.sleep(4)  # stall every call so the scan can't finish under the timeout
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, *args):
+            pass
+
+    def setUp(self):
+        self.server = HTTPServer(("127.0.0.1", 0), self._SlowHandler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._home = tempfile.mkdtemp(prefix="ai-discovery-timeout-home-")
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        shutil.rmtree(self._home, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "watchdog timing asserted on POSIX")
+    def test_self_timeout_exits_nonzero_and_cleans_lock(self):
+        env = os.environ.copy()
+        env["HOME"] = self._home
+        env["USERPROFILE"] = self._home
+        start = time.monotonic()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/coding_discovery_tools/ai_tools_discovery.py",
+                "--api-key", "test-key-000000",
+                "--domain", f"http://127.0.0.1:{self.port}",
+                "--timeout", "2",
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=env,
+        )
+        elapsed = time.monotonic() - start
+        # Aborted by its own watchdog (non-zero) rather than completing the scan.
+        self.assertNotEqual(result.returncode, 0, f"stdout={result.stdout}\nstderr={result.stderr}")
+        self.assertLess(elapsed, 60, "self-timeout did not abort promptly")
+        # Lock cleaned up so a subsequent rerun isn't blocked.
+        lock = Path(self._home) / ".unbound" / "discovery.lock"
+        self.assertFalse(lock.exists(), "discovery.lock left behind after self-timeout")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_main_restores_signal_handlers(self):
+        # main() installs SIGTERM/SIGINT handlers but must restore the originals
+        # in its finally so importing/calling it doesn't pollute the process.
+        import signal as _signal
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        prev_term = _signal.getsignal(_signal.SIGTERM)
+        prev_int = _signal.getsignal(_signal.SIGINT)
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        # acquire_lock -> "contended" makes main() exit BEFORE installing handlers,
+        # so use a detector that finishes instantly with the lock acquired.
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev"
+        detector_inst.detect_all_tools.return_value = []
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value={}), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+        self.assertEqual(_signal.getsignal(_signal.SIGTERM), prev_term)
+        self.assertEqual(_signal.getsignal(_signal.SIGINT), prev_int)
+
+
 class TestUnsupportedPlatformGuard(unittest.TestCase):
     """main() runs on supported platforms (macOS/Windows/Linux) and exits
     cleanly on anything else instead of crashing in detector init."""
@@ -670,7 +764,10 @@ class TestAcquireLockReasonCodes(unittest.TestCase):
 
     def test_acquire_lock_contended_on_fresh_lock(self):
         self.cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
-        self.cache.LOCK_PATH.write_text("123 now\n")
+        # Use this test process's own (live) PID: the liveness check now steals a
+        # lock whose recorded PID is dead, so a genuine "contended" needs a real
+        # live owner.
+        self.cache.LOCK_PATH.write_text(f"{os.getpid()} now\n")
         os.utime(self.cache.LOCK_PATH, (time.time(), time.time()))
 
         self.assertEqual(self.cache.acquire_lock(), "contended")
@@ -710,6 +807,88 @@ class TestAcquireLockReasonCodes(unittest.TestCase):
         # The lock file created by os.open must be removed on write failure, so a
         # ghost lock can't make the next run see false contention.
         self.assertFalse(self.cache.LOCK_PATH.exists())
+
+
+class TestStaleLockPidLiveness(unittest.TestCase):
+    """WEB-4755: a lock left by a run that was killed without cleanup (dead PID,
+    fresh mtime) is stolen immediately so the NEXT discovery run isn't blocked
+    for the full stale-lock window. A genuinely live owner is still honored."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        unbound_dir.mkdir(parents=True, exist_ok=True)
+        self._patchers = [
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    @staticmethod
+    def _dead_pid() -> int:
+        for pid in (999999, 888888, 777777):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return pid
+            except OSError:
+                continue
+        return 999999
+
+    def _fresh(self):
+        os.utime(self.cache.LOCK_PATH, (time.time(), time.time()))
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_dead_pid_fresh_lock_is_stolen(self):
+        # Simulate a SIGKILLed run: dead PID, fresh mtime (heartbeat just ticked).
+        self.cache.LOCK_PATH.write_text(f"{self._dead_pid()} now\n")
+        self._fresh()
+        self.assertFalse(self.cache._lock_is_live())
+        # acquire_lock steals it so the rerun proceeds instead of seeing contention.
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache._read_lock_pid(), os.getpid())
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_live_pid_fresh_lock_is_contended(self):
+        self.cache.LOCK_PATH.write_text(f"{os.getpid()} now\n")
+        self._fresh()
+        self.assertTrue(self.cache._lock_is_live())
+        self.assertEqual(self.cache.acquire_lock(), "contended")
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_live_pid_stale_mtime_is_not_live(self):
+        # Heartbeat died (stale mtime) even though the PID is alive -> stealable,
+        # matching the original zombie-by-staleness tolerance.
+        self.cache.LOCK_PATH.write_text(f"{os.getpid()} then\n")
+        stale = time.time() - (self.cache.STALE_LOCK_SECONDS + 60)
+        os.utime(self.cache.LOCK_PATH, (stale, stale))
+        self.assertFalse(self.cache._lock_is_live())
+
+    def test_unparseable_pid_falls_back_to_mtime(self):
+        # No PID token (or Windows) -> fall back to mtime freshness.
+        self.cache.LOCK_PATH.write_text("not-a-pid\n")
+        self._fresh()
+        self.assertTrue(self.cache._lock_is_live())
+        stale = time.time() - (self.cache.STALE_LOCK_SECONDS + 60)
+        os.utime(self.cache.LOCK_PATH, (stale, stale))
+        self.assertFalse(self.cache._lock_is_live())
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_pid_alive_helper(self):
+        self.assertTrue(self.cache._pid_alive(os.getpid()))
+        self.assertFalse(self.cache._pid_alive(self._dead_pid()))
+        self.assertFalse(self.cache._pid_alive(0))
 
 
 class TestStateDirFallback(unittest.TestCase):

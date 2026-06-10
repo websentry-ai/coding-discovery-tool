@@ -12,11 +12,17 @@ logger = logging.getLogger(__name__)
 
 
 # Common system-wide install locations for Google's Antigravity (a VS Code
-# fork distributed via .deb / .rpm / tarball). All ship a resources/app/
-# product.json with a "version" key, matching the VS Code resource layout.
+# fork distributed via .deb / .rpm / tarball). The flat installs ship a
+# resources/app/product.json with a "version" key, matching the VS Code
+# resource layout. The Antigravity 2.0 tarball installs to
+# ``/opt/antigravity-ide`` and is ARCH-NESTED (e.g.
+# ``/opt/antigravity-ide/Antigravity-IDE/Antigravity-x64/antigravity``), so a
+# flat resources gate alone misses it — see ``_has_install_artifact``.
 _SYSTEM_INSTALL_DIRS = (
     Path("/opt/Antigravity"),
     Path("/opt/antigravity"),
+    Path("/opt/antigravity-ide"),
+    Path("/opt/antigravity-ide/Antigravity-IDE"),
     Path("/usr/lib/antigravity"),
     Path("/usr/share/antigravity"),
 )
@@ -25,6 +31,16 @@ _SYSTEM_INSTALL_DIRS = (
 _USER_INSTALL_RELATIVE_DIRS = (
     Path(".local/share/Antigravity"),
     Path(".local/share/antigravity"),
+)
+
+# Arch-nested / flat launcher executables under an Antigravity install dir
+# (Antigravity 2.0 tarball). Presence of any of these qualifies the dir as a
+# real install even when the flat ``resources/app`` tree is one level deeper.
+_LAUNCHER_RELATIVE_PATHS = (
+    Path("Antigravity-x64/antigravity"),
+    Path("Antigravity-arm64/antigravity"),
+    Path("antigravity-ide"),
+    Path("antigravity"),
 )
 
 
@@ -41,13 +57,16 @@ class LinuxAntigravityDetector(BaseToolDetector):
 
         Antigravity is a VS Code fork, so a genuine install ships a
         ``resources/app/product.json`` (or ``package.json``) under one of the
-        conventional install dirs. We gate on that resource tree EXISTING —
-        rather than on ``~/.antigravity`` (a residue config/data dir that
-        survives uninstall) and rather than on a *parseable* ``version`` key.
-        An install whose product/package json lacks a ``version`` is still a
-        real install, so version parsing is decoupled: ``get_version()`` is
-        called independently and a missing version is reported as
-        ``"Unknown"`` (matching Replit-Linux / KiloCode).
+        conventional install dirs. The Antigravity 2.0 tarball is instead
+        ARCH-NESTED (the launcher lives at ``<dir>/Antigravity-x64/antigravity``
+        and friends), which the flat resources gate misses — so we ALSO accept
+        a dir holding one of those launcher executables. We gate on those
+        artifacts EXISTING — rather than on ``~/.antigravity`` (a residue
+        config/data dir that survives uninstall) and rather than on a
+        *parseable* ``version`` key. An install whose product/package json
+        lacks a ``version`` is still a real install, so version parsing is
+        decoupled: ``get_version()`` is called independently and a missing
+        version is reported as ``"Unknown"`` (matching Replit-Linux / KiloCode).
         """
         for install_dir in self._candidate_install_dirs():
             try:
@@ -55,19 +74,36 @@ class LinuxAntigravityDetector(BaseToolDetector):
                     continue
             except (PermissionError, OSError):
                 continue
-            for filename in ("product.json", "package.json"):
-                resource = install_dir / "resources" / "app" / filename
-                try:
-                    if not resource.exists() or not resource.is_file():
-                        continue
-                except (PermissionError, OSError):
-                    continue
+            if self._has_install_artifact(install_dir):
                 return {
                     "name": self.tool_name,
                     "version": self.get_version() or "Unknown",
                     "install_path": str(install_dir),
                 }
         return None
+
+    @staticmethod
+    def _has_install_artifact(install_dir: Path) -> bool:
+        """Return True iff ``install_dir`` holds a real Antigravity install
+        artifact: a flat ``resources/app/product.json`` / ``package.json``
+        resource tree (VS Code layout), OR an arch-nested / flat launcher
+        executable (``Antigravity-x64/antigravity`` etc. — the 2.0 tarball).
+        Never raises."""
+        for filename in ("product.json", "package.json"):
+            resource = install_dir / "resources" / "app" / filename
+            try:
+                if resource.exists() and resource.is_file():
+                    return True
+            except (PermissionError, OSError):
+                continue
+        for rel in _LAUNCHER_RELATIVE_PATHS:
+            launcher = install_dir / rel
+            try:
+                if launcher.exists() and launcher.is_file():
+                    return True
+            except (PermissionError, OSError):
+                continue
+        return False
 
     def get_version(self) -> Optional[str]:
         """

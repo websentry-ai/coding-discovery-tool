@@ -30,6 +30,7 @@ _MOD = "scripts.coding_discovery_tools.user_tool_detector"
 # Absolute-literal candidate paths baked into ``find_claude_binary_for_user``.
 _HOMEBREW = Path("/opt/homebrew/bin/claude")
 _USR_LOCAL = Path("/usr/local/bin/claude")
+_USR_BIN = Path("/usr/bin/claude")
 
 
 def _make_detector():
@@ -45,7 +46,7 @@ def _make_detector():
 # absolute literals as absent — except one optionally-present target — while
 # every other path keeps real behaviour. This keeps the suite hermetic on any
 # host regardless of what is actually installed.
-_ABS_LITERALS = (_HOMEBREW, _USR_LOCAL)
+_ABS_LITERALS = (_HOMEBREW, _USR_LOCAL, _USR_BIN)
 
 
 def _isolate_abs(present: Path = None):
@@ -161,6 +162,33 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(_USR_LOCAL))
+
+    def test_usr_bin_binary_detected_when_not_root(self):
+        """FIX #3: ``/usr/bin/claude`` (apt/dnf system package) -> detected when
+        NOT root. Added alongside the existing Homebrew / /usr/local literals.
+
+        Fails against the pre-fix candidate list, which omitted ``/usr/bin``."""
+        self._with_abs(_USR_BIN)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(_USR_BIN))
+
+    def test_usr_bin_binary_skipped_when_root(self):
+        """GUARD: ``/usr/bin/claude`` is MACHINE-GLOBAL, so under a root/MDM
+        multi-user scan it must be SKIPPED (one shared install must not be
+        attributed to every user) — mirrors the Homebrew/usr-local root guard.
+        With ``/usr/bin/claude`` "present" but no user_home-relative binary, the
+        finder returns None under root."""
+        self._with_abs(_USR_BIN)
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(self.home)
+        self.assertIsNone(result)
 
     def test_local_bin_binary_detected(self):
         self._make_exec(self.home / ".local" / "bin" / "claude")
@@ -339,6 +367,24 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
 
     def test_programs_binary_detected(self):
         exe = self.home / "AppData" / "Local" / "Programs" / "claude" / "claude.exe"
+        self._make_exec(exe)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(exe))
+
+    def test_winget_links_shim_detected(self):
+        """FIX #3: WinGet (a documented primary installer) drops a shim into the
+        per-user ``AppData\\Local\\Microsoft\\WinGet\\Links\\claude.exe`` dir —
+        NOT under ``AppData\\Local\\Programs\\claude``. This must now be
+        detected on the Windows branch.
+
+        Fails against the pre-fix Windows candidate list, which omitted the
+        WinGet Links shim dir."""
+        exe = (self.home / "AppData" / "Local" / "Microsoft" / "WinGet"
+               / "Links" / "claude.exe")
         self._make_exec(exe)
         det = _make_detector()
         with patch(f"{_MOD}.platform.system", return_value="Windows"), \

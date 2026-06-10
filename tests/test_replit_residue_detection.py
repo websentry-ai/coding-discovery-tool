@@ -77,9 +77,13 @@ class TestWindowsReplitResidue(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_exe_install_detected(self):
-        """A Programs dir containing ``Replit.exe`` -> detected."""
+        """A Squirrel install dir containing a versioned ``app-*\\Replit.exe``
+        -> detected. (Squirrel never puts the exe directly under the root; it
+        lives in the ``app-<version>`` folder alongside ``Update.exe``.)"""
         self.install.mkdir(parents=True, exist_ok=True)
-        (self.install / "Replit.exe").write_text("")
+        exe = self.install / "app-1.8.0" / "Replit.exe"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("")
         with patch.object(self.detector, "_candidate_install_paths", return_value=[self.install]), \
              patch.object(self.detector, "get_version", return_value="1.8.0"):
             result = self.detector.detect()
@@ -99,26 +103,103 @@ class TestWindowsReplitResidue(unittest.TestCase):
         self.assertEqual(result["install_path"], str(self.install))
         self.assertEqual(result["version"], "2.1.4")
 
+    def test_squirrel_layout_detected_with_dir_name_version(self):
+        """REGRESSION (FIX #1): a realistic Electron Forge / Squirrel layout
+        ``%LocalAppData%\\replit\\app-1.2.3\\Replit.exe`` + ``Update.exe`` ->
+        detected, with the version parsed from the ``app-1.2.3`` folder name
+        (NOT the exe / package.json, which asar removes). Runs the REAL
+        ``get_version`` (only ``run_command`` neutralised) so the dir-name
+        parse is exercised.
+
+        Fails against the pre-fix gate, which only looked for ``Replit.exe``
+        directly under the candidate dir."""
+        local = self.root / "AppData" / "Local"
+        install = local / "replit"
+        install.mkdir(parents=True, exist_ok=True)
+        (install / "Update.exe").write_text("")
+        exe = install / "app-1.2.3" / "Replit.exe"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("")
+
+        env = {"LOCALAPPDATA": str(local)}
+        with patch.object(self.mod, "is_running_as_admin", return_value=False), \
+             patch.object(self.mod, "run_command", return_value=None), \
+             patch.dict(self.mod.os.environ, env, clear=True):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(install))
+        self.assertEqual(result["version"], "1.2.3")
+
+    def test_asar_only_install_detected(self):
+        """REGRESSION (FIX #1): an ``asar: true`` install — ``resources\\
+        app.asar`` present, NO ``resources\\app\\package.json`` — is detected
+        (the asar layout the gate previously missed)."""
+        asar = self.install / "resources" / "app.asar"
+        asar.parent.mkdir(parents=True, exist_ok=True)
+        asar.write_text("")  # packed archive; we never parse it (zero-dep)
+        with patch.object(self.detector, "_candidate_install_paths", return_value=[self.install]), \
+             patch.object(self.mod, "run_command", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(self.install))
+        # No parseable version source (asar not parsed) -> "Unknown".
+        self.assertEqual(result["version"], "Unknown")
+
+    def test_bare_install_dir_only_not_detected(self):
+        """A bare empty ``%LocalAppData%\\replit\\`` dir (no Update.exe / no
+        versioned exe / no asar / no package.json) -> None. GUARD: the gate is
+        on inner artifacts, never on the bare Squirrel dir existing (which is
+        the dir uninstall deletes)."""
+        local = self.root / "AppData" / "Local"
+        (local / "replit").mkdir(parents=True, exist_ok=True)  # empty
+        env = {"LOCALAPPDATA": str(local)}
+        with patch.object(self.mod, "is_running_as_admin", return_value=False), \
+             patch.object(self.mod, "run_command", return_value=None), \
+             patch.dict(self.mod.os.environ, env, clear=True):
+            result = self.detector.detect()
+        self.assertIsNone(result)
+
+    def test_roaming_data_dir_only_not_detected(self):
+        """The residue userData dir ``%APPDATA%\\Roaming\\Replit`` alone (no
+        install dir) -> None. It is not even a candidate path."""
+        local = self.root / "AppData" / "Local"
+        local.mkdir(parents=True, exist_ok=True)  # no replit install dir inside
+        roaming = self.root / "AppData" / "Roaming" / "Replit"
+        roaming.mkdir(parents=True, exist_ok=True)
+        (roaming / "config.json").write_text("{}")
+        env = {"LOCALAPPDATA": str(local)}
+        with patch.object(self.mod, "is_running_as_admin", return_value=False), \
+             patch.object(self.mod, "run_command", return_value=None), \
+             patch.dict(self.mod.os.environ, env, clear=True):
+            result = self.detector.detect()
+        self.assertIsNone(result)
+
     def test_admin_multiuser_other_user_install_detected(self):
         """MULTI-USER (WARNING #2): under a SYSTEM/admin scan, a per-user
-        squirrel install ``C:\\Users\\<other>\\AppData\\Local\\Programs\\
-        Replit\\Replit.exe`` belonging to ANOTHER user is reached. This runs
-        the REAL ``_candidate_install_paths`` (admin branch) — only
-        ``is_running_as_admin`` and the ``C:\\Users`` enumeration helper are
-        patched, so the real artifact gate validates the exe.
+        Squirrel DIRECT install ``C:\\Users\\<other>\\AppData\\Local\\replit``
+        (with ``Update.exe`` + ``app-*\\Replit.exe``) belonging to ANOTHER user
+        is reached via ``_other_user_local_appdata_dirs``. This runs the REAL
+        ``_candidate_install_paths`` (admin branch) — only
+        ``is_running_as_admin`` and the ``C:\\Users`` enumeration helpers are
+        patched, so the real artifact gate validates the install.
 
         Fails against the pre-fix rewrite which never walked other users'
-        dirs under admin."""
-        other_programs = self.root / "Users" / "other" / "AppData" / "Local" / "Programs"
+        ``AppData\\Local`` dirs under admin."""
+        other_local = self.root / "Users" / "other" / "AppData" / "Local"
         # Use the FIRST candidate name (INSTALL_DIR_NAMES[0]) so the returned
         # install_path is deterministic on a case-insensitive FS.
-        install = other_programs / self.detector.INSTALL_DIR_NAMES[0]
+        install = other_local / self.detector.INSTALL_DIR_NAMES[0]
         install.mkdir(parents=True, exist_ok=True)
-        (install / "Replit.exe").write_text("")
+        (install / "Update.exe").write_text("")
+        exe = install / "app-3.0.0" / "Replit.exe"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("")
 
         with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.detector, "_other_user_local_appdata_dirs",
+                          return_value=[other_local]), \
              patch.object(self.detector, "_other_user_program_dirs",
-                          return_value=[other_programs]), \
+                          return_value=[]), \
              patch.object(self.detector, "get_version", return_value="3.0.0"), \
              patch.dict(self.mod.os.environ, {}, clear=True):
             result = self.detector.detect()
@@ -127,26 +208,29 @@ class TestWindowsReplitResidue(unittest.TestCase):
 
     def test_admin_multiuser_other_user_residue_only_not_detected(self):
         """Under admin, another user's residue-only dir (a bare
-        ``Programs\\Replit`` with NO exe / resource tree) still -> None: the
-        artifact gate is preserved, no residue gate is introduced."""
-        other_programs = self.root / "Users" / "other" / "AppData" / "Local" / "Programs"
-        residue = other_programs / "Replit"
-        residue.mkdir(parents=True, exist_ok=True)  # empty: no exe, no resources
+        ``AppData\\Local\\replit`` with NO Update.exe / versioned exe / asar /
+        package.json) still -> None: the artifact gate is preserved, no residue
+        gate is introduced."""
+        other_local = self.root / "Users" / "other" / "AppData" / "Local"
+        residue = other_local / "replit"
+        residue.mkdir(parents=True, exist_ok=True)  # empty: no install artifact
 
         with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.detector, "_other_user_local_appdata_dirs",
+                          return_value=[other_local]), \
              patch.object(self.detector, "_other_user_program_dirs",
-                          return_value=[other_programs]), \
+                          return_value=[]), \
              patch.dict(self.mod.os.environ, {}, clear=True):
             result = self.detector.detect()
         self.assertIsNone(result)
 
     def test_non_admin_does_not_enumerate_other_users(self):
-        """When NOT admin, the other-user enumeration must not run: a
-        per-user install belonging to another user is NOT reported."""
-        other_programs = self.root / "Users" / "other" / "AppData" / "Local" / "Programs"
-        install = other_programs / "Replit"
+        """When NOT admin, the other-user enumeration must not run: a real
+        per-user Squirrel install belonging to another user is NOT reported."""
+        other_local = self.root / "Users" / "other" / "AppData" / "Local"
+        install = other_local / "replit"
         install.mkdir(parents=True, exist_ok=True)
-        (install / "Replit.exe").write_text("")
+        (install / "Update.exe").write_text("")  # a REAL install artifact
 
         # Strip env so the scanner's own %LOCALAPPDATA% can't match either.
         with patch.object(self.mod, "is_running_as_admin", return_value=False), \
@@ -197,6 +281,31 @@ class TestLinuxReplitResidue(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(self.install))
         self.assertEqual(result["version"], "2.0.1")
+
+    def test_asar_install_detected(self):
+        """REGRESSION (FIX #1): the deb installs to ``/usr/lib/replit`` and,
+        with ``asar: true``, ships ``resources/app.asar`` (NO
+        ``resources/app/package.json``). Gating only on package.json missed it.
+        Modelled on the real ``/usr/lib/replit/resources/app.asar`` layout.
+
+        Fails against the pre-fix gate, which only checked package.json."""
+        lib_install = self.root / "usr" / "lib" / "replit"
+        asar = lib_install / "resources" / "app.asar"
+        asar.parent.mkdir(parents=True, exist_ok=True)
+        asar.write_text("")  # packed archive; never parsed (zero-dep)
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[lib_install]), \
+             patch.object(self.mod, "run_command", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(lib_install))
+        # asar not parsed and no package.json -> "Unknown".
+        self.assertEqual(result["version"], "Unknown")
+
+    def test_usr_lib_replit_is_a_real_candidate(self):
+        """GUARD: ``/usr/lib/replit`` (the one verified deb location) must stay
+        in the real candidate set even though the speculative ``/opt/*`` /
+        ``/usr/share/*`` entries were dropped."""
+        self.assertIn(Path("/usr/lib/replit"), self.detector._candidate_install_dirs())
 
     def test_which_replit_backstop_detected(self):
         """No resource-tree install, but ``which replit`` resolves to a real

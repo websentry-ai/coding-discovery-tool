@@ -15,7 +15,7 @@ from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
 from .constants import VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
-from .utils import run_command
+from .utils import resolve_npm_global_tool_bin, run_command
 
 logger = logging.getLogger(__name__)
 
@@ -219,12 +219,33 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
         except (PermissionError, OSError):
             pass
 
-    # Check common user binary locations the nvm/bun scans miss. ~/.local/bin and
-    # the npm-global prefix are user_home-relative (always safe). Homebrew and
-    # /usr/local are MACHINE-GLOBAL — under a root/MDM multi-user scan, probing
-    # them per-user would attribute one shared install to every user, so only
-    # add them when NOT root (same reasoning as the `which` backstop guard).
-    if platform.system() != "Windows":
+    if platform.system() == "Windows":
+        # Windows npm installs drop shims into %APPDATA%\npm (no POSIX X_OK
+        # semantics, so gate on existence like the Claude Windows branch and
+        # the Bun fallback below). Mirrors how Claude has a Windows branch.
+        npm_dir = user_home / "AppData" / "Roaming" / "npm"
+        windows_candidates = [
+            npm_dir / "gemini.cmd",
+            npm_dir / "gemini.ps1",
+            npm_dir / "gemini",
+        ]
+        for candidate in windows_candidates:
+            try:
+                if candidate.exists():
+                    return {
+                        "name": detector.tool_name,
+                        "version": detector.get_version() or "Unknown",
+                        "install_path": str(candidate)
+                    }
+            except OSError:
+                continue
+    else:
+        # Check common user binary locations the nvm/bun scans miss.
+        # ~/.local/bin and the npm-global prefix are user_home-relative (always
+        # safe). Homebrew and /usr/local are MACHINE-GLOBAL — under a root/MDM
+        # multi-user scan, probing them per-user would attribute one shared
+        # install to every user, so only add them when NOT root (same reasoning
+        # as the `which` backstop guard).
         gemini_candidates = [
             user_home / ".local" / "bin" / "gemini",
             user_home / ".npm-global" / "bin" / "gemini",
@@ -244,6 +265,18 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
                     }
             except OSError:
                 continue
+
+        # Resolve the npm global prefix (Homebrew node / nvm / pnpm vary) and
+        # probe ``<prefix>/bin/gemini`` plus pnpm/nvm fallbacks. The dynamic
+        # ``npm prefix -g`` probe is root-guarded inside the helper (it resolves
+        # the SCANNER's prefix, not the user's — the 93b5fc2 cross-user FP class).
+        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root())
+        if npm_resolved:
+            return {
+                "name": detector.tool_name,
+                "version": detector.get_version() or "Unknown",
+                "install_path": npm_resolved
+            }
 
     # Fallback: Check Bun global binaries
     bun_bin = user_home / ".bun" / "bin" / "gemini"
@@ -328,6 +361,9 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             user_home / "AppData" / "Roaming" / "npm" / "claude.cmd",
             user_home / "AppData" / "Roaming" / "npm" / "claude.exe",
             user_home / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
+            # WinGet is a documented primary installer; it drops a shim into the
+            # per-user Links dir (NOT under AppData\Local\Programs\claude).
+            user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "claude.exe",
             user_home / ".bun" / "bin" / "claude.exe",
         ]
     else:
@@ -338,13 +374,14 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             user_home / ".config" / "yarn" / "global"  # yarn global install
             / "node_modules" / ".bin" / "claude",
         ]
-        # Homebrew and /usr/local are MACHINE-GLOBAL — under a root/MDM
-        # multi-user scan, probing them per-user would attribute one shared
-        # install to every user, so only add them when NOT root.
+        # Homebrew, /usr/local and /usr/bin are MACHINE-GLOBAL — under a
+        # root/MDM multi-user scan, probing them per-user would attribute one
+        # shared install to every user, so only add them when NOT root.
         if not is_running_as_root():
             candidates = [
                 Path("/opt/homebrew/bin/claude"),      # Apple Silicon Homebrew
                 Path("/usr/local/bin/claude"),         # Intel Mac / manual install
+                Path("/usr/bin/claude"),               # apt/dnf system package
             ] + candidates
 
     for candidate in candidates:

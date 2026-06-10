@@ -277,6 +277,58 @@ class TestLinuxAntigravityResidue(unittest.TestCase):
         self.assertEqual(result["install_path"], str(self.install))
         self.assertEqual(result["version"], "Unknown")
 
+    # --- FIX #3: /opt/antigravity-ide + arch-nested launcher gate --------
+
+    def test_antigravity_ide_flat_launcher_detected(self):
+        """FIX #3: ``/opt/antigravity-ide/Antigravity-IDE`` holding the flat
+        ``antigravity-ide`` launcher (no flat ``resources/app`` tree) ->
+        detected. Modelled on the Antigravity 2.0 tarball layout.
+
+        Fails against the pre-fix gate, which only accepted a flat
+        ``resources/app/product.json`` / ``package.json``."""
+        ide_dir = self.root / "opt" / "antigravity-ide" / "Antigravity-IDE"
+        launcher = ide_dir / "antigravity-ide"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text("")
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[ide_dir]), \
+             patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(ide_dir))
+        self.assertEqual(result["version"], "Unknown")
+
+    def test_arch_nested_launcher_detected(self):
+        """FIX #3: an ARCH-NESTED ``<dir>/Antigravity-x64/antigravity`` launcher
+        (the 2.0 tarball is arch-nested) -> detected even though the flat
+        ``resources`` gate would miss it."""
+        ide_dir = self.root / "opt" / "antigravity"
+        launcher = ide_dir / "Antigravity-x64" / "antigravity"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text("")
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[ide_dir]), \
+             patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(ide_dir))
+
+    def test_antigravity_ide_dirs_in_real_candidate_set(self):
+        """GUARD: the new ``/opt/antigravity-ide`` dirs are in the REAL
+        candidate set (not just injected in tests)."""
+        candidates = self.detector._candidate_install_dirs()
+        self.assertIn(Path("/opt/antigravity-ide"), candidates)
+        self.assertIn(Path("/opt/antigravity-ide/Antigravity-IDE"), candidates)
+
+    def test_residue_dir_only_still_not_detected_with_new_gate(self):
+        """The new launcher gate must NOT re-open the residue FP: a bare
+        ``~/.antigravity`` config dir (no resources tree, no launcher) under a
+        candidate dir still -> None."""
+        residue = self.home / ".antigravity"
+        residue.mkdir(parents=True, exist_ok=True)
+        (residue / "settings.json").write_text("{}")
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[residue]):
+            result = self.detector.detect()
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     unittest.main()

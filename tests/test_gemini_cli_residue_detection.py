@@ -267,6 +267,69 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         self.assertNotEqual(result["install_path"], str(self.home / ".gemini"))
         self.assertEqual(result["install_path"], str(self.home / ".local" / "bin" / "gemini"))
 
+    # --- FIX #3: Windows npm path + npm-prefix root guard ----------------
+
+    def test_windows_npm_cmd_detected(self):
+        """FIX #3: on Windows, the npm shim ``%APPDATA%\\npm\\gemini.cmd`` ->
+        detected (mirrors how Claude has a Windows branch). Gates on existence
+        (no POSIX X_OK on Windows).
+
+        Fails against the pre-fix code, whose user-dir/Homebrew/Bun block was
+        gated entirely to non-Windows (no Windows npm probe at all)."""
+        cmd = self.home / "AppData" / "Roaming" / "npm" / "gemini.cmd"
+        cmd.parent.mkdir(parents=True, exist_ok=True)
+        cmd.write_text("")
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cmd))
+
+    def test_npm_prefix_resolution_skipped_when_root(self):
+        """GUARD (FIX #3): under a root/MDM multi-user scan the npm-prefix
+        resolution (``resolve_npm_global_tool_bin``) must be SKIPPED for the
+        SCANNER-scoped probe — a user with only ``~/.gemini`` residue must NOT
+        be reported. We assert the resolver is invoked with ``is_root=True``
+        (so its internal ``npm prefix -g`` probe is gated), and ``detect()``
+        (the ``which`` backstop) is never consulted. Mirrors
+        ``test_which_fallback_skipped_when_root``."""
+        (self.home / ".gemini").mkdir()  # residue only
+        calls = []
+
+        def spy(tool, user_home, is_root):
+            calls.append((tool, is_root))
+            return None
+
+        det = _make_detector()
+        det.detect.return_value = {
+            "name": "Gemini CLI", "version": "1.2.3",
+            "install_path": "/scanner/bin/gemini",
+        }
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_MOD}.resolve_npm_global_tool_bin", side_effect=spy), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNone(result)
+        self.assertEqual(calls, [("gemini", True)])
+        det.detect.assert_not_called()
+
+    def test_npm_prefix_resolution_used_when_not_root(self):
+        """FIX #3: when NOT root, the npm-prefix resolution finds the real
+        binary -> detected (resolver stubbed to a tmp path for hermeticity)."""
+        npm_bin = self.home / "npmprefix" / "bin" / "gemini"
+        npm_bin.parent.mkdir(parents=True, exist_ok=True)
+        npm_bin.write_text("")
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_MOD}.resolve_npm_global_tool_bin", return_value=str(npm_bin)), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(npm_bin))
+
 
 if __name__ == "__main__":
     unittest.main()

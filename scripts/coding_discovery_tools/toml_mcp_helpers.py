@@ -9,7 +9,10 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from .mcp_extraction_helpers import transform_mcp_servers_to_array
+from .mcp_extraction_helpers import (
+    _accumulate_per_user_with_fallback,
+    transform_mcp_servers_to_array,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,29 +240,44 @@ def extract_codex_global_mcp_config_with_admin_support(
     is_admin_fn: Callable[[], Tuple[bool, Optional[Path]]],
     tool_name: str = TOOL_NAME,
     parent_levels: int = PARENT_LEVELS
-) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
+) -> List[Dict[str, Union[str, List[Dict[str, Any]]]]]:
     """
     Extract global Codex MCP config with support for admin/root users.
 
     Accepts a platform-specific callable returning (is_admin, users_dir).
-    When admin, searches all user directories; falls back to the current user's path.
+    When admin, searches every user directory and accumulates each user's
+    global config (de-duplicated by the config's ``path`` key). This fixes a
+    multi-user data loss where only the FIRST user's config was returned.
+
+    The admin's own ``global_config_path`` is kept as a FALLBACK ONLY (used only
+    when no per-user config was found), preserving the original single-user-root
+    semantics exactly.
+
+    Single-user and non-admin machines are unaffected: the result is a 0-or-1
+    element list, identical in content to the single dict (or None) returned
+    previously.
+
+    Returns:
+        List of config dicts with 'path' and 'mcpServers' keys (empty if none found)
     """
     is_admin, users_dir = is_admin_fn()
 
+    # Resolve this tool's own admin user-home list (the codex filter), then defer
+    # the accumulate + de-dup + fallback-only inner loop to the shared helper.
+    # Codex filters the raw users_dir directly here (it does not use
+    # _iter_admin_user_homes), so reproduce that filter EXACTLY at this call site.
     if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if not user_dir.is_dir() or user_dir.name.startswith('.'):
-                continue
-            try:
-                user_config_path = user_dir / global_config_path.relative_to(Path.home())
-                if user_config_path.exists():
-                    config = read_codex_toml_mcp_config(user_config_path, tool_name, parent_levels)
-                    if config:
-                        return config
-            except (ValueError, OSError):
-                continue
+        user_homes = [
+            d for d in users_dir.iterdir()
+            if d.is_dir() and not d.name.startswith('.')
+        ]
+    else:
+        user_homes = []
 
-    if global_config_path.exists():
-        return read_codex_toml_mcp_config(global_config_path, tool_name, parent_levels)
-
-    return None
+    return _accumulate_per_user_with_fallback(
+        user_homes,
+        global_config_path,
+        read_codex_toml_mcp_config,
+        tool_name,
+        parent_levels,
+    )

@@ -5,11 +5,11 @@ MCP config extraction for OpenCode on Windows systems.
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
-    extract_global_mcp_config_with_root_support,
+    _accumulate_per_user_with_fallback,
     transform_mcp_servers_to_array,
 )
 
@@ -78,41 +78,46 @@ def extract_opencode_global_mcp_config_with_root_support(
     global_config_path: Path,
     tool_name: str = "OpenCode",
     parent_levels: int = 5
-) -> Optional[Dict]:
+) -> List[Dict]:
     """
     Extract global OpenCode MCP config with support for admin user.
-    
-    Reuses the pattern from extract_global_mcp_config_with_root_support
-    but calls read_opencode_mcp_config for JSON parsing with "mcp" section support.
-    
+
+    Delegates the accumulate + de-dup + fallback-only inner loop to the shared
+    _accumulate_per_user_with_fallback helper, but calls read_opencode_mcp_config
+    for JSON parsing with "mcp" section support.
+
+    When running as administrator, accumulates each user's config (de-duplicated
+    by path). Single-user and non-admin machines yield a 0-or-1 element list,
+    identical to the single dict (or None) returned previously.
+
     Args:
         global_config_path: Path to the global MCP config file (relative to home)
         tool_name: Name of the tool (for logging)
         parent_levels: Number of parent directories to go up for the path
-    
+
     Returns:
-        Dict with 'path' and 'mcpServers' keys, or None if no config found
+        List of config dicts with 'path' and 'mcpServers' keys (empty if none found)
     """
-    # When running as administrator, check all user directories
+    # Resolve this tool's own admin user-home list (the C:\Users walk), then
+    # defer the accumulate + de-dup + fallback-only inner loop to the shared
+    # helper. Detection (_is_running_as_admin) stays here per call site; the
+    # helper's empty-list path reproduces the original unified fallback exactly.
+    user_homes: List[Path] = []
     if _is_running_as_admin():
         users_dir = Path("C:\\Users")
         if users_dir.exists():
-            for user_dir in users_dir.iterdir():
-                if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                    try:
-                        user_config_path = user_dir / global_config_path.relative_to(Path.home())
-                        if user_config_path.exists():
-                            config = read_opencode_mcp_config(user_config_path, tool_name, parent_levels)
-                            if config:
-                                return config
-                    except (ValueError, OSError):
-                        continue
-    
-    # Fallback to current user's config
-    if global_config_path.exists():
-        return read_opencode_mcp_config(global_config_path, tool_name, parent_levels)
-    
-    return None
+            user_homes = [
+                user_dir for user_dir in users_dir.iterdir()
+                if user_dir.is_dir() and not user_dir.name.startswith('.')
+            ]
+
+    return _accumulate_per_user_with_fallback(
+        user_homes,
+        global_config_path,
+        read_opencode_mcp_config,
+        tool_name,
+        parent_levels,
+    )
 
 
 def _is_running_as_admin() -> bool:
@@ -151,26 +156,23 @@ class WindowsOpenCodeMCPConfigExtractor(BaseMCPConfigExtractor):
             Dict with projects array containing MCP configs, or None if no configs found
         """
         projects = []
-        
-        # Extract global config
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
-        
+
+        # Extract global config(s) — one per user when running as administrator
+        projects.extend(self._extract_global_config())
+
         # Return None if no configs found
         if not projects:
             return None
-        
+
         return {
             "projects": projects
         }
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_config(self) -> List[Dict]:
         r"""
         Extract global MCP config from AppData\Roaming\.config\opencode\opencode.json
-        
+
         When running as administrator, collects global configs from ALL users.
-        Returns the first non-empty config found, or None if none found.
         """
         return extract_opencode_global_mcp_config_with_root_support(
             self.GLOBAL_MCP_CONFIG_PATH,

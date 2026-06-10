@@ -5,7 +5,7 @@ MCP config extraction for Antigravity on Windows systems.
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import extract_global_mcp_config_with_root_support
@@ -28,26 +28,23 @@ class WindowsAntigravityMCPConfigExtractor(BaseMCPConfigExtractor):
             Dict with projects array containing MCP configs, or None if no configs found
         """
         projects = []
-        
-        # Extract global config
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
-        
+
+        # Extract global config(s) — one per user when running as administrator
+        projects.extend(self._extract_global_config())
+
         # Return None if no configs found
         if not projects:
             return None
-        
+
         return {
             "projects": projects
         }
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_config(self) -> List[Dict]:
         """
         Extract global MCP config from ~/.gemini/antigravity/mcp_config.json
-        
+
         When running as administrator, collects global configs from ALL users.
-        Returns the first non-empty config found, or None if none found.
         """
         return extract_global_mcp_config_with_root_support(
             self.GLOBAL_MCP_CONFIG_PATH,

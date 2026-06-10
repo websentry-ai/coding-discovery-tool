@@ -11,7 +11,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 
 try:
     from coding_discovery_tools.mcp_extraction_helpers import transform_mcp_servers_to_array
@@ -32,38 +31,37 @@ def scan_one(server_name, server_config):
     return servers[0] if servers else None
 
 
+def _curl_config_quote(value):
+    """Escape a value for a curl --config double-quoted field."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def report(domain, api_key, server_obj):
     """POST the scanned server to the single-server endpoint. Returns the curl result.
 
-    Both secrets stay off argv / /proc/<pid>/cmdline: the bearer token via a curl
-    config on stdin (`--config -`), and the JSON body (whose `args` can carry
-    credentials) via a 0600 temp file referenced with `-d @file`.
+    The bearer token and the JSON body (whose `args` can carry credentials) are
+    both fed to curl through a config on stdin (`--config -`), so neither lands in
+    argv / /proc/<pid>/cmdline. Using stdin rather than a temp file also avoids
+    Windows temp-dir resolution issues when launched under Git Bash.
     """
     url = f"{_normalize_url(domain)}{REPORT_PATH}"
     payload = json.dumps({"mcp_server": server_obj})
-    curl_config = f'header = "Authorization: Bearer {api_key}"\n'
-    fd, payload_path = tempfile.mkstemp(prefix="unbound-mcp-scan-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(payload)
-        return subprocess.run(
-            [
-                "curl", "-s", "-X", "POST", "--config", "-",
-                "-H", "Content-Type: application/json",
-                "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                "-d", f"@{payload_path}",
-                "--max-time", "60",
-                "-w", "\n%{http_code}",
-                url,
-            ],
-            input=curl_config,
-            capture_output=True, text=True, timeout=90,
-        )
-    finally:
-        try:
-            os.remove(payload_path)
-        except OSError:
-            pass
+    curl_config = (
+        f'header = "Authorization: Bearer {_curl_config_quote(api_key)}"\n'
+        'header = "Content-Type: application/json"\n'
+        'header = "User-Agent: AI-Tools-Discovery/1.0"\n'
+        f'data = "{_curl_config_quote(payload)}"\n'
+    )
+    return subprocess.run(
+        [
+            "curl", "-s", "-X", "POST", "--config", "-",
+            "--max-time", "60",
+            "-w", "\n%{http_code}",
+            url,
+        ],
+        input=curl_config,
+        capture_output=True, text=True, timeout=90,
+    )
 
 
 def main():

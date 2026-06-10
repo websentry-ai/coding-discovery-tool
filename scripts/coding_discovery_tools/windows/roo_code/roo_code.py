@@ -133,7 +133,7 @@ class WindowsRooDetector(BaseToolDetector):
         # extensions survives uninstall, so the extensions.json entry alone is
         # not proof of install. Reuse the Windows Antigravity detector's
         # install-dir probe (Programs/ + Program Files/ for the exe/resources).
-        if self._is_antigravity_installed():
+        if self._is_antigravity_installed(user_home):
             antigravity_info = self._check_antigravity_extension(user_home)
             if antigravity_info:
                 extension_path, version = antigravity_info
@@ -148,15 +148,15 @@ class WindowsRooDetector(BaseToolDetector):
 
         return results
 
-    def _is_antigravity_installed(self) -> bool:
+    def _is_antigravity_installed(self, user_home: Path) -> bool:
         """
-        Return True if a real Antigravity install dir is present, reusing the
-        Windows Antigravity detector's ``_find_app_path()`` (checks Programs/
-        and Program Files/ for Antigravity.exe or the resources tree — both
-        removed on uninstall). Wrapped so a probe error never crashes detection.
+        Return True iff Antigravity is installed FOR ``user_home`` — the user's
+        own per-user install or a machine-wide one — so a per-user Antigravity
+        owned by ANOTHER user (reachable via the all-users admin enumeration) is
+        not attributed here. Wrapped so a probe error never crashes detection.
         """
         try:
-            return WindowsAntigravityDetector()._find_app_path() is not None
+            return WindowsAntigravityDetector().is_installed_for_user(user_home)
         except (PermissionError, OSError) as e:
             logger.debug(f"Could not check Antigravity install presence: {e}")
             return False

@@ -267,6 +267,19 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
             result = find_claude_binary_for_user(self.home)
         self.assertEqual(result, str(self.home / ".local" / "bin" / "claude"))
 
+    def test_homebrew_skipped_when_root(self):
+        """Under a root/MDM multi-user scan, the MACHINE-GLOBAL Homebrew /
+        /usr/local candidates must be SKIPPED — probing them per-user would
+        attribute one shared install to EVERY user. With Homebrew "present" but
+        no user_home-relative binary, the finder returns None under root. Fails
+        against the pre-guard code, which probed Homebrew regardless of root."""
+        self._with_abs(_HOMEBREW)  # /opt/homebrew/bin/claude "present"+exec
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(self.home)
+        self.assertIsNone(result)
+
     def test_residue_dir_plus_real_binary_uses_binary(self):
         (self.home / ".claude").mkdir()
         self._make_exec(self.home / ".local" / "bin" / "claude")

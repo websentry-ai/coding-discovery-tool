@@ -225,6 +225,35 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         self.assertIsNone(result)
         det.detect.assert_not_called()
 
+    def test_homebrew_skipped_when_root(self):
+        """Under a root/MDM multi-user scan, the MACHINE-GLOBAL Homebrew /
+        /usr/local candidates must be SKIPPED — probing them per-user would
+        attribute one shared Homebrew install to EVERY user. With Homebrew
+        "present" but no user_home-relative binary, the result is None under
+        root. Fails against the pre-guard code, which probed Homebrew regardless
+        of root."""
+        self._with_abs(_HOMEBREW)  # /opt/homebrew/bin/gemini "present"+exec
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNone(result)
+
+    def test_user_home_binary_still_detected_when_root(self):
+        """The root guard drops only the MACHINE-GLOBAL candidates — a
+        user_home-relative binary (``~/.local/bin/gemini``) is still probed and
+        detected under root (it is correctly scoped to that user)."""
+        self._make_exec(self.home / ".local" / "bin" / "gemini")
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_gemini_cli(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"],
+                         str(self.home / ".local" / "bin" / "gemini"))
+
     def test_residue_dir_plus_real_binary_uses_binary(self):
         """When both ``~/.gemini`` residue and a real binary exist, the
         install_path is the binary (never the residue dir)."""

@@ -64,6 +64,32 @@ class WindowsAntigravityDetector(BaseToolDetector):
                     return app_path
         return None
 
+    def is_installed_for_user(self, user_home: Path) -> bool:
+        """Return True iff Antigravity is installed FOR ``user_home`` — the
+        user's own per-user squirrel install (``…\\AppData\\Local\\Programs``)
+        OR a machine-wide ``Program Files`` install (available to that user).
+        Unlike ``_find_app_path`` under an admin scan, this does NOT consult
+        OTHER users' Programs dirs, so a per-user Antigravity owned by user A is
+        never attributed to user B. Never raises."""
+        roots = [
+            user_home / "AppData" / "Local" / "Programs",
+            Path("C:\\Program Files"),
+            Path("C:\\Program Files (x86)"),
+        ]
+        for base in roots:
+            for name in self._PROGRAM_DIR_NAMES:
+                app_path = base / name
+                try:
+                    if not app_path.exists():
+                        continue
+                    if (app_path / "Antigravity.exe").exists():
+                        return True
+                    if app_path.is_dir() and (app_path / "resources").exists():
+                        return True
+                except (PermissionError, OSError):
+                    continue
+        return False
+
     # Per-user squirrel install dir names under ...\AppData\Local\Programs.
     _PROGRAM_DIR_NAMES = ("antigravity", "Antigravity", "Gemini", "Google Gemini")
 

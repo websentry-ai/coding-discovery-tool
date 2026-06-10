@@ -161,6 +161,57 @@ class TestWindowsAntigravityResidue(unittest.TestCase):
             result = self.detector.detect()
         self.assertIsNone(result)
 
+    # --- is_installed_for_user: user-scoped install probe ----------------
+    # Used by the Windows Cline / Roo detectors to gate their Antigravity rows
+    # on the install being present FOR THE USER being scanned (not for any
+    # user reachable via the all-users admin enumeration). All cases rely on
+    # ``C:\Program Files\Antigravity`` being absent on the test host (true on
+    # macOS, and CI Windows runners have no Antigravity), so only the tmp
+    # user_home decides the outcome.
+
+    def test_is_installed_for_user_own_program_dir(self):
+        """The user's OWN ``AppData/Local/Programs/Antigravity`` holding
+        ``Antigravity.exe`` -> True."""
+        user_install = (self.home / "AppData" / "Local" / "Programs"
+                        / self.detector._PROGRAM_DIR_NAMES[0])
+        user_install.mkdir(parents=True, exist_ok=True)
+        (user_install / "Antigravity.exe").write_text("")
+        self.assertTrue(self.detector.is_installed_for_user(self.home))
+
+    def test_is_installed_for_user_resources_tree(self):
+        """A user-scoped install dir with a ``resources`` tree (no exe) -> True."""
+        user_install = (self.home / "AppData" / "Local" / "Programs"
+                        / self.detector._PROGRAM_DIR_NAMES[0])
+        (user_install / "resources").mkdir(parents=True, exist_ok=True)
+        self.assertTrue(self.detector.is_installed_for_user(self.home))
+
+    def test_is_installed_for_user_residue_only_false(self):
+        """An empty user ``Programs/Antigravity`` dir (no exe / no resources) ->
+        False — residue, not a real install (no residue gate introduced)."""
+        user_install = (self.home / "AppData" / "Local" / "Programs"
+                        / self.detector._PROGRAM_DIR_NAMES[0])
+        user_install.mkdir(parents=True, exist_ok=True)  # empty
+        self.assertFalse(self.detector.is_installed_for_user(self.home))
+
+    def test_is_installed_for_user_absent_false(self):
+        """No Antigravity artifact anywhere under the user's home -> False."""
+        self.assertFalse(self.detector.is_installed_for_user(self.home))
+
+    def test_is_installed_for_user_ignores_other_users_install(self):
+        """THE CROSS-USER FIX: user B's check must NOT see user A's per-user
+        Antigravity. ``is_installed_for_user`` consults only ``user_B``'s own
+        home + machine-wide Program Files — never another user's Programs dir —
+        so user A having Antigravity does not make it "installed for" user B.
+
+        Fails against ``_find_app_path``, which under admin enumerates ALL
+        users' Programs dirs and would report B as installed."""
+        user_a_install = (self.root / "user_a" / "AppData" / "Local" / "Programs"
+                          / self.detector._PROGRAM_DIR_NAMES[0])
+        user_a_install.mkdir(parents=True, exist_ok=True)
+        (user_a_install / "Antigravity.exe").write_text("")
+        # user B (self.home) has NO Antigravity of its own.
+        self.assertFalse(self.detector.is_installed_for_user(self.home))
+
 
 class TestLinuxAntigravityResidue(unittest.TestCase):
     def setUp(self):

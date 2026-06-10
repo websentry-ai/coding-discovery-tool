@@ -219,15 +219,21 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
         except (PermissionError, OSError):
             pass
 
-    # Check common user binary locations the nvm/bun scans miss:
-    # Homebrew, the official installer (~/.local/bin), and npm-global prefix.
+    # Check common user binary locations the nvm/bun scans miss. ~/.local/bin and
+    # the npm-global prefix are user_home-relative (always safe). Homebrew and
+    # /usr/local are MACHINE-GLOBAL — under a root/MDM multi-user scan, probing
+    # them per-user would attribute one shared install to every user, so only
+    # add them when NOT root (same reasoning as the `which` backstop guard).
     if platform.system() != "Windows":
         gemini_candidates = [
-            Path("/opt/homebrew/bin/gemini"),
-            Path("/usr/local/bin/gemini"),
             user_home / ".local" / "bin" / "gemini",
             user_home / ".npm-global" / "bin" / "gemini",
         ]
+        if not is_running_as_root():
+            gemini_candidates = [
+                Path("/opt/homebrew/bin/gemini"),
+                Path("/usr/local/bin/gemini"),
+            ] + gemini_candidates
         for candidate in gemini_candidates:
             try:
                 if candidate.exists() and os.access(str(candidate), os.X_OK):
@@ -326,14 +332,20 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
         ]
     else:
         candidates = [
-            Path("/opt/homebrew/bin/claude"),          # Apple Silicon Homebrew
-            Path("/usr/local/bin/claude"),             # Intel Mac / manual install
             user_home / ".local" / "bin" / "claude",   # Official installer
             user_home / ".bun" / "bin" / "claude",     # Bun global install
             user_home / ".npm-global" / "bin" / "claude",  # npm global prefix
             user_home / ".config" / "yarn" / "global"  # yarn global install
             / "node_modules" / ".bin" / "claude",
         ]
+        # Homebrew and /usr/local are MACHINE-GLOBAL — under a root/MDM
+        # multi-user scan, probing them per-user would attribute one shared
+        # install to every user, so only add them when NOT root.
+        if not is_running_as_root():
+            candidates = [
+                Path("/opt/homebrew/bin/claude"),      # Apple Silicon Homebrew
+                Path("/usr/local/bin/claude"),         # Intel Mac / manual install
+            ] + candidates
 
     for candidate in candidates:
         try:

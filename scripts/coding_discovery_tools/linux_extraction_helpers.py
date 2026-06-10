@@ -331,14 +331,20 @@ def is_linux_ide_installed(ide_folder: str, user_home: Path) -> Tuple[bool, Opti
             if _exists(p):
                 return True, str(p)
 
-    # 6. Binary on PATH.
-    for bin_name in info["bin_names"]:
-        try:
-            found = shutil.which(bin_name)
-            if found:
-                return True, found
-        except (OSError, Exception) as e:  # noqa: BLE001 - which must never crash
-            logger.debug(f"PATH lookup for {bin_name} failed: {e}")
-            continue
+    # 6. Binary on PATH. ``shutil.which`` resolves the SCANNER's PATH, not
+    #    ``user_home``'s — under a root/MDM scan it would attribute the scanner's
+    #    editor to every user with extension residue (the cross-user FP this PR
+    #    fixes everywhere else). Skip it when root; the user_home-scoped and
+    #    machine-wide dir checks above already cover real installs. Mirrors the
+    #    ``find_claude_binary_for_user`` / ``_detect_gemini_cli`` ``which`` guard.
+    if not is_running_as_root():
+        for bin_name in info["bin_names"]:
+            try:
+                found = shutil.which(bin_name)
+                if found:
+                    return True, found
+            except (OSError, Exception) as e:  # noqa: BLE001 - which must never crash
+                logger.debug(f"PATH lookup for {bin_name} failed: {e}")
+                continue
 
     return False, None

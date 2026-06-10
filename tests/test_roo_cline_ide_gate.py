@@ -361,12 +361,25 @@ class TestWindowsIdeProbeLocationClasses(unittest.TestCase):
         self.assertEqual(path, str(install))
 
     def test_path_launcher_detected(self):
-        """The editor launcher on PATH (``shutil.which`` resolves) -> installed,
-        even with no install dir present."""
-        with patch("shutil.which", side_effect=lambda n: r"C:\X\cursor.exe" if n == "cursor.exe" else None):
+        """The editor launcher on PATH (``shutil.which`` resolves) -> installed
+        when NOT admin, even with no install dir present."""
+        with patch.object(win_helpers, "is_running_as_admin", return_value=False), \
+             patch("shutil.which", side_effect=lambda n: r"C:\X\cursor.exe" if n == "cursor.exe" else None):
             installed, path = win_helpers.is_windows_ide_installed("Cursor", self.home)
         self.assertTrue(installed)
         self.assertEqual(path, r"C:\X\cursor.exe")
+
+    def test_path_launcher_skipped_when_admin(self):
+        """Under an elevated admin scan the ``shutil.which`` PATH step is SKIPPED
+        — it resolves the SCANNER's PATH, not user_home's, so honouring it would
+        attribute the admin's editor to every user with extension residue (the
+        cross-user FP). With no install dir present the result is (False, None)
+        even though ``which`` would resolve. Mirrors the Linux/Gemini guard."""
+        with patch.object(win_helpers, "is_running_as_admin", return_value=True), \
+             patch("shutil.which", side_effect=lambda n: r"C:\X\cursor.exe" if n == "cursor.exe" else None):
+            installed, path = win_helpers.is_windows_ide_installed("Cursor", self.home)
+        self.assertFalse(installed)
+        self.assertIsNone(path)
 
 
 class TestLinuxIdeProbeLocationClasses(unittest.TestCase):
@@ -458,12 +471,27 @@ class TestLinuxIdeProbeLocationClasses(unittest.TestCase):
         self.assertEqual(path, str(install))
 
     def test_path_binary_detected(self):
-        """The editor binary on PATH (``shutil.which`` resolves) -> installed."""
+        """The editor binary on PATH (``shutil.which`` resolves) -> installed
+        when NOT root."""
         with self._abs_redirect(), \
+             patch.object(linux_helpers, "is_running_as_root", return_value=False), \
              patch("shutil.which", side_effect=lambda n: "/usr/bin/code" if n == "code" else None):
             installed, path = linux_helpers.is_linux_ide_installed("Code", self.home)
         self.assertTrue(installed)
         self.assertEqual(path, "/usr/bin/code")
+
+    def test_path_binary_skipped_when_root(self):
+        """Under a root/MDM scan the ``shutil.which`` PATH step is SKIPPED — it
+        resolves the SCANNER's PATH, not user_home's, so honouring it would
+        attribute the scanner's editor to every user with extension residue (the
+        cross-user FP). With no install dir present the result is (False, None)
+        even though ``which`` would resolve. Mirrors the Gemini/Claude guard."""
+        with self._abs_redirect(), \
+             patch.object(linux_helpers, "is_running_as_root", return_value=True), \
+             patch("shutil.which", side_effect=lambda n: "/usr/bin/code" if n == "code" else None):
+            installed, path = linux_helpers.is_linux_ide_installed("Code", self.home)
+        self.assertFalse(installed)
+        self.assertIsNone(path)
 
 
 if __name__ == "__main__":

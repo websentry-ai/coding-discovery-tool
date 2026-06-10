@@ -81,14 +81,21 @@ def is_windows_ide_installed(ide_folder: str, user_home: Path) -> Tuple[bool, Op
                 logger.debug(f"Could not check IDE dir {app_dir}: {e}")
                 continue
 
-    for exe_name in info["exe_names"]:
-        try:
-            found = shutil.which(exe_name)
-            if found:
-                return True, found
-        except (OSError, Exception) as e:  # noqa: BLE001 - which must never crash
-            logger.debug(f"PATH lookup for {exe_name} failed: {e}")
-            continue
+    # ``shutil.which`` resolves the SCANNER's PATH, not ``user_home``'s. Under an
+    # elevated admin scan the admin's own VS Code/Cursor on PATH would be
+    # attributed to every user with extension residue (the cross-user FP this PR
+    # fixes everywhere else). Skip it when admin; the user_home-scoped and
+    # machine-wide dir checks above already cover real installs. Mirrors the
+    # Linux guard and ``find_claude_binary_for_user``'s ``which`` guard.
+    if not is_running_as_admin():
+        for exe_name in info["exe_names"]:
+            try:
+                found = shutil.which(exe_name)
+                if found:
+                    return True, found
+            except (OSError, Exception) as e:  # noqa: BLE001 - which must never crash
+                logger.debug(f"PATH lookup for {exe_name} failed: {e}")
+                continue
 
     return False, None
 

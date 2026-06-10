@@ -1,28 +1,10 @@
 #!/usr/bin/env python3
-"""
-Scan ONE MCP server on demand and report it to the control plane.
+"""Scan ONE MCP server on demand and report it to the control plane.
 
-This is the fast path: when the gateway sees an MCP tool call for a server whose
-fingerprint it doesn't recognise yet, it tells the client (via the PreToolUse
-hook) to scan just that one server. This script does exactly that — it reuses the
-normal discovery scanner (`transform_mcp_servers_to_array`, including its OAuth
-token injection and env/header stripping), then POSTs the result to the dedicated
-single-server endpoint, which upserts MCPServerMetadata and kicks canonicalisation.
-So a newly added MCP server becomes policy-ready in minutes instead of waiting for
-the daily full scan.
-
-Unlike the full discovery report this sends NO device / project / installation
-data — the endpoint writes metadata only (keyed by fingerprint), so no device_id
-is needed. `env` / `headers` are stripped from the payload by the scanner.
-
-All HTTP uses curl (never urllib) per the Zscaler constraint in CLAUDE.md.
-
-Usage:
-  scan_single_mcp_server.py --name linear \\
-      --server-json '{"url": "https://mcp.linear.app/sse"}' \\
-      --domain https://api.example.com [--api-key KEY]
-
-The API key falls back to the UNBOUND_API_KEY environment variable.
+Reuses the discovery scanner for a single server, then POSTs to the
+single-server endpoint, which writes metadata only (keyed by fingerprint, no
+device/project) and kicks canonicalisation. HTTP uses curl per the Zscaler
+constraint in CLAUDE.md.
 """
 import argparse
 import json
@@ -50,13 +32,17 @@ def scan_one(server_name, server_config):
 
 
 def report(domain, api_key, server_obj):
-    """POST the scanned server to the single-server endpoint. Returns the curl result."""
+    """POST the scanned server to the single-server endpoint. Returns the curl result.
+
+    The bearer token is fed through a curl config on stdin (`--config -`) so it
+    never lands in argv / /proc/<pid>/cmdline.
+    """
     url = f"{_normalize_url(domain)}{REPORT_PATH}"
     payload = json.dumps({"mcp_server": server_obj})
+    curl_config = f'header = "Authorization: Bearer {api_key}"\n'
     return subprocess.run(
         [
-            "curl", "-s", "-X", "POST",
-            "-H", f"Authorization: Bearer {api_key}",
+            "curl", "-s", "-X", "POST", "--config", "-",
             "-H", "Content-Type: application/json",
             "-H", "User-Agent: AI-Tools-Discovery/1.0",
             "-d", payload,
@@ -64,6 +50,7 @@ def report(domain, api_key, server_obj):
             "-w", "\n%{http_code}",
             url,
         ],
+        input=curl_config,
         capture_output=True, text=True, timeout=90,
     )
 
@@ -71,46 +58,53 @@ def report(domain, api_key, server_obj):
 def main():
     parser = argparse.ArgumentParser(description="Scan one MCP server and report it.")
     parser.add_argument("--name", required=True, help="MCP server name (as configured)")
-    parser.add_argument("--server-json", required=True,
-                        help='JSON server config, e.g. {"command":..,"args":..,"url":..,"type":..}')
+    # Prefer the env var so the config (which may carry secrets in `args`) never
+    # appears in the process argv / /proc/<pid>/cmdline.
+    parser.add_argument("--server-json", default=os.environ.get("UNBOUND_MCP_SERVER_JSON"),
+                        help='JSON server config (defaults to the UNBOUND_MCP_SERVER_JSON env)')
     parser.add_argument("--domain", required=True, help="Control-plane base URL")
     parser.add_argument("--api-key", default=os.environ.get("UNBOUND_API_KEY"),
                         help="Discovery/gateway API key (defaults to UNBOUND_API_KEY env)")
     args = parser.parse_args()
+    ctx = f"server={args.name!r} domain={args.domain!r}"
 
     if not args.api_key:
-        print("error: no api key (pass --api-key or set UNBOUND_API_KEY)", file=sys.stderr)
+        print(f"error: no api key (pass --api-key or set UNBOUND_API_KEY) [{ctx}]", file=sys.stderr)
+        return 2
+    if not args.server_json:
+        print(f"error: no server config (pass --server-json or set UNBOUND_MCP_SERVER_JSON) [{ctx}]",
+              file=sys.stderr)
         return 2
 
     try:
         server_config = json.loads(args.server_json)
     except (ValueError, TypeError) as e:
-        print(f"error: invalid --server-json: {e}", file=sys.stderr)
+        print(f"error: invalid server config json: {e} [{ctx}]", file=sys.stderr)
         return 2
     if not isinstance(server_config, dict):
-        print("error: --server-json must be a JSON object", file=sys.stderr)
+        print(f"error: server config must be a JSON object [{ctx}]", file=sys.stderr)
         return 2
 
     try:
         server_obj = scan_one(args.name, server_config)
     except Exception as e:
-        print(f"error: scan failed: {e}", file=sys.stderr)
+        print(f"error: scan failed: {e} [{ctx}]", file=sys.stderr)
         return 1
     if not server_obj:
-        print("error: scan produced no result", file=sys.stderr)
+        print(f"error: scan produced no result [{ctx}]", file=sys.stderr)
         return 1
 
     try:
         result = report(args.domain, args.api_key, server_obj)
     except Exception as e:
-        print(f"error: report failed: {e}", file=sys.stderr)
+        print(f"error: report failed: {e} [{ctx}]", file=sys.stderr)
         return 1
 
     out = (result.stdout or "").strip()
     http_code = out.rsplit("\n", 1)[-1] if out else ""
     if http_code.startswith("2"):
         return 0
-    print(f"error: report failed (http {http_code}): {out[:300]} {(result.stderr or '')[:200]}",
+    print(f"error: report failed (http {http_code}) [{ctx}]: {out[:300]} {(result.stderr or '')[:200]}",
           file=sys.stderr)
     return 1
 

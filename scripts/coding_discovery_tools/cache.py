@@ -315,6 +315,14 @@ def acquire_lock() -> str:
         return "contended"
 
     if LOCK_PATH.exists():
+        # Log WHY we're stealing so a rerun is distinguishable in logs: recovery
+        # from a predecessor killed without cleanup (dead PID) vs a plain stale
+        # (heartbeat-died) lock.
+        _stale_pid = _read_lock_pid()
+        if _stale_pid is not None and os.name == "posix" and not _pid_alive(_stale_pid):
+            logger.info(f"stealing discovery lock from dead PID {_stale_pid} (predecessor killed without cleanup)")
+        else:
+            logger.info("stealing stale discovery lock (heartbeat older than the stale window)")
         try:
             LOCK_PATH.unlink()
         except OSError as e:

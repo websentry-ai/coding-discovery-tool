@@ -30,7 +30,7 @@ from typing import Dict, Iterator, List, Optional, Callable
 # 30 minutes. Pass --timeout <=0 to disable.
 DEFAULT_RUN_TIMEOUT_SECONDS = 1800
 
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 
 try:
     from .coding_tool_base import BaseMCPConfigExtractor
@@ -2357,6 +2357,16 @@ def main():
             except Exception:
                 pass
 
+    def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15) -> None:
+        """Run the best-effort failure report on a daemon thread bounded by
+        join_timeout, so a slow/retrying backend can't block exit. Used by both
+        the abort path and the normal except path (which were asymmetric)."""
+        t = threading.Thread(
+            target=_mark_run_failed, args=(error_type, message), daemon=True,
+        )
+        t.start()
+        t.join(timeout=join_timeout)
+
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between
         # the try-body completing and finally cancelling the watchdog, where a
@@ -2364,15 +2374,21 @@ def main():
         if _finished[0]:
             return
         logger.error(message)
-        # Release the lock FIRST so a follow-up run is never blocked. Then report
-        # on a bounded daemon thread so a slow backend (send_scan_event retries
-        # with backoff) can't keep us alive past the parent's kill grace.
+        # Release the lock FIRST so a follow-up run is never blocked even if the
+        # reports below stall. Surface the abort to Sentry (the observability path
+        # an endpoint scanner actually has — no Prometheus here), on top of the
+        # "failed" scan event whose error_type already lets the backend graph
+        # timeout vs signal vs crash.
         _release_lock_and_heartbeat()
-        _reporter = threading.Thread(
-            target=_mark_run_failed, args=(error_type, message), daemon=True,
-        )
-        _reporter.start()
-        _reporter.join(timeout=15)
+        try:
+            report_to_sentry(
+                RuntimeError(message),
+                {**sentry_ctx, "phase": "abort", "abort_reason": error_type},
+                level="warning",
+            )
+        except Exception:
+            pass
+        _report_failed_bounded(error_type, message)
         os._exit(1)
 
     def _on_watchdog_timeout() -> None:
@@ -2854,7 +2870,7 @@ def main():
         # paths may have already reported, in which case this is a no-op).
         if device_id and run_id:
             logger.error("Sending scan failed event due to error...")
-            _mark_run_failed(type(e).__name__, str(e))
+            _report_failed_bounded(type(e).__name__, str(e))
         else:
             logger.warning("Skipping scan failed event - device_id or run_id not initialized")
 

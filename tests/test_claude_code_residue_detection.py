@@ -369,6 +369,7 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
     # claude binary is attributed to its OWNER (Homebrew/usr-local) or to every
     # scanned user when root-owned (apt/dnf /usr/bin), instead of being dropped.
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
     def test_homebrew_owned_by_this_user_detected_when_root(self):
         """W1: root scan, /opt/homebrew/bin/claude present and owned by a uid
         whose home == the scanned user_home -> attributed (returned). Fails
@@ -383,6 +384,7 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
             result = find_claude_binary_for_user(self.home)
         self.assertEqual(result, str(_HOMEBREW))
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
     def test_homebrew_owned_by_other_user_not_detected_when_root(self):
         """W1 (the FP guard): root scan, /opt/homebrew/bin/claude owned by a
         DIFFERENT user's home -> skipped; with no user-local binary the finder

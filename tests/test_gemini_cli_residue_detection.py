@@ -382,6 +382,7 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
     # binary is attributed to its OWNER (Homebrew/usr-local) or to every
     # scanned user when root-owned (apt/dnf), instead of being dropped.
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
     def test_homebrew_owned_by_this_user_detected_when_root(self):
         """W1: root scan, /opt/homebrew/bin/gemini present and owned by a uid
         whose home == the scanned user_home -> attributed (detected). Fails
@@ -398,6 +399,7 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(_HOMEBREW))
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
     def test_homebrew_owned_by_other_user_not_detected_when_root(self):
         """W1 (the FP guard): root scan, /opt/homebrew/bin/gemini owned by a
         DIFFERENT user's home -> that candidate is skipped; with no user-local
@@ -459,6 +461,7 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         self.assertIsNone(result)
 
 
+@unittest.skipIf(os.name == "nt", "POSIX-only: machine_global_binary_owned_by_user uses pwd (absent on Windows)")
 class TestMachineGlobalBinaryOwnedByUser(unittest.TestCase):
     """Focused unit tests for the shared ``machine_global_binary_owned_by_user``
     helper — the four branches: uid0 -> True, owner-match -> True,

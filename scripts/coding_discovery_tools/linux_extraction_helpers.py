@@ -8,8 +8,9 @@ they are platform-agnostic (path ops, file reading, project-root detection).
 """
 
 import logging
+import shutil
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .constants import MAX_SEARCH_DEPTH
 
@@ -209,3 +210,141 @@ def linux_home_for_user(username: str) -> Path:
     if username == "root":
         return Path("/root")
     return Path(f"/home/{username}")
+
+
+# Maps the globalStorage IDE-folder key (as used by Cline/Roo ``SUPPORTED_IDES``)
+# to the host editor's Linux install layout: absolute system dirs, ``/opt`` and
+# ``~/.local/share`` dir names, Snap names, Flatpak app-ids, ``.desktop`` file
+# stems, and PATH binary names. Used to gate Cline/Roo rows on the host editor
+# actually being installed (the ``~/.config/<IDE>/.../globalStorage/<ext-id>``
+# dir survives an editor uninstall, so it alone is not proof of install).
+_LINUX_IDE_INSTALL_INFO: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "Code": {
+        "system_dirs": ("/usr/share/code", "/usr/lib/code", "/usr/share/code-insiders"),
+        "opt_local_names": ("VSCode", "code", "Code"),
+        "snap_names": ("code", "code-insiders"),
+        "flatpak_ids": ("com.visualstudio.code", "com.visualstudio.code-oss"),
+        "desktop_stems": ("code", "code-oss", "code_code"),
+        "bin_names": ("code", "code-insiders", "codium"),
+    },
+    "Cursor": {
+        "system_dirs": ("/usr/share/cursor", "/usr/lib/cursor"),
+        "opt_local_names": ("Cursor", "cursor"),
+        "snap_names": ("cursor",),
+        "flatpak_ids": ("com.cursor.Cursor", "sh.cursor.Cursor"),
+        "desktop_stems": ("cursor",),
+        "bin_names": ("cursor",),
+    },
+    "Windsurf": {
+        "system_dirs": ("/usr/share/windsurf", "/usr/lib/windsurf"),
+        "opt_local_names": ("Windsurf", "windsurf"),
+        "snap_names": ("windsurf",),
+        "flatpak_ids": ("com.codeium.windsurf",),
+        "desktop_stems": ("windsurf",),
+        "bin_names": ("windsurf",),
+    },
+}
+
+# Shared Flatpak roots (system + per-user). The per-user one is resolved
+# relative to ``user_home`` so a root/MDM scan checks the right user.
+_FLATPAK_SYSTEM_ROOT = Path("/var/lib/flatpak")
+
+
+def is_linux_ide_installed(ide_folder: str, user_home: Path) -> Tuple[bool, Optional[str]]:
+    """Return ``(installed, path)`` for a host editor (VS Code / Cursor /
+    Windsurf) on Linux, scanning every documented install location:
+
+    * system dirs (``/usr/share/code`` & friends),
+    * ``/opt/<IDE>`` and ``~/.local/share/<IDE>`` (tarball sideloads),
+    * Snap (``/snap/<name>``, ``/snap/bin/<name>``),
+    * Flatpak (``/var/lib/flatpak`` and ``~/.local/share/flatpak``),
+    * freedesktop ``.desktop`` launchers (system + ``~/.local/share``), and
+    * the editor binary on PATH (``code``/``cursor``/``windsurf``/``codium``).
+
+    The thorough probe is deliberate: a too-narrow host check would HIDE a real
+    Cline/Roo user whose editor lives somewhere the check forgot, trading the
+    residue false-positive for a false-negative. ANY hit counts as installed.
+    Never raises — every filesystem/PATH probe is wrapped.
+
+    Args:
+        ide_folder: The ``SUPPORTED_IDES`` key (``Code`` / ``Cursor`` /
+            ``Windsurf``).
+        user_home: The home dir of the user being scanned (so a root/MDM scan
+            checks THAT user's per-user installs, not the scanner's).
+
+    Returns:
+        Tuple of (is_installed, path) — path is None when not installed.
+    """
+    info = _LINUX_IDE_INSTALL_INFO.get(ide_folder)
+    if not info:
+        return False, None
+
+    def _exists_dir(path: Path) -> bool:
+        try:
+            return path.exists() and path.is_dir()
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check IDE path {path}: {e}")
+            return False
+
+    def _exists(path: Path) -> bool:
+        try:
+            return path.exists()
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check IDE path {path}: {e}")
+            return False
+
+    # 1. System install dirs.
+    for system_dir in info["system_dirs"]:
+        p = Path(system_dir)
+        if _exists_dir(p):
+            return True, str(p)
+
+    # 2. /opt and per-user ~/.local/share sideloads.
+    for name in info["opt_local_names"]:
+        for base in (Path("/opt"), user_home / ".local" / "share"):
+            p = base / name
+            if _exists_dir(p):
+                return True, str(p)
+
+    # 3. Snap.
+    for snap_name in info["snap_names"]:
+        for p in (Path("/snap") / snap_name, Path("/snap/bin") / snap_name):
+            if _exists(p):
+                return True, str(p)
+
+    # 4. Flatpak (system + per-user) — app dir under app/<id>.
+    for flatpak_id in info["flatpak_ids"]:
+        for root in (_FLATPAK_SYSTEM_ROOT, user_home / ".local" / "share" / "flatpak"):
+            p = root / "app" / flatpak_id
+            if _exists_dir(p):
+                return True, str(p)
+
+    # 5. freedesktop .desktop launchers (system + per-user).
+    desktop_roots = (
+        Path("/usr/share/applications"),
+        Path("/usr/local/share/applications"),
+        user_home / ".local" / "share" / "applications",
+    )
+    for stem in info["desktop_stems"]:
+        for root in desktop_roots:
+            p = root / f"{stem}.desktop"
+            if _exists(p):
+                return True, str(p)
+
+    # 6. Binary on PATH. ``shutil.which`` resolves the SCANNER's PATH, not
+    #    ``user_home``'s — under a root/MDM scan it would attribute the scanner's
+    #    editor to every user with extension residue (the cross-user FP this PR
+    #    fixes everywhere else). Skip it when root; the user_home-scoped and
+    #    machine-wide dir checks above already cover real installs. Mirrors the
+    #    ``find_claude_binary_for_user`` / ``_detect_gemini_cli`` ``which`` guard.
+    if not is_running_as_root():
+        for bin_name in info["bin_names"]:
+            try:
+                found = shutil.which(bin_name)
+                if found:
+                    return True, found
+            except (OSError, Exception) as e:  # noqa: BLE001 - which must never crash
+                logger.debug(f"PATH lookup for {bin_name} failed: {e}")
+                continue
+
+    return False, None

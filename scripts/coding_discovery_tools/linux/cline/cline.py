@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
-from ...linux_extraction_helpers import get_linux_user_homes, is_running_as_root
+from ...linux_extraction_helpers import (
+    get_linux_user_homes,
+    is_linux_ide_installed,
+    is_running_as_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,19 +47,47 @@ class LinuxClineDetector(BaseToolDetector):
 
     def _detect_cline_for_user(self, user_home: Path) -> List[Dict]:
         results = []
+        # Require BOTH the globalStorage extension dir AND the host editor to be
+        # installed (mirrors macOS): the ``globalStorage/<ext-id>`` dir survives
+        # an editor uninstall, so it alone is not proof of install.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_cline_extension(user_home, ide_folder)
             if extension_info:
                 extension_path, version = extension_info
-                results.append({
-                    "name": f"Cline ({ide_display_name})",
-                    "version": version or "Unknown",
-                    "publisher": "Saoud Rizwan",
-                    "ide": ide_display_name,
-                    "install_path": str(extension_path),
-                })
-                logger.info(f"Detected: Cline ({ide_display_name}) v{version or 'Unknown'}")
+                host_installed, _ = self._check_ide_installation(ide_folder, user_home)
+                if host_installed and extension_path:
+                    results.append({
+                        "name": f"Cline ({ide_display_name})",
+                        "version": version or "Unknown",
+                        "publisher": "Saoud Rizwan",
+                        "ide": ide_display_name,
+                        "install_path": str(extension_path),
+                    })
+                    logger.info(f"Detected: Cline ({ide_display_name}) v{version or 'Unknown'}")
         return results
+
+    def _check_ide_installation(self, ide_name: str, user_home: Path) -> Tuple[bool, Optional[str]]:
+        """
+        Check whether the host editor (VS Code / Cursor / Windsurf) is installed
+        on Linux for the user being scanned.
+
+        Delegates to the shared ``is_linux_ide_installed`` probe, which checks
+        system dirs, ``/opt`` and ``~/.local/share`` sideloads, Snap, Flatpak,
+        ``.desktop`` launchers, and the editor binary on PATH. ANY of those
+        counts as installed, so a real Cline user is never hidden. Never raises.
+
+        Args:
+            ide_name: The ``SUPPORTED_IDES`` key (Code / Cursor / Windsurf).
+            user_home: Home dir of the user being scanned.
+
+        Returns:
+            Tuple of (is_installed, path).
+        """
+        try:
+            return is_linux_ide_installed(ide_name, user_home)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not check {ide_name} install presence: {e}")
+            return False, None
 
     def _check_cline_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[Path, Optional[str]]]:
         extension_dir = (

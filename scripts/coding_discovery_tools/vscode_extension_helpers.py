@@ -1,21 +1,12 @@
 """Shared helpers for reading the VS Code extension install registry.
 
-VS Code-family editors (VS Code, Cursor, Windsurf, VSCodium, Antigravity) record
-every installed extension in ``<editor-extensions-dir>/extensions.json`` and
-REWRITE that file when an extension is uninstalled. That makes the registry the
-authoritative "is this extension live?" signal — unlike the extension's
-``globalStorage/<ext-id>`` directory, which VS Code does NOT clean up on
-uninstall (microsoft/vscode#119022). Detectors that gate on globalStorage
-therefore surface phantom rows for extensions the user has removed; gating on the
-``extensions.json`` entry instead kills that false positive.
+VS Code-family editors rewrite ``<extensions-dir>/extensions.json`` on uninstall,
+making it the authoritative "is this extension live?" signal — unlike the
+extension's ``globalStorage/<ext-id>`` dir, which survives uninstall
+(microsoft/vscode#119022) and so produces phantom rows. The extensions dir is
+home-relative and identical across macOS/Windows/Linux, so one mapping serves all.
 
-The extensions directory is the editor's per-user one (``~/.vscode/extensions``,
-``~/.cursor/extensions``, …) — the SAME directory the per-tool version globs
-already read — and is identical across macOS, Windows, and Linux, so a single
-mapping serves every OS.
-
-Everything here is std-lib only and wraps all I/O: this code runs on customer
-machines and must never raise.
+All I/O is wrapped — this runs on customer machines and must never raise.
 """
 
 import json
@@ -25,10 +16,9 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Per-user extensions registry directory for each VS Code-family editor, keyed by
-# the editor's ``SUPPORTED_IDES`` folder name. These dirs are home-relative and
-# identical on macOS/Windows/Linux (VS Code uses ``~/.vscode/extensions``
-# cross-platform, not the ``~/.config`` app-data tree).
+# Per-user extensions dir per VS Code-family editor, keyed by SUPPORTED_IDES folder
+# name. Home-relative and identical on all OSes (VS Code uses ~/.vscode/extensions
+# cross-platform, not the ~/.config app-data tree).
 _EXTENSIONS_DIR_BY_EDITOR = {
     "Code": ".vscode/extensions",
     "Cursor": ".cursor/extensions",
@@ -60,19 +50,9 @@ def find_extension_in_editor(
     """Return ``(matched_location, version)`` if ``ext_id`` is a live entry in the
     editor's ``extensions.json``, else None.
 
-    The match is CASE-INSENSITIVE on the entry's ``identifier.id`` so a constant
-    cased one way (e.g. ``kilocode.Kilo-Code``) matches a registry entry cased the
-    other (``kilocode.kilo-code``) and vice-versa. The returned ``version`` comes
-    from the matched entry's ``version`` field (None when absent). The returned
-    ``matched_location`` is the entry's resolved on-disk location when available,
-    else the extensions dir itself.
-
-    Gating on this entry (which VS Code rewrites on uninstall) instead of the
-    extension's globalStorage dir (which survives uninstall — microsoft/vscode
-    #119022) is what distinguishes a live install from leftover residue.
-
-    Never raises — all I/O is wrapped. Returns None for an unknown editor, a
-    missing/empty/corrupt ``extensions.json``, or no matching entry.
+    Matches case-insensitively on ``identifier.id`` (constants and registry entries
+    disagree on casing, e.g. ``kilocode.Kilo-Code`` vs ``kilocode.kilo-code``).
+    Never raises — returns None for an unknown editor or a missing/corrupt registry.
 
     Args:
         user_home: The user's home directory.

@@ -28,14 +28,11 @@ from ...utils import (
 
 logger = logging.getLogger(__name__)
 
-# NOTE (gate moved to the binary): the marker machinery below
+# NOTE: the detection gate now keys on the ``copilot`` binary
+# (``_resolve_binary``), so the marker machinery below
 # (``_CLI_STRONG_MARKER_*`` / ``_CLI_SHARED_MARKER_*`` /
-# ``_copilot_dir_has_strong_artifact`` / ``_copilot_dir_has_shared_artifact``)
-# is RETAINED-BUT-UNUSED for the detection gate, which now keys on the ``copilot``
-# binary (``_resolve_binary``) instead of the ``~/.copilot`` config dir. It is
-# kept here (rather than deleted) to keep this diff focused; FOLLOW-UP: remove the
-# marker machinery once nothing references it. The original rationale is preserved
-# below for that follow-up.
+# ``_copilot_dir_has_*_artifact``) is currently unused; its rationale is kept for
+# the eventual removal.
 #
 # The CLI home directory is version-dependent in its exact contents. We never
 # gate on a single file, and never on bare-directory existence alone — we
@@ -276,12 +273,11 @@ class MacOSCopilotCliDetector(BaseToolDetector):
     Detector for GitHub Copilot CLI installations on macOS systems.
 
     Detection gates on the ``copilot`` BINARY (resolved per-user via
-    ``_resolve_binary``), not on the ``~/.copilot/`` config directory. The config
-    dir is also written by the IDE Copilot agent (skills/agents/instructions/ide)
-    and by Unbound's own MDM onboarding (hooks/), and it survives a CLI
-    uninstall, so gating on it produced phantom CLI rows (devices D2FJV74J5Q /
-    MY4W6QQGCQ). ``~/.copilot`` remains the EXTRACTOR root (rules/MCP/settings/
-    skills run independently once the tool is detected).
+    ``_resolve_binary``), not on the ``~/.copilot/`` config dir — the IDE Copilot
+    agent (skills/agents/instructions/ide) and Unbound's MDM onboarding (hooks/)
+    also write it, and it survives a CLI uninstall, so gating on it produced
+    phantom CLI rows. ``~/.copilot`` remains the EXTRACTOR root (rules/MCP/
+    settings/skills run independently once the tool is detected).
 
     When ``user_home`` is set on the instance (the per-user path used by the
     live discovery loop via ``detect_tool_for_user``), detection is scoped to
@@ -346,14 +342,10 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         by the caller.
 
         Args:
-            binary: When provided, probe THIS exact ``copilot`` path — the one
-                ``_detect_for_user`` already resolved — with no re-resolve and no
-                bare-PATH fallback. This is the live path: it avoids the
-                double-resolve (the caller already paid for ``_resolve_binary``)
-                and works even when ``self.user_home`` is unset (the standalone
-                root ``detect()`` fallback). When ``None``, keep the legacy
-                behaviour: resolve the per-user binary off ``self.user_home`` if
-                set, else fall back to the bare ``copilot`` PATH probe.
+            binary: When provided, probe this exact ``copilot`` path with no
+                re-resolve and no bare-PATH fallback (avoids a double-resolve and
+                works when ``self.user_home`` is unset). When ``None``, resolve the
+                per-user binary off ``self.user_home`` if set, else probe bare PATH.
 
         Returns:
             Parsed version (e.g. ``0.0.399``) or None if it can't be determined.
@@ -361,8 +353,7 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             banner so the stored value is clean and within the backend's version
             column limit (a raw multi-line banner overflows it).
         """
-        # Live path: probe the binary detection already resolved. No re-resolve,
-        # no bare-PATH fallback — the caller passed the exact install it gated on.
+        # Probe the exact binary detection already resolved.
         if binary is not None:
             try:
                 return _parse_cli_version(
@@ -372,12 +363,9 @@ class MacOSCopilotCliDetector(BaseToolDetector):
                 logger.debug(f"Could not extract Copilot CLI version from resolved binary: {exc}")
                 return None
 
-        # No-arg back-compat path. Resolve the per-user binary first (root's PATH
-        # lacks the user's copilot install during an MDM all-users scan), then
-        # fall back to the bare-PATH probe for the running-user case. Use the SAME
-        # per-OS resolver detection uses (``self._resolve_binary``, overridden on
-        # Linux/Windows) so a detected install's OS-specific location (npm-global
-        # prefix, /usr/local/bin, AppData npm) is honoured here too.
+        # No-arg path: resolve the per-user binary first (root's PATH lacks the
+        # user's copilot under an MDM scan), then fall back to the bare-PATH probe.
+        # Uses the same per-OS ``_resolve_binary`` detection uses.
         try:
             if self.user_home is not None:
                 resolved = self._resolve_binary(self.user_home)
@@ -446,21 +434,11 @@ class MacOSCopilotCliDetector(BaseToolDetector):
     def _resolve_binary(self, user_home: Path) -> Optional[str]:
         """Resolve the ``copilot`` CLI binary for ``user_home`` (the detection gate).
 
-        Gating on the binary — not the ``~/.copilot`` config dir, which the IDE
-        agent and Unbound's MDM hook also write and which survives a CLI
-        uninstall — is what kills the phantom-CLI false positive.
-
-        Order (mirrors ``find_claude_binary_for_user``):
-          - per-user installs: ``~/.local/bin/copilot``, ``~/.bun/bin/copilot``,
-            newest ``~/.nvm/versions/node/*/bin/copilot`` (via
-            ``_resolve_copilot_binary``)
-          - the npm-global prefix (Homebrew node / nvm / pnpm) via the shared
-            resolver (its ``npm prefix -g`` probe is root-guarded internally)
-          - machine-global Homebrew: ``/opt/homebrew/bin/copilot`` and
-            ``/usr/local/bin/copilot``, owner-attributed under a root/MDM scan so
-            one user's install isn't fanned out to every user (the 93b5fc2
-            cross-user FP); a root-owned system-wide binary attributes to each
-            scanned user.
+        Mirrors ``find_claude_binary_for_user``: per-user installs, then the
+        npm-global prefix (root-guarded), then machine-global Homebrew. The
+        machine-global candidates are owner-attributed under a root/MDM scan so one
+        user's install isn't fanned out to every user (a root-owned system binary
+        does attribute to each).
 
         Best-effort: returns an absolute path string or None. Never raises.
         """
@@ -490,12 +468,9 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         """
         Detect the Copilot CLI for a single user's home directory.
 
-        Gates on the ``copilot`` binary (resolved via ``_resolve_binary``). The
-        ``~/.copilot`` config dir is NOT the gate — it is also written by the IDE
-        Copilot agent (skills/agents/instructions/ide) and by Unbound's own MDM
-        onboarding (hooks/), and survives a CLI uninstall, so gating on it
-        produced phantom CLI rows. Returns a tool-info dict whose ``install_path``
-        is the resolved binary, or None when no binary is found.
+        Gates on the ``copilot`` binary (via ``_resolve_binary``), not the
+        ``~/.copilot`` config dir (see the class docstring). Returns a tool-info
+        dict whose ``install_path`` is the resolved binary, or None.
         """
         binary = self._resolve_binary(user_home)
         if not binary:
@@ -503,18 +478,13 @@ class MacOSCopilotCliDetector(BaseToolDetector):
 
         return {
             "name": self.tool_name,
-            # Probe the binary we just resolved (not a re-resolve off
-            # self.user_home, and not the bare ``copilot`` PATH fallback): under a
-            # root/MDM all-users scan root's PATH lacks the user's copilot, so the
-            # bare probe would read "unknown" for every user.
+            # Probe the binary we just resolved: under a root/MDM scan root's PATH
+            # lacks the user's copilot, so a bare probe reads "unknown" per user.
             "version": self.get_version(binary) or "unknown",
             "publisher": "GitHub",
             "install_path": binary,
-            # The resolved config dir (~/.copilot, COPILOT_HOME-aware). install_path
-            # is the binary now (the gate), but the rules/MCP/settings/skills
-            # extractors still key on the config dir, so the orchestrator uses
-            # _config_path to match this install's per-user settings + coalesce its
-            # user-scope skills (see _process_copilot_cli_tool). Underscore-prefixed
-            # so it stays internal (stripped from the backend payload).
+            # Resolved config dir (~/.copilot, COPILOT_HOME-aware): install_path is
+            # now the binary, but the extractors still key on the config dir.
+            # Underscore-prefixed so it stays internal (stripped from the payload).
             "_config_path": str(_resolve_copilot_dir(user_home)),
         }

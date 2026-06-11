@@ -185,13 +185,10 @@ class TestFilterThenGate(unittest.TestCase):
 class TestProcessSingleToolCarriesConfigPath(unittest.TestCase):
     """Integration across the REAL boundary the unit tests above skipped.
 
-    The unit tests hand-build the tool dict already containing ``config_path``;
-    they never exercise ``process_single_tool`` -> ``_process_copilot_cli_tool``,
-    which rebuilds the dict and is where ``config_path`` was being DROPPED. This
-    runs the exact main() chain — ``process_single_tool`` ->
-    ``filter_tool_projects_by_user`` -> ``_copilot_cli_owned_by_user`` — for a
-    machine-global binary install with zero projects/permissions, the case that
-    was wrongly suppressed for the legitimate owner.
+    The unit tests hand-build the tool dict with ``config_path``; this runs the
+    actual ``process_single_tool`` -> ``filter_tool_projects_by_user`` ->
+    ``_copilot_cli_owned_by_user`` chain (where ``_process_copilot_cli_tool``
+    rebuilds the dict) for a machine-global binary install with no projects.
     """
 
     def setUp(self):
@@ -246,9 +243,9 @@ class TestProcessSingleToolCarriesConfigPath(unittest.TestCase):
 
     def test_config_path_stripped_from_backend_report(self):
         # _config_path is INTERNAL (underscore-prefixed): it drives per-user
-        # attribution but must NOT reach the backend payload — generate_single_tool_report
-        # strips _-prefixed keys. (This is the WARNING the rename closed; a bare
-        # ``config_path`` would have leaked the user's home path to the backend.)
+        # attribution but must NOT reach the backend payload — a bare
+        # ``config_path`` would leak the user's home path. generate_single_tool_report
+        # strips _-prefixed keys.
         processed = self.detector.process_single_tool(self._detection_tool())
         report = self.detector.generate_single_tool_report(processed, "device-1", "owner")
         sent = report["tools"][0]

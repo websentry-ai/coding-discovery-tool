@@ -10,12 +10,10 @@ Project skills:      **/.github/skills/<name>/SKILL.md
                      **/.claude/skills/<name>/SKILL.md
                      **/.agents/skills/<name>/SKILL.md
 
-DRY: the per-tool config (``COPILOT_CLI_ITEM_CONFIGS``) and the project-grouping
-helpers are inherited from ``MacOSCopilotCliSkillsExtractor``. Only the OS
-primitives differ — the all-users scan, the filesystem root + top-level
-enumeration, and the skip predicate (the Linux ``should_skip_system_path`` must
-NOT skip ``/home``, unlike the macOS one) — so the three methods that touch those
-primitives are overridden here with ``linux_extraction_helpers`` equivalents.
+The per-tool config and project-grouping helpers are inherited from
+``MacOSCopilotCliSkillsExtractor`` (DRY); only the OS primitives are overridden
+here. Note the Linux ``should_skip_system_path`` must NOT skip ``/home`` (unlike
+macOS), or project skills under user homes are dropped.
 """
 
 import logging
@@ -87,9 +85,7 @@ class LinuxCopilotCliSkillsExtractor(MacOSCopilotCliSkillsExtractor):
         """Recursively walk for ``.github``/``.claude``/``.agents`` skills dirs.
 
         Identical to the macOS walk but uses the Linux ``should_skip_system_path``
-        (which does NOT skip ``/home``, so project skills under user homes are not
-        silently dropped). Symlinked dirs are skipped; user-home tool dirs are not
-        double-counted as project skills; depth is bounded; never crashes.
+        (see the module docstring re ``/home``).
         """
         if current_depth > MAX_SEARCH_DEPTH:
             return

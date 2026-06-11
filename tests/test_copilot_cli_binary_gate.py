@@ -1,21 +1,17 @@
 """Binary-gate tests for GitHub Copilot CLI detection (macOS + Linux).
 
-Copilot CLI detection moved from the ``~/.copilot`` config dir (also written by
-the IDE Copilot agent and by Unbound's own MDM onboarding hook, and surviving a
-CLI uninstall) to the ``copilot`` binary. These tests pin both directions plus
-the new Linux detector:
+Detection gates on the ``copilot`` binary, not the ``~/.copilot`` config dir.
+These pin both directions plus the Linux detector:
 
   (a) ``~/.copilot`` with only ``hooks/unbound.json`` and NO binary -> None
-      (kills BOTH the config-residue FP and the Unbound-hook self-FP at once)
-  (b) ``~/.copilot`` + ``~/.local/bin/copilot`` (executable) -> detected,
+      (kills both the config-residue FP and the Unbound-hook self-FP)
+  (b) ``~/.copilot`` + an executable ``~/.local/bin/copilot`` -> detected,
       install_path is the binary
-  (c) the new ``LinuxCopilotCliDetector`` detects via the same binary gate
+  (c) ``LinuxCopilotCliDetector`` detects via the same binary gate
 
-The npm-global resolver is neutralised and ``is_running_as_root`` is pinned False
-so the gate depends ONLY on the per-user on-disk binary the test creates under the
-hermetic home (otherwise a CI box with a real ``copilot`` on PATH would leak in).
-The Homebrew owner-attribution branch (which uses ``os.stat``) is covered by a
-separate POSIX-only test that scopes its ``os.stat`` mock to the target path.
+The npm-global resolver is neutralised and ``is_running_as_root`` pinned False so
+the gate depends only on the binary the test creates under the hermetic home
+(else a CI box with a real ``copilot`` on PATH leaks in).
 """
 
 import os
@@ -105,7 +101,7 @@ class TestMacOSCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):
         """Under a root scan, a machine-global ``/opt/homebrew/bin/copilot`` is
         attributed to the scanned user only when owned by them (or root). The
         ``os.stat`` mock is SCOPED to that path so pathlib's own stat calls
-        elsewhere are untouched (gotcha #2); root is pinned True for this case."""
+        elsewhere are untouched; root is pinned True for this case."""
         brew = Path("/opt/homebrew/bin/copilot")
         real_stat = os.stat
 
@@ -150,11 +146,11 @@ class TestLinuxCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX X_OK semantics for the ~/.local/bin stub")
     def test_linux_version_threaded_from_resolved_binary(self):
-        """The Linux detector inherits the version-threading fix: with the bare
-        ``copilot`` OFF the scanner's PATH, the resolved binary is probed -> the
-        emitted row carries the parsed version, not "unknown" (the root-scan fix).
-        ``get_version`` is inherited from the macOS detector, so its ``run_command``
-        lives in the macOS module namespace.
+        """Version is threaded from the resolved binary: with the bare ``copilot``
+        OFF the scanner's PATH, the resolved binary is probed -> the row carries the
+        parsed version, not "unknown". ``get_version`` is inherited from the macOS
+        detector, so its ``run_command`` lives in the macOS module namespace (hence
+        the patch target).
         """
         binary = self.home / ".local" / "bin" / "copilot"
         _write_executable(binary)
@@ -207,7 +203,7 @@ class TestLinuxCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):
         """Under a root scan, the machine-global default Linuxbrew prefix
         ``/home/linuxbrew/.linuxbrew/bin/copilot`` is attributed to the scanned
         user when owned by them (or root). The ``os.stat`` mock is SCOPED to that
-        path so pathlib's own stat calls elsewhere are untouched (gotcha #2)."""
+        path so pathlib's own stat calls elsewhere are untouched."""
         brew = Path("/home/linuxbrew/.linuxbrew/bin/copilot")
         real_stat = os.stat
 
@@ -237,7 +233,7 @@ class TestLinuxCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):
         """The FP guard: under a root scan, ``/home/linuxbrew/.linuxbrew/bin/
         copilot`` owned by a DIFFERENT user is skipped, so with no user-local
         binary detection returns None (one user's Linuxbrew install is not fanned
-        out to every scanned user — the 93b5fc2 cross-user FP)."""
+        out to every scanned user)."""
         brew = Path("/home/linuxbrew/.linuxbrew/bin/copilot")
         other_home = self.home.parent / "someone_else"
         real_stat = os.stat
@@ -274,18 +270,13 @@ class TestLinuxCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):
 class TestWindowsCopilotCliWinGet(unittest.TestCase):
     """WinGet install of the GitHub Copilot CLI on Windows.
 
-    ``winget install GitHub.Copilot`` (package id ``GitHub.Copilot``) is a
-    documented Windows install method. The package is a portable zip whose
-    manifest declares ``Commands: [copilot]``, so WinGet drops a ``copilot.exe``
-    shim — named after the command alias, NOT the package id — into the per-user
-    ``%LOCALAPPDATA%\\Microsoft\\WinGet\\Links`` dir (mirrors the Claude WinGet
-    path in ``find_claude_binary_for_user``). The old Windows resolver omitted
-    this dir, so every WinGet install was a false negative.
+    ``winget install GitHub.Copilot`` drops a ``copilot.exe`` shim — named after
+    the package's ``copilot`` command alias, not the package id — into the per-user
+    ``%LOCALAPPDATA%\\Microsoft\\WinGet\\Links`` dir, which the resolver must check.
 
-    ``_resolve_windows_binary`` is EXISTENCE-gated (Windows ``os.access(X_OK)`` is
-    True for any file), so the test creates a plain stub and never chmods — no
-    ``skipIf(os.name == 'nt')`` is needed. ``get_version`` is patched out so the
-    ``shell=True`` ``copilot --version`` probe never runs."""
+    ``_resolve_windows_binary`` is existence-gated (Windows ``os.access(X_OK)`` is
+    True for any file), so the test creates a plain stub and never chmods.
+    ``get_version`` is patched out so the ``shell=True`` probe never runs."""
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""

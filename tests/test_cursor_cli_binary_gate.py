@@ -1,19 +1,18 @@
 """Binary-gate tests for Cursor CLI detection.
 
-Cursor CLI (``cursor-agent``) detection moved from the ``~/.cursor/cli-config.json``
-residue (also written by the Cursor IDE, and surviving a CLI uninstall) to the
-``cursor-agent`` binary. These tests drive the live per-user entry point
-``detect_tool_for_user`` and pin both directions:
+Cursor CLI (``cursor-agent``) detection gates on the binary, not the
+``~/.cursor/cli-config.json`` residue. These drive the live per-user entry point
+``detect_tool_for_user`` and pin:
 
-  (a) ``cli-config.json`` only, no binary -> None (the residue FP this fix kills)
-  (b) ``~/.local/bin/cursor-agent`` (executable) -> detected, install_path is the binary
-  (c) only the IDE ``cursor`` launcher on PATH -> None (the mis-detect guard:
-      gating on ``cursor-agent`` must not pick up the IDE ``cursor`` binary)
+  (a) ``cli-config.json`` only, no binary -> None (the residue FP)
+  (b) executable ``~/.local/bin/cursor-agent`` -> detected, install_path is the binary
+  (c) only the IDE ``cursor`` launcher on PATH -> None (gating on ``cursor-agent``
+      must not pick up the IDE ``cursor`` binary)
 
-The npm-global resolver and the ``which`` PATH backstop are neutralised, and
-``is_running_as_root`` is pinned False, so the gate depends ONLY on the per-user
-on-disk binary the test creates under the hermetic home (otherwise a CI box with
-a real ``cursor-agent`` on PATH would leak in).
+The npm-global resolver and ``which`` PATH backstop are neutralised and
+``is_running_as_root`` pinned False, so the gate depends only on the binary the
+test creates under the hermetic home (else a CI box with a real ``cursor-agent``
+on PATH leaks in).
 """
 
 import os
@@ -129,19 +128,14 @@ class TestCursorCliBinaryGate(unittest.TestCase):
 class TestCursorCliBinaryGateWindows(unittest.TestCase):
     """Windows branch of ``find_cursor_agent_binary_for_user``.
 
-    The native Windows installer (``irm 'https://cursor.com/install?win32=true'
-    | iex``) drops ``cursor-agent``/``agent`` (``.exe``/``.cmd``) at the root of
-    ``%LOCALAPPDATA%\\cursor-agent`` and keeps the real binary under a
-    ``versions\\<v>\\`` subdir — none of which the old single-candidate Windows
-    branch (``.local\\bin\\cursor-agent.exe`` only) probed, so every native
-    install was a false negative. The Git-Bash variant drops an extensionless
-    ``~/.local/bin/cursor-agent``.
+    The native Windows installer drops ``cursor-agent``/``agent`` (``.exe``/``.cmd``)
+    at the root of ``%LOCALAPPDATA%\\cursor-agent`` and keeps the real binary under a
+    ``versions\\<v>\\`` subdir; the Git-Bash variant drops an extensionless
+    ``~/.local/bin/cursor-agent``. These pin all of those.
 
-    The Windows branch is EXISTENCE-gated (on Windows ``os.access(X_OK)`` is True
-    for any file), so these tests create plain files and never chmod — no
-    ``skipIf(os.name == 'nt')`` is needed. ``platform.system`` is pinned to
-    ``"Windows"`` so the Windows branch runs on a POSIX CI box, and
-    ``is_running_as_root`` is irrelevant to this branch (no machine-global probe).
+    The branch is existence-gated (on Windows ``os.access(X_OK)`` is True for any
+    file), so these tests create plain files and never chmod. ``platform.system``
+    is pinned to ``"Windows"`` so the branch runs on a POSIX CI box.
     """
 
     def setUp(self):
@@ -157,7 +151,7 @@ class TestCursorCliBinaryGateWindows(unittest.TestCase):
 
     def test_localappdata_cursor_agent_exe_detected(self):
         """``%LOCALAPPDATA%\\cursor-agent\\cursor-agent.exe`` (native installer)
-        -> detected. Fails against the old single-candidate Windows branch."""
+        -> detected."""
         exe = self.home / "AppData" / "Local" / "cursor-agent" / "cursor-agent.exe"
         exe.parent.mkdir(parents=True)
         exe.write_text("", encoding="utf-8")
@@ -201,18 +195,13 @@ class TestCursorCliBinaryGateWindows(unittest.TestCase):
 
 
 class TestCursorCliVersionFromResolvedBinary(unittest.TestCase):
-    """The root/MDM-scan version fix: version is probed from the RESOLVED
-    ``cursor-agent`` binary, not a bare ``cursor-agent --version`` against the
-    scanner's PATH.
+    """Version is probed from the RESOLVED ``cursor-agent`` binary, not a bare
+    ``cursor-agent --version`` against the scanner's PATH.
 
-    Repro of the broken case: under a root MDM all-users scan, the user's
-    ``~/.local/bin/cursor-agent`` is NOT on root's PATH, so the old bare
-    ``cursor-agent --version`` read nothing and every user's version was
-    "Unknown" even though the binary was found. We simulate that by mocking
-    ``run_command`` to return the version banner ONLY when invoked with the
-    resolved absolute binary path, and None for a bare ``cursor-agent`` (or
-    ``which``). Asserting the detected row's version is the parsed value FAILS
-    against the pre-fix code (which called ``get_version()`` with no arg).
+    Under a root MDM scan the user's ``~/.local/bin/cursor-agent`` is not on root's
+    PATH, so a bare probe reads nothing and version is "Unknown". Simulated by
+    mocking ``run_command`` to return the banner only for the resolved absolute
+    path, and None for a bare ``cursor-agent`` (or ``which``).
     """
 
     _BANNER = "2026.02.13 (Cursor Agent)"
@@ -252,9 +241,8 @@ class TestCursorCliVersionFromResolvedBinary(unittest.TestCase):
         binary = self._make_binary()
 
         def fake_run(command, *a, **k):
-            # The banner is returned ONLY for the resolved absolute binary path.
-            # A bare ``cursor-agent --version`` (the pre-fix call) yields nothing,
-            # exactly like root's PATH on an MDM scan.
+            # Banner only for the resolved absolute path; a bare ``cursor-agent``
+            # yields nothing, like root's PATH on an MDM scan.
             if command[:1] == [str(binary)]:
                 return self._BANNER
             return None
@@ -264,14 +252,13 @@ class TestCursorCliVersionFromResolvedBinary(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(binary))
-        # The fix: version comes from probing the resolved binary, not "Unknown".
+        # Version comes from probing the resolved binary, not "Unknown".
         self.assertEqual(result["version"], "2026.02.13")
 
     @unittest.skipIf(os.name == "nt", "POSIX X_OK gate for the ~/.local/bin stub")
     def test_pre_fix_bare_probe_would_have_been_unknown(self):
-        """Non-vacuity guard: with the SAME mock, a bare ``get_version()`` (the
-        pre-fix call shape) yields None -> the row would have been "Unknown".
-        This is what the fix changes."""
+        """Non-vacuity guard: with the SAME mock, a bare ``get_version()`` yields
+        None -> the row would be "Unknown"; passing the binary yields the version."""
         binary = self._make_binary()
 
         def fake_run(command, *a, **k):
@@ -280,9 +267,9 @@ class TestCursorCliVersionFromResolvedBinary(unittest.TestCase):
             return None
 
         with patch(f"{_CURSOR_MOD}.run_command", side_effect=fake_run):
-            # Pre-fix shape: no binary arg -> bare ``cursor-agent`` -> None.
+            # No-arg -> bare ``cursor-agent`` -> None.
             self.assertIsNone(self.detector.get_version())
-            # Post-fix shape: pass the resolved binary -> parsed version.
+            # Binary arg -> resolved binary probed -> parsed version.
             self.assertEqual(self.detector.get_version(str(binary)), "2026.02.13")
 
     def test_get_version_no_arg_still_probes_bare_command(self):
@@ -313,8 +300,8 @@ class TestWindowsCursorCliVersion(unittest.TestCase):
     The Windows detector class runs on any OS (its ``get_version`` only touches
     ``subprocess``, which we mock), so no ``platform.system`` pin is needed. The
     quoted-path case matters because under ``shell=True`` a bare argv list with a
-    path containing spaces (``C:\\Users\\First Last\\...``) is split by cmd.exe;
-    the fix passes a single ``list2cmdline``-quoted command string instead.
+    path containing spaces (``C:\\Users\\First Last\\...``) is split by cmd.exe, so
+    the detector passes a single ``list2cmdline``-quoted command string instead.
     """
 
     def setUp(self):

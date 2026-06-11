@@ -1,12 +1,10 @@
 """
 MCP config extraction for the GitHub Copilot CLI on Linux systems.
 
-The parser and the User-scope read are OS-agnostic (the User-scope all-users scan
-is handled by the shared root-support helper, which already enumerates Linux user
-homes), so this subclass inherits them from the macOS extractor. Only the
-Workspace ``.mcp.json`` walk differs on Linux (the ``/`` root + Linux system
-dirs); we override the ``_workspace_search_roots`` / ``_should_skip_workspace_path``
-seams accordingly. Mirrors the Windows subclass.
+The parser and User-scope read are OS-agnostic and inherited from the macOS
+extractor. Only the workspace ``.mcp.json`` walk differs on Linux (``/`` root +
+Linux system dirs), so this subclass overrides the
+``_workspace_search_roots`` / ``_should_skip_workspace_path`` seams.
 """
 
 import logging

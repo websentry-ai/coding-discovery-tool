@@ -1,12 +1,10 @@
 """
 GitHub Copilot CLI detection and extraction for Linux.
 
-The GitHub Copilot CLI (`@github/copilot`) is the standalone agentic terminal
-tool, distinct from the GitHub Copilot VS Code extension / JetBrains plugin, with
-its own home directory at ``~/.copilot/`` (general config plus
-``~/.copilot/mcp-config.json`` for MCP servers). The detector and extractors reuse
-the OS-agnostic macOS logic; only the all-users scan and the Linux-specific
-filesystem primitives are overridden.
+The standalone ``@github/copilot`` CLI (distinct from the VS Code extension /
+JetBrains plugin) keeps its config under ``~/.copilot/``. The detector and
+extractors reuse the OS-agnostic macOS logic, overriding only the all-users scan
+and the Linux filesystem primitives.
 """
 
 from .copilot_cli import LinuxCopilotCliDetector

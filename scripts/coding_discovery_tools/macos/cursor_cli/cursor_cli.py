@@ -55,13 +55,10 @@ class MacOSCursorCliDetector(BaseToolDetector):
         Extract Cursor CLI version using ``cursor-agent --version``. Best-effort.
 
         Args:
-            binary: When provided, probe THIS exact ``cursor-agent`` path (the one
-                detection already resolved for the user). Under a root/MDM
-                all-users scan the user's ``~/.local/bin/cursor-agent`` is NOT on
-                root's PATH, so the bare ``cursor-agent`` probe reads nothing and
-                the version is "Unknown" — probing the resolved binary directly is
-                what populates it. When ``None`` (any no-arg caller), keep the
-                legacy bare-PATH probe so behaviour is unchanged.
+            binary: When provided, probe this exact ``cursor-agent`` path. Under a
+                root/MDM scan the user's ``cursor-agent`` isn't on root's PATH, so
+                the bare probe reads "Unknown" — the resolved path populates it.
+                When ``None``, keep the legacy bare-PATH probe.
 
         Returns:
             Version string or None if version cannot be determined

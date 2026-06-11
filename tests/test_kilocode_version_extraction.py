@@ -1,12 +1,10 @@
 """Integration tests for KiloCode detection + version extraction.
 
-KiloCode now gates on (and reads its version from) the editor's
-``extensions.json`` install registry — the file VS Code rewrites on uninstall —
-instead of the extension's ``globalStorage/<ext-id>`` directory (which survives
-uninstall) plus a host-editor install probe. These tests drive the detector at
-``_check_user_for_kilocode`` (the per-user entry) and pin both directions:
-registry entry present -> detected with that version; globalStorage residue with
-NO registry entry -> not detected (the FP kill).
+KiloCode gates on (and reads its version from) the editor's ``extensions.json``
+registry, not the extension's ``globalStorage/<ext-id>`` dir (which survives
+uninstall). These tests drive the detector at ``_check_user_for_kilocode`` (the
+per-user entry) and pin both directions: registry entry present -> detected with
+that version; globalStorage residue with NO entry -> not detected (the FP kill).
 
 The helper is pure ``pathlib`` + JSON, so there is no platform skip — every CI box
 exercises the gate (otherwise the Linux runner would skip the very behaviour

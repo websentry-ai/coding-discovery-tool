@@ -58,10 +58,8 @@ class LinuxClineDetector(BaseToolDetector):
 
     def _detect_cline_for_user(self, user_home: Path) -> List[Dict]:
         results = []
-        # Gate purely on the editor's extensions.json registry entry (which VS
-        # Code rewrites on uninstall). No host-install AND-gate: the registry
-        # entry is itself proof of a live install, and globalStorage residue —
-        # which survives uninstall — no longer drives detection.
+        # Gate on the extensions.json entry alone — no host-install AND-gate, since
+        # the entry is itself proof of a live install.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_cline_extension(user_home, ide_folder)
             if extension_info:

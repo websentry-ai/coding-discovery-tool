@@ -2,15 +2,9 @@
 Roo Code detection for Windows.
 
 Roo Code is an AI-powered coding assistant that operates as a VS Code extension.
-This module detects Roo Code installations by checking, for each supported
-editor, whether the Roo extension is a LIVE entry in that editor's
-``extensions.json`` install registry (VS Code rewrites this file on uninstall).
-
-The extension's ``globalStorage/<ext-id>`` directory is deliberately NOT used as
-the gate: VS Code does not clean it up on uninstall (microsoft/vscode#119022),
-so gating on it surfaced phantom rows for extensions the user had removed. The
-host-editor install AND-gate is likewise dropped — the ``extensions.json`` entry
-is itself proof the editor manages a live install.
+Detection gates on a LIVE entry in each editor's ``extensions.json`` registry, not
+the ``globalStorage/<ext-id>`` dir, which survives uninstall (microsoft/vscode
+#119022) and so produced phantom rows for removed extensions.
 
 Returns detections like:
 - Roo Code (VS Code)
@@ -120,10 +114,8 @@ class WindowsRooDetector(BaseToolDetector):
         """
         results = []
 
-        # Gate purely on the editor's extensions.json registry entry (which VS
-        # Code rewrites on uninstall). No host-install AND-gate: the registry
-        # entry is itself proof of a live install, and globalStorage residue —
-        # which survives uninstall — no longer drives detection.
+        # Gate on the extensions.json entry alone — no host-install AND-gate, since
+        # the entry is itself proof of a live install.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_roo_extension(user_home, ide_folder)
 
@@ -138,9 +130,8 @@ class WindowsRooDetector(BaseToolDetector):
                 })
                 logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
 
-        # Antigravity keeps its own install gate (the per-user/machine install
-        # being present) because it is not a marketplace VS Code editor; its
-        # extensions.json read is routed through the shared helper.
+        # Antigravity keeps its own install gate (not a marketplace VS Code editor);
+        # the extensions.json read still goes through the shared helper.
         if self._is_antigravity_installed(user_home):
             antigravity_info = find_extension_in_editor(
                 user_home, "Antigravity", self.ROO_EXTENSION_ID

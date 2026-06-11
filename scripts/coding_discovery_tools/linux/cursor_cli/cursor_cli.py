@@ -38,12 +38,10 @@ class LinuxCursorCliDetector(BaseToolDetector):
         """Extract Cursor CLI version using ``cursor-agent --version``. Best-effort.
 
         Args:
-            binary: When provided, probe THIS exact ``cursor-agent`` path (the one
-                detection already resolved). Under a root/MDM all-users scan the
-                user's ``~/.local/bin/cursor-agent`` is NOT on root's PATH, so the
-                bare ``cursor-agent`` probe yields nothing and the version reads
-                "Unknown" — probing the resolved binary directly populates it.
-                When ``None``, keep the legacy bare-PATH probe (back-compat).
+            binary: When provided, probe this exact ``cursor-agent`` path. Under a
+                root/MDM scan the user's ``cursor-agent`` isn't on root's PATH, so
+                the bare probe reads "Unknown" — the resolved path populates it.
+                When ``None``, keep the legacy bare-PATH probe.
         """
         try:
             command = [str(binary), "--version"] if binary else ["cursor-agent", "--version"]

@@ -2,15 +2,9 @@
 Kilo Code detection for Windows.
 
 Kilo Code is an AI-powered coding assistant that operates as a VS Code extension.
-This module detects Kilo Code by checking, for each supported editor, whether the
-Kilo Code extension is a LIVE entry in that editor's ``extensions.json`` install
-registry (VS Code rewrites this file on uninstall).
-
-The extension's ``globalStorage/<ext-id>`` directory is deliberately NOT used as
-the gate: VS Code does not clean it up on uninstall (microsoft/vscode#119022), so
-gating on it surfaced phantom rows for removed extensions. The host-editor exe
-AND-gate is likewise dropped — the ``extensions.json`` entry is itself proof of a
-live install.
+Detection gates on a LIVE entry in each editor's ``extensions.json`` registry, not
+the ``globalStorage/<ext-id>`` dir, which survives uninstall (microsoft/vscode
+#119022) and so produced phantom rows for removed extensions.
 """
 
 import logging
@@ -145,12 +139,9 @@ class WindowsKiloCodeDetector(BaseToolDetector):
         """
         Check if Kilo Code is installed for a specific user.
 
-        Walk the supported editors once and accept the first one whose
-        ``extensions.json`` registry lists the Kilo Code extension as a live
-        entry. The case-insensitive match in ``find_extension_in_editor`` handles
-        the registry storing ``kilocode.kilo-code`` against the display-cased
-        ``KILOCODE_EXTENSION_ID`` constant. The version comes from the matched
-        registry entry; the install_path is the editor's extensions dir.
+        Accepts the first editor whose ``extensions.json`` lists Kilo Code as a live
+        entry. ``find_extension_in_editor`` matches case-insensitively — the registry
+        stores ``kilocode.kilo-code`` but ``KILOCODE_EXTENSION_ID`` is display-cased.
         """
         for ide_name in self.SUPPORTED_IDES:
             extension_info = self._check_kilocode_extension(user_home, ide_name)

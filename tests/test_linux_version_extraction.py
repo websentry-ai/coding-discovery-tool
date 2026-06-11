@@ -14,7 +14,7 @@ KILO_EXT_ID = "kilocode.Kilo-Code"
 def _write_kilo_registry(user_home: Path, ide_key: str, ext_id: str = KILO_EXT_ID,
                          version: str = "3.7.0") -> Path:
     """Write a Kilo Code entry into ``<editor>/extensions/extensions.json`` (the
-    install registry the detector now gates on)."""
+    install registry the detector gates on)."""
     rel = {"Code": ".vscode/extensions", "Cursor": ".cursor/extensions"}[ide_key]
     ext_dir = user_home / rel
     ext_dir.mkdir(parents=True, exist_ok=True)
@@ -33,7 +33,7 @@ def _write_resource_json(install_dir: Path, filename: str, version: str) -> Path
 
 
 class TestLinuxKiloCodeVersion(unittest.TestCase):
-    """Kilo Code on Linux now gates on (and reads its version from) the editor's
+    """Kilo Code on Linux gates on (and reads its version from) the editor's
     ``extensions.json`` registry, via ``detect()`` -> ``_check_user_for_kilocode``.
 
     ``get_linux_user_homes`` is pinned to the hermetic tmp home so the scan is

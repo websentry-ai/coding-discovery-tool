@@ -119,15 +119,14 @@ def _write_copilot_binary(user_home: Path) -> Path:
 
 
 class TestCopilotCliDetection(unittest.TestCase):
-    """Per-user detection now gates on the ``copilot`` BINARY, not the
-    ``~/.copilot`` config dir. The config dir (and its markers/hooks/skills) is
-    residue that survives a CLI uninstall and is also written by the IDE agent and
+    """Per-user detection gates on the ``copilot`` BINARY, not the ``~/.copilot``
+    config dir, which survives uninstall and is also written by the IDE agent and
     Unbound's MDM hook, so it must NOT, on its own, surface a CLI row.
 
-    The npm-global / PATH fallbacks are neutralised and ``is_running_as_root`` is
+    The npm-global / PATH fallbacks are neutralised and ``is_running_as_root``
     pinned False so the gate depends ONLY on the binary the test creates under the
-    hermetic ``user_home`` (otherwise a CI box with a real ``copilot`` on PATH
-    would leak in)."""
+    hermetic ``user_home`` (else a CI box with a real ``copilot`` on PATH leaks
+    in)."""
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
@@ -187,8 +186,8 @@ class TestCopilotCliDetection(unittest.TestCase):
 
     def test_config_markers_without_binary_not_detected(self):
         """A ~/.copilot full of STRONG markers but NO binary is uninstall residue
-        -> not detected (the FP this fix kills). Covers the whole former
-        strong-marker set in one shot."""
+        -> not detected (the residue FP). Covers the whole former strong-marker
+        set in one shot."""
         copilot_dir = self._make_copilot_dir()
         for f in ("settings.json", "config.json", "mcp-config.json", "lsp-config.json",
                   "permissions-config.json", "session-store.db"):
@@ -198,9 +197,9 @@ class TestCopilotCliDetection(unittest.TestCase):
         self.assertIsNone(self.detector.detect())
 
     def test_hooks_only_without_binary_not_detected(self):
-        """Repro for device D2FJV74J5Q / user gowshik: ~/.copilot held only
-        hooks/unbound.json (Unbound's MDM onboarding writes it on every enrolled
-        device) and NO binary -> not detected (the fleet-wide phantom-CLI FP)."""
+        """~/.copilot holding only hooks/unbound.json (Unbound's MDM onboarding
+        writes it on every enrolled device) and NO binary -> not detected (the
+        fleet-wide phantom-CLI FP)."""
         copilot_dir = self._make_copilot_dir()
         hooks_dir = copilot_dir / "hooks"
         hooks_dir.mkdir()
@@ -208,9 +207,8 @@ class TestCopilotCliDetection(unittest.TestCase):
         self.assertIsNone(self.detector.detect())
 
     def test_skills_only_without_binary_not_detected(self):
-        """Repro for device MY4W6QQGCQ / user karthick: a ~/.copilot holding only
-        skills/ + copilot-instructions.md (the IDE Copilot agent) and NO binary ->
-        not detected."""
+        """A ~/.copilot holding only skills/ + copilot-instructions.md (the IDE
+        Copilot agent) and NO binary -> not detected."""
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "skills").mkdir()
         (copilot_dir / "copilot-instructions.md").write_text("rules", encoding="utf-8")
@@ -957,7 +955,7 @@ def _write_windows_copilot_shim(user_home: Path) -> Path:
 
 
 class TestWindowsCopilotCliDetection(unittest.TestCase):
-    """Per-user detection on Windows now gates on the ``copilot`` BINARY (the npm
+    """Per-user detection on Windows gates on the ``copilot`` BINARY (the npm
     ``copilot.cmd`` shim / ``.local/bin`` / ``.bun/bin``), not the ``~/.copilot``
     config dir. The Windows detector subclasses the macOS one and overrides
     ``_resolve_binary`` -> ``_resolve_windows_binary``, exercised here.
@@ -997,7 +995,7 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
 
     def test_config_dir_without_binary_not_detected(self):
         """A ~/.copilot full of markers but NO binary is uninstall residue ->
-        not detected (the FP this fix kills on Windows too)."""
+        not detected (the residue FP, on Windows too)."""
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
         (copilot_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -1220,10 +1218,7 @@ class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6c. Version threaded from the resolved binary into get_version (the root-scan
-#     fix): _detect_for_user passes the binary it already resolved, so version
-#     populates even when self.user_home is unset and the bare ``copilot`` is not
-#     on the scanner's PATH (the broken standalone-root detect() fallback).
+# 6c. Version threaded from the resolved binary into get_version.
 # ---------------------------------------------------------------------------
 
 class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
@@ -1232,12 +1227,9 @@ class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
     (unset on the standalone root path) and not the bare ``copilot`` PATH probe
     (which root's PATH lacks during an MDM all-users scan).
 
-    Repro of the broken case: a binary is resolved/detected, but
-    ``self.user_home`` is None AND a bare ``copilot --version`` yields nothing —
-    yet the version is STILL resolved because we probe the resolved binary
-    directly. This FAILS against the pre-fix code (``get_version()`` with no arg,
-    which under ``self.user_home is None`` falls straight through to the bare
-    ``copilot`` probe).
+    Simulated by resolving a binary while ``self.user_home`` is None and a bare
+    ``copilot --version`` yields nothing; the version still resolves because we
+    probe the resolved binary directly.
     """
 
     def setUp(self):
@@ -1256,12 +1248,11 @@ class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
         probed -> version is the parsed banner, NOT "unknown"."""
         binary = _write_copilot_binary(self.user_home)  # ~/.local/bin/copilot
         detector = MacOSCopilotCliDetector()
-        detector.user_home = None  # the broken standalone-root fallback
+        detector.user_home = None  # the standalone-root fallback path
 
         def fake_run(command, *a, **k):
-            # The banner is returned ONLY when the RESOLVED binary path is probed.
-            # A bare ``copilot --version`` (the pre-fix fallthrough) yields nothing,
-            # exactly like root's PATH on an MDM all-users scan.
+            # Banner only when the RESOLVED binary path is probed; a bare
+            # ``copilot`` yields nothing, like root's PATH on an MDM scan.
             if command[:1] == [str(binary)]:
                 return _VERSION_BANNER
             return None
@@ -1273,7 +1264,7 @@ class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(binary))
-        # The fix: version comes from probing the resolved binary, not "unknown".
+        # Version comes from probing the resolved binary, not "unknown".
         self.assertEqual(result["version"], "0.0.399")
 
     @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
@@ -1281,7 +1272,7 @@ class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
         """End-to-end via the root all-users ``detect()`` path: ``self.user_home``
         stays None, ``/Users`` is redirected to a temp tree with one user that has
         a binary, and the bare ``copilot`` is off PATH. The emitted row's version
-        is the parsed banner (the exact broken standalone-root scenario)."""
+        is the parsed banner."""
         users_dir = Path(self.tmp_dir) / "Users"
         alice = users_dir / "alice"
         alice.mkdir(parents=True)
@@ -1314,10 +1305,9 @@ class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
     def test_pre_fix_no_arg_would_be_unknown(self):
-        """Non-vacuity guard: with the SAME mock and ``self.user_home`` None, the
-        pre-fix call shape ``get_version()`` (no arg) yields None -> the row would
-        have read "unknown". The post-fix ``get_version(binary)`` returns the
-        parsed version. This is the behavioural delta the fix introduces."""
+        """Non-vacuity guard: with the SAME mock and ``self.user_home`` None, a bare
+        ``get_version()`` (no arg) yields None -> the row would read "unknown";
+        ``get_version(binary)`` returns the parsed version."""
         binary = _write_copilot_binary(self.user_home)
         detector = MacOSCopilotCliDetector()
         detector.user_home = None
@@ -1328,9 +1318,9 @@ class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
             return None
 
         with patch(f"{_DETECTOR_MOD}.run_command", side_effect=fake_run):
-            # Pre-fix shape: no arg + user_home None -> bare ``copilot`` -> None.
+            # No arg + user_home None -> bare ``copilot`` -> None.
             self.assertIsNone(detector.get_version())
-            # Post-fix shape: pass the resolved binary -> parsed version.
+            # Binary arg -> resolved binary probed -> parsed version.
             self.assertEqual(detector.get_version(str(binary)), "0.0.399")
 
     def test_get_version_with_binary_probes_exact_path_no_fallback(self):
@@ -1385,7 +1375,7 @@ class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
         """Integration: the inherited ``_detect_for_user`` calls the Windows
         ``get_version(binary)`` override (signature must accept the param), which
         probes the resolved shim under shell=True -> the emitted row carries the
-        parsed version (the Windows leg of the root-scan fix)."""
+        parsed version."""
         tmp = tempfile.mkdtemp()
         try:
             user_home = Path(tmp) / "user"

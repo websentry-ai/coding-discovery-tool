@@ -317,20 +317,17 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
 def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
     """Detect Cursor CLI (``cursor-agent``) installation for a user.
 
-    Gates on the ``cursor-agent`` binary, not the ``~/.cursor/cli-config.json``
-    residue. ``~/.cursor`` (and its ``cli-config.json``) is also written by the
-    Cursor IDE and survives a CLI uninstall, so detecting on it produced false
-    positives. ``cli-config.json`` remains available to the settings extractor,
-    which only runs once the tool is detected here.
+    Gates on the binary, not ``~/.cursor/cli-config.json`` — the Cursor IDE also
+    writes ``~/.cursor`` and it survives a CLI uninstall, so gating on it produced
+    false positives.
     """
     cursor_agent_bin = find_cursor_agent_binary_for_user(user_home)
     if cursor_agent_bin:
         return {
             "name": detector.tool_name,
-            # Probe the resolved binary directly: the detector's get_version()
-            # otherwise runs a bare ``cursor-agent --version`` against the
-            # SCANNER's PATH, which under a root/MDM all-users scan lacks the
-            # user's ~/.local/bin/cursor-agent -> "Unknown" for every user.
+            # Probe the resolved binary directly: get_version() with no arg runs
+            # against the scanner's PATH, which under a root/MDM scan lacks the
+            # user's cursor-agent -> "Unknown" for every user.
             "version": detector.get_version(cursor_agent_bin) or "Unknown",
             "install_path": cursor_agent_bin
         }
@@ -474,10 +471,10 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
 
 
 def _cursor_agent_version_key(version_dir: Path):
-    """Numeric (major, minor, patch) parsed from a "X.Y.Z" version-dir name so the
-    newest sorts last (``reverse=True`` puts it first). A plain string sort would
-    order "1.10.0" before "1.9.0" and report a stale version; malformed names yield
-    () and sort earliest. Shared by the POSIX and Windows versioned-dir scans.
+    """Numeric (major, minor, patch) key for a "X.Y.Z" version-dir name.
+
+    A string sort would order "1.10.0" before "1.9.0" and report a stale version;
+    malformed names yield () and sort earliest.
     """
     return tuple(int(p) for p in version_dir.name.split(".") if p.isdigit())
 
@@ -485,21 +482,10 @@ def _cursor_agent_version_key(version_dir: Path):
 def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
     """Find the absolute path to the ``cursor-agent`` binary for a user.
 
-    Mirrors ``find_claude_binary_for_user``: gating on the binary (not the
-    ``~/.cursor`` config dir, which the Cursor IDE also writes and which survives
-    a CLI uninstall) is what kills the residue false positive.
-
-    On POSIX the official installer drops ``cursor-agent`` (older builds: a bare
-    ``agent`` shim) into ``~/.local/bin`` and keeps the real binary under
-    ``~/.local/share/cursor-agent/versions/<ver>/cursor-agent`` (newest version
-    preferred so a stale older build isn't picked). The npm-global prefix is
-    probed via the shared resolver, and a root-guarded ``which cursor-agent``
-    backstops custom prefixes (skipped under root — it resolves the SCANNER's
-    PATH, not ``user_home``'s, which would mis-attribute the install). On Windows
-    the native installer dir ``%LOCALAPPDATA%\\cursor-agent`` is checked
-    (``cursor-agent``/``agent`` as ``.exe``/``.cmd`` at the root plus the newest
-    ``versions\\<v>\\cursor-agent.exe``), along with the ``~/.local/bin`` Git-Bash
-    variant (``which`` is not a command there, so the explicit candidates cover it).
+    Mirrors ``find_claude_binary_for_user``. Checks the per-user installer
+    locations and versioned dirs, then npm-global and a PATH backstop — both
+    root-guarded, since under a root/MDM scan they resolve the scanner's PATH,
+    not ``user_home``'s, and would mis-attribute the install.
 
     Args:
         user_home: Path to the user's home directory.
@@ -508,15 +494,11 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
         Absolute path to the ``cursor-agent`` binary as a string, or None.
     """
     if platform.system() == "Windows":
-        # Existence-gated, NOT os.access(X_OK): on Windows X_OK is True for any
-        # file, so it can't distinguish a binary (mirrors the Gemini/Claude
-        # Windows branches). All candidates are user_home-relative, so they are
-        # correctly scoped to this user even under an admin/MDM scan.
+        # Existence-gated, not os.access(X_OK): on Windows X_OK is True for any
+        # file, so it can't distinguish a binary.
         install_dir = user_home / "AppData" / "Local" / "cursor-agent"
         candidates = [
-            # Native Windows installer (irm 'https://cursor.com/install?win32=true'
-            # | iex) drops cursor-agent.{exe,cmd,ps1} and agent.{exe,cmd,ps1} at
-            # the root of %LOCALAPPDATA%\cursor-agent.
+            # Native Windows installer drops these at the root of the install dir.
             install_dir / "cursor-agent.exe",
             install_dir / "cursor-agent.cmd",
             install_dir / "agent.exe",
@@ -533,10 +515,8 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
             except (PermissionError, OSError):
                 continue
 
-        # The native installer keeps the real binary under a versioned subdir
-        # (%LOCALAPPDATA%\cursor-agent\versions\<v>\cursor-agent.exe); pick the
-        # newest by numeric version (same key as the POSIX branch) so a stale
-        # older build isn't reported.
+        # Native installer keeps the real binary under a versioned subdir; pick the
+        # newest version so a stale older build isn't reported.
         versions_dir = install_dir / "versions"
         try:
             if versions_dir.exists():
@@ -556,8 +536,7 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
             logger.debug(f"Could not enumerate Windows cursor-agent versions: {e}")
         return None
 
-    # POSIX (macOS / Linux). All candidates below are user_home-relative, so they
-    # are correctly scoped to this user even under a root/MDM multi-user scan.
+    # POSIX (macOS / Linux). Older builds installed a bare ``agent`` shim.
     candidates = [
         user_home / ".local" / "bin" / "cursor-agent",
         user_home / ".local" / "bin" / "agent",
@@ -589,18 +568,16 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
     except (PermissionError, OSError) as e:
         logger.debug(f"Could not enumerate cursor-agent versions: {e}")
 
-    # npm-global prefix backstop (Homebrew node / nvm / pnpm vary). The dynamic
-    # ``npm prefix -g`` probe is root-guarded inside the helper (it resolves the
-    # SCANNER's prefix, not the user's — the 93b5fc2 cross-user FP class).
+    # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix -g``
+    # resolves the scanner's prefix, not the user's.
     npm_resolved = resolve_npm_global_tool_bin(
         "cursor-agent", user_home, is_running_as_root()
     )
     if npm_resolved:
         return npm_resolved
 
-    # PATH backstop: only meaningful single-user / non-root (the resolved PATH is
-    # the SCANNER's, not user_home's; under root it would mis-attribute the
-    # scanner's cursor-agent to a user who has only residue).
+    # PATH backstop: non-root only — under root ``which`` resolves the scanner's
+    # PATH, mis-attributing its cursor-agent to a user who has only residue.
     if not is_running_as_root():
         which_path = run_command(["which", "cursor-agent"], VERSION_TIMEOUT)
         if which_path:

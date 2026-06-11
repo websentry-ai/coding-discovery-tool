@@ -60,26 +60,18 @@ class WindowsCursorCliDetector(BaseToolDetector):
         exec a ``.cmd`` from a bare argv list).
 
         Args:
-            binary: When provided, probe THIS exact ``cursor-agent`` path (the one
-                detection already resolved for the user). Under an admin/MDM
-                all-users scan the user's per-user ``cursor-agent`` is NOT on the
-                scanner's PATH, so the bare ``cursor-agent`` probe yields nothing
-                and the version reads "Unknown" — probing the resolved binary
-                directly populates it. The absolute path is passed as a single
-                shell-quoted command string (``"<path>" --version``) because a
-                bare argv list under ``shell=True`` would split a path containing
-                spaces (e.g. ``C:\\Users\\First Last\\...``); ``subprocess.list2cmdline``
-                quotes it the way ``cmd.exe`` expects. When ``None``, keep the
-                legacy bare-PATH probe (back-compat).
+            binary: When provided, probe this exact ``cursor-agent`` path. Under an
+                admin/MDM scan the user's ``cursor-agent`` isn't on the scanner's
+                PATH, so the bare probe reads "Unknown" — the resolved path
+                populates it. When ``None``, keep the legacy bare-PATH probe.
 
         Returns:
             Version string or None if version cannot be determined
         """
         try:
             if binary:
-                # Quote the absolute path for cmd.exe (handles spaces); a bare
-                # ["<path with spaces>", "--version"] list under shell=True would
-                # break, so build one properly-quoted command string.
+                # Quote the path for cmd.exe: a bare argv list under shell=True
+                # splits a path containing spaces, so build one quoted string.
                 command = subprocess.list2cmdline([str(binary), "--version"])
             else:
                 command = ["cursor-agent", "--version"]

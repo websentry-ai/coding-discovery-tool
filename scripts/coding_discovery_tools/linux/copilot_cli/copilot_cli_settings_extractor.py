@@ -1,12 +1,9 @@
 """
 GitHub Copilot CLI settings/permissions extraction for Linux.
 
-The durable permission config (``config.json`` / ``settings.json`` carrying
-``trusted_folders`` / ``allowed_urls`` / ``denied_urls``) is OS-agnostic, and all
-the parsing lives in ``MacOSCopilotCliSettingsExtractor``. The ONLY OS-specific
-seam is the all-users scan, so this subclass overrides just
-``_scan_all_user_homes`` to enumerate Linux user homes — mirroring the Windows
-subclass.
+The permission-config parsing is OS-agnostic and inherited from
+``MacOSCopilotCliSettingsExtractor``. The only OS-specific seam is the all-users
+scan, so this subclass overrides just ``_scan_all_user_homes``.
 """
 
 from pathlib import Path

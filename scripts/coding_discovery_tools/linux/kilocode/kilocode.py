@@ -41,10 +41,8 @@ class LinuxKiloCodeDetector(BaseToolDetector):
 
     def get_version(self) -> Optional[str]:
         """
-        Delegate to detect() so the install-gating logic (the extension being a
-        live ``extensions.json`` entry) stays the single source of truth — a
-        removed extension whose residue lingers must not surface a version when
-        detect() returns None.
+        Delegate to detect() so the live-entry gate stays the single source of
+        truth — leftover residue must not surface a version when detect() is None.
         """
         result = self.detect()
         if result:

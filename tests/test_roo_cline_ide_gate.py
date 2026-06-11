@@ -1,22 +1,15 @@
 """extensions.json-entry gating tests for Roo Code & Cline (macOS/Windows/Linux).
 
-The detection gate moved from the extension's ``globalStorage/<ext-id>`` dir
-(plus a host-editor install AND-gate) to the editor's ``extensions.json`` install
-registry. VS Code rewrites ``extensions.json`` on uninstall but does NOT clean up
-globalStorage (microsoft/vscode#119022), so the old gate surfaced phantom rows for
-removed extensions; the new gate keys purely on the live registry entry.
+The detection gate keys on the editor's ``extensions.json`` registry, not the
+extension's ``globalStorage/<ext-id>`` dir (which survives uninstall —
+microsoft/vscode#119022 — and produced phantom rows). Both directions are proven:
+a live entry -> detected (version + extensions dir as install_path); globalStorage
+residue with NO entry -> not in results (the FP kill). Antigravity keeps its own
+install gate but reads its entry through the same registry helper.
 
-Both directions are proven: a live ``extensions.json`` entry -> detected (with the
-entry's version and the extensions dir as install_path); globalStorage residue
-with NO entry -> not in results (the FP kill). Antigravity keeps its own install
-gate but reads its entry through the same registry helper.
-
-The live ``find_extension_in_editor`` helper runs unmocked, so these are true
-end-to-end detector tests over hermetic tmp homes.
-
-The host-IDE probe helpers (``is_windows_ide_installed`` / ``is_linux_ide_installed``
-and their ``_*_IDE_INSTALL_INFO`` tables) are no longer called by the detectors,
-but the live helpers are still covered by ``TestWindows/LinuxIdeProbeLocationClasses``.
+``find_extension_in_editor`` runs unmocked, so these are true end-to-end detector
+tests over hermetic tmp homes. The host-IDE probe helpers are no longer called by
+the detectors but stay covered by ``TestWindows/LinuxIdeProbeLocationClasses``.
 """
 
 import json
@@ -205,9 +198,9 @@ class _WindowsExtensionsGateMixin(_ExtensionsGateMixin):
         return gs
 
     def test_host_install_not_required(self):
-        """Regression for the dropped host-IDE AND-gate (Q1): a registry entry with
-        NO host editor installed anywhere (``shutil.which`` neutralised) still
-        detects — the entry alone is proof of a live install."""
+        """Regression for the dropped host-IDE AND-gate: a registry entry with NO
+        host editor installed anywhere (``shutil.which`` neutralised) still detects
+        — the entry alone is proof of a live install."""
         self._make_registry_entry("Code")
         with patch("shutil.which", return_value=None):
             results = self._detect()
@@ -236,8 +229,8 @@ class _LinuxExtensionsGateMixin(_ExtensionsGateMixin):
         return gs
 
     def test_host_install_not_required(self):
-        """Regression for the dropped host-IDE AND-gate (Q1): a registry entry with
-        NO host editor installed anywhere still detects on Linux."""
+        """Regression for the dropped host-IDE AND-gate: a registry entry with NO
+        host editor installed anywhere still detects on Linux."""
         self._make_registry_entry("Code")
         with patch("shutil.which", return_value=None):
             results = self._detect()

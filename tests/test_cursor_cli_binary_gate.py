@@ -17,15 +17,20 @@ a real ``cursor-agent`` on PATH would leak in).
 """
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import scripts.coding_discovery_tools.user_tool_detector as utd
 from scripts.coding_discovery_tools.macos.cursor_cli.cursor_cli import MacOSCursorCliDetector
 
 _MOD = "scripts.coding_discovery_tools.user_tool_detector"
+# The cursor_cli detector module whose ``run_command`` the version probe calls.
+_CURSOR_MOD = "scripts.coding_discovery_tools.macos.cursor_cli.cursor_cli"
+# The Windows cursor_cli detector module (its version probe uses ``subprocess``).
+_WIN_CURSOR_MOD = "scripts.coding_discovery_tools.windows.cursor_cli.cursor_cli"
 
 
 class TestCursorCliBinaryGate(unittest.TestCase):
@@ -193,6 +198,163 @@ class TestCursorCliBinaryGateWindows(unittest.TestCase):
 
     def test_nothing_present_not_detected(self):
         self.assertIsNone(self._resolve())
+
+
+class TestCursorCliVersionFromResolvedBinary(unittest.TestCase):
+    """The root/MDM-scan version fix: version is probed from the RESOLVED
+    ``cursor-agent`` binary, not a bare ``cursor-agent --version`` against the
+    scanner's PATH.
+
+    Repro of the broken case: under a root MDM all-users scan, the user's
+    ``~/.local/bin/cursor-agent`` is NOT on root's PATH, so the old bare
+    ``cursor-agent --version`` read nothing and every user's version was
+    "Unknown" even though the binary was found. We simulate that by mocking
+    ``run_command`` to return the version banner ONLY when invoked with the
+    resolved absolute binary path, and None for a bare ``cursor-agent`` (or
+    ``which``). Asserting the detected row's version is the parsed value FAILS
+    against the pre-fix code (which called ``get_version()`` with no arg).
+    """
+
+    _BANNER = "2026.02.13 (Cursor Agent)"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.detector = MacOSCursorCliDetector()
+        # Pin non-root for the resolver seam and neutralise the npm-global
+        # resolver so only the on-disk per-user binary satisfies the gate.
+        self._patchers = [
+            patch(f"{_MOD}.is_running_as_root", return_value=False),
+            patch(f"{_MOD}.resolve_npm_global_tool_bin", return_value=None),
+            # The gate's ``which cursor-agent`` backstop in user_tool_detector
+            # must not leak a real PATH cursor-agent on the CI box.
+            patch(f"{_MOD}.run_command", return_value=None),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.tmp.cleanup()
+
+    def _make_binary(self) -> Path:
+        binary = self.home / ".local" / "bin" / "cursor-agent"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\necho x\n", encoding="utf-8")
+        os.chmod(binary, 0o755)
+        return binary
+
+    @unittest.skipIf(os.name == "nt", "POSIX X_OK gate for the ~/.local/bin stub")
+    def test_version_resolved_from_binary_when_bare_command_off_path(self):
+        """Bare ``cursor-agent`` not on PATH, but the resolved binary IS probed ->
+        version is the parsed banner, NOT "Unknown" (the root-scan fix)."""
+        binary = self._make_binary()
+
+        def fake_run(command, *a, **k):
+            # The banner is returned ONLY for the resolved absolute binary path.
+            # A bare ``cursor-agent --version`` (the pre-fix call) yields nothing,
+            # exactly like root's PATH on an MDM scan.
+            if command[:1] == [str(binary)]:
+                return self._BANNER
+            return None
+
+        with patch(f"{_CURSOR_MOD}.run_command", side_effect=fake_run):
+            result = utd.detect_tool_for_user(self.detector, self.home)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+        # The fix: version comes from probing the resolved binary, not "Unknown".
+        self.assertEqual(result["version"], "2026.02.13")
+
+    @unittest.skipIf(os.name == "nt", "POSIX X_OK gate for the ~/.local/bin stub")
+    def test_pre_fix_bare_probe_would_have_been_unknown(self):
+        """Non-vacuity guard: with the SAME mock, a bare ``get_version()`` (the
+        pre-fix call shape) yields None -> the row would have been "Unknown".
+        This is what the fix changes."""
+        binary = self._make_binary()
+
+        def fake_run(command, *a, **k):
+            if command[:1] == [str(binary)]:
+                return self._BANNER
+            return None
+
+        with patch(f"{_CURSOR_MOD}.run_command", side_effect=fake_run):
+            # Pre-fix shape: no binary arg -> bare ``cursor-agent`` -> None.
+            self.assertIsNone(self.detector.get_version())
+            # Post-fix shape: pass the resolved binary -> parsed version.
+            self.assertEqual(self.detector.get_version(str(binary)), "2026.02.13")
+
+    def test_get_version_no_arg_still_probes_bare_command(self):
+        """Back-compat: ``get_version()`` with no arg still probes the bare
+        ``cursor-agent --version`` (so any other no-arg caller is unaffected)."""
+        with patch(f"{_CURSOR_MOD}.run_command", return_value=self._BANNER) as run:
+            version = self.detector.get_version()
+        self.assertEqual(version, "2026.02.13")
+        self.assertEqual(run.call_args.args[0], ["cursor-agent", "--version"])
+
+
+@unittest.skipIf(os.name == "nt", "POSIX-only: exercises the macOS Cursor detector probe")
+class TestCursorCliVersionProbeShape(unittest.TestCase):
+    """The macOS detector probes the EXACT resolved path when given a binary."""
+
+    def test_get_version_with_binary_probes_that_exact_path(self):
+        binary = "/Users/someone/.local/bin/cursor-agent"
+        with patch(f"{_CURSOR_MOD}.run_command", return_value="1.2.3 (Cursor Agent)") as run:
+            version = MacOSCursorCliDetector().get_version(binary)
+        self.assertEqual(version, "1.2.3")
+        self.assertEqual(run.call_args.args[0], [binary, "--version"])
+
+
+class TestWindowsCursorCliVersion(unittest.TestCase):
+    """Windows Cursor version probe (``subprocess.run(..., shell=True)`` for the
+    ``.cmd`` shim).
+
+    The Windows detector class runs on any OS (its ``get_version`` only touches
+    ``subprocess``, which we mock), so no ``platform.system`` pin is needed. The
+    quoted-path case matters because under ``shell=True`` a bare argv list with a
+    path containing spaces (``C:\\Users\\First Last\\...``) is split by cmd.exe;
+    the fix passes a single ``list2cmdline``-quoted command string instead.
+    """
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.windows.cursor_cli.cursor_cli import (
+            WindowsCursorCliDetector,
+        )
+        self.Detector = WindowsCursorCliDetector
+
+    def test_version_from_resolved_binary_with_spaces_is_quoted(self):
+        """An absolute binary path WITH SPACES is passed as a single properly
+        quoted command string under shell=True (not a bare list that cmd.exe
+        would split), and the version parses."""
+        binary = r"C:\Users\First Last\AppData\Local\cursor-agent\cursor-agent.exe"
+        fake = MagicMock(returncode=0, stdout="2026.02.13 (Cursor Agent)", stderr="")
+        with patch(f"{_WIN_CURSOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = self.Detector().get_version(binary)
+        self.assertEqual(version, "2026.02.13")
+        sent = run.call_args.args[0]
+        # A single command STRING (not a list), with the spaced path quoted the
+        # way cmd.exe expects.
+        self.assertIsInstance(sent, str)
+        self.assertEqual(sent, subprocess.list2cmdline([binary, "--version"]))
+        self.assertIn(f'"{binary}"', sent)
+        self.assertIs(run.call_args.kwargs.get("shell"), True)
+
+    def test_version_no_arg_uses_bare_list_shell_true(self):
+        """Back-compat / no-regression: with no binary, the bare
+        ``["cursor-agent", "--version"]`` list runs under shell=True, unchanged."""
+        fake = MagicMock(returncode=0, stdout="1.2.3 (Cursor Agent)", stderr="")
+        with patch(f"{_WIN_CURSOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = self.Detector().get_version()
+        self.assertEqual(version, "1.2.3")
+        self.assertEqual(run.call_args.args[0], ["cursor-agent", "--version"])
+        self.assertIs(run.call_args.kwargs.get("shell"), True)
+
+    def test_version_probe_failure_returns_none(self):
+        """A failing/absent binary -> None (caller falls back to "Unknown"),
+        never raises (headless MDM scan must not crash)."""
+        with patch(f"{_WIN_CURSOR_MOD}.subprocess.run", side_effect=FileNotFoundError()):
+            self.assertIsNone(self.Detector().get_version(r"C:\x y\cursor-agent.exe"))
 
 
 if __name__ == "__main__":

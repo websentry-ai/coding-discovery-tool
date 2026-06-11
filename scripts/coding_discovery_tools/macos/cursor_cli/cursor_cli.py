@@ -50,15 +50,25 @@ class MacOSCursorCliDetector(BaseToolDetector):
             "install_path": install_path
         }
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """
         Extract Cursor CLI version using ``cursor-agent --version``. Best-effort.
+
+        Args:
+            binary: When provided, probe THIS exact ``cursor-agent`` path (the one
+                detection already resolved for the user). Under a root/MDM
+                all-users scan the user's ``~/.local/bin/cursor-agent`` is NOT on
+                root's PATH, so the bare ``cursor-agent`` probe reads nothing and
+                the version is "Unknown" — probing the resolved binary directly is
+                what populates it. When ``None`` (any no-arg caller), keep the
+                legacy bare-PATH probe so behaviour is unchanged.
 
         Returns:
             Version string or None if version cannot be determined
         """
         try:
-            output = run_command(["cursor-agent", "--version"], VERSION_TIMEOUT)
+            command = [str(binary), "--version"] if binary else ["cursor-agent", "--version"]
+            output = run_command(command, VERSION_TIMEOUT)
             if output:
                 return extract_version_number(output.strip())
         except Exception as e:

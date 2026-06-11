@@ -52,16 +52,39 @@ class WindowsCursorCliDetector(BaseToolDetector):
             "install_path": install_path
         }
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """
         Extract Cursor CLI version using ``cursor-agent --version``. Best-effort.
+
+        ``shell=True`` is required so the npm ``.cmd`` shim can run (Windows can't
+        exec a ``.cmd`` from a bare argv list).
+
+        Args:
+            binary: When provided, probe THIS exact ``cursor-agent`` path (the one
+                detection already resolved for the user). Under an admin/MDM
+                all-users scan the user's per-user ``cursor-agent`` is NOT on the
+                scanner's PATH, so the bare ``cursor-agent`` probe yields nothing
+                and the version reads "Unknown" — probing the resolved binary
+                directly populates it. The absolute path is passed as a single
+                shell-quoted command string (``"<path>" --version``) because a
+                bare argv list under ``shell=True`` would split a path containing
+                spaces (e.g. ``C:\\Users\\First Last\\...``); ``subprocess.list2cmdline``
+                quotes it the way ``cmd.exe`` expects. When ``None``, keep the
+                legacy bare-PATH probe (back-compat).
 
         Returns:
             Version string or None if version cannot be determined
         """
         try:
+            if binary:
+                # Quote the absolute path for cmd.exe (handles spaces); a bare
+                # ["<path with spaces>", "--version"] list under shell=True would
+                # break, so build one properly-quoted command string.
+                command = subprocess.list2cmdline([str(binary), "--version"])
+            else:
+                command = ["cursor-agent", "--version"]
             result = subprocess.run(
-                ["cursor-agent", "--version"],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=VERSION_TIMEOUT,

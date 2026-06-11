@@ -104,26 +104,39 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
             logger.debug(f"Error scanning C:\\Users for Copilot CLI: {exc}")
         return results
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """
         Extract Copilot CLI version on Windows using ``copilot --version``.
 
-        Overrides the inherited macOS probe to pass ``shell=True``: npm installs
-        the CLI as a ``copilot.cmd`` shim, which Windows cannot exec from a bare
-        argv list, so the inherited ``run_command`` probe would raise and version
-        would always read "unknown". Mirrors ``WindowsCodexDetector``.
+        Overrides the inherited macOS probe to pass ``shell=True`` (via
+        ``_probe_version``): npm installs the CLI as a ``copilot.cmd`` shim, which
+        Windows cannot exec from a bare argv list, so the inherited ``run_command``
+        probe would raise and version would always read "unknown". Mirrors
+        ``WindowsCodexDetector``.
 
-        Like the macOS detector, the per-user binary is resolved first (admin's
-        PATH lacks the user's copilot install during an MDM all-users scan)
-        before falling back to the bare ``copilot`` probe.
+        Args:
+            binary: When provided, probe THIS exact ``copilot`` path — the one
+                ``_detect_for_user`` already resolved (e.g. the
+                ``AppData/Roaming/npm/copilot.cmd`` shim) — through
+                ``_probe_version`` (``shell=True``), with no re-resolve and no bare
+                ``copilot`` fallback. This is the live path; it works even when
+                ``self.user_home`` is unset. When ``None``, keep the legacy
+                behaviour: resolve the per-user binary off ``self.user_home`` if
+                set, else fall back to the bare ``copilot`` probe.
+
         Best-effort: returns None on any failure and the caller falls back to
         "unknown".
         """
+        if binary is not None:
+            # Route through _probe_version so the npm .cmd shim runs under
+            # shell=True; no re-resolve, no bare-PATH fallback.
+            return self._probe_version([str(binary), "--version"])
+
         try:
             if self.user_home is not None:
-                binary = self._resolve_windows_binary(self.user_home)
-                if binary is not None:
-                    parsed = self._probe_version([str(binary), "--version"])
+                resolved = self._resolve_windows_binary(self.user_home)
+                if resolved is not None:
+                    parsed = self._probe_version([str(resolved), "--version"])
                     if parsed:
                         return parsed
         except Exception as exc:

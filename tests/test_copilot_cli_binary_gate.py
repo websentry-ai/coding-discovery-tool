@@ -148,6 +148,31 @@ class TestLinuxCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(binary))
 
+    @unittest.skipIf(os.name == "nt", "POSIX X_OK semantics for the ~/.local/bin stub")
+    def test_linux_version_threaded_from_resolved_binary(self):
+        """The Linux detector inherits the version-threading fix: with the bare
+        ``copilot`` OFF the scanner's PATH, the resolved binary is probed -> the
+        emitted row carries the parsed version, not "unknown" (the root-scan fix).
+        ``get_version`` is inherited from the macOS detector, so its ``run_command``
+        lives in the macOS module namespace.
+        """
+        binary = self.home / ".local" / "bin" / "copilot"
+        _write_executable(binary)
+        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+
+        def fake_run(command, *a, **k):
+            # Banner only for the resolved binary; bare ``copilot`` yields nothing.
+            if command[:1] == [str(binary)]:
+                return banner
+            return None
+
+        # The detector is scoped to this single user (mixin sets user_home).
+        with patch(f"{_MAC_MOD}.run_command", side_effect=fake_run):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+        self.assertEqual(result["version"], "0.0.399")
+
     @unittest.skipIf(os.name == "nt", "POSIX path; /usr/local/bin is a Linux machine-global")
     def test_linux_usr_local_bin_detected(self):
         """Linux resolves the machine-global ``/usr/local/bin/copilot`` (no

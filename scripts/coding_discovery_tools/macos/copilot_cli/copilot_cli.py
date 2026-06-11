@@ -337,7 +337,7 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             self.user_home = Path(user_home)
         return self._detect_all_users()
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """
         Extract Copilot CLI version using ``copilot --version``.
 
@@ -345,25 +345,45 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         as root or scanning another user), in which case "unknown" is returned
         by the caller.
 
+        Args:
+            binary: When provided, probe THIS exact ``copilot`` path — the one
+                ``_detect_for_user`` already resolved — with no re-resolve and no
+                bare-PATH fallback. This is the live path: it avoids the
+                double-resolve (the caller already paid for ``_resolve_binary``)
+                and works even when ``self.user_home`` is unset (the standalone
+                root ``detect()`` fallback). When ``None``, keep the legacy
+                behaviour: resolve the per-user binary off ``self.user_home`` if
+                set, else fall back to the bare ``copilot`` PATH probe.
+
         Returns:
             Parsed version (e.g. ``0.0.399``) or None if it can't be determined.
             The semver is parsed out of the multi-line ``copilot --version``
             banner so the stored value is clean and within the backend's version
             column limit (a raw multi-line banner overflows it).
         """
-        # Resolve the per-user binary first (root's PATH lacks the user's
-        # copilot install during an MDM all-users scan), then fall back to the
-        # bare-PATH probe for the running-user case. Use the SAME per-OS resolver
-        # detection uses (``self._resolve_binary``, overridden on Linux/Windows)
-        # so a detected install's OS-specific location (npm-global prefix,
-        # /usr/local/bin, AppData npm) is honoured here too — otherwise a binary
-        # found by detection would still report version "unknown".
+        # Live path: probe the binary detection already resolved. No re-resolve,
+        # no bare-PATH fallback — the caller passed the exact install it gated on.
+        if binary is not None:
+            try:
+                return _parse_cli_version(
+                    run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                )
+            except Exception as exc:
+                logger.debug(f"Could not extract Copilot CLI version from resolved binary: {exc}")
+                return None
+
+        # No-arg back-compat path. Resolve the per-user binary first (root's PATH
+        # lacks the user's copilot install during an MDM all-users scan), then
+        # fall back to the bare-PATH probe for the running-user case. Use the SAME
+        # per-OS resolver detection uses (``self._resolve_binary``, overridden on
+        # Linux/Windows) so a detected install's OS-specific location (npm-global
+        # prefix, /usr/local/bin, AppData npm) is honoured here too.
         try:
             if self.user_home is not None:
-                binary = self._resolve_binary(self.user_home)
-                if binary is not None:
+                resolved = self._resolve_binary(self.user_home)
+                if resolved is not None:
                     parsed = _parse_cli_version(
-                        run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                        run_command([str(resolved), "--version"], VERSION_TIMEOUT)
                     )
                     if parsed:
                         return parsed
@@ -483,7 +503,11 @@ class MacOSCopilotCliDetector(BaseToolDetector):
 
         return {
             "name": self.tool_name,
-            "version": self.get_version() or "unknown",
+            # Probe the binary we just resolved (not a re-resolve off
+            # self.user_home, and not the bare ``copilot`` PATH fallback): under a
+            # root/MDM all-users scan root's PATH lacks the user's copilot, so the
+            # bare probe would read "unknown" for every user.
+            "version": self.get_version(binary) or "unknown",
             "publisher": "GitHub",
             "install_path": binary,
             # The resolved config dir (~/.copilot, COPILOT_HOME-aware). install_path

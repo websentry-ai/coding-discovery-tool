@@ -1220,6 +1220,195 @@ class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 6c. Version threaded from the resolved binary into get_version (the root-scan
+#     fix): _detect_for_user passes the binary it already resolved, so version
+#     populates even when self.user_home is unset and the bare ``copilot`` is not
+#     on the scanner's PATH (the broken standalone-root detect() fallback).
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
+    """``_detect_for_user`` threads the resolved binary into ``get_version`` so the
+    version is probed from THAT exact path — not re-resolved off ``self.user_home``
+    (unset on the standalone root path) and not the bare ``copilot`` PATH probe
+    (which root's PATH lacks during an MDM all-users scan).
+
+    Repro of the broken case: a binary is resolved/detected, but
+    ``self.user_home`` is None AND a bare ``copilot --version`` yields nothing —
+    yet the version is STILL resolved because we probe the resolved binary
+    directly. This FAILS against the pre-fix code (``get_version()`` with no arg,
+    which under ``self.user_home is None`` falls straight through to the bare
+    ``copilot`` probe).
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.user_home = Path(self.tmp_dir) / "user"
+        self.user_home.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
+    def test_detect_for_user_resolves_version_with_user_home_unset(self):
+        """``self.user_home`` is None (the standalone root all-users path) and the
+        bare ``copilot`` is OFF the scanner's PATH, yet the resolved binary is
+        probed -> version is the parsed banner, NOT "unknown"."""
+        binary = _write_copilot_binary(self.user_home)  # ~/.local/bin/copilot
+        detector = MacOSCopilotCliDetector()
+        detector.user_home = None  # the broken standalone-root fallback
+
+        def fake_run(command, *a, **k):
+            # The banner is returned ONLY when the RESOLVED binary path is probed.
+            # A bare ``copilot --version`` (the pre-fix fallthrough) yields nothing,
+            # exactly like root's PATH on an MDM all-users scan.
+            if command[:1] == [str(binary)]:
+                return _VERSION_BANNER
+            return None
+
+        with patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch(f"{_DETECTOR_MOD}.run_command", side_effect=fake_run):
+            result = detector._detect_for_user(self.user_home)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+        # The fix: version comes from probing the resolved binary, not "unknown".
+        self.assertEqual(result["version"], "0.0.399")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
+    def test_root_all_users_scan_populates_version(self):
+        """End-to-end via the root all-users ``detect()`` path: ``self.user_home``
+        stays None, ``/Users`` is redirected to a temp tree with one user that has
+        a binary, and the bare ``copilot`` is off PATH. The emitted row's version
+        is the parsed banner (the exact broken standalone-root scenario)."""
+        users_dir = Path(self.tmp_dir) / "Users"
+        alice = users_dir / "alice"
+        alice.mkdir(parents=True)
+        binary = _write_copilot_binary(alice)
+
+        real_path = Path
+
+        def _path_side_effect(arg):
+            if str(arg) == "/Users":
+                return users_dir
+            return real_path(arg)
+
+        def fake_run(command, *a, **k):
+            if command[:1] == [str(binary)]:
+                return _VERSION_BANNER
+            return None
+
+        detector = MacOSCopilotCliDetector()
+        detector.user_home = None  # force the root all-users branch
+        with patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch(f"{_DETECTOR_MOD}.run_command", side_effect=fake_run), \
+             patch(f"{_DETECTOR_MOD}.Path", side_effect=_path_side_effect):
+            result = detector.detect()
+
+        # Single qualifying user -> a single dict.
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["install_path"], str(binary))
+        self.assertEqual(result["version"], "0.0.399")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
+    def test_pre_fix_no_arg_would_be_unknown(self):
+        """Non-vacuity guard: with the SAME mock and ``self.user_home`` None, the
+        pre-fix call shape ``get_version()`` (no arg) yields None -> the row would
+        have read "unknown". The post-fix ``get_version(binary)`` returns the
+        parsed version. This is the behavioural delta the fix introduces."""
+        binary = _write_copilot_binary(self.user_home)
+        detector = MacOSCopilotCliDetector()
+        detector.user_home = None
+
+        def fake_run(command, *a, **k):
+            if command[:1] == [str(binary)]:
+                return _VERSION_BANNER
+            return None
+
+        with patch(f"{_DETECTOR_MOD}.run_command", side_effect=fake_run):
+            # Pre-fix shape: no arg + user_home None -> bare ``copilot`` -> None.
+            self.assertIsNone(detector.get_version())
+            # Post-fix shape: pass the resolved binary -> parsed version.
+            self.assertEqual(detector.get_version(str(binary)), "0.0.399")
+
+    def test_get_version_with_binary_probes_exact_path_no_fallback(self):
+        """``get_version(binary)`` probes THAT exact path once and does NOT fall
+        back to the bare ``copilot`` probe (no double-resolve, no PATH leak)."""
+        binary = "/Users/x/.local/bin/copilot"
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=_VERSION_BANNER) as run:
+            version = MacOSCopilotCliDetector().get_version(binary)
+        self.assertEqual(version, "0.0.399")
+        run.assert_called_once_with([binary, "--version"], ANY)
+
+    def test_get_version_no_arg_back_compat_bare_probe(self):
+        """Back-compat: ``get_version()`` with no arg and ``user_home`` unset still
+        runs the bare ``copilot --version`` probe (unchanged for no-arg callers)."""
+        det = MacOSCopilotCliDetector()  # user_home defaults to None
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=_VERSION_BANNER) as run:
+            version = det.get_version()
+        self.assertEqual(version, "0.0.399")
+        run.assert_called_once_with(["copilot", "--version"], ANY)
+
+
+class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
+    """The Windows override accepts the same ``binary`` param and routes it through
+    ``_probe_version`` (``shell=True`` for the npm ``.cmd`` shim), with no
+    re-resolve and no bare fallback."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_get_version_with_binary_uses_probe_version_shell_true(self):
+        shim = r"C:\Users\someone\AppData\Roaming\npm\copilot.cmd"
+        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        fake = MagicMock(returncode=0, stdout=banner, stderr="")
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = WindowsCopilotCliDetector().get_version(shim)
+        self.assertEqual(version, "0.0.399")
+        # Routed through _probe_version -> the resolved shim path, shell=True.
+        self.assertEqual(run.call_args.args[0], [shim, "--version"])
+        self.assertIs(run.call_args.kwargs.get("shell"), True)
+
+    def test_get_version_with_binary_no_bare_fallback_on_failure(self):
+        """When the resolved-binary probe fails, get_version(binary) returns None
+        WITHOUT a second bare ``copilot`` probe (no double-probe)."""
+        shim = r"C:\Users\someone\AppData\Roaming\npm\copilot.cmd"
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()) as run:
+            self.assertIsNone(WindowsCopilotCliDetector().get_version(shim))
+        # Exactly one probe — the resolved binary — and no bare-name retry.
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], [shim, "--version"])
+
+    def test_detect_for_user_threads_binary_into_windows_get_version(self):
+        """Integration: the inherited ``_detect_for_user`` calls the Windows
+        ``get_version(binary)`` override (signature must accept the param), which
+        probes the resolved shim under shell=True -> the emitted row carries the
+        parsed version (the Windows leg of the root-scan fix)."""
+        tmp = tempfile.mkdtemp()
+        try:
+            user_home = Path(tmp) / "user"
+            shim = user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+            shim.parent.mkdir(parents=True)
+            shim.write_text("@echo off\n", encoding="utf-8")
+            banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+            fake = MagicMock(returncode=0, stdout=banner, stderr="")
+            detector = WindowsCopilotCliDetector()
+            detector.user_home = None  # the standalone path; binary comes from the param
+            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+                result = detector._detect_for_user(user_home)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["install_path"], str(shim))
+            self.assertEqual(result["version"], "0.0.399")
+            # Probed the resolved shim (not a bare ``copilot``), shell=True.
+            self.assertEqual(run.call_args.args[0], [str(shim), "--version"])
+            self.assertIs(run.call_args.kwargs.get("shell"), True)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # 7. Windows admin all-users scan -> per-user rows with distinct install_path
 # ---------------------------------------------------------------------------
 

@@ -327,7 +327,11 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     if cursor_agent_bin:
         return {
             "name": detector.tool_name,
-            "version": detector.get_version() or "Unknown",
+            # Probe the resolved binary directly: the detector's get_version()
+            # otherwise runs a bare ``cursor-agent --version`` against the
+            # SCANNER's PATH, which under a root/MDM all-users scan lacks the
+            # user's ~/.local/bin/cursor-agent -> "Unknown" for every user.
+            "version": detector.get_version(cursor_agent_bin) or "Unknown",
             "install_path": cursor_agent_bin
         }
 

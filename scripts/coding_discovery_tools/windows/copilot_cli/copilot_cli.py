@@ -10,7 +10,8 @@ identical to the macOS layout, with its MCP servers in
 Three things are OS-specific: the all-users scan (Windows uses
 ``is_running_as_admin`` and iterates ``C:\\Users`` instead of root + ``/Users``),
 the binary resolve (``_resolve_binary`` -> ``_resolve_windows_binary``: the npm
-``copilot.cmd`` shim / ``.local/bin`` / ``.bun/bin``, no Homebrew), and
+``copilot.cmd`` shim / WinGet ``Links\\copilot.exe`` shim / ``.local/bin`` /
+``.bun/bin``, no Homebrew), and
 ``get_version`` (overridden to pass ``shell=True`` for the npm ``.cmd`` shim,
 mirroring ``WindowsCodexDetector`` — without it the inherited probe would always
 read "unknown"). Everything else — the binary GATE in ``_detect_for_user``,
@@ -136,12 +137,17 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
 
         Checks the documented/observed per-user install locations in order:
         ``AppData/Roaming/npm/copilot.cmd`` (npm global shim),
+        ``AppData/Local/Microsoft/WinGet/Links/copilot.exe`` (WinGet shim — the
+        ``GitHub.Copilot`` package is a portable zip whose ``Commands: [copilot]``
+        alias makes WinGet drop a ``copilot.exe`` shim into the per-user Links
+        dir; mirrors ``find_claude_binary_for_user``'s WinGet path),
         ``.local/bin/copilot.exe``, ``.bun/bin/copilot.exe``. Best-effort: any
         error is swallowed and None is returned. Never raises.
         """
         try:
             for candidate in (
                 user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd",
+                user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "copilot.exe",
                 user_home / ".local" / "bin" / "copilot.exe",
                 user_home / ".bun" / "bin" / "copilot.exe",
             ):

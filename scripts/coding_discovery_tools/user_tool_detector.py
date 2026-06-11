@@ -469,6 +469,15 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     return None
 
 
+def _cursor_agent_version_key(version_dir: Path):
+    """Numeric (major, minor, patch) parsed from a "X.Y.Z" version-dir name so the
+    newest sorts last (``reverse=True`` puts it first). A plain string sort would
+    order "1.10.0" before "1.9.0" and report a stale version; malformed names yield
+    () and sort earliest. Shared by the POSIX and Windows versioned-dir scans.
+    """
+    return tuple(int(p) for p in version_dir.name.split(".") if p.isdigit())
+
+
 def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
     """Find the absolute path to the ``cursor-agent`` binary for a user.
 
@@ -483,8 +492,10 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
     probed via the shared resolver, and a root-guarded ``which cursor-agent``
     backstops custom prefixes (skipped under root — it resolves the SCANNER's
     PATH, not ``user_home``'s, which would mis-attribute the install). On Windows
-    the per-user ``%USERPROFILE%\\.local\\bin\\cursor-agent.exe`` is checked
-    (``which`` is not a command there, so the explicit candidate covers it).
+    the native installer dir ``%LOCALAPPDATA%\\cursor-agent`` is checked
+    (``cursor-agent``/``agent`` as ``.exe``/``.cmd`` at the root plus the newest
+    ``versions\\<v>\\cursor-agent.exe``), along with the ``~/.local/bin`` Git-Bash
+    variant (``which`` is not a command there, so the explicit candidates cover it).
 
     Args:
         user_home: Path to the user's home directory.
@@ -493,7 +504,22 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
         Absolute path to the ``cursor-agent`` binary as a string, or None.
     """
     if platform.system() == "Windows":
+        # Existence-gated, NOT os.access(X_OK): on Windows X_OK is True for any
+        # file, so it can't distinguish a binary (mirrors the Gemini/Claude
+        # Windows branches). All candidates are user_home-relative, so they are
+        # correctly scoped to this user even under an admin/MDM scan.
+        install_dir = user_home / "AppData" / "Local" / "cursor-agent"
         candidates = [
+            # Native Windows installer (irm 'https://cursor.com/install?win32=true'
+            # | iex) drops cursor-agent.{exe,cmd,ps1} and agent.{exe,cmd,ps1} at
+            # the root of %LOCALAPPDATA%\cursor-agent.
+            install_dir / "cursor-agent.exe",
+            install_dir / "cursor-agent.cmd",
+            install_dir / "agent.exe",
+            install_dir / "agent.cmd",
+            # Git-Bash variant: the Unix installer run under MINGW64 drops an
+            # extensionless symlink into ~/.local/bin.
+            user_home / ".local" / "bin" / "cursor-agent",
             user_home / ".local" / "bin" / "cursor-agent.exe",
         ]
         for candidate in candidates:
@@ -502,6 +528,28 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
                     return str(candidate)
             except (PermissionError, OSError):
                 continue
+
+        # The native installer keeps the real binary under a versioned subdir
+        # (%LOCALAPPDATA%\cursor-agent\versions\<v>\cursor-agent.exe); pick the
+        # newest by numeric version (same key as the POSIX branch) so a stale
+        # older build isn't reported.
+        versions_dir = install_dir / "versions"
+        try:
+            if versions_dir.exists():
+                version_dirs = sorted(
+                    (d for d in versions_dir.iterdir() if d.is_dir()),
+                    key=_cursor_agent_version_key,
+                    reverse=True,
+                )
+                for version_dir in version_dirs:
+                    versioned = version_dir / "cursor-agent.exe"
+                    try:
+                        if versioned.exists():
+                            return str(versioned)
+                    except (PermissionError, OSError):
+                        continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not enumerate Windows cursor-agent versions: {e}")
         return None
 
     # POSIX (macOS / Linux). All candidates below are user_home-relative, so they
@@ -520,19 +568,11 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
     # Versioned install dir: pick the newest version's cursor-agent.
     versions_dir = user_home / ".local" / "share" / "cursor-agent" / "versions"
 
-    def _version_key(version_dir: Path):
-        # Numeric (major, minor, patch) parsed from a "X.Y.Z" dir name so the
-        # newest sorts last (reverse=True puts it first). A plain string sort
-        # would order "1.10.0" before "1.9.0" and report a stale version;
-        # malformed names yield () and sort earliest. Mirrors copilot_cli's
-        # _node_version_key idiom.
-        return tuple(int(p) for p in version_dir.name.split(".") if p.isdigit())
-
     try:
         if versions_dir.exists():
             version_dirs = sorted(
                 (d for d in versions_dir.iterdir() if d.is_dir()),
-                key=_version_key,
+                key=_cursor_agent_version_key,
                 reverse=True,
             )
             for version_dir in version_dirs:

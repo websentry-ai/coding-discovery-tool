@@ -11,7 +11,9 @@ DRY (CLAUDE.md): the binary GATE in ``_detect_for_user``, ``detect``,
 from ``MacOSCopilotCliDetector``. Only two things are Linux-specific and
 overridden here: the all-users scan (``get_linux_user_homes()`` instead of root +
 ``/Users``) and the binary resolve (``_resolve_binary``: npm/nvm/pnpm via the
-shared resolver plus ``/usr/local/bin/copilot``; NO Homebrew on Linux).
+shared resolver, ``/usr/local/bin/copilot``, plus Linuxbrew
+(``~/.linuxbrew`` and ``/home/linuxbrew/.linuxbrew``); Linuxbrew only — macOS
+Homebrew prefixes are macOS-specific).
 """
 
 import logging
@@ -24,7 +26,10 @@ from ...macos.copilot_cli.copilot_cli import (
     MacOSCopilotCliDetector,
     _resolve_copilot_binary,
 )
-from ...utils import resolve_npm_global_tool_bin
+from ...utils import (
+    machine_global_binary_owned_by_user,
+    resolve_npm_global_tool_bin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +48,15 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
 
         Order: per-user installs (``~/.local/bin``, ``~/.bun/bin``, newest nvm
         node) via ``_resolve_copilot_binary``; the npm-global prefix (nvm / pnpm /
-        system node) via the shared resolver; and the machine-global
+        system node) via the shared resolver; the machine-global
         ``/usr/local/bin/copilot`` (root-owned system installs attribute to every
-        scanned user). NO Homebrew — that is a macOS path. Best-effort: returns a
-        path string or None. Never raises.
+        scanned user); and Linuxbrew (``brew install copilot-cli`` is supported on
+        Linux): the user-local ``~/.linuxbrew/bin/copilot`` (unconditional) and the
+        machine-global ``/home/linuxbrew/.linuxbrew/bin/copilot`` (owner-attributed
+        under a root/MDM scan so one user's install isn't fanned out — the 93b5fc2
+        cross-user FP). Linuxbrew only; macOS Homebrew prefixes
+        (``/opt/homebrew``, ``/usr/local/bin`` as a brew prefix) are macOS-specific.
+        Best-effort: returns a path string or None. Never raises.
         """
         per_user = _resolve_copilot_binary(user_home)
         if per_user is not None:
@@ -58,12 +68,24 @@ class LinuxCopilotCliDetector(MacOSCopilotCliDetector):
         if npm_resolved:
             return npm_resolved
 
-        candidate = Path("/usr/local/bin/copilot")
-        try:
-            if candidate.exists() and os.access(str(candidate), os.X_OK):
-                return str(candidate)
-        except (PermissionError, OSError):
-            pass
+        # user_home-relative Linuxbrew prefix is scoped to this user, so it is
+        # always probed; the machine-global /usr/local and /home/linuxbrew
+        # prefixes are owner-attributed under root.
+        user_relative = [user_home / ".linuxbrew" / "bin" / "copilot"]
+        machine_global = [
+            Path("/usr/local/bin/copilot"),
+            Path("/home/linuxbrew/.linuxbrew/bin/copilot"),
+        ]
+        is_root = is_running_as_root()
+        for candidate in user_relative + machine_global:
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    if is_root and candidate in machine_global \
+                            and not machine_global_binary_owned_by_user(candidate, user_home):
+                        continue
+                    return str(candidate)
+            except (PermissionError, OSError):
+                continue
 
         return None
 

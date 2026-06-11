@@ -121,5 +121,79 @@ class TestCursorCliBinaryGate(unittest.TestCase):
         self.assertIsNone(self._detect())
 
 
+class TestCursorCliBinaryGateWindows(unittest.TestCase):
+    """Windows branch of ``find_cursor_agent_binary_for_user``.
+
+    The native Windows installer (``irm 'https://cursor.com/install?win32=true'
+    | iex``) drops ``cursor-agent``/``agent`` (``.exe``/``.cmd``) at the root of
+    ``%LOCALAPPDATA%\\cursor-agent`` and keeps the real binary under a
+    ``versions\\<v>\\`` subdir — none of which the old single-candidate Windows
+    branch (``.local\\bin\\cursor-agent.exe`` only) probed, so every native
+    install was a false negative. The Git-Bash variant drops an extensionless
+    ``~/.local/bin/cursor-agent``.
+
+    The Windows branch is EXISTENCE-gated (on Windows ``os.access(X_OK)`` is True
+    for any file), so these tests create plain files and never chmod — no
+    ``skipIf(os.name == 'nt')`` is needed. ``platform.system`` is pinned to
+    ``"Windows"`` so the Windows branch runs on a POSIX CI box, and
+    ``is_running_as_root`` is irrelevant to this branch (no machine-global probe).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _resolve(self):
+        with patch(f"{_MOD}.platform.system", return_value="Windows"):
+            return utd.find_cursor_agent_binary_for_user(self.home)
+
+    def test_localappdata_cursor_agent_exe_detected(self):
+        """``%LOCALAPPDATA%\\cursor-agent\\cursor-agent.exe`` (native installer)
+        -> detected. Fails against the old single-candidate Windows branch."""
+        exe = self.home / "AppData" / "Local" / "cursor-agent" / "cursor-agent.exe"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        self.assertEqual(self._resolve(), str(exe))
+
+    def test_localappdata_agent_cmd_detected(self):
+        """The ``agent.cmd`` shim variant at the install-dir root -> detected."""
+        cmd = self.home / "AppData" / "Local" / "cursor-agent" / "agent.cmd"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("", encoding="utf-8")
+        self.assertEqual(self._resolve(), str(cmd))
+
+    def test_versioned_subdir_detected_and_numeric_newest(self):
+        """The real binary under ``cursor-agent\\versions\\<v>\\cursor-agent.exe``
+        -> detected, and the NEWEST by numeric version wins (a lexical sort would
+        pick the stale ``1.9.0`` over ``1.10.0``)."""
+        base = self.home / "AppData" / "Local" / "cursor-agent" / "versions"
+        for ver in ("1.9.0", "1.10.0", "1.2.0"):
+            exe = base / ver / "cursor-agent.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("", encoding="utf-8")
+        self.assertEqual(self._resolve(), str(base / "1.10.0" / "cursor-agent.exe"))
+
+    def test_git_bash_extensionless_detected(self):
+        """The Git-Bash (MINGW64) variant drops an extensionless
+        ``~/.local/bin/cursor-agent`` -> detected."""
+        binary = self.home / ".local" / "bin" / "cursor-agent"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("", encoding="utf-8")
+        self.assertEqual(self._resolve(), str(binary))
+
+    def test_cursor_residue_only_not_detected(self):
+        """``~/.cursor/cli-config.json`` residue but no Windows binary -> None."""
+        cursor_dir = self.home / ".cursor"
+        cursor_dir.mkdir(parents=True)
+        (cursor_dir / "cli-config.json").write_text("{}", encoding="utf-8")
+        self.assertIsNone(self._resolve())
+
+    def test_nothing_present_not_detected(self):
+        self.assertIsNone(self._resolve())
+
+
 if __name__ == "__main__":
     unittest.main()

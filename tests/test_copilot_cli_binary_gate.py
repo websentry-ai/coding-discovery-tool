@@ -27,9 +27,11 @@ from unittest.mock import patch
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
 from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli import LinuxCopilotCliDetector
+from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
 
 _MAC_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli"
 _LINUX_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli"
+_WINDOWS_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli"
 
 
 def _write_executable(path: Path) -> None:
@@ -162,6 +164,132 @@ class TestLinuxCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):
             result = self.detector.detect()
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(target))
+
+    @unittest.skipIf(os.name == "nt", "POSIX X_OK semantics for the user-local Linuxbrew stub")
+    def test_user_linuxbrew_bin_detected(self):
+        """``brew install copilot-cli`` on Linux with a user-local Linuxbrew
+        prefix: an executable ``~/.linuxbrew/bin/copilot`` -> detected. This is
+        user_home-relative, so it is probed unconditionally (no owner check)."""
+        binary = self.home / ".linuxbrew" / "bin" / "copilot"
+        _write_executable(binary)
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
+    def test_global_linuxbrew_owned_by_user_detected_under_root(self):
+        """Under a root scan, the machine-global default Linuxbrew prefix
+        ``/home/linuxbrew/.linuxbrew/bin/copilot`` is attributed to the scanned
+        user when owned by them (or root). The ``os.stat`` mock is SCOPED to that
+        path so pathlib's own stat calls elsewhere are untouched (gotcha #2)."""
+        brew = Path("/home/linuxbrew/.linuxbrew/bin/copilot")
+        real_stat = os.stat
+
+        class _FakeStat:
+            st_uid = 0  # root-owned -> attributes to every scanned user
+
+        def scoped_stat(path, *a, **k):
+            if str(path) == str(brew):
+                return _FakeStat()
+            return real_stat(path, *a, **k)
+
+        def fake_exists(self):
+            return str(self) == str(brew)
+
+        with patch(f"{_LINUX_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_LINUX_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch.object(Path, "exists", fake_exists), \
+             patch("os.access", lambda p, m: str(p) == str(brew)), \
+             patch("os.stat", scoped_stat), \
+             patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(brew))
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
+    def test_global_linuxbrew_owned_by_other_user_not_detected_under_root(self):
+        """The FP guard: under a root scan, ``/home/linuxbrew/.linuxbrew/bin/
+        copilot`` owned by a DIFFERENT user is skipped, so with no user-local
+        binary detection returns None (one user's Linuxbrew install is not fanned
+        out to every scanned user — the 93b5fc2 cross-user FP)."""
+        brew = Path("/home/linuxbrew/.linuxbrew/bin/copilot")
+        other_home = self.home.parent / "someone_else"
+        real_stat = os.stat
+
+        class _FakeStat:
+            st_uid = 4242  # a regular, non-root uid owned by another user
+
+        def scoped_stat(path, *a, **k):
+            if str(path) == str(brew):
+                return _FakeStat()
+            return real_stat(path, *a, **k)
+
+        def fake_exists(self):
+            return str(self) == str(brew)
+
+        def fake_getpwuid(uid):
+            class _PW:
+                pw_dir = str(other_home)
+            if uid == 4242:
+                return _PW()
+            raise KeyError(uid)
+
+        with patch(f"{_LINUX_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_LINUX_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch.object(Path, "exists", fake_exists), \
+             patch("os.access", lambda p, m: str(p) == str(brew)), \
+             patch("os.stat", scoped_stat), \
+             patch("scripts.coding_discovery_tools.utils.pwd.getpwuid", fake_getpwuid), \
+             patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNone(result)
+
+
+class TestWindowsCopilotCliWinGet(unittest.TestCase):
+    """WinGet install of the GitHub Copilot CLI on Windows.
+
+    ``winget install GitHub.Copilot`` (package id ``GitHub.Copilot``) is a
+    documented Windows install method. The package is a portable zip whose
+    manifest declares ``Commands: [copilot]``, so WinGet drops a ``copilot.exe``
+    shim — named after the command alias, NOT the package id — into the per-user
+    ``%LOCALAPPDATA%\\Microsoft\\WinGet\\Links`` dir (mirrors the Claude WinGet
+    path in ``find_claude_binary_for_user``). The old Windows resolver omitted
+    this dir, so every WinGet install was a false negative.
+
+    ``_resolve_windows_binary`` is EXISTENCE-gated (Windows ``os.access(X_OK)`` is
+    True for any file), so the test creates a plain stub and never chmods — no
+    ``skipIf(os.name == 'nt')`` is needed. ``get_version`` is patched out so the
+    ``shell=True`` ``copilot --version`` probe never runs."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.detector = WindowsCopilotCliDetector()
+        self.detector.user_home = self.home
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_winget_links_shim_detected(self):
+        """A ``…\\WinGet\\Links\\copilot.exe`` stub -> detected via the Windows
+        resolver; install_path is the shim."""
+        exe = (self.home / "AppData" / "Local" / "Microsoft" / "WinGet"
+               / "Links" / "copilot.exe")
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["name"], "GitHub Copilot CLI")
+        self.assertEqual(result["install_path"], str(exe))
+
+    def test_copilot_config_residue_only_not_detected(self):
+        """``~/.copilot/hooks/unbound.json`` residue but no WinGet (or any)
+        binary -> None."""
+        _make_hooks_only(self.home)
+        self.assertIsNone(self.detector.detect())
 
 
 if __name__ == "__main__":

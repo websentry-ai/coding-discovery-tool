@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as DefusedET
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -284,7 +285,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         paths = set()
 
         try:
-            tree = ET.parse(xml_path)
+            tree = DefusedET.parse(xml_path)
             root = tree.getroot()
 
             # Various path formats used by JetBrains

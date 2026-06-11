@@ -781,7 +781,7 @@ class TestCopilotCliRouting(unittest.TestCase):
             "name": "GitHub Copilot CLI",
             "version": "0.0.1",
             "install_path": "/Users/x/.local/bin/copilot",   # the binary (the gate)
-            "config_path": "/Users/x/.copilot",               # the config dir
+            "_config_path": "/Users/x/.copilot",               # the config dir
         }
         self.detector._copilot_cli_mcp_extractor = MagicMock()
         self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
@@ -2388,7 +2388,7 @@ class TestCopilotCliSkillsRouting(unittest.TestCase):
             "name": "GitHub Copilot CLI",
             "version": "1.0.55",
             "install_path": "/Users/x/.local/bin/copilot",  # the binary (the gate)
-            "config_path": "/Users/x/.copilot",             # the config dir
+            "_config_path": "/Users/x/.copilot",             # the config dir
         }
         us1 = self._skill("deploy", "/Users/x/.copilot/skills/deploy/SKILL.md", scope="user")
         us2 = self._skill("review", "/Users/x/.agents/skills/review/SKILL.md", scope="user")

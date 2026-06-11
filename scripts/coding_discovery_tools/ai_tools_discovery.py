@@ -163,19 +163,19 @@ def _normalise_path(p: str) -> str:
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
-    The CLI's per-user config dir (``~/.copilot``, carried as ``config_path``) is
+    The CLI's per-user config dir (``~/.copilot``, carried as ``_config_path``) is
     owned by exactly one user, but the per-user scan loop re-runs for every user.
-    Emit only when the user OWNS the detected config dir (``config_path`` under
+    Emit only when the user OWNS the detected config dir (``_config_path`` under
     their home) OR the per-user filter produced data for them (projects/
     permissions) — otherwise a non-owner with no data would get a phantom CLI
     install row. Scoped to the CLI: IDE tools legitimately share a machine-wide
-    install. Ownership keys on ``config_path`` (the ``~/.copilot`` dir), NOT
+    install. Ownership keys on ``_config_path`` (the ``~/.copilot`` dir), NOT
     ``install_path``: install_path is now the ``copilot`` BINARY, which for a
     machine-global install (Homebrew/npm-global) lives outside any user home and
-    so would never look "owned". Older payloads without ``config_path`` fall back
+    so would never look "owned". Older payloads without ``_config_path`` fall back
     to ``install_path``.
     """
-    own_path = tool_filtered.get("config_path") or tool_filtered.get("install_path", "")
+    own_path = tool_filtered.get("_config_path") or tool_filtered.get("install_path", "")
     own_norm = _normalise_path(own_path)
     user_norm = _normalise_path(str(user_home))
     owns_install = bool(own_norm) and (
@@ -1516,9 +1516,9 @@ class AIToolsDetector:
                 # one row with the global rules + MCP servers, rather than
                 # scattering across each skill's own directory. The gate's
                 # install_path is the binary now, so the config dir is carried
-                # separately as ``config_path`` (older payloads without it fall
+                # separately as ``_config_path`` (older payloads without it fall
                 # back to install_path).
-                install_key = tool.get("config_path") or tool.get("install_path") or str(Path.home())
+                install_key = tool.get("_config_path") or tool.get("install_path") or str(Path.home())
                 for skill in user_skills:
                     if install_key not in projects_dict:
                         projects_dict[install_key] = {"mcpServers": [], "rules": [], "skills": []}
@@ -1555,14 +1555,14 @@ class AIToolsDetector:
                 all_settings = self._copilot_cli_settings_extractor.extract_settings() or []
                 # The detection gate's install_path is the binary now, so match the
                 # settings record against the resolved CONFIG dir (carried as
-                # ``config_path``; older payloads without it fall back to
+                # ``_config_path``; older payloads without it fall back to
                 # install_path). extract_settings() returns every user's record
                 # under a root scan, but this runs once per user-install. Keep only
                 # THIS install's record — each settings file sits directly in the
                 # config dir, so match by parent dir (boundary-safe; a bare prefix
                 # would also match a sibling like ".copilot-old"). Prevents an
                 # all-users scan from leaking another user's permissions onto this row.
-                config_dir = tool.get("config_path") or tool.get("install_path", "")
+                config_dir = tool.get("_config_path") or tool.get("install_path", "")
                 own = [
                     s for s in all_settings
                     if config_dir and s.get("settings_path")
@@ -1599,11 +1599,11 @@ class AIToolsDetector:
             "install_path": tool.get("install_path"),
             # Carry the resolved config dir (~/.copilot) forward. install_path is
             # the binary now; the downstream ownership gate
-            # (_copilot_cli_owned_by_user) keys on config_path to attribute this
+            # (_copilot_cli_owned_by_user) keys on _config_path to attribute this
             # row to the config-dir owner. Dropping it here made the gate fall back
             # to the binary install_path — outside any home for a machine-global
             # install — wrongly suppressing the legitimate owner.
-            "config_path": tool.get("config_path"),
+            "_config_path": tool.get("_config_path"),
             "projects": projects_list,
         }
         if permissions_payload:
@@ -2605,14 +2605,14 @@ def main():
                         # Ownership gate (Copilot CLI only): suppress a phantom install
                         # row for a user who neither owns the detected ~/.copilot config
                         # dir nor has any per-user data (e.g. gowshik_2 carrying gowshik's
-                        # config_path with 0 projects). filter_tool_projects_by_user scopes
-                        # projects/permissions but never rewrites config_path/install_path,
-                        # so the gate is needed. Ownership keys on config_path, not the
+                        # _config_path with 0 projects). filter_tool_projects_by_user scopes
+                        # projects/permissions but never rewrites _config_path/install_path,
+                        # so the gate is needed. Ownership keys on _config_path, not the
                         # binary install_path (see _copilot_cli_owned_by_user).
                         if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
                             logger.info(
                                 f"  Skipping Copilot CLI for {user_name}: config dir "
-                                f"{tool_filtered.get('config_path') or tool_filtered.get('install_path')!r} "
+                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
                                 f"not owned by this user and no per-user data"
                             )
                             continue

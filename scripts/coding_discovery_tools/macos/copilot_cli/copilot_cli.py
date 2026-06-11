@@ -489,7 +489,8 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             # The resolved config dir (~/.copilot, COPILOT_HOME-aware). install_path
             # is the binary now (the gate), but the rules/MCP/settings/skills
             # extractors still key on the config dir, so the orchestrator uses
-            # config_path to match this install's per-user settings + coalesce its
-            # user-scope skills (see _process_copilot_cli_tool).
-            "config_path": str(_resolve_copilot_dir(user_home)),
+            # _config_path to match this install's per-user settings + coalesce its
+            # user-scope skills (see _process_copilot_cli_tool). Underscore-prefixed
+            # so it stays internal (stripped from the backend payload).
+            "_config_path": str(_resolve_copilot_dir(user_home)),
         }

@@ -31,7 +31,7 @@ def _cli_tool(install_path: str, projects=None, permissions=None, config_path=No
         "projects": projects or [],
     }
     if config_path is not None:
-        tool["config_path"] = config_path
+        tool["_config_path"] = config_path
     if permissions is not None:
         tool["permissions"] = permissions
     return tool
@@ -176,7 +176,7 @@ class TestFilterThenGate(unittest.TestCase):
             config_path="/Users/gowshik/.copilot",
         )
         filtered_owner = self.detector.filter_tool_projects_by_user(tool, Path("/Users/gowshik"))
-        self.assertEqual(filtered_owner.get("config_path"), "/Users/gowshik/.copilot")
+        self.assertEqual(filtered_owner.get("_config_path"), "/Users/gowshik/.copilot")
         self.assertTrue(self._emit(tool, "/Users/gowshik"))
         # A second user with no config dir under their home and no data: suppressed.
         self.assertFalse(self._emit(tool, "/Users/gowshik_2"))
@@ -215,7 +215,7 @@ class TestProcessSingleToolCarriesConfigPath(unittest.TestCase):
             "version": "0.0.1",
             "publisher": "GitHub",
             "install_path": "/opt/homebrew/bin/copilot",
-            "config_path": "/Users/owner/.copilot",
+            "_config_path": "/Users/owner/.copilot",
         }
 
     def _emit(self, processed: dict, user_home: str) -> bool:
@@ -226,7 +226,7 @@ class TestProcessSingleToolCarriesConfigPath(unittest.TestCase):
     def test_process_single_tool_preserves_config_path(self):
         # The regression: the rebuilt result dict MUST carry config_path forward.
         processed = self.detector.process_single_tool(self._detection_tool())
-        self.assertEqual(processed.get("config_path"), "/Users/owner/.copilot")
+        self.assertEqual(processed.get("_config_path"), "/Users/owner/.copilot")
         # install_path stays the binary (the detection gate), unchanged.
         self.assertEqual(processed.get("install_path"), "/opt/homebrew/bin/copilot")
         # Zero projects/permissions: this is the machine-global, no-data case.
@@ -243,6 +243,19 @@ class TestProcessSingleToolCarriesConfigPath(unittest.TestCase):
         # dir under their home and has no per-user data -> SUPPRESS (no phantom row).
         processed = self.detector.process_single_tool(self._detection_tool())
         self.assertFalse(self._emit(processed, "/Users/sibling"))
+
+    def test_config_path_stripped_from_backend_report(self):
+        # _config_path is INTERNAL (underscore-prefixed): it drives per-user
+        # attribution but must NOT reach the backend payload — generate_single_tool_report
+        # strips _-prefixed keys. (This is the WARNING the rename closed; a bare
+        # ``config_path`` would have leaked the user's home path to the backend.)
+        processed = self.detector.process_single_tool(self._detection_tool())
+        report = self.detector.generate_single_tool_report(processed, "device-1", "owner")
+        sent = report["tools"][0]
+        self.assertNotIn("_config_path", sent)
+        self.assertNotIn("config_path", sent)
+        # install_path (the binary, not underscore-prefixed) IS still sent.
+        self.assertEqual(sent.get("install_path"), "/opt/homebrew/bin/copilot")
 
 
 if __name__ == "__main__":

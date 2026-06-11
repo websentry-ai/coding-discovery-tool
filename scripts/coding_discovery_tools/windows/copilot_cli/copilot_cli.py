@@ -7,17 +7,12 @@ keeps its configuration under ``%USERPROFILE%\\.copilot`` (i.e. ``~/.copilot``),
 identical to the macOS layout, with its MCP servers in
 ``~/.copilot/mcp-config.json``.
 
-Two things are OS-specific: the all-users scan (Windows uses
-``is_running_as_admin`` and iterates ``C:\\Users`` instead of root + ``/Users``)
-and ``get_version`` (overridden to pass ``shell=True`` for the npm ``.cmd``
-shim, mirroring ``WindowsCodexDetector`` — without it the inherited probe would
-always read "unknown"). Everything else — the marker gate
-(``_copilot_dir_has_strong_artifact``), ``_detect_for_user``, ``detect``, and
-``detect_all_tools`` — is inherited from the macOS detector rather than
-re-derived (CLAUDE.md DRY). The marker gate inherits the strong-vs-shared
-artifact split (``_copilot_dir_has_strong_artifact``) too. Mirrors the
-per-user/admin idiom in
-``windows/github_copilot/detect_copilot.py``.
+OS-specific overrides: the all-users scan (``is_running_as_admin`` + ``C:\\Users``),
+the binary resolve (``_resolve_windows_binary``: npm ``copilot.cmd`` / WinGet
+``Links\\copilot.exe`` shims / ``.local/bin`` / ``.bun/bin``, no Homebrew), and
+``get_version`` (``shell=True`` — Windows can't exec the npm ``.cmd`` shim from a
+bare argv list, so the inherited probe would read "unknown"). Everything else is
+inherited from the macOS detector (DRY).
 """
 
 import logging
@@ -36,12 +31,13 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
     """
     Detector for GitHub Copilot CLI installations on Windows systems.
 
-    Inherits the full macOS detection surface (marker gate, per-user detection,
+    Inherits the full macOS detection surface (binary gate, per-user detection,
     ``detect``/``detect_all_tools``, and ``get_version``) and overrides only the
     all-users branch: when ``self.user_home`` is unset and the process is admin,
     every user under ``C:\\Users`` is scanned; otherwise the current user's home
     is checked. Each detected user yields a distinct row whose ``install_path``
-    is that user's ``~/.copilot`` directory.
+    is that user's resolved ``copilot`` binary (with ``~/.copilot`` carried as
+    the internal ``_config_path``).
     """
 
     def _detect_all_users(self) -> List[Dict]:
@@ -62,6 +58,15 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
 
         result = self._detect_for_user(Path.home())
         return [result] if result else []
+
+    def _resolve_binary(self, user_home: Path) -> Optional[str]:
+        """Resolve the ``copilot`` CLI binary for ``user_home`` (the detection gate).
+
+        Overrides the macOS resolver with the Windows candidate list
+        (``_resolve_windows_binary``; no Homebrew). Returns a path string or None.
+        """
+        binary = self._resolve_windows_binary(user_home)
+        return str(binary) if binary is not None else None
 
     def _detect_for_all_system_users(self) -> List[Dict]:
         """Scan every user directory under ``C:\\Users`` when running as admin.
@@ -91,26 +96,33 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
             logger.debug(f"Error scanning C:\\Users for Copilot CLI: {exc}")
         return results
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """
         Extract Copilot CLI version on Windows using ``copilot --version``.
 
-        Overrides the inherited macOS probe to pass ``shell=True``: npm installs
-        the CLI as a ``copilot.cmd`` shim, which Windows cannot exec from a bare
-        argv list, so the inherited ``run_command`` probe would raise and version
-        would always read "unknown". Mirrors ``WindowsCodexDetector``.
+        Overrides the inherited macOS probe to pass ``shell=True`` (via
+        ``_probe_version``): npm installs the CLI as a ``copilot.cmd`` shim, which
+        Windows cannot exec from a bare argv list, so the inherited probe would read
+        "unknown". Mirrors ``WindowsCodexDetector``.
 
-        Like the macOS detector, the per-user binary is resolved first (admin's
-        PATH lacks the user's copilot install during an MDM all-users scan)
-        before falling back to the bare ``copilot`` probe.
+        Args:
+            binary: When provided, probe this exact ``copilot`` path with no
+                re-resolve and no bare ``copilot`` fallback (works when
+                ``self.user_home`` is unset). When ``None``, resolve the per-user
+                binary off ``self.user_home`` if set, else probe bare ``copilot``.
+
         Best-effort: returns None on any failure and the caller falls back to
         "unknown".
         """
+        if binary is not None:
+            # Through _probe_version so the npm .cmd shim runs under shell=True.
+            return self._probe_version([str(binary), "--version"])
+
         try:
             if self.user_home is not None:
-                binary = self._resolve_windows_binary(self.user_home)
-                if binary is not None:
-                    parsed = self._probe_version([str(binary), "--version"])
+                resolved = self._resolve_windows_binary(self.user_home)
+                if resolved is not None:
+                    parsed = self._probe_version([str(resolved), "--version"])
                     if parsed:
                         return parsed
         except Exception as exc:
@@ -122,14 +134,15 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
     def _resolve_windows_binary(user_home: Path) -> Optional[Path]:
         """Return the per-user ``copilot`` CLI binary for ``user_home`` on Windows.
 
-        Checks the documented/observed per-user install locations in order:
-        ``AppData/Roaming/npm/copilot.cmd`` (npm global shim),
-        ``.local/bin/copilot.exe``, ``.bun/bin/copilot.exe``. Best-effort: any
-        error is swallowed and None is returned. Never raises.
+        Checks the per-user install locations below: the npm global shim, the WinGet
+        shim (the ``GitHub.Copilot`` package's ``copilot`` command alias lands in the
+        per-user Links dir), and the ``.local/bin`` / ``.bun/bin`` binaries.
+        Best-effort: returns None on any error. Never raises.
         """
         try:
             for candidate in (
                 user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd",
+                user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "copilot.exe",
                 user_home / ".local" / "bin" / "copilot.exe",
                 user_home / ".bun" / "bin" / "copilot.exe",
             ):

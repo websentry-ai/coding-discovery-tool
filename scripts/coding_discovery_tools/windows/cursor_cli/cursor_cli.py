@@ -1,8 +1,9 @@
 """
 Cursor CLI detection for Windows.
 
-Cursor CLI is a command-line tool for the Cursor IDE.
-This module detects Cursor CLI installations by checking for the 'cursor' command.
+Cursor CLI is the standalone agentic terminal tool ``cursor-agent`` — distinct
+from the Cursor IDE's ``cursor`` launcher. Gating on ``cursor-agent`` avoids
+mislabelling the IDE launcher as the CLI.
 """
 
 import logging
@@ -23,8 +24,8 @@ class WindowsCursorCliDetector(BaseToolDetector):
     Detector for Cursor CLI installations on Windows systems.
 
     Detection involves:
-    - Checking if 'cursor' command is available using 'where cursor'
-    - Verifying installation by running 'cursor --version'
+    - Checking if the ``cursor-agent`` command is available via ``where cursor-agent``
+    - Reading the version via ``cursor-agent --version``
     """
 
     @property
@@ -51,16 +52,31 @@ class WindowsCursorCliDetector(BaseToolDetector):
             "install_path": install_path
         }
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """
-        Extract Cursor CLI version using 'cursor --version'.
+        Extract Cursor CLI version using ``cursor-agent --version``. Best-effort.
+
+        ``shell=True`` is required so the npm ``.cmd`` shim can run (Windows can't
+        exec a ``.cmd`` from a bare argv list).
+
+        Args:
+            binary: When provided, probe this exact ``cursor-agent`` path. Under an
+                admin/MDM scan the user's ``cursor-agent`` isn't on the scanner's
+                PATH, so the bare probe reads "Unknown" — the resolved path
+                populates it. When ``None``, keep the legacy bare-PATH probe.
 
         Returns:
             Version string or None if version cannot be determined
         """
         try:
+            if binary:
+                # Quote the path for cmd.exe: a bare argv list under shell=True
+                # splits a path containing spaces, so build one quoted string.
+                command = subprocess.list2cmdline([str(binary), "--version"])
+            else:
+                command = ["cursor-agent", "--version"]
             result = subprocess.run(
-                ["cursor", "--version"],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=VERSION_TIMEOUT,
@@ -76,24 +92,27 @@ class WindowsCursorCliDetector(BaseToolDetector):
 
     def _check_cursor_command(self) -> Optional[str]:
         """
-        Check if 'cursor' command is available using 'where cursor'.
+        Check if the ``cursor-agent`` command is available via ``where cursor-agent``.
+
+        Probing ``cursor-agent`` (NOT ``cursor``) is what avoids mislabelling the
+        Cursor IDE launcher as the CLI.
 
         Returns:
-            Path to cursor executable if found, None otherwise
+            Path to the ``cursor-agent`` executable if found, None otherwise
         """
         try:
-            output = run_command(["where", "cursor"], VERSION_TIMEOUT)
+            output = run_command(["where", "cursor-agent"], VERSION_TIMEOUT)
             if output:
                 path = output.strip().split('\n')[0].strip()
                 if Path(path).exists():
-                    logger.debug(f"Found Cursor CLI at: {path}")
+                    logger.debug(f"Found Cursor CLI (cursor-agent) at: {path}")
                     return path
 
-            cursor_path = shutil.which("cursor")
+            cursor_path = shutil.which("cursor-agent")
             if cursor_path:
                 path = Path(cursor_path)
                 if path.exists():
-                    logger.debug(f"Found Cursor CLI via shutil.which at: {path}")
+                    logger.debug(f"Found Cursor CLI (cursor-agent) via shutil.which at: {path}")
                     return str(path)
         except Exception as e:
             logger.debug(f"Could not check for Cursor CLI command: {e}")

@@ -353,10 +353,14 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         """
         # Resolve the per-user binary first (root's PATH lacks the user's
         # copilot install during an MDM all-users scan), then fall back to the
-        # bare-PATH probe for the running-user case.
+        # bare-PATH probe for the running-user case. Use the SAME per-OS resolver
+        # detection uses (``self._resolve_binary``, overridden on Linux/Windows)
+        # so a detected install's OS-specific location (npm-global prefix,
+        # /usr/local/bin, AppData npm) is honoured here too — otherwise a binary
+        # found by detection would still report version "unknown".
         try:
             if self.user_home is not None:
-                binary = _resolve_copilot_binary(self.user_home)
+                binary = self._resolve_binary(self.user_home)
                 if binary is not None:
                     parsed = _parse_cli_version(
                         run_command([str(binary), "--version"], VERSION_TIMEOUT)

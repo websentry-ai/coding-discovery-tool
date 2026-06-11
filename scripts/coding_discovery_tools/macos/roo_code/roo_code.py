@@ -31,10 +31,11 @@ class MacOSRooDetector(BaseToolDetector):
     """
     Detector for Roo Code installations on macOS systems.
 
-    Roo Code operates as a VS Code extension, so detection involves:
-    - Checking for compatible IDE installations (VS Code, Cursor, Windsurf, Antigravity)
-    - Verifying Roo extension settings exist in IDE global storage
-    - Checking Antigravity's extensions.json for installed extensions
+    Roo Code operates as a VS Code extension. For VS Code / Cursor / Windsurf /
+    VSCodium, detection gates on the extension being a LIVE entry in the editor's
+    ``extensions.json`` install registry; the ``globalStorage/<ext-id>`` dir
+    survives uninstall (microsoft/vscode#119022) so it is NOT used as the gate.
+    Antigravity retains its bundled ``.app`` + ``extensions.json`` check.
 
     Returns separate detections for each IDE where Roo Code is installed.
     """

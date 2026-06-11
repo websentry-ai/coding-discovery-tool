@@ -35,15 +35,6 @@ class MacOSKiloCodeDetector(BaseToolDetector):
     # Kilo Code extension identifier
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
 
-    # Application names for each IDE
-    IDE_APP_NAMES = {
-        "Code": ["Visual Studio Code.app"],
-        "Cursor": ["Cursor.app"],
-    }
-
-    # Standard macOS applications directory
-    APPLICATIONS_DIR = Path("/Applications")
-
     @property
     def tool_name(self) -> str:
         """Return the name of the tool being detected."""
@@ -107,39 +98,6 @@ class MacOSKiloCodeDetector(BaseToolDetector):
             }
         logger.debug("No editor lists Kilo Code as a live extensions.json entry")
         return None
-
-    def _check_ide_installation(self, ide_name: str) -> Tuple[bool, Optional[str]]:
-        """
-        Check if a specific IDE is installed in /Applications.
-        
-        First checks if the IDE installation path exists before proceeding.
-        
-        Args:
-            ide_name: Name of the IDE to check (Code or Cursor)
-            
-        Returns:
-            Tuple of (is_installed: bool, install_path: Optional[str])
-        """
-        app_names = self.IDE_APP_NAMES.get(ide_name, [])
-        
-        for app_name in app_names:
-            ide_path = self.APPLICATIONS_DIR / app_name
-            
-            # First check if the path exists
-            try:
-                if not ide_path.exists():
-                    logger.debug(f"IDE path does not exist: {ide_path}")
-                    continue
-                
-                # Verify it's a directory
-                if ide_path.is_dir():
-                    logger.debug(f"Found {ide_name} installation at: {ide_path}")
-                    return True, str(ide_path)
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Could not check IDE path {ide_path}: {e}")
-                continue
-        
-        return False, None
 
     def _check_kilocode_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[str, Optional[str]]]:
         """

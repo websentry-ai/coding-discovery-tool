@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
-from ...linux_extraction_helpers import get_linux_user_homes, is_linux_ide_installed
+from ...linux_extraction_helpers import get_linux_user_homes
 from ...vscode_extension_helpers import (
     extensions_dir_for_editor,
     find_extension_in_editor,
@@ -70,29 +70,6 @@ class LinuxRooDetector(BaseToolDetector):
                 })
                 logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
         return results
-
-    def _check_ide_installation(self, ide_name: str, user_home: Path) -> Tuple[bool, Optional[str]]:
-        """
-        Check whether the host editor (VS Code / Cursor / Windsurf) is installed
-        on Linux for the user being scanned.
-
-        Delegates to the shared ``is_linux_ide_installed`` probe, which checks
-        system dirs, ``/opt`` and ``~/.local/share`` sideloads, Snap, Flatpak,
-        ``.desktop`` launchers, and the editor binary on PATH. ANY of those
-        counts as installed, so a real Roo user is never hidden. Never raises.
-
-        Args:
-            ide_name: The ``SUPPORTED_IDES`` key (Code / Cursor / Windsurf).
-            user_home: Home dir of the user being scanned.
-
-        Returns:
-            Tuple of (is_installed, path).
-        """
-        try:
-            return is_linux_ide_installed(ide_name, user_home)
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check {ide_name} install presence: {e}")
-            return False, None
 
     def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[str, Optional[str]]]:
         """Return ``(matched_location, version)`` if Roo Code is a live entry in

@@ -31,12 +31,13 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
     """
     Detector for GitHub Copilot CLI installations on Windows systems.
 
-    Inherits the full macOS detection surface (marker gate, per-user detection,
+    Inherits the full macOS detection surface (binary gate, per-user detection,
     ``detect``/``detect_all_tools``, and ``get_version``) and overrides only the
     all-users branch: when ``self.user_home`` is unset and the process is admin,
     every user under ``C:\\Users`` is scanned; otherwise the current user's home
     is checked. Each detected user yields a distinct row whose ``install_path``
-    is that user's ``~/.copilot`` directory.
+    is that user's resolved ``copilot`` binary (with ``~/.copilot`` carried as
+    the internal ``_config_path``).
     """
 
     def _detect_all_users(self) -> List[Dict]:

@@ -72,6 +72,9 @@ from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli import (
 from scripts.coding_discovery_tools.linux.copilot_cli.mcp_config_extractor import (
     LinuxCopilotCliMCPConfigExtractor,
 )
+from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_skills_extractor import (
+    LinuxCopilotCliSkillsExtractor,
+)
 from scripts.coding_discovery_tools.copilot_cli_skills_helpers import (
     COPILOT_CLI_PARENT_DIR_NAMES,
     COPILOT_CLI_USER_DIR_NAMES,
@@ -2652,6 +2655,43 @@ class TestWindowsCopilotCliSkillsExtraction(unittest.TestCase):
         from scripts.coding_discovery_tools.coding_tool_base import BaseCopilotCliSkillsExtractor
         self.assertTrue(issubclass(WindowsCopilotCliSkillsExtractor, BaseCopilotCliSkillsExtractor))
         self.assertNotIn(MacOSCopilotCliSkillsExtractor, WindowsCopilotCliSkillsExtractor.__mro__)
+
+
+# ---------------------------------------------------------------------------
+# 20. Linux skills user-level guard: a root/MDM scan must NOT double-count a
+#     non-scanner user's ~/.agents (or ~/.claude) skills as project skills
+# ---------------------------------------------------------------------------
+
+class TestLinuxRootSkillsUserLevelGuard(unittest.TestCase):
+    """On a Linux root/MDM scan the project walk must recognize EVERY user's
+    user-level skill dir (``/home/<user>/.agents/skills`` and ``/root/.agents/
+    skills``) as user-level, so it is not re-emitted as a project skill — it is
+    already reported user-scope by ``_extract_user_level_skills``.
+
+    Regression: the base ``is_user_level_claude_subdir(type_dir)`` derives the
+    users-root from ``Path.home()`` (``/root`` under a root scan, whose parent is
+    ``/``), so a non-scanner ``/home/<user>/.agents/skills`` was misclassified as a
+    project skill -> double-count. ``LinuxCopilotCliSkillsExtractor`` overrides
+    this via ``_is_user_level_skill_dir``, pinning the users-root to ``/home`` and
+    adding an explicit ``/root`` check. Pure path-logic, so it is deterministic on
+    every CI runner (the project has no Linux runner)."""
+
+    def _is_user(self, p: str) -> bool:
+        return LinuxCopilotCliSkillsExtractor._is_user_level_skill_dir(Path(p))
+
+    def test_root_home_agents_skills_is_user_level(self):
+        self.assertTrue(self._is_user("/root/.agents/skills"))
+        self.assertTrue(self._is_user("/root/.claude/skills"))
+
+    def test_home_user_skills_still_user_level(self):
+        self.assertTrue(self._is_user("/home/alice/.agents/skills"))
+        self.assertTrue(self._is_user("/home/alice/.claude/skills"))
+
+    def test_real_project_skills_not_user_level(self):
+        # Project repos under either /home/<user> or /root stay project-scope.
+        self.assertFalse(self._is_user("/home/alice/repo/.github/skills"))
+        self.assertFalse(self._is_user("/root/repo/.github/skills"))
+        self.assertFalse(self._is_user("/home/alice/repo/.agents/skills"))
 
 
 if __name__ == "__main__":

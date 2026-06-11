@@ -31,10 +31,11 @@ class MacOSClineDetector(BaseToolDetector):
     """
     Detector for Cline installations on macOS systems.
 
-    Cline operates as a VS Code extension, so detection involves:
-    - Checking for compatible IDE installations (VS Code, Cursor, Windsurf, Antigravity)
-    - Verifying Cline extension settings exist in IDE global storage
-    - Checking Antigravity's extensions.json for installed extensions
+    Cline operates as a VS Code extension. For VS Code / Cursor / Windsurf,
+    detection gates on the extension being a LIVE entry in the editor's
+    ``extensions.json`` install registry; the ``globalStorage/<ext-id>`` dir
+    survives uninstall (microsoft/vscode#119022) so it is NOT used as the gate.
+    Antigravity retains its bundled ``.app`` + ``extensions.json`` check.
 
     Returns separate detections for each IDE where Cline is installed.
     """

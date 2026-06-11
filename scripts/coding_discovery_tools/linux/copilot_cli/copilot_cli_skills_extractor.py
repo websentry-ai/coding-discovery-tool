@@ -75,6 +75,30 @@ class LinuxCopilotCliSkillsExtractor(MacOSCopilotCliSkillsExtractor):
         else:
             self._walk_for_skills(root_path, root_path, projects_by_root, current_depth=0)
 
+    @staticmethod
+    def _is_user_level_skill_dir(type_dir: Path) -> bool:
+        """Whether ``type_dir`` (e.g. ``<home>/.agents/skills``) is a *user-level*
+        skills dir the project walk must skip — it is already reported by
+        ``_extract_user_level_skills``, so re-walking it as a project skill would
+        double-count it.
+
+        Linux has two home shapes: ``/home/<user>`` (children of ``/home``) and
+        ``/root`` (root's own home, NOT under ``/home``). The base's bare
+        ``is_user_level_claude_subdir(type_dir)`` derives the users-root from
+        ``Path.home()``; on a root/MDM scan that resolves to ``/root`` (whose parent
+        is ``/``), so a *non-scanner* user's ``/home/<user>/.agents/skills`` is no
+        longer recognized as user-level and gets double-counted. Pin the users-root
+        to ``/home`` for the ``/home/<user>`` shape, and add an explicit ``/root``
+        check for root's own home.
+        """
+        if is_user_level_claude_subdir(type_dir, users_root_path="/home"):
+            return True
+        # type_dir = <home>/<tool_dir>/<skills>  ->  home = type_dir.parent.parent
+        try:
+            return type_dir.parent.parent == Path("/root")
+        except (OSError, ValueError):
+            return False
+
     def _walk_for_skills(
         self,
         root_path: Path,
@@ -85,7 +109,8 @@ class LinuxCopilotCliSkillsExtractor(MacOSCopilotCliSkillsExtractor):
         """Recursively walk for ``.github``/``.claude``/``.agents`` skills dirs.
 
         Identical to the macOS walk but uses the Linux ``should_skip_system_path``
-        (see the module docstring re ``/home``).
+        (see the module docstring re ``/home``) and the Linux-aware
+        ``_is_user_level_skill_dir`` (see its docstring re ``/home`` + ``/root``).
         """
         if current_depth > MAX_SEARCH_DEPTH:
             return
@@ -112,7 +137,7 @@ class LinuxCopilotCliSkillsExtractor(MacOSCopilotCliSkillsExtractor):
                             for config in COPILOT_CLI_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
                                 if type_dir.exists() and type_dir.is_dir():
-                                    if not is_user_level_claude_subdir(type_dir):
+                                    if not self._is_user_level_skill_dir(type_dir):
                                         extract_copilot_cli_items_from_directory(
                                             type_dir,
                                             projects_by_root,

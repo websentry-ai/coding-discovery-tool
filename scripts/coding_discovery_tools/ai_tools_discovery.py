@@ -163,17 +163,19 @@ def _normalise_path(p: str) -> str:
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
-    The CLI's ``install_path`` is a per-user ``~/.copilot`` owned by exactly one
-    user, but the per-user scan loop re-runs for every user. Emit only when the
-    user OWNS the detected install (``install_path`` under their home) OR the
-    per-user filter produced data for them (projects/permissions) — otherwise a
-    non-owner with no data would get a phantom CLI install row. Scoped to the
-    CLI: IDE tools legitimately share a machine-wide ``install_path``.
+    The per-user scan loop re-runs for every user, so emit only when the user owns
+    the detected config dir or the per-user filter produced data for them;
+    otherwise a non-owner gets a phantom install row. CLI-scoped: IDE tools
+    legitimately share a machine-wide install. Keys on ``_config_path`` (the
+    ``~/.copilot`` dir), not ``install_path`` — install_path is now the binary,
+    which for a machine-global install lives outside any home. Older payloads
+    without ``_config_path`` fall back to ``install_path``.
     """
-    install_norm = _normalise_path(tool_filtered.get("install_path", ""))
+    own_path = tool_filtered.get("_config_path") or tool_filtered.get("install_path", "")
+    own_norm = _normalise_path(own_path)
     user_norm = _normalise_path(str(user_home))
-    owns_install = bool(install_norm) and (
-        install_norm == user_norm or install_norm.startswith(user_norm + "/")
+    owns_install = bool(own_norm) and (
+        own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
     has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
     return owns_install or has_data
@@ -1505,11 +1507,10 @@ class AIToolsDetector:
                 user_skills = skills_result.get("user_skills", [])
                 project_skills = skills_result.get("project_skills", [])
 
-                # User-scope skills: coalesce them all under THIS install's config
-                # dir (install_path == the resolved ~/.copilot, COPILOT_HOME-aware)
-                # so they share one row with the global rules + MCP servers, rather
-                # than scattering across each skill's own directory.
-                install_key = tool.get("install_path") or str(Path.home())
+                # Coalesce user-scope skills under the config dir (~/.copilot) so they
+                # share one row with the global rules + MCP servers. Keys on
+                # _config_path since install_path is now the binary, not the config dir.
+                install_key = tool.get("_config_path") or tool.get("install_path") or str(Path.home())
                 for skill in user_skills:
                     if install_key not in projects_dict:
                         projects_dict[install_key] = {"mcpServers": [], "rules": [], "skills": []}
@@ -1544,18 +1545,16 @@ class AIToolsDetector:
         if self._copilot_cli_settings_extractor:
             try:
                 all_settings = self._copilot_cli_settings_extractor.extract_settings() or []
-                install_path = tool.get("install_path", "")
-                # extract_settings() returns every user's record under a root scan,
-                # but this runs once per user-install (install_path == that user's
-                # ~/.copilot config dir). Keep only THIS install's record — each
-                # settings file sits directly in the config dir, so match by parent
-                # dir (boundary-safe; a bare prefix would also match a sibling like
-                # ".copilot-old"). Prevents an all-users scan from leaking another
-                # user's permissions onto this row.
+                # extract_settings() returns every user's record under a root scan;
+                # keep only this install's by matching the parent dir against the
+                # config dir (boundary-safe — a bare prefix would also match a sibling
+                # like ".copilot-old"), so an all-users scan can't leak another user's
+                # permissions onto this row. Config dir, not install_path (the binary).
+                config_dir = tool.get("_config_path") or tool.get("install_path", "")
                 own = [
                     s for s in all_settings
-                    if install_path and s.get("settings_path")
-                    and Path(str(s["settings_path"])).parent == Path(install_path)
+                    if config_dir and s.get("settings_path")
+                    and Path(str(s["settings_path"])).parent == Path(config_dir)
                 ]
                 permissions_payload = transform_settings_to_backend_format(own) if own else None
                 if permissions_payload:
@@ -1586,6 +1585,10 @@ class AIToolsDetector:
             "name": tool.get("name"),
             "version": tool.get("version"),
             "install_path": tool.get("install_path"),
+            # Config dir (~/.copilot); the downstream ownership gate keys on this to
+            # attribute the row, since install_path is now the binary (outside any
+            # home for a machine-global install).
+            "_config_path": tool.get("_config_path"),
             "projects": projects_list,
         }
         if permissions_payload:
@@ -2585,15 +2588,15 @@ def main():
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
 
                         # Ownership gate (Copilot CLI only): suppress a phantom install
-                        # row for a user who neither owns the detected ~/.copilot nor has
-                        # any per-user data (e.g. gowshik_2 carrying gowshik's install_path
-                        # with 0 projects). filter_tool_projects_by_user scopes projects/
-                        # permissions but never rewrites install_path, so the gate is needed.
+                        # row for a user who neither owns the detected ~/.copilot config
+                        # dir nor has per-user data. filter_tool_projects_by_user scopes
+                        # projects/permissions but never rewrites the paths, so the gate
+                        # is needed.
                         if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
                             logger.info(
-                                f"  Skipping Copilot CLI for {user_name}: install_path "
-                                f"{tool_filtered.get('install_path')!r} not owned by this "
-                                f"user and no per-user data"
+                                f"  Skipping Copilot CLI for {user_name}: config dir "
+                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+                                f"not owned by this user and no per-user data"
                             )
                             continue
 

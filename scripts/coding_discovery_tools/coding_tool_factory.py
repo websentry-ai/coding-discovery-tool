@@ -214,6 +214,11 @@ from .linux import (
     LinuxCursorCliRulesExtractor,
     LinuxCursorCliMCPConfigExtractor,
     LinuxCursorCliSettingsExtractor,
+    LinuxCopilotCliDetector,
+    LinuxCopilotCliMCPConfigExtractor,
+    LinuxCopilotCliRulesExtractor,
+    LinuxCopilotCliSettingsExtractor,
+    LinuxCopilotCliSkillsExtractor,
     LinuxCodexDetector,
     LinuxCodexRulesExtractor,
     LinuxCodexMCPConfigExtractor,
@@ -665,6 +670,8 @@ class ToolDetectorFactory:
             return MacOSCopilotCliDetector()
         elif os_name == "Windows":
             return WindowsCopilotCliDetector()
+        elif os_name == "Linux":
+            return LinuxCopilotCliDetector()
         else:
             return None
 
@@ -1469,6 +1476,8 @@ class CopilotCliMCPConfigExtractorFactory:
             return MacOSCopilotCliMCPConfigExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliMCPConfigExtractor()
         else:
             return None
 
@@ -1493,6 +1502,8 @@ class CopilotCliRulesExtractorFactory:
             return MacOSCopilotCliRulesExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliRulesExtractor()
         else:
             return None
 
@@ -1516,6 +1527,8 @@ class CopilotCliSettingsExtractorFactory:
             return MacOSCopilotCliSettingsExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliSettingsExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliSettingsExtractor()
         else:
             return None
 
@@ -1539,6 +1552,8 @@ class CopilotCliSkillsExtractorFactory:
             return MacOSCopilotCliSkillsExtractor()
         elif os_name == "Windows":
             return WindowsCopilotCliSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxCopilotCliSkillsExtractor()
         else:
             return None
 

@@ -1,23 +1,15 @@
-"""IDE-install gating tests for Roo Code & Cline on macOS.
+"""extensions.json-entry gating tests for Roo Code & Cline (macOS/Windows/Linux).
 
-Two fixes are under test:
+The detection gate keys on the editor's ``extensions.json`` registry, not the
+extension's ``globalStorage/<ext-id>`` dir (which survives uninstall —
+microsoft/vscode#119022 — and produced phantom rows). Both directions are proven:
+a live entry -> detected (version + extensions dir as install_path); globalStorage
+residue with NO entry -> not in results (the FP kill). Antigravity keeps its own
+install gate but reads its entry through the same registry helper.
 
-1. The globalStorage main loop changed from ``ide_installed OR extension_path``
-   to ``ide_installed AND extension_path``. A stale
-   ``.../<IDE>/User/globalStorage/<ext-id>`` dir survives an IDE uninstall, so
-   the OR form surfaced a phantom row for an IDE that is no longer installed.
-
-2. The Antigravity branch is now gated on
-   ``_check_ide_installation("Antigravity")``. ``~/.antigravity/extensions``
-   (which holds ``extensions.json``) survives uninstall, so the extensions.json
-   entry alone is not proof of install.
-
-Both directions are proven per fix: real (.app present) -> detected; residue
-(globalStorage / extensions.json only, no .app) -> not in results.
-
-The tests build a real tmp ``/Applications`` tree and point the detector's
-``APPLICATIONS_DIR`` at it, so the actual ``_check_ide_installation`` code runs
-(rather than being mocked away).
+``find_extension_in_editor`` runs unmocked, so these are true end-to-end detector
+tests over hermetic tmp homes. The host-IDE probe helpers are no longer called by
+the detectors but stay covered by ``TestWindows/LinuxIdeProbeLocationClasses``.
 """
 
 import json
@@ -29,6 +21,7 @@ from unittest.mock import patch
 import scripts.coding_discovery_tools.utils as utils_mod
 import scripts.coding_discovery_tools.windows_extraction_helpers as win_helpers
 import scripts.coding_discovery_tools.linux_extraction_helpers as linux_helpers
+from scripts.coding_discovery_tools.vscode_extension_helpers import extensions_dir_for_editor
 from scripts.coding_discovery_tools.macos.cline.cline import MacOSClineDetector
 from scripts.coding_discovery_tools.macos.roo_code.roo_code import MacOSRooDetector
 from scripts.coding_discovery_tools.windows.cline.cline import WindowsClineDetector
@@ -40,9 +33,11 @@ ROO_EXT_ID = "rooveterinaryinc.roo-cline"
 CLINE_EXT_ID = "saoudrizwan.claude-dev"
 
 
-class _IdeGateMixin:
-    """Shared assertions for the two detectors. Mixed with ``TestCase`` by the
-    concrete subclasses (so the mixin itself is never collected/run)."""
+class _ExtensionsGateMixin:
+    """Shared end-to-end assertions for a (Cline|Roo) detector. The registry entry
+    is the gate; globalStorage residue must NOT detect. Concrete subclasses set
+    the detector, the ext id, the label, the per-user method, and the per-OS
+    globalStorage builder."""
 
     Detector = None
     ext_id = None
@@ -52,19 +47,80 @@ class _IdeGateMixin:
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.home = self.root / "user"
+        self.home = Path(self.tmp.name) / "user"
         self.home.mkdir(parents=True)
-        self.apps = self.root / "Applications"
-        self.apps.mkdir()
 
     def tearDown(self):
         self.tmp.cleanup()
 
     # --- fixture builders ----------------------------------------------
 
-    def _make_globalstorage(self, ide_folder: str) -> Path:
-        gs = (self.home / "Library" / "Application Support" / ide_folder
+    def _make_registry_entry(self, ide_key: str, version: str = "3.1.0") -> Path:
+        """Write an extensions.json entry for ``ide_key`` and return the
+        extensions dir (the detector's install_path)."""
+        ext_dir = extensions_dir_for_editor(self.home, ide_key)
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        (ext_dir / "extensions.json").write_text(json.dumps([
+            {
+                "identifier": {"id": self.ext_id},
+                "version": version,
+                "relativeLocation": f"{self.ext_id}-{version}",
+            }
+        ]), encoding="utf-8")
+        return ext_dir
+
+    def _make_globalstorage(self, ide_key: str) -> Path:  # pragma: no cover
+        raise NotImplementedError
+
+    def _detect(self):
+        det = self.Detector()
+        return getattr(det, self.per_user_method)(self.home)
+
+    def _names(self, results):
+        return [r["name"] for r in results]
+
+    # --- registry entry present -> detected ----------------------------
+
+    def test_registry_entry_detected(self):
+        """A live extensions.json entry -> detected; install_path is the
+        extensions dir; version comes from the entry."""
+        ext_dir = self._make_registry_entry("Code", version="3.1.0")
+        results = self._detect()
+        self.assertIn(f"{self.tool_label} (VS Code)", self._names(results))
+        row = next(r for r in results if r["name"] == f"{self.tool_label} (VS Code)")
+        self.assertEqual(row["install_path"], str(ext_dir))
+        self.assertEqual(row["version"], "3.1.0")
+
+    # --- globalStorage residue WITHOUT a registry entry -> NOT detected -
+
+    def test_globalstorage_residue_without_extensions_entry_not_detected(self):
+        """The core FP kill: globalStorage residue (survives uninstall) present but
+        NO extensions.json entry -> no row."""
+        self._make_globalstorage("Code")
+        results = self._detect()
+        self.assertEqual(
+            results, [],
+            "globalStorage residue with no extensions.json entry must not surface a row",
+        )
+
+    def test_nothing_present_returns_empty(self):
+        """No registry entry, no globalStorage -> []."""
+        self.assertEqual(self._detect(), [])
+
+
+# =====================================================================
+# macOS — also covers the Antigravity branch (keeps its own .app gate)
+# =====================================================================
+
+
+class _MacOSExtensionsGateMixin(_ExtensionsGateMixin):
+    def setUp(self):
+        super().setUp()
+        self.apps = Path(self.tmp.name) / "Applications"
+        self.apps.mkdir()
+
+    def _make_globalstorage(self, ide_key: str) -> Path:
+        gs = (self.home / "Library" / "Application Support" / ide_key
               / "User" / "globalStorage" / self.ext_id)
         gs.mkdir(parents=True, exist_ok=True)
         return gs
@@ -74,236 +130,121 @@ class _IdeGateMixin:
         app.mkdir(parents=True, exist_ok=True)
         return app
 
-    def _make_antigravity_extension_json(self, version: str = "3.1.0") -> Path:
-        ext_dir = self.home / ".antigravity" / "extensions"
-        ext_loc = ext_dir / f"{self.ext_id}-{version}"
-        ext_loc.mkdir(parents=True, exist_ok=True)
-        (ext_dir / "extensions.json").write_text(json.dumps([
-            {
-                "identifier": {"id": self.ext_id},
-                "version": version,
-                "relativeLocation": f"{self.ext_id}-{version}",
-            }
-        ]), encoding="utf-8")
-        return ext_loc
-
     def _detect(self):
-        """Drive the per-user detection with APPLICATIONS_DIR pointed at the
-        tmp /Applications tree, so the real ``_check_ide_installation`` runs."""
+        # APPLICATIONS_DIR points at the tmp tree so the real Antigravity .app
+        # gate runs (Antigravity is still install-gated).
         with patch.object(self.Detector, "APPLICATIONS_DIR", self.apps):
             det = self.Detector()
             return getattr(det, self.per_user_method)(self.home)
 
-    def _names(self, results):
-        return [r["name"] for r in results]
-
-    # --- globalStorage OR->AND fix -------------------------------------
-
-    def test_globalstorage_plus_app_detected(self):
-        """globalStorage present AND VS Code.app present -> detected."""
-        gs = self._make_globalstorage("Code")
-        self._make_app("Visual Studio Code.app")
+    def test_vscodium_registry_entry_detected_for_roo(self):
+        """Roo Code added VSCodium to SUPPORTED_IDES — a VSCodium registry entry
+        is detected. (Cline does not list VSCodium; this is overridden there.)"""
+        ext_dir = self._make_registry_entry("VSCodium", version="2.0.0")
         results = self._detect()
-        self.assertIn(f"{self.tool_label} (VS Code)", self._names(results))
-        row = next(r for r in results if r["name"] == f"{self.tool_label} (VS Code)")
-        self.assertEqual(row["install_path"], str(gs))
+        self.assertIn(f"{self.tool_label} (VSCodium)", self._names(results))
+        row = next(r for r in results if r["name"] == f"{self.tool_label} (VSCodium)")
+        self.assertEqual(row["install_path"], str(ext_dir))
 
-    def test_globalstorage_without_app_not_detected(self):
-        """globalStorage present but NO .app for that IDE -> [] (the OR->AND
-        fix). Residue case: AppSupport/globalStorage survived the IDE uninstall."""
-        self._make_globalstorage("Code")
+    # --- Antigravity branch: registry entry + .app gate ----------------
+
+    def test_antigravity_entry_without_app_not_detected(self):
+        """Antigravity extensions.json entry but no Antigravity.app -> not in
+        results (Antigravity keeps its own install gate)."""
+        self._make_registry_entry("Antigravity")
         results = self._detect()
-        self.assertEqual(
-            results, [],
-            "Stale globalStorage from an uninstalled IDE must not surface a row",
-        )
+        self.assertNotIn(f"{self.tool_label} (Antigravity)", self._names(results))
 
-    # --- Antigravity branch gate ---------------------------------------
-
-    def test_antigravity_extension_without_app_not_detected(self):
-        """extensions.json lists the ext but no Antigravity.app -> not in
-        results (residue ~/.antigravity/extensions survived uninstall)."""
-        self._make_antigravity_extension_json()
-        results = self._detect()
-        self.assertNotIn(
-            f"{self.tool_label} (Antigravity)", self._names(results),
-            "Antigravity extensions.json alone (no .app) must not surface a row",
-        )
-
-    def test_antigravity_extension_with_app_detected(self):
-        """extensions.json lists the ext AND Antigravity.app present -> detected."""
-        ext_loc = self._make_antigravity_extension_json()
+    def test_antigravity_entry_with_app_detected(self):
+        """Antigravity extensions.json entry AND Antigravity.app -> detected;
+        install_path is the Antigravity extensions dir."""
+        ext_dir = self._make_registry_entry("Antigravity")
         self._make_app("Antigravity.app")
         results = self._detect()
         self.assertIn(f"{self.tool_label} (Antigravity)", self._names(results))
         row = next(r for r in results if r["name"] == f"{self.tool_label} (Antigravity)")
-        self.assertEqual(row["install_path"], str(ext_loc))
-
-    def test_nothing_installed_returns_empty(self):
-        """No globalStorage, no .app, no extensions.json -> []."""
-        self.assertEqual(self._detect(), [])
-
-    # --- user-local ~/Applications (false-negative guard) ----------------
-
-    def test_globalstorage_plus_user_applications_app_detected(self):
-        """FIX #2 (macOS hardening): globalStorage present AND the host editor
-        installed in the USER-LOCAL ``~/Applications`` (not ``/Applications``)
-        -> detected. Guards the false negative where the editor was drag-
-        installed into the home folder.
-
-        Fails against the pre-fix ``_check_ide_installation`` that only looked
-        in ``/Applications``."""
-        gs = self._make_globalstorage("Code")
-        user_apps = self.home / "Applications"
-        user_apps.mkdir(parents=True, exist_ok=True)
-        (user_apps / "Visual Studio Code.app").mkdir(parents=True, exist_ok=True)
-        # ``/Applications`` (self.apps) stays EMPTY, so only ~/Applications can
-        # satisfy the gate.
-        results = self._detect()
-        self.assertIn(f"{self.tool_label} (VS Code)", self._names(results))
-        row = next(r for r in results if r["name"] == f"{self.tool_label} (VS Code)")
-        self.assertEqual(row["install_path"], str(gs))
+        self.assertEqual(row["install_path"], str(ext_dir))
 
 
-class TestRooIdeGate(_IdeGateMixin, unittest.TestCase):
+class TestRooIdeGate(_MacOSExtensionsGateMixin, unittest.TestCase):
     Detector = MacOSRooDetector
     ext_id = ROO_EXT_ID
     tool_label = "Roo Code"
     per_user_method = "_detect_roo_for_user"
 
 
-class TestClineIdeGate(_IdeGateMixin, unittest.TestCase):
+class TestClineIdeGate(_MacOSExtensionsGateMixin, unittest.TestCase):
     Detector = MacOSClineDetector
     ext_id = CLINE_EXT_ID
     tool_label = "Cline"
     per_user_method = "_detect_cline_for_user"
 
+    def test_vscodium_registry_entry_detected_for_roo(self):
+        """Cline does NOT list VSCodium; a VSCodium-only entry yields no row."""
+        self._make_registry_entry("VSCodium", version="2.0.0")
+        self.assertEqual(self._detect(), [])
+
 
 # =====================================================================
-# FIX #2 — Windows + Linux host-IDE gate (was deferred I1)
-#
-# Win/Linux Cline/Roo previously emitted a row on the bare
-# ``globalStorage/<ext-id>`` dir with NO host check — that dir survives an
-# editor uninstall, so it was a residue false positive. The fix gates the
-# main-row loop on ``host_installed AND extension`` (mirrors macOS), using a
-# THOROUGH host probe so a real user is never hidden (false-negative guard).
+# Windows + Linux — no host-IDE gate anymore; the registry entry is the gate
 # =====================================================================
 
 
-class _WinLinuxIdeGateMixin:
-    """End-to-end gate assertions for a (Cline|Roo) detector on Win/Linux:
-    residue-only globalStorage -> NOT detected (FP kill); globalStorage + one
-    host install -> detected (false-negative guard). Concrete subclasses set
-    the detector, the per-user method, the ext id, the label, and the two
-    fixture builders (globalStorage + host install)."""
-
-    Detector = None
-    ext_id = None
-    tool_label = None
-    per_user_method = None
-
-    def setUp(self):
-        utils_mod._SENTRY_DSN = ""
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.home = self.root / "user"
-        self.home.mkdir(parents=True)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    # --- per-OS fixture builders (overridden by subclasses) --------------
-
-    def _make_globalstorage(self, ide_folder: str) -> Path:  # pragma: no cover
-        raise NotImplementedError
-
-    def _make_host_install(self, ide_folder: str) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    # --- shared driver / assertions --------------------------------------
-
-    def _detect(self):
-        det = self.Detector()
-        return getattr(det, self.per_user_method)(self.home)
-
-    def _names(self, results):
-        return [r["name"] for r in results]
-
-    def test_globalstorage_residue_without_host_not_detected(self):
-        """globalStorage present but the host editor absent EVERYWHERE -> []
-        (the residue FP this fix kills). ``shutil.which`` is neutralised and no
-        host artifact is created, so nothing can satisfy the gate."""
-        self._make_globalstorage("Code")
-        with patch("shutil.which", return_value=None):
-            results = self._detect()
-        self.assertEqual(
-            results, [],
-            "Residue globalStorage with no host editor must not surface a row",
-        )
-
-    def test_globalstorage_plus_host_detected(self):
-        """globalStorage present AND the host editor installed (per-user
-        Programs on Windows / ~/.local/share on Linux) -> detected (the
-        false-negative guard)."""
-        gs = self._make_globalstorage("Code")
-        self._make_host_install("Code")
-        with patch("shutil.which", return_value=None):
-            results = self._detect()
-        self.assertIn(f"{self.tool_label} (VS Code)", self._names(results))
-        row = next(r for r in results if r["name"] == f"{self.tool_label} (VS Code)")
-        self.assertEqual(row["install_path"], str(gs))
-
-
-class _WindowsIdeGateMixin(_WinLinuxIdeGateMixin):
-    def _make_globalstorage(self, ide_folder: str) -> Path:
-        gs = (self.home / "AppData" / "Roaming" / ide_folder
+class _WindowsExtensionsGateMixin(_ExtensionsGateMixin):
+    def _make_globalstorage(self, ide_key: str) -> Path:
+        gs = (self.home / "AppData" / "Roaming" / ide_key
               / "User" / "globalStorage" / self.ext_id)
         gs.mkdir(parents=True, exist_ok=True)
         return gs
 
-    def _make_host_install(self, ide_folder: str) -> None:
-        # Per-user %LOCALAPPDATA%\Programs\Microsoft VS Code (Programs class).
-        dir_name = win_helpers._WINDOWS_IDE_INSTALL_INFO[ide_folder]["dir_names"][0]
-        install = self.home / "AppData" / "Local" / "Programs" / dir_name
-        install.mkdir(parents=True, exist_ok=True)
+    def test_host_install_not_required(self):
+        """Regression for the dropped host-IDE AND-gate: a registry entry with NO
+        host editor installed anywhere (``shutil.which`` neutralised) still detects
+        — the entry alone is proof of a live install."""
+        self._make_registry_entry("Code")
+        with patch("shutil.which", return_value=None):
+            results = self._detect()
+        self.assertIn(f"{self.tool_label} (VS Code)", self._names(results))
 
 
-class TestWindowsClineIdeGate(_WindowsIdeGateMixin, unittest.TestCase):
+class TestWindowsClineIdeGate(_WindowsExtensionsGateMixin, unittest.TestCase):
     Detector = WindowsClineDetector
     ext_id = CLINE_EXT_ID
     tool_label = "Cline"
     per_user_method = "_detect_cline_for_user"
 
 
-class TestWindowsRooIdeGate(_WindowsIdeGateMixin, unittest.TestCase):
+class TestWindowsRooIdeGate(_WindowsExtensionsGateMixin, unittest.TestCase):
     Detector = WindowsRooDetector
     ext_id = ROO_EXT_ID
     tool_label = "Roo Code"
     per_user_method = "_detect_roo_for_user"
 
 
-class _LinuxIdeGateMixin(_WinLinuxIdeGateMixin):
-    def _make_globalstorage(self, ide_folder: str) -> Path:
-        gs = (self.home / ".config" / ide_folder
+class _LinuxExtensionsGateMixin(_ExtensionsGateMixin):
+    def _make_globalstorage(self, ide_key: str) -> Path:
+        gs = (self.home / ".config" / ide_key
               / "User" / "globalStorage" / self.ext_id)
         gs.mkdir(parents=True, exist_ok=True)
         return gs
 
-    def _make_host_install(self, ide_folder: str) -> None:
-        # Per-user ~/.local/share/<name> sideload (the ~/.local class).
-        name = linux_helpers._LINUX_IDE_INSTALL_INFO[ide_folder]["opt_local_names"][0]
-        install = self.home / ".local" / "share" / name
-        install.mkdir(parents=True, exist_ok=True)
+    def test_host_install_not_required(self):
+        """Regression for the dropped host-IDE AND-gate: a registry entry with NO
+        host editor installed anywhere still detects on Linux."""
+        self._make_registry_entry("Code")
+        with patch("shutil.which", return_value=None):
+            results = self._detect()
+        self.assertIn(f"{self.tool_label} (VS Code)", self._names(results))
 
 
-class TestLinuxClineIdeGate(_LinuxIdeGateMixin, unittest.TestCase):
+class TestLinuxClineIdeGate(_LinuxExtensionsGateMixin, unittest.TestCase):
     Detector = LinuxClineDetector
     ext_id = CLINE_EXT_ID
     tool_label = "Cline"
     per_user_method = "_detect_cline_for_user"
 
 
-class TestLinuxRooIdeGate(_LinuxIdeGateMixin, unittest.TestCase):
+class TestLinuxRooIdeGate(_LinuxExtensionsGateMixin, unittest.TestCase):
     Detector = LinuxRooDetector
     ext_id = ROO_EXT_ID
     tool_label = "Roo Code"

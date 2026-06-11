@@ -315,17 +315,23 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
 
 
 def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Cursor CLI installation for a user."""
-    cursor_dir = user_home / ".cursor"
-    cli_config = cursor_dir / "cli-config.json"
-    if cli_config.exists():
+    """Detect Cursor CLI (``cursor-agent``) installation for a user.
+
+    Gates on the ``cursor-agent`` binary, not the ``~/.cursor/cli-config.json``
+    residue. ``~/.cursor`` (and its ``cli-config.json``) is also written by the
+    Cursor IDE and survives a CLI uninstall, so detecting on it produced false
+    positives. ``cli-config.json`` remains available to the settings extractor,
+    which only runs once the tool is detected here.
+    """
+    cursor_agent_bin = find_cursor_agent_binary_for_user(user_home)
+    if cursor_agent_bin:
         return {
             "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(cursor_dir)
+            "version": detector.get_version() or "Unknown",
+            "install_path": cursor_agent_bin
         }
 
-    return detector.detect()
+    return None
 
 
 def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
@@ -452,6 +458,107 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     # above already cover it).
     if not is_running_as_root() and platform.system() != "Windows":
         which_path = run_command(["which", "claude"], VERSION_TIMEOUT)
+        if which_path:
+            try:
+                resolved = Path(which_path)
+                if resolved.exists() and os.access(str(resolved), os.X_OK):
+                    return str(resolved)
+            except (PermissionError, OSError):
+                pass
+
+    return None
+
+
+def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
+    """Find the absolute path to the ``cursor-agent`` binary for a user.
+
+    Mirrors ``find_claude_binary_for_user``: gating on the binary (not the
+    ``~/.cursor`` config dir, which the Cursor IDE also writes and which survives
+    a CLI uninstall) is what kills the residue false positive.
+
+    On POSIX the official installer drops ``cursor-agent`` (older builds: a bare
+    ``agent`` shim) into ``~/.local/bin`` and keeps the real binary under
+    ``~/.local/share/cursor-agent/versions/<ver>/cursor-agent`` (newest version
+    preferred so a stale older build isn't picked). The npm-global prefix is
+    probed via the shared resolver, and a root-guarded ``which cursor-agent``
+    backstops custom prefixes (skipped under root — it resolves the SCANNER's
+    PATH, not ``user_home``'s, which would mis-attribute the install). On Windows
+    the per-user ``%USERPROFILE%\\.local\\bin\\cursor-agent.exe`` is checked
+    (``which`` is not a command there, so the explicit candidate covers it).
+
+    Args:
+        user_home: Path to the user's home directory.
+
+    Returns:
+        Absolute path to the ``cursor-agent`` binary as a string, or None.
+    """
+    if platform.system() == "Windows":
+        candidates = [
+            user_home / ".local" / "bin" / "cursor-agent.exe",
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    return str(candidate)
+            except (PermissionError, OSError):
+                continue
+        return None
+
+    # POSIX (macOS / Linux). All candidates below are user_home-relative, so they
+    # are correctly scoped to this user even under a root/MDM multi-user scan.
+    candidates = [
+        user_home / ".local" / "bin" / "cursor-agent",
+        user_home / ".local" / "bin" / "agent",
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.exists() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except (PermissionError, OSError):
+            continue
+
+    # Versioned install dir: pick the newest version's cursor-agent.
+    versions_dir = user_home / ".local" / "share" / "cursor-agent" / "versions"
+
+    def _version_key(version_dir: Path):
+        # Numeric (major, minor, patch) parsed from a "X.Y.Z" dir name so the
+        # newest sorts last (reverse=True puts it first). A plain string sort
+        # would order "1.10.0" before "1.9.0" and report a stale version;
+        # malformed names yield () and sort earliest. Mirrors copilot_cli's
+        # _node_version_key idiom.
+        return tuple(int(p) for p in version_dir.name.split(".") if p.isdigit())
+
+    try:
+        if versions_dir.exists():
+            version_dirs = sorted(
+                (d for d in versions_dir.iterdir() if d.is_dir()),
+                key=_version_key,
+                reverse=True,
+            )
+            for version_dir in version_dirs:
+                versioned = version_dir / "cursor-agent"
+                try:
+                    if versioned.exists() and os.access(str(versioned), os.X_OK):
+                        return str(versioned)
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate cursor-agent versions: {e}")
+
+    # npm-global prefix backstop (Homebrew node / nvm / pnpm vary). The dynamic
+    # ``npm prefix -g`` probe is root-guarded inside the helper (it resolves the
+    # SCANNER's prefix, not the user's — the 93b5fc2 cross-user FP class).
+    npm_resolved = resolve_npm_global_tool_bin(
+        "cursor-agent", user_home, is_running_as_root()
+    )
+    if npm_resolved:
+        return npm_resolved
+
+    # PATH backstop: only meaningful single-user / non-root (the resolved PATH is
+    # the SCANNER's, not user_home's; under root it would mis-attribute the
+    # scanner's cursor-agent to a user who has only residue).
+    if not is_running_as_root():
+        which_path = run_command(["which", "cursor-agent"], VERSION_TIMEOUT)
         if which_path:
             try:
                 resolved = Path(which_path)

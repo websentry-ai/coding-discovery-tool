@@ -1,8 +1,9 @@
 """
 Cursor CLI detection for macOS.
 
-Cursor CLI is a command-line tool for the Cursor IDE.
-This module detects Cursor CLI installations by checking for the 'cursor' command.
+Cursor CLI is the standalone agentic terminal tool ``cursor-agent`` — distinct
+from the Cursor IDE's ``cursor`` launcher. This module gates on ``cursor-agent``;
+gating on ``cursor`` mislabelled the IDE launcher as the CLI.
 """
 
 import logging
@@ -21,8 +22,8 @@ class MacOSCursorCliDetector(BaseToolDetector):
     Detector for Cursor CLI installations on macOS systems.
 
     Detection involves:
-    - Checking if 'cursor' command is available using 'which cursor'
-    - Verifying installation by running 'cursor --version'
+    - Checking if the ``cursor-agent`` command is available via ``which cursor-agent``
+    - Reading the version via ``cursor-agent --version``
     """
 
     @property
@@ -51,13 +52,13 @@ class MacOSCursorCliDetector(BaseToolDetector):
 
     def get_version(self) -> Optional[str]:
         """
-        Extract Cursor CLI version using 'cursor --version'.
+        Extract Cursor CLI version using ``cursor-agent --version``. Best-effort.
 
         Returns:
             Version string or None if version cannot be determined
         """
         try:
-            output = run_command(["cursor", "--version"], VERSION_TIMEOUT)
+            output = run_command(["cursor-agent", "--version"], VERSION_TIMEOUT)
             if output:
                 return extract_version_number(output.strip())
         except Exception as e:
@@ -66,17 +67,20 @@ class MacOSCursorCliDetector(BaseToolDetector):
 
     def _check_cursor_command(self) -> Optional[str]:
         """
-        Check if 'cursor' command is available using 'which cursor'.
+        Check if the ``cursor-agent`` command is available via ``which cursor-agent``.
+
+        Probing ``cursor-agent`` (NOT ``cursor``) is what avoids mislabelling the
+        Cursor IDE launcher as the CLI.
 
         Returns:
-            Path to cursor executable if found, None otherwise
+            Path to the ``cursor-agent`` executable if found, None otherwise
         """
         try:
-            output = run_command(["which", "cursor"], VERSION_TIMEOUT)
+            output = run_command(["which", "cursor-agent"], VERSION_TIMEOUT)
             if output:
                 path = output.strip()
                 if Path(path).exists():
-                    logger.debug(f"Found Cursor CLI at: {path}")
+                    logger.debug(f"Found Cursor CLI (cursor-agent) at: {path}")
                     return path
         except Exception as e:
             logger.debug(f"Could not check for Cursor CLI command: {e}")

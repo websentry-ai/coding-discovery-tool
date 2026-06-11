@@ -7,16 +7,15 @@ keeps its configuration under ``%USERPROFILE%\\.copilot`` (i.e. ``~/.copilot``),
 identical to the macOS layout, with its MCP servers in
 ``~/.copilot/mcp-config.json``.
 
-Two things are OS-specific: the all-users scan (Windows uses
-``is_running_as_admin`` and iterates ``C:\\Users`` instead of root + ``/Users``)
-and ``get_version`` (overridden to pass ``shell=True`` for the npm ``.cmd``
-shim, mirroring ``WindowsCodexDetector`` — without it the inherited probe would
-always read "unknown"). Everything else — the marker gate
-(``_copilot_dir_has_strong_artifact``), ``_detect_for_user``, ``detect``, and
-``detect_all_tools`` — is inherited from the macOS detector rather than
-re-derived (CLAUDE.md DRY). The marker gate inherits the strong-vs-shared
-artifact split (``_copilot_dir_has_strong_artifact``) too. Mirrors the
-per-user/admin idiom in
+Three things are OS-specific: the all-users scan (Windows uses
+``is_running_as_admin`` and iterates ``C:\\Users`` instead of root + ``/Users``),
+the binary resolve (``_resolve_binary`` -> ``_resolve_windows_binary``: the npm
+``copilot.cmd`` shim / ``.local/bin`` / ``.bun/bin``, no Homebrew), and
+``get_version`` (overridden to pass ``shell=True`` for the npm ``.cmd`` shim,
+mirroring ``WindowsCodexDetector`` — without it the inherited probe would always
+read "unknown"). Everything else — the binary GATE in ``_detect_for_user``,
+``detect``, and ``detect_all_tools`` — is inherited from the macOS detector
+rather than re-derived (CLAUDE.md DRY). Mirrors the per-user/admin idiom in
 ``windows/github_copilot/detect_copilot.py``.
 """
 
@@ -62,6 +61,19 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
 
         result = self._detect_for_user(Path.home())
         return [result] if result else []
+
+    def _resolve_binary(self, user_home: Path) -> Optional[str]:
+        """Resolve the ``copilot`` CLI binary for ``user_home`` on Windows (the
+        detection gate).
+
+        Overrides the macOS resolver: Windows installs the CLI as
+        ``AppData/Roaming/npm/copilot.cmd`` (npm global shim) or under
+        ``.local/bin`` / ``.bun/bin``, and has no Homebrew. Reuses the existing
+        ``_resolve_windows_binary`` candidate list. Best-effort: returns a path
+        string or None. Never raises.
+        """
+        binary = self._resolve_windows_binary(user_home)
+        return str(binary) if binary is not None else None
 
     def _detect_for_all_system_users(self) -> List[Dict]:
         """Scan every user directory under ``C:\\Users`` when running as admin.

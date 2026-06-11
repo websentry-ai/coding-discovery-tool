@@ -1,12 +1,23 @@
-"""Roo Code detection for Linux."""
+"""Roo Code detection for Linux.
 
-import json
+Detection gates on whether the Roo extension is a LIVE entry in each editor's
+``extensions.json`` install registry (VS Code rewrites this file on uninstall).
+The extension's ``globalStorage/<ext-id>`` directory is NOT used: VS Code does
+not clean it up on uninstall (microsoft/vscode#119022), so gating on it surfaced
+phantom rows for removed extensions. The host-editor install AND-gate is likewise
+dropped — the ``extensions.json`` entry is itself proof of a live install.
+"""
+
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...linux_extraction_helpers import get_linux_user_homes, is_linux_ide_installed
+from ...vscode_extension_helpers import (
+    extensions_dir_for_editor,
+    find_extension_in_editor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +29,7 @@ class LinuxRooDetector(BaseToolDetector):
         "Code": "VS Code",
         "Cursor": "Cursor",
         "Windsurf": "Windsurf",
+        "VSCodium": "VSCodium",
     }
 
     ROO_EXTENSION_ID = "rooveterinaryinc.roo-cline"
@@ -43,23 +55,22 @@ class LinuxRooDetector(BaseToolDetector):
 
     def _detect_roo_for_user(self, user_home: Path) -> List[Dict]:
         results = []
-        # Require BOTH the globalStorage extension dir AND the host editor to be
-        # installed (mirrors macOS): the ``globalStorage/<ext-id>`` dir survives
-        # an editor uninstall, so it alone is not proof of install.
+        # Gate purely on the editor's extensions.json registry entry (which VS
+        # Code rewrites on uninstall). No host-install AND-gate: the registry
+        # entry is itself proof of a live install, and globalStorage residue —
+        # which survives uninstall — no longer drives detection.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_roo_extension(user_home, ide_folder)
             if extension_info:
-                extension_path, version = extension_info
-                host_installed, _ = self._check_ide_installation(ide_folder, user_home)
-                if host_installed and extension_path:
-                    results.append({
-                        "name": f"Roo Code ({ide_display_name})",
-                        "version": version or "Unknown",
-                        "publisher": "Roo Veterinary Inc",
-                        "ide": ide_display_name,
-                        "install_path": str(extension_path),
-                    })
-                    logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
+                _, version = extension_info
+                results.append({
+                    "name": f"Roo Code ({ide_display_name})",
+                    "version": version or "Unknown",
+                    "publisher": "Roo Veterinary Inc",
+                    "ide": ide_display_name,
+                    "install_path": str(extensions_dir_for_editor(user_home, ide_folder)),
+                })
+                logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
         return results
 
     def _check_ide_installation(self, ide_name: str, user_home: Path) -> Tuple[bool, Optional[str]]:
@@ -85,43 +96,7 @@ class LinuxRooDetector(BaseToolDetector):
             logger.debug(f"Could not check {ide_name} install presence: {e}")
             return False, None
 
-    def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[Path, Optional[str]]]:
-        extension_dir = (
-            user_home / ".config" / ide_name / "User" / "globalStorage" / self.ROO_EXTENSION_ID
-        )
-        try:
-            if not extension_dir.exists():
-                return None
-            logger.debug(f"Found Roo extension directory for {ide_name} at: {extension_dir}")
-            version = self._get_extension_version(user_home, ide_name)
-            return extension_dir, version
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check Roo extension path for {ide_name}: {e}")
-        return None
-
-    def _get_extension_version(self, user_home: Path, ide_name: str) -> Optional[str]:
-        extensions_dir = user_home / ".vscode" / "extensions"
-        if ide_name == "Cursor":
-            extensions_dir = user_home / ".cursor" / "extensions"
-        elif ide_name == "Windsurf":
-            extensions_dir = user_home / ".windsurf" / "extensions"
-
-        try:
-            if extensions_dir.exists():
-                for ext_dir in extensions_dir.glob("rooveterinaryinc.roo-cline-*"):
-                    package_json = ext_dir / "package.json"
-                    if package_json.exists():
-                        try:
-                            with open(package_json, "r", encoding="utf-8") as f:
-                                data = json.load(f)
-                                return data.get("version")
-                        except (json.JSONDecodeError, OSError):
-                            pass
-                    if "-" in ext_dir.name:
-                        try:
-                            return ext_dir.name.rsplit("-", 1)[1]
-                        except IndexError:
-                            pass
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check extensions directory: {e}")
-        return None
+    def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[str, Optional[str]]]:
+        """Return ``(matched_location, version)`` if Roo Code is a live entry in
+        the editor's ``extensions.json``, else None."""
+        return find_extension_in_editor(user_home, ide_name, self.ROO_EXTENSION_ID)

@@ -2,10 +2,15 @@
 Roo Code detection for macOS.
 
 Roo Code is an AI-powered coding assistant that operates as a VS Code extension.
-This module detects Roo Code installations by checking for:
-1. IDE installations (VS Code, Cursor, Windsurf, Antigravity)
-2. Roo extension settings in IDE global storage directories
-3. Antigravity extensions via ~/.antigravity/extensions/extensions.json
+This module detects Roo Code installations by checking, for each supported
+editor, whether the Roo extension is a LIVE entry in that editor's
+``extensions.json`` install registry (VS Code rewrites this file on uninstall).
+
+The extension's ``globalStorage/<ext-id>`` directory is deliberately NOT used as
+the gate: VS Code does not clean it up on uninstall (microsoft/vscode#119022),
+so gating on it surfaced phantom rows for extensions the user had removed. The
+host-editor ``.app`` AND-gate is likewise dropped — the ``extensions.json`` entry
+is itself proof the editor manages a live install.
 
 Returns detections like:
 - Roo Code (VS Code)
@@ -14,13 +19,16 @@ Returns detections like:
 - Roo Code (Antigravity)
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...macos_extraction_helpers import is_running_as_root
+from ...vscode_extension_helpers import (
+    extensions_dir_for_editor,
+    find_extension_in_editor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +45,13 @@ class MacOSRooDetector(BaseToolDetector):
     Returns separate detections for each IDE where Roo Code is installed.
     """
 
-    # Supported IDEs that can host the Roo Code extension (globalStorage-based)
+    # Supported IDEs that can host the Roo Code extension. Each maps a
+    # ``vscode_extension_helpers`` editor key to its display name.
     SUPPORTED_IDES = {
         'Code': 'VS Code',
         'Cursor': 'Cursor',
         'Windsurf': 'Windsurf',
+        'VSCodium': 'VSCodium',
     }
 
     # Roo Code extension identifier
@@ -119,43 +129,40 @@ class MacOSRooDetector(BaseToolDetector):
         """
         results = []
 
-        # Check globalStorage-based IDEs (VS Code, Cursor, Windsurf)
+        # Gate purely on the editor's extensions.json registry entry (which VS
+        # Code rewrites on uninstall). No host-.app AND-gate: the registry entry
+        # is itself proof of a live install, and globalStorage residue — which
+        # survives uninstall — no longer drives detection.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_roo_extension(user_home, ide_folder)
 
             if extension_info:
-                extension_path, version = extension_info
+                _, version = extension_info
+                results.append({
+                    "name": f"Roo Code ({ide_display_name})",
+                    "version": version or "Unknown",
+                    "publisher": "Roo Veterinary Inc",
+                    "ide": ide_display_name,
+                    "install_path": str(extensions_dir_for_editor(user_home, ide_folder))
+                })
+                logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
 
-                # Verify the IDE is installed. Require BOTH the globalStorage
-                # extension dir AND the host IDE's .app to be present — stale
-                # globalStorage from an uninstalled IDE must not surface a row
-                # (matches kilocode.py:149).
-                ide_installed, _ = self._check_ide_installation(ide_folder, user_home)
-
-                if ide_installed and extension_path:
-                    results.append({
-                        "name": f"Roo Code ({ide_display_name})",
-                        "version": version or "Unknown",
-                        "publisher": "Roo Veterinary Inc",
-                        "ide": ide_display_name,
-                        "install_path": str(extension_path)
-                    })
-                    logger.info(f"Detected: Roo Code ({ide_display_name}) v{version or 'Unknown'}")
-
-        # Check Antigravity (uses different extension storage). Gate on the
-        # Antigravity .app being present — ~/.antigravity/extensions survives
-        # uninstall, so the extensions.json entry alone is not proof of install.
+        # Antigravity keeps its own install gate (the .app being present) because
+        # it is not a marketplace VS Code editor; its extensions.json read is
+        # routed through the shared helper so the live-entry semantics match.
         antigravity_installed, _ = self._check_ide_installation("Antigravity", user_home)
         if antigravity_installed:
-            antigravity_info = self._check_antigravity_extension(user_home)
+            antigravity_info = find_extension_in_editor(
+                user_home, "Antigravity", self.ROO_EXTENSION_ID
+            )
             if antigravity_info:
-                extension_path, version = antigravity_info
+                _, version = antigravity_info
                 results.append({
                     "name": "Roo Code (Antigravity)",
                     "version": version or "Unknown",
                     "publisher": "Roo Veterinary Inc",
                     "ide": "Antigravity",
-                    "install_path": str(extension_path)
+                    "install_path": str(extensions_dir_for_editor(user_home, "Antigravity"))
                 })
                 logger.info(f"Detected: Roo Code (Antigravity) v{version or 'Unknown'}")
 
@@ -197,114 +204,16 @@ class MacOSRooDetector(BaseToolDetector):
 
         return False, None
 
-    def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[Path, Optional[str]]]:
+    def _check_roo_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[str, Optional[str]]]:
         """
-        Check if Roo extension exists for a specific IDE and extract version.
+        Check if Roo Code is a live entry in the editor's ``extensions.json`` and
+        return its version.
 
         Args:
             user_home: User's home directory path
             ide_name: Name of the IDE folder to check
 
         Returns:
-            Tuple of (extension_path, version) if found, None otherwise
+            Tuple of (matched_location, version) if found, None otherwise
         """
-        code_base = user_home / "Library" / "Application Support"
-        extension_dir = code_base / ide_name / "User" / "globalStorage" / self.ROO_EXTENSION_ID
-
-        try:
-            if not extension_dir.exists():
-                return None
-
-            logger.debug(f"Found Roo extension directory for {ide_name} at: {extension_dir}")
-
-            # Try to get version from package.json in the extension
-            version = self._get_extension_version(user_home, ide_name)
-
-            return extension_dir, version
-
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check Roo extension path for {ide_name}: {e}")
-
-        return None
-
-    def _check_antigravity_extension(self, user_home: Path) -> Optional[Tuple[Path, Optional[str]]]:
-        """
-        Check if Roo Code is installed in Antigravity.
-
-        Antigravity stores extensions in ~/.antigravity/extensions/extensions.json
-
-        Args:
-            user_home: User's home directory path
-
-        Returns:
-            Tuple of (extension_path, version) if found, None otherwise
-        """
-        extensions_json = user_home / ".antigravity" / "extensions" / "extensions.json"
-
-        try:
-            if not extensions_json.exists():
-                return None
-
-            with open(extensions_json, 'r', encoding='utf-8') as f:
-                extensions = json.load(f)
-
-            # Search for Roo Code extension
-            for ext in extensions:
-                ext_id = ext.get('identifier', {}).get('id', '').lower()
-                if ext_id == self.ROO_EXTENSION_ID.lower():
-                    version = ext.get('version')
-                    # Get extension path from location
-                    location = ext.get('location', {})
-                    ext_path = location.get('path') or location.get('fsPath')
-                    if ext_path:
-                        return Path(ext_path), version
-                    # Fallback to relative location
-                    rel_location = ext.get('relativeLocation')
-                    if rel_location:
-                        ext_path = user_home / ".antigravity" / "extensions" / rel_location
-                        return ext_path, version
-
-        except (json.JSONDecodeError, OSError) as e:
-            logger.debug(f"Could not check Antigravity extensions: {e}")
-
-        return None
-
-    def _get_extension_version(self, user_home: Path, ide_name: str) -> Optional[str]:
-        """
-        Try to extract Roo Code version from the extension's package.json.
-
-        Args:
-            user_home: User's home directory path
-            ide_name: Name of the IDE folder
-
-        Returns:
-            Version string if found, None otherwise
-        """
-        # Check extensions directory for the roo-cline extension
-        extensions_dir = user_home / ".vscode" / "extensions"
-        if ide_name == "Cursor":
-            extensions_dir = user_home / ".cursor" / "extensions"
-        elif ide_name == "Windsurf":
-            extensions_dir = user_home / ".windsurf" / "extensions"
-
-        try:
-            if extensions_dir.exists():
-                for ext_dir in extensions_dir.glob("rooveterinaryinc.roo-cline-*"):
-                    package_json = ext_dir / "package.json"
-                    if package_json.exists():
-                        try:
-                            with open(package_json, 'r', encoding='utf-8') as f:
-                                data = json.load(f)
-                                return data.get('version')
-                        except (json.JSONDecodeError, OSError):
-                            pass
-                    # Fallback: extract version from folder name
-                    if "-" in ext_dir.name:
-                        try:
-                            return ext_dir.name.rsplit('-', 1)[1]
-                        except IndexError:
-                            pass
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check extensions directory: {e}")
-
-        return None
+        return find_extension_in_editor(user_home, ide_name, self.ROO_EXTENSION_ID)

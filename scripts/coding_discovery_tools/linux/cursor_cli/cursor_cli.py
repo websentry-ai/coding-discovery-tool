@@ -1,4 +1,9 @@
-"""Cursor CLI detection for Linux."""
+"""Cursor CLI detection for Linux.
+
+Cursor CLI is the standalone agentic terminal tool ``cursor-agent`` — distinct
+from the Cursor IDE's ``cursor`` launcher. Gating on ``cursor-agent`` avoids
+mislabelling the IDE launcher as the CLI.
+"""
 
 import logging
 from pathlib import Path
@@ -31,7 +36,7 @@ class LinuxCursorCliDetector(BaseToolDetector):
 
     def get_version(self) -> Optional[str]:
         try:
-            output = run_command(["cursor", "--version"], VERSION_TIMEOUT)
+            output = run_command(["cursor-agent", "--version"], VERSION_TIMEOUT)
             if output:
                 return extract_version_number(output.strip())
         except Exception as e:
@@ -40,11 +45,11 @@ class LinuxCursorCliDetector(BaseToolDetector):
 
     def _check_cursor_command(self) -> Optional[str]:
         try:
-            output = run_command(["which", "cursor"], VERSION_TIMEOUT)
+            output = run_command(["which", "cursor-agent"], VERSION_TIMEOUT)
             if output:
                 path = output.strip()
                 if Path(path).exists():
-                    logger.debug(f"Found Cursor CLI at: {path}")
+                    logger.debug(f"Found Cursor CLI (cursor-agent) at: {path}")
                     return path
         except Exception as e:
             logger.debug(f"Could not check for Cursor CLI command: {e}")

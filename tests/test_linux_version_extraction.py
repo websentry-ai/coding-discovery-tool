@@ -8,11 +8,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-def _make_extension(extensions_dir: Path, package_version: str = None, folder_suffix: str = "1.2.3") -> Path:
-    ext_dir = extensions_dir / f"kilocode.Kilo-Code-{folder_suffix}"
+KILO_EXT_ID = "kilocode.Kilo-Code"
+
+
+def _write_kilo_registry(user_home: Path, ide_key: str, ext_id: str = KILO_EXT_ID,
+                         version: str = "3.7.0") -> Path:
+    """Write a Kilo Code entry into ``<editor>/extensions/extensions.json`` (the
+    install registry the detector now gates on)."""
+    rel = {"Code": ".vscode/extensions", "Cursor": ".cursor/extensions"}[ide_key]
+    ext_dir = user_home / rel
     ext_dir.mkdir(parents=True, exist_ok=True)
-    if package_version is not None:
-        (ext_dir / "package.json").write_text(json.dumps({"name": "Kilo-Code", "version": package_version}))
+    (ext_dir / "extensions.json").write_text(json.dumps([
+        {"identifier": {"id": ext_id}, "version": version,
+         "relativeLocation": f"{ext_id}-{version}"}
+    ]), encoding="utf-8")
     return ext_dir
 
 
@@ -24,36 +33,55 @@ def _write_resource_json(install_dir: Path, filename: str, version: str) -> Path
 
 
 class TestLinuxKiloCodeVersion(unittest.TestCase):
+    """Kilo Code on Linux now gates on (and reads its version from) the editor's
+    ``extensions.json`` registry, via ``detect()`` -> ``_check_user_for_kilocode``.
+
+    ``get_linux_user_homes`` is pinned to the hermetic tmp home so the scan is
+    isolated from the CI box's real ``/home``."""
+
     def setUp(self):
         from scripts.coding_discovery_tools.linux.kilocode.kilocode import LinuxKiloCodeDetector
         self.detector = LinuxKiloCodeDetector()
         self.tmp = tempfile.TemporaryDirectory()
         self.user_home = Path(self.tmp.name)
+        self._homes = patch(
+            "scripts.coding_discovery_tools.linux.kilocode.kilocode.get_linux_user_homes",
+            return_value=[self.user_home],
+        )
+        self._homes.start()
 
     def tearDown(self):
+        self._homes.stop()
         self.tmp.cleanup()
 
-    def test_reads_version_from_package_json(self):
-        _make_extension(self.user_home / ".vscode" / "extensions", package_version="3.7.0")
-        version = self.detector._get_extension_version_for_user(self.user_home, "Code")
-        self.assertEqual(version, "3.7.0")
+    def test_reads_version_from_registry_entry(self):
+        _write_kilo_registry(self.user_home, "Code", version="3.7.0")
+        result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "3.7.0")
+        self.assertEqual(result["install_path"], str(self.user_home / ".vscode" / "extensions"))
 
-    def test_scoped_to_requested_ide_only(self):
-        """A Cursor lookup must NOT return a leftover VS Code version."""
-        _make_extension(self.user_home / ".vscode" / "extensions", package_version="1.0.0")
-        version = self.detector._get_extension_version_for_user(self.user_home, "Cursor")
-        self.assertIsNone(version)
+    def test_uses_cursor_registry_when_cursor_has_entry(self):
+        _write_kilo_registry(self.user_home, "Cursor", version="4.2.0")
+        result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "4.2.0")
+        self.assertEqual(result["install_path"], str(self.user_home / ".cursor" / "extensions"))
 
-    def test_uses_cursor_extensions_dir_when_cursor_requested(self):
-        _make_extension(self.user_home / ".cursor" / "extensions", package_version="4.2.0")
-        version = self.detector._get_extension_version_for_user(self.user_home, "Cursor")
-        self.assertEqual(version, "4.2.0")
+    def test_lowercase_id_in_registry_detected(self):
+        """The registry stores the lowercase id; the case-insensitive match still
+        finds it against the display-cased constant."""
+        _write_kilo_registry(self.user_home, "Code", ext_id="kilocode.kilo-code", version="5.0.0")
+        result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "5.0.0")
 
-    def test_folder_suffix_fallback(self):
-        ext_dir = _make_extension(self.user_home / ".vscode" / "extensions", folder_suffix="2.5.1")
-        (ext_dir / "package.json").write_text("not valid json {{{")
-        version = self.detector._get_extension_version_for_user(self.user_home, "Code")
-        self.assertEqual(version, "2.5.1")
+    def test_globalstorage_residue_without_registry_entry_not_detected(self):
+        """The FP kill: globalStorage residue (which survives uninstall) present but
+        NO extensions.json registry entry -> not detected."""
+        gs = self.user_home / ".config" / "Code" / "User" / "globalStorage" / KILO_EXT_ID
+        gs.mkdir(parents=True)
+        self.assertIsNone(self.detector.detect())
 
 
 class TestLinuxAntigravityVersion(unittest.TestCase):

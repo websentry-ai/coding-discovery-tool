@@ -247,6 +247,7 @@ class TestCopilotCliDetection(unittest.TestCase):
             result = self.detector.detect()
         self.assertEqual(result["install_path"], str(binary))
 
+    @unittest.skipIf(os.name == "nt", "os.access(X_OK) has no POSIX semantics on Windows (any file reads executable)")
     def test_non_executable_binary_not_detected(self):
         """A ~/.local/bin/copilot that is NOT executable -> not detected (X_OK gate)."""
         binary = self.user_home / ".local" / "bin" / "copilot"

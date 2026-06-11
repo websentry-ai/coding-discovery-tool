@@ -227,7 +227,16 @@ main() {
     # key appears in /proc/pid/cmdline and ps for the duration of the Python process.
     # This is a pre-existing limitation of the Python entry point (not introduced by
     # this PR); the scheduled wrapper already avoids exposing the key at the shell level.
-    $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "${_extra_args[@]}" "$@"
+    #
+    # Routing: a leading "mcp-scan" runs the on-demand single-server scan (used by
+    # the agent hooks when the gateway reports an MCP server it has no record of);
+    # anything else runs the full daily discovery sweep.
+    if [ "${1:-}" = "mcp-scan" ]; then
+        shift
+        $PYTHON_CMD -m scripts.coding_discovery_tools.scan_single_mcp_server "${_extra_args[@]}" "$@"
+    else
+        $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "${_extra_args[@]}" "$@"
+    fi
 }
 
 # ==============================================================================

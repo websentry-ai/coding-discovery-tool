@@ -11,6 +11,7 @@ from ...macos_extraction_helpers import (
     scan_user_directories,
     is_running_as_root
 )
+from ...utils import resolve_npm_global_tool_bin
 
 from ...mcp_extraction_helpers import (
     extract_roo_mcp_from_dir,
@@ -144,16 +145,38 @@ class MacOSOpenClawDetector(BaseOpenClawDetector):
         Callback function to check for OpenClaw in a specific user's home directory.
         Used by both normal execution and scan_user_directories.
         """
+        # NOTE: the bare ``~/.openclaw`` dir is residue config/data that survives
+        # uninstall — excluded. The ``~/.openclaw/bin/openclaw`` candidate is
+        # also dropped: it is NOT a documented install location (npm installs to
+        # the global prefix, resolved via ``_resolve_npm_prefix_bin``), so it
+        # never matched. Gate on the per-user .app bundle here; the real npm
+        # binary is resolved separately.
         user_paths = [
             user_home / "Applications/OpenClaw.app",
-            user_home / ".openclaw/bin/openclaw",
-            user_home / ".openclaw"
         ]
-        
+
         for p in user_paths:
             if p.exists():
                 return p
+
+        # npm global Node CLI: real binary at ``<npm prefix>/bin/openclaw``
+        # (Homebrew node / nvm / pnpm vary). The dynamic ``npm prefix -g`` probe
+        # is root-guarded inside the helper (it resolves the SCANNER's prefix,
+        # not the user's — the 93b5fc2 cross-user FP class).
+        npm_bin = self._resolve_npm_prefix_bin(user_home)
+        if npm_bin:
+            return Path(npm_bin)
         return None
+
+    def _resolve_npm_prefix_bin(self, user_home: Path) -> Optional[str]:
+        """Resolve ``openclaw`` via the npm global prefix + static fallbacks.
+        Delegates to the shared ``resolve_npm_global_tool_bin`` (root-guarded
+        ``npm prefix -g`` + Homebrew/pnpm/nvm fallbacks). Never raises."""
+        try:
+            return resolve_npm_global_tool_bin("openclaw", user_home, is_running_as_root())
+        except Exception as e:  # noqa: BLE001 - resolution must never crash detection
+            logger.debug(f"npm-prefix resolution for openclaw failed: {e}")
+            return None
 
     def _check_running_process(self) -> bool:
         """Check running processes using ps."""

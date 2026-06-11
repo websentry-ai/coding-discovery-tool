@@ -2,10 +2,9 @@
 Cline detection for macOS.
 
 Cline is an AI-powered coding assistant that operates as a VS Code extension.
-This module detects Cline installations by checking for:
-1. IDE installations (VS Code, Cursor, Windsurf, Antigravity)
-2. Cline extension settings in IDE global storage directories
-3. Antigravity extensions via ~/.antigravity/extensions/extensions.json
+Detection gates on a LIVE entry in each editor's ``extensions.json`` registry, not
+the ``globalStorage/<ext-id>`` dir, which survives uninstall (microsoft/vscode
+#119022) and so produced phantom rows for removed extensions.
 
 Returns detections like:
 - Cline (VS Code)
@@ -14,13 +13,16 @@ Returns detections like:
 - Cline (Antigravity)
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...macos_extraction_helpers import is_running_as_root
+from ...vscode_extension_helpers import (
+    extensions_dir_for_editor,
+    find_extension_in_editor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +31,11 @@ class MacOSClineDetector(BaseToolDetector):
     """
     Detector for Cline installations on macOS systems.
 
-    Cline operates as a VS Code extension, so detection involves:
-    - Checking for compatible IDE installations (VS Code, Cursor, Windsurf, Antigravity)
-    - Verifying Cline extension settings exist in IDE global storage
-    - Checking Antigravity's extensions.json for installed extensions
+    Cline operates as a VS Code extension. For VS Code / Cursor / Windsurf,
+    detection gates on the extension being a LIVE entry in the editor's
+    ``extensions.json`` install registry; the ``globalStorage/<ext-id>`` dir
+    survives uninstall (microsoft/vscode#119022) so it is NOT used as the gate.
+    Antigravity retains its bundled ``.app`` + ``extensions.json`` check.
 
     Returns separate detections for each IDE where Cline is installed.
     """
@@ -118,172 +121,88 @@ class MacOSClineDetector(BaseToolDetector):
         """
         results = []
 
-        # Check globalStorage-based IDEs (VS Code, Cursor, Windsurf)
+        # Gate on the extensions.json entry alone — no host-.app AND-gate, since the
+        # entry is itself proof of a live install.
         for ide_folder, ide_display_name in self.SUPPORTED_IDES.items():
             extension_info = self._check_cline_extension(user_home, ide_folder)
 
             if extension_info:
-                extension_path, version = extension_info
+                _, version = extension_info
+                results.append({
+                    "name": f"Cline ({ide_display_name})",
+                    "version": version or "Unknown",
+                    "publisher": "Saoud Rizwan",
+                    "ide": ide_display_name,
+                    "install_path": str(extensions_dir_for_editor(user_home, ide_folder))
+                })
+                logger.info(f"Detected: Cline ({ide_display_name}) v{version or 'Unknown'}")
 
-                ide_installed, _ = self._check_ide_installation(ide_folder)
-
-                if ide_installed or extension_path:
-                    results.append({
-                        "name": f"Cline ({ide_display_name})",
-                        "version": version or "Unknown",
-                        "publisher": "Saoud Rizwan",
-                        "ide": ide_display_name,
-                        "install_path": str(extension_path)
-                    })
-                    logger.info(f"Detected: Cline ({ide_display_name}) v{version or 'Unknown'}")
-
-        antigravity_info = self._check_antigravity_extension(user_home)
-        if antigravity_info:
-            extension_path, version = antigravity_info
-            results.append({
-                "name": "Cline (Antigravity)",
-                "version": version or "Unknown",
-                "publisher": "Saoud Rizwan",
-                "ide": "Antigravity",
-                "install_path": str(extension_path)
-            })
-            logger.info(f"Detected: Cline (Antigravity) v{version or 'Unknown'}")
+        # Antigravity keeps its own .app gate (not a marketplace VS Code editor);
+        # the extensions.json read still goes through the shared helper.
+        antigravity_installed, _ = self._check_ide_installation("Antigravity", user_home)
+        if antigravity_installed:
+            antigravity_info = find_extension_in_editor(
+                user_home, "Antigravity", self.CLINE_EXTENSION_ID
+            )
+            if antigravity_info:
+                _, version = antigravity_info
+                results.append({
+                    "name": "Cline (Antigravity)",
+                    "version": version or "Unknown",
+                    "publisher": "Saoud Rizwan",
+                    "ide": "Antigravity",
+                    "install_path": str(extensions_dir_for_editor(user_home, "Antigravity"))
+                })
+                logger.info(f"Detected: Cline (Antigravity) v{version or 'Unknown'}")
 
         return results
 
-    def _check_ide_installation(self, ide_name: str) -> Tuple[bool, Optional[str]]:
+    def _check_ide_installation(
+        self, ide_name: str, user_home: Optional[Path] = None
+    ) -> Tuple[bool, Optional[str]]:
         """
-        Check if a specific IDE is installed in /Applications.
+        Check if a specific IDE is installed in the machine-wide
+        ``/Applications`` OR the user-local ``~/Applications`` — the latter
+        covers per-user .app installs (a drag-install into the home folder).
+        Checking both avoids a false negative that would hide a real Cline user
+        whose editor lives in ``~/Applications``.
 
         Args:
             ide_name: Name of the IDE folder (Code, Cursor, Windsurf, or Antigravity)
+            user_home: Home dir of the user being scanned (for ``~/Applications``).
+                Defaults to ``Path.home()`` when not supplied.
 
         Returns:
             Tuple of (is_installed: bool, install_path: Optional[str])
         """
         app_names = self.IDE_APP_NAMES.get(ide_name, [])
+        if user_home is None:
+            user_home = Path.home()
+        app_dirs = [self.APPLICATIONS_DIR, user_home / "Applications"]
 
-        for app_name in app_names:
-            ide_path = self.APPLICATIONS_DIR / app_name
-
-            try:
-                if ide_path.exists() and ide_path.is_dir():
-                    logger.debug(f"Found {ide_name} installation at: {ide_path}")
-                    return True, str(ide_path)
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Could not check IDE path {ide_path}: {e}")
-                continue
+        for app_dir in app_dirs:
+            for app_name in app_names:
+                ide_path = app_dir / app_name
+                try:
+                    if ide_path.exists() and ide_path.is_dir():
+                        logger.debug(f"Found {ide_name} installation at: {ide_path}")
+                        return True, str(ide_path)
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Could not check IDE path {ide_path}: {e}")
+                    continue
 
         return False, None
 
-    def _check_cline_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[Path, Optional[str]]]:
+    def _check_cline_extension(self, user_home: Path, ide_name: str) -> Optional[Tuple[str, Optional[str]]]:
         """
-        Check if Cline extension exists for a specific IDE and extract version.
+        Check if Cline is a live entry in the editor's ``extensions.json`` and
+        return its version.
 
         Args:
             user_home: User's home directory path
             ide_name: Name of the IDE folder to check
 
         Returns:
-            Tuple of (extension_path, version) if found, None otherwise
+            Tuple of (matched_location, version) if found, None otherwise
         """
-        code_base = user_home / "Library" / "Application Support"
-        extension_dir = code_base / ide_name / "User" / "globalStorage" / self.CLINE_EXTENSION_ID
-
-        try:
-            if not extension_dir.exists():
-                return None
-
-            logger.debug(f"Found Cline extension directory for {ide_name} at: {extension_dir}")
-
-            # Try to get version from package.json in the extension
-            version = self._get_extension_version(user_home, ide_name)
-
-            return extension_dir, version
-
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check Cline extension path for {ide_name}: {e}")
-
-        return None
-
-    def _check_antigravity_extension(self, user_home: Path) -> Optional[Tuple[Path, Optional[str]]]:
-        """
-        Check if Cline is installed in Antigravity.
-
-        Antigravity stores extensions in ~/.antigravity/extensions/extensions.json
-
-        Args:
-            user_home: User's home directory path
-
-        Returns:
-            Tuple of (extension_path, version) if found, None otherwise
-        """
-        extensions_json = user_home / ".antigravity" / "extensions" / "extensions.json"
-
-        try:
-            if not extensions_json.exists():
-                return None
-
-            with open(extensions_json, 'r', encoding='utf-8') as f:
-                extensions = json.load(f)
-
-            # Search for Cline extension
-            for ext in extensions:
-                ext_id = ext.get('identifier', {}).get('id', '').lower()
-                if ext_id == self.CLINE_EXTENSION_ID.lower():
-                    version = ext.get('version')
-                    # Get extension path from location
-                    location = ext.get('location', {})
-                    ext_path = location.get('path') or location.get('fsPath')
-                    if ext_path:
-                        return Path(ext_path), version
-                    # Fallback to relative location
-                    rel_location = ext.get('relativeLocation')
-                    if rel_location:
-                        ext_path = user_home / ".antigravity" / "extensions" / rel_location
-                        return ext_path, version
-
-        except (json.JSONDecodeError, OSError) as e:
-            logger.debug(f"Could not check Antigravity extensions: {e}")
-
-        return None
-
-    def _get_extension_version(self, user_home: Path, ide_name: str) -> Optional[str]:
-        """
-        Try to extract Cline version from the extension's package.json.
-
-        Args:
-            user_home: User's home directory path
-            ide_name: Name of the IDE folder
-
-        Returns:
-            Version string if found, None otherwise
-        """
-        # Check extensions directory for the cline extension
-        extensions_dir = user_home / ".vscode" / "extensions"
-        if ide_name == "Cursor":
-            extensions_dir = user_home / ".cursor" / "extensions"
-        elif ide_name == "Windsurf":
-            extensions_dir = user_home / ".windsurf" / "extensions"
-
-        try:
-            if extensions_dir.exists():
-                for ext_dir in extensions_dir.glob("saoudrizwan.claude-dev-*"):
-                    package_json = ext_dir / "package.json"
-                    if package_json.exists():
-                        try:
-                            with open(package_json, 'r', encoding='utf-8') as f:
-                                data = json.load(f)
-                                return data.get('version')
-                        except (json.JSONDecodeError, OSError):
-                            pass
-                    # Fallback: extract version from folder name
-                    if "-" in ext_dir.name:
-                        try:
-                            return ext_dir.name.rsplit('-', 1)[1]
-                        except IndexError:
-                            pass
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check extensions directory: {e}")
-
-        return None
+        return find_extension_in_editor(user_home, ide_name, self.CLINE_EXTENSION_ID)

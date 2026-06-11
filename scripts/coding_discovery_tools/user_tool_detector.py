@@ -13,6 +13,13 @@ from typing import Dict, Optional
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
+from .constants import VERSION_TIMEOUT
+from .macos_extraction_helpers import is_running_as_root
+from .utils import (
+    machine_global_binary_owned_by_user,
+    resolve_npm_global_tool_bin,
+    run_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,41 +86,21 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
 
 
 def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Claude Code installation for a user."""
-    # Check user's .claude directory first
-    claude_dir = user_home / ".claude"
-    if claude_dir.exists():
+    """Detect Claude Code installation for a user.
+
+    Gates on the claude binary, not the ~/.claude config directory. The config
+    directory survives uninstall (residue), so detecting on it produces false
+    positives. ~/.claude remains available to the rules/MCP extractor, which only
+    runs once the tool is detected here.
+    """
+    claude_bin = find_claude_binary_for_user(user_home)
+    if claude_bin:
         return {
             "name": detector.tool_name,
             "version": detector.get_version(),
-            "install_path": str(claude_dir)
+            "install_path": claude_bin
         }
-    
-    # Check user's .nvm versions for claude binary (npm installs - most common)
-    nvm_versions = user_home / ".nvm" / "versions"
-    if nvm_versions.exists():
-        try:
-            for version_dir in nvm_versions.iterdir():
-                if version_dir.is_dir():
-                    claude_bin = version_dir / "bin" / "claude"
-                    if claude_bin.exists():
-                        return {
-                            "name": detector.tool_name,
-                            "version": detector.get_version(),
-                            "install_path": str(claude_bin)
-                        }
-        except (PermissionError, OSError):
-            pass
-    
-    # Fallback: Check Bun global binaries
-    bun_bin = user_home / ".bun" / "bin" / "claude"
-    if bun_bin.exists():
-        return {
-            "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(bun_bin)
-        }
-    
+
     return None
 
 
@@ -192,20 +179,21 @@ def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Di
 
 
 def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Gemini CLI installation for a user."""
-    # Check user's .gemini directory first (global installation/config)
-    gemini_dir = user_home / ".gemini"
-    if gemini_dir.exists() and gemini_dir.is_dir():
-        return {
-            "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(gemini_dir)
-        }
-    
+    """Detect Gemini CLI installation for a user.
+
+    Gates on the gemini binary, not the ~/.gemini config directory. The config
+    directory survives uninstall (residue), so detecting on it produces false
+    positives. ~/.gemini remains available to the rules/MCP extractor, which only
+    runs once the tool is detected here.
+    """
     # Check user's .nvm versions for gemini (npm installs - most common)
     # npm creates symlinks with hash suffixes like .gemini-lUK4BXcM
     nvm_versions = user_home / ".nvm" / "versions" / "node"
-    if nvm_versions.exists():
+    try:
+        nvm_present = nvm_versions.exists()
+    except OSError:
+        nvm_present = False
+    if nvm_present:
         try:
             for version_dir in nvm_versions.iterdir():
                 if not version_dir.is_dir():
@@ -238,32 +226,113 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
                         }
         except (PermissionError, OSError):
             pass
-    
+
+    if platform.system() == "Windows":
+        # Windows npm installs drop shims into %APPDATA%\npm (no POSIX X_OK
+        # semantics, so gate on existence like the Claude Windows branch and
+        # the Bun fallback below). Mirrors how Claude has a Windows branch.
+        npm_dir = user_home / "AppData" / "Roaming" / "npm"
+        windows_candidates = [
+            npm_dir / "gemini.cmd",
+            npm_dir / "gemini.ps1",
+            npm_dir / "gemini",
+        ]
+        for candidate in windows_candidates:
+            try:
+                if candidate.exists():
+                    return {
+                        "name": detector.tool_name,
+                        "version": detector.get_version() or "Unknown",
+                        "install_path": str(candidate)
+                    }
+            except OSError:
+                continue
+    else:
+        # Check common user binary locations the nvm/bun scans miss.
+        # ~/.local/bin and the npm-global prefix are user_home-relative (always
+        # safe). Homebrew and /usr/local are MACHINE-GLOBAL — they are ALWAYS
+        # probed, but under a root/MDM multi-user scan each is owner-attributed
+        # so one user's Homebrew install isn't fanned out to every user (the
+        # 93b5fc2 cross-user FP); a root-owned system-wide binary attributes to
+        # each scanned user. User_home-relative candidates are path-scoped and
+        # always pass (no owner check).
+        machine_global = [
+            Path("/opt/homebrew/bin/gemini"),
+            Path("/usr/local/bin/gemini"),
+        ]
+        user_relative = [
+            user_home / ".local" / "bin" / "gemini",
+            user_home / ".npm-global" / "bin" / "gemini",
+        ]
+        is_root = is_running_as_root()
+        for candidate in machine_global + user_relative:
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    if is_root and candidate in machine_global \
+                            and not machine_global_binary_owned_by_user(candidate, user_home):
+                        continue
+                    return {
+                        "name": detector.tool_name,
+                        "version": detector.get_version() or "Unknown",
+                        "install_path": str(candidate)
+                    }
+            except OSError:
+                continue
+
+        # Resolve the npm global prefix (Homebrew node / nvm / pnpm vary) and
+        # probe ``<prefix>/bin/gemini`` plus pnpm/nvm fallbacks. The dynamic
+        # ``npm prefix -g`` probe is root-guarded inside the helper (it resolves
+        # the SCANNER's prefix, not the user's — the 93b5fc2 cross-user FP class).
+        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root())
+        if npm_resolved:
+            return {
+                "name": detector.tool_name,
+                "version": detector.get_version() or "Unknown",
+                "install_path": npm_resolved
+            }
+
     # Fallback: Check Bun global binaries
     bun_bin = user_home / ".bun" / "bin" / "gemini"
-    if bun_bin.exists():
+    try:
+        bun_present = bun_bin.exists()
+    except OSError:
+        bun_present = False
+    if bun_present:
         return {
             "name": detector.tool_name,
             "version": detector.get_version(),
             "install_path": str(bun_bin)
         }
     
-    # Final fallback: Use detector's default detection (checks PATH via 'which gemini')
+    # Final fallback: detector.detect() resolves `which gemini` against the
+    # SCANNER's PATH, not user_home. Under a root/MDM multi-user scan that would
+    # mis-attribute the scanner's gemini to a user who has only residue, so skip
+    # it when root — the explicit user_home candidates above already cover real
+    # installs (mirrors the Claude find_claude_binary_for_user root guard).
+    if is_running_as_root():
+        return None
     return detector.detect()
 
 
 def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Cursor CLI installation for a user."""
-    cursor_dir = user_home / ".cursor"
-    cli_config = cursor_dir / "cli-config.json"
-    if cli_config.exists():
+    """Detect Cursor CLI (``cursor-agent``) installation for a user.
+
+    Gates on the binary, not ``~/.cursor/cli-config.json`` — the Cursor IDE also
+    writes ``~/.cursor`` and it survives a CLI uninstall, so gating on it produced
+    false positives.
+    """
+    cursor_agent_bin = find_cursor_agent_binary_for_user(user_home)
+    if cursor_agent_bin:
         return {
             "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(cursor_dir)
+            # Probe the resolved binary directly: get_version() with no arg runs
+            # against the scanner's PATH, which under a root/MDM scan lacks the
+            # user's cursor-agent -> "Unknown" for every user.
+            "version": detector.get_version(cursor_agent_bin) or "Unknown",
+            "install_path": cursor_agent_bin
         }
 
-    return detector.detect()
+    return None
 
 
 def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
@@ -299,8 +368,10 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     """
     Find the absolute path to the claude binary for a specific user.
 
-    On macOS: Homebrew (Apple Silicon and Intel), .local/bin, Bun, nvm.
-    On Windows: .local/bin, AppData npm, AppData Local Programs.
+    On macOS/Linux: Homebrew (Apple Silicon and Intel), .local/bin, Bun,
+    npm-global, yarn-global, nvm, and a ``which claude`` PATH backstop.
+    On Windows: .local/bin, AppData npm (.cmd and bare), AppData Local Programs,
+    and Bun.
 
     Args:
         user_home: Path to the user's home directory
@@ -308,23 +379,48 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     Returns:
         Absolute path to claude binary as string, or None if not found
     """
+    machine_global: list = []
     if platform.system() == "Windows":
         candidates = [
             user_home / ".local" / "bin" / "claude.exe",
             user_home / "AppData" / "Roaming" / "npm" / "claude.cmd",
+            user_home / "AppData" / "Roaming" / "npm" / "claude.exe",
             user_home / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
+            # WinGet is a documented primary installer; it drops a shim into the
+            # per-user Links dir (NOT under AppData\Local\Programs\claude).
+            user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "claude.exe",
+            user_home / ".bun" / "bin" / "claude.exe",
         ]
     else:
-        candidates = [
-            Path("/opt/homebrew/bin/claude"),          # Apple Silicon Homebrew
-            Path("/usr/local/bin/claude"),             # Intel Mac / manual install
+        user_relative = [
             user_home / ".local" / "bin" / "claude",   # Official installer
             user_home / ".bun" / "bin" / "claude",     # Bun global install
+            user_home / ".npm-global" / "bin" / "claude",  # npm global prefix
+            user_home / ".config" / "yarn" / "global"  # yarn global install
+            / "node_modules" / ".bin" / "claude",
         ]
+        # Homebrew, /usr/local and /usr/bin are MACHINE-GLOBAL — they are
+        # ALWAYS probed, but under a root/MDM multi-user scan each is
+        # owner-attributed (see the loop below) so one user's Homebrew install
+        # isn't fanned out to every user (the 93b5fc2 cross-user FP); a
+        # root-owned system-wide binary attributes to each scanned user.
+        machine_global = [
+            Path("/opt/homebrew/bin/claude"),      # Apple Silicon Homebrew
+            Path("/usr/local/bin/claude"),         # Intel Mac / manual install
+            Path("/usr/bin/claude"),               # apt/dnf system package
+        ]
+        candidates = machine_global + user_relative
 
+    is_root = is_running_as_root()
     for candidate in candidates:
         try:
             if candidate.exists():
+                # Machine-global binaries under root are owner-attributed; a
+                # candidate owned by a different user is skipped so it isn't
+                # fanned out to every scanned user.
+                if is_root and candidate in machine_global \
+                        and not machine_global_binary_owned_by_user(candidate, user_home):
+                    continue
                 if os.access(str(candidate), os.X_OK):
                     return str(candidate)
                 logger.debug(
@@ -352,5 +448,144 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                     continue
     except (PermissionError, OSError):
         pass
+
+    # PATH backstop: catch custom install prefixes the explicit list misses.
+    # Only meaningful in the single-user / non-root case — the resolved PATH
+    # is the SCANNER's, not ``user_home``'s. Under a root/MDM multi-user scan
+    # it would resolve root's claude for a user who has none, mis-attributing
+    # the install. The explicit candidate list above is comprehensive and
+    # already user_home-relative, so we skip ``which`` when root, and on
+    # Windows (where ``which`` is not a command — the .exe/.cmd candidates
+    # above already cover it).
+    if not is_running_as_root() and platform.system() != "Windows":
+        which_path = run_command(["which", "claude"], VERSION_TIMEOUT)
+        if which_path:
+            try:
+                resolved = Path(which_path)
+                if resolved.exists() and os.access(str(resolved), os.X_OK):
+                    return str(resolved)
+            except (PermissionError, OSError):
+                pass
+
+    return None
+
+
+def _cursor_agent_version_key(version_dir: Path):
+    """Numeric (major, minor, patch) key for a "X.Y.Z" version-dir name.
+
+    A string sort would order "1.10.0" before "1.9.0" and report a stale version;
+    malformed names yield () and sort earliest.
+    """
+    return tuple(int(p) for p in version_dir.name.split(".") if p.isdigit())
+
+
+def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
+    """Find the absolute path to the ``cursor-agent`` binary for a user.
+
+    Mirrors ``find_claude_binary_for_user``. Checks the per-user installer
+    locations and versioned dirs, then npm-global and a PATH backstop — both
+    root-guarded, since under a root/MDM scan they resolve the scanner's PATH,
+    not ``user_home``'s, and would mis-attribute the install.
+
+    Args:
+        user_home: Path to the user's home directory.
+
+    Returns:
+        Absolute path to the ``cursor-agent`` binary as a string, or None.
+    """
+    if platform.system() == "Windows":
+        # Existence-gated, not os.access(X_OK): on Windows X_OK is True for any
+        # file, so it can't distinguish a binary.
+        install_dir = user_home / "AppData" / "Local" / "cursor-agent"
+        candidates = [
+            # Native Windows installer drops these at the root of the install dir.
+            install_dir / "cursor-agent.exe",
+            install_dir / "cursor-agent.cmd",
+            install_dir / "agent.exe",
+            install_dir / "agent.cmd",
+            # Git-Bash variant: the Unix installer run under MINGW64 drops an
+            # extensionless symlink into ~/.local/bin.
+            user_home / ".local" / "bin" / "cursor-agent",
+            user_home / ".local" / "bin" / "cursor-agent.exe",
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    return str(candidate)
+            except (PermissionError, OSError):
+                continue
+
+        # Native installer keeps the real binary under a versioned subdir; pick the
+        # newest version so a stale older build isn't reported.
+        versions_dir = install_dir / "versions"
+        try:
+            if versions_dir.exists():
+                version_dirs = sorted(
+                    (d for d in versions_dir.iterdir() if d.is_dir()),
+                    key=_cursor_agent_version_key,
+                    reverse=True,
+                )
+                for version_dir in version_dirs:
+                    versioned = version_dir / "cursor-agent.exe"
+                    try:
+                        if versioned.exists():
+                            return str(versioned)
+                    except (PermissionError, OSError):
+                        continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not enumerate Windows cursor-agent versions: {e}")
+        return None
+
+    # POSIX (macOS / Linux). Older builds installed a bare ``agent`` shim.
+    candidates = [
+        user_home / ".local" / "bin" / "cursor-agent",
+        user_home / ".local" / "bin" / "agent",
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.exists() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except (PermissionError, OSError):
+            continue
+
+    # Versioned install dir: pick the newest version's cursor-agent.
+    versions_dir = user_home / ".local" / "share" / "cursor-agent" / "versions"
+
+    try:
+        if versions_dir.exists():
+            version_dirs = sorted(
+                (d for d in versions_dir.iterdir() if d.is_dir()),
+                key=_cursor_agent_version_key,
+                reverse=True,
+            )
+            for version_dir in version_dirs:
+                versioned = version_dir / "cursor-agent"
+                try:
+                    if versioned.exists() and os.access(str(versioned), os.X_OK):
+                        return str(versioned)
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate cursor-agent versions: {e}")
+
+    # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix -g``
+    # resolves the scanner's prefix, not the user's.
+    npm_resolved = resolve_npm_global_tool_bin(
+        "cursor-agent", user_home, is_running_as_root()
+    )
+    if npm_resolved:
+        return npm_resolved
+
+    # PATH backstop: non-root only — under root ``which`` resolves the scanner's
+    # PATH, mis-attributing its cursor-agent to a user who has only residue.
+    if not is_running_as_root():
+        which_path = run_command(["which", "cursor-agent"], VERSION_TIMEOUT)
+        if which_path:
+            try:
+                resolved = Path(which_path)
+                if resolved.exists() and os.access(str(resolved), os.X_OK):
+                    return str(resolved)
+            except (PermissionError, OSError):
+                pass
 
     return None

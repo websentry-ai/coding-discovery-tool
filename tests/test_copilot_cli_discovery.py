@@ -67,6 +67,15 @@ from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli_skills_extract
 from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli_skills_extractor import (
     WindowsCopilotCliSkillsExtractor,
 )
+from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli import (
+    LinuxCopilotCliDetector,
+)
+from scripts.coding_discovery_tools.linux.copilot_cli.mcp_config_extractor import (
+    LinuxCopilotCliMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli_skills_extractor import (
+    LinuxCopilotCliSkillsExtractor,
+)
 from scripts.coding_discovery_tools.copilot_cli_skills_helpers import (
     COPILOT_CLI_PARENT_DIR_NAMES,
     COPILOT_CLI_USER_DIR_NAMES,
@@ -99,11 +108,29 @@ _ALLOWED_RULE_FIELDS = {
 
 
 # ---------------------------------------------------------------------------
-# 1. Detection: marker variants + negatives
+# 1. Detection: BINARY gate (config-dir residue no longer detects)
 # ---------------------------------------------------------------------------
 
+def _write_copilot_binary(user_home: Path) -> Path:
+    """Drop an executable ``~/.local/bin/copilot`` under ``user_home`` and return
+    its path. This is the per-user install location the binary gate resolves
+    first (``_resolve_copilot_binary``)."""
+    binary = user_home / ".local" / "bin" / "copilot"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\necho copilot\n", encoding="utf-8")
+    os.chmod(binary, 0o755)
+    return binary
+
+
 class TestCopilotCliDetection(unittest.TestCase):
-    """Per-user detection of ~/.copilot via the union marker set."""
+    """Per-user detection gates on the ``copilot`` BINARY, not the ``~/.copilot``
+    config dir, which survives uninstall and is also written by the IDE agent and
+    Unbound's MDM hook, so it must NOT, on its own, surface a CLI row.
+
+    The npm-global / PATH fallbacks are neutralised and ``is_running_as_root``
+    pinned False so the gate depends ONLY on the binary the test creates under the
+    hermetic ``user_home`` (else a CI box with a real ``copilot`` on PATH leaks
+    in)."""
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
@@ -113,8 +140,18 @@ class TestCopilotCliDetection(unittest.TestCase):
         self.user_home.mkdir(parents=True)
         # Scope detection to this single user (the live per-user path).
         self.detector.user_home = self.user_home
+        # Neutralise the non-filesystem binary resolvers so only the per-user
+        # on-disk binary the test creates can satisfy the gate.
+        self._patchers = [
+            patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False),
+            patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None),
+        ]
+        for p in self._patchers:
+            p.start()
 
     def tearDown(self):
+        for p in self._patchers:
+            p.stop()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def _make_copilot_dir(self) -> Path:
@@ -122,210 +159,138 @@ class TestCopilotCliDetection(unittest.TestCase):
         copilot_dir.mkdir(parents=True)
         return copilot_dir
 
-    def test_no_copilot_dir_not_detected(self):
-        """No ~/.copilot at all -> not detected."""
-        self.assertIsNone(self.detector.detect())
+    # --- binary present -> detected -----------------------------------------
 
-    def test_empty_copilot_dir_not_detected(self):
-        """~/.copilot present but empty -> not detected (no bare-dir gating)."""
-        self._make_copilot_dir()
-        self.assertIsNone(self.detector.detect())
-
-    def test_settings_json_marker_detected(self):
-        """Current CLI layout uses settings.json."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
-        result = self.detector.detect()
+    def test_binary_present_detected(self):
+        """A resolvable ``~/.local/bin/copilot`` -> detected; install_path is the
+        binary; row carries the GitHub publisher."""
+        binary = _write_copilot_binary(self.user_home)
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
         self.assertIsNotNone(result)
         self.assertEqual(result["name"], "GitHub Copilot CLI")
         self.assertEqual(result["publisher"], "GitHub")
-        self.assertEqual(result["install_path"], str(copilot_dir))
+        self.assertEqual(result["install_path"], str(binary))
 
-    def test_config_json_marker_detected(self):
-        """Older CLI layout uses config.json."""
+    def test_binary_plus_config_dir_install_path_is_binary(self):
+        """Even with a full ~/.copilot config dir present, install_path is the
+        binary (the gate), not the config dir."""
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "config.json").write_text("{}", encoding="utf-8")
-        self.assertIsNotNone(self.detector.detect())
+        binary = _write_copilot_binary(self.user_home)
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertEqual(result["install_path"], str(binary))
 
-    def test_mcp_config_marker_detected(self):
-        """mcp-config.json alone is a sufficient signal."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "mcp-config.json").write_text("{}", encoding="utf-8")
-        self.assertIsNotNone(self.detector.detect())
+    # --- config-dir residue WITHOUT a binary -> NOT detected ----------------
 
-    def test_lsp_config_marker_detected(self):
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "lsp-config.json").write_text("{}", encoding="utf-8")
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_session_state_dir_marker_detected(self):
-        """A marker directory (session-state) is a sufficient signal."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "session-state").mkdir()
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_logs_dir_marker_detected(self):
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "logs").mkdir()
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_installed_plugins_dir_marker_detected(self):
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "installed-plugins").mkdir()
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_command_history_state_dir_marker_detected(self):
-        """Documented dir name is 'command-history-state' (not 'history-session-state')."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "command-history-state").mkdir()
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_skills_dir_alone_not_detected(self):
-        """skills/ is a SHARED marker (the IDE Copilot agent reads it too), so on
-        its own it is not a standalone CLI install -> not detected."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "skills").mkdir()
+    def test_no_copilot_dir_no_binary_not_detected(self):
+        """No ~/.copilot and no binary -> not detected."""
         self.assertIsNone(self.detector.detect())
 
-    def test_agents_dir_alone_not_detected(self):
-        """agents/ is a SHARED marker -> not a CLI install on its own."""
+    def test_config_markers_without_binary_not_detected(self):
+        """A ~/.copilot full of STRONG markers but NO binary is uninstall residue
+        -> not detected (the residue FP). Covers the whole former strong-marker
+        set in one shot."""
         copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "agents").mkdir()
+        for f in ("settings.json", "config.json", "mcp-config.json", "lsp-config.json",
+                  "permissions-config.json", "session-store.db"):
+            (copilot_dir / f).write_text("{}", encoding="utf-8")
+        for d in ("logs", "session-state", "installed-plugins", "command-history-state"):
+            (copilot_dir / d).mkdir()
         self.assertIsNone(self.detector.detect())
 
-    def test_instructions_dir_alone_not_detected(self):
-        """instructions/ is a SHARED marker -> not a CLI install on its own."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "instructions").mkdir()
-        self.assertIsNone(self.detector.detect())
-
-    def test_copilot_instructions_md_alone_not_detected(self):
-        """copilot-instructions.md is a SHARED marker -> not a CLI install alone."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "copilot-instructions.md").write_text("hi", encoding="utf-8")
-        self.assertIsNone(self.detector.detect())
-
-    def test_ide_lock_dir_alone_not_detected(self):
-        """ide/ holds the discovery lock the VS Code/JetBrains Copilot EXTENSION
-        writes (microsoft/vscode-copilot-chat#3583), so an IDE-only user has it
-        with no CLI -> SHARED, not a CLI install on its own."""
-        copilot_dir = self._make_copilot_dir()
-        ide_dir = copilot_dir / "ide"
-        ide_dir.mkdir()
-        (ide_dir / "0c.lock").write_text(
-            '{"pid": 1, "ideName": "Visual Studio Code", "workspaceFolders": []}',
-            encoding="utf-8",
-        )
-        self.assertIsNone(self.detector.detect())
-
-    def test_hooks_dir_alone_not_detected(self):
-        """hooks/ is written by Unbound's OWN MDM onboarding (websentry-ai/setup
-        copilot/hooks/mdm/setup.py creates ~/.copilot/hooks/ and writes
-        unbound.json on every onboarded device), so it is NOT CLI-exclusive ->
-        SHARED, not a CLI install on its own. Repro for device D2FJV74J5Q / user
-        gowshik: ~/.copilot held only hooks/unbound.json, no copilot binary."""
+    def test_hooks_only_without_binary_not_detected(self):
+        """~/.copilot holding only hooks/unbound.json (Unbound's MDM onboarding
+        writes it on every enrolled device) and NO binary -> not detected (the
+        fleet-wide phantom-CLI FP)."""
         copilot_dir = self._make_copilot_dir()
         hooks_dir = copilot_dir / "hooks"
         hooks_dir.mkdir()
         (hooks_dir / "unbound.json").write_text('{"version": 1}', encoding="utf-8")
         self.assertIsNone(self.detector.detect())
 
-    def test_real_install_with_hooks_and_strong_marker_detected(self):
-        """A real CLI install (session-store.db) that ALSO has Unbound's hooks/ is
-        still detected — a shared marker never vetoes a strong one."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
-        (copilot_dir / "hooks").mkdir()
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_only_skills_and_rules_not_detected(self):
-        """Repro for device MY4W6QQGCQ / user karthick: a ~/.copilot holding only
-        skills/ and copilot-instructions.md (both SHARED, no strong CLI artifact)
-        is the IDE Copilot agent, not the CLI -> not detected (no phantom row)."""
+    def test_skills_only_without_binary_not_detected(self):
+        """A ~/.copilot holding only skills/ + copilot-instructions.md (the IDE
+        Copilot agent) and NO binary -> not detected."""
         copilot_dir = self._make_copilot_dir()
         (copilot_dir / "skills").mkdir()
         (copilot_dir / "copilot-instructions.md").write_text("rules", encoding="utf-8")
         self.assertIsNone(self.detector.detect())
 
-    def test_session_store_db_marker_detected(self):
-        """session-store.db is a STRONG CLI-exclusive marker -> detected."""
+    def test_ide_lock_only_without_binary_not_detected(self):
+        """ide/ holds the discovery lock the VS Code/JetBrains Copilot EXTENSION
+        writes (microsoft/vscode-copilot-chat#3583); an IDE-only user with no
+        binary -> not detected."""
         copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_real_install_with_strong_and_shared_markers_detected(self):
-        """A real install (strong markers config.json + session-store.db) that ALSO
-        has shared skills/ is detected — shared markers never veto a strong one."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "config.json").write_text("{}", encoding="utf-8")
-        (copilot_dir / "session-store.db").write_text("", encoding="utf-8")
-        (copilot_dir / "skills").mkdir()
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_shared_only_logs_info_and_returns_none(self):
-        """A shared-only ~/.copilot emits an INFO suppression log and returns None."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "skills").mkdir()
-        with self.assertLogs(_DETECTOR_MOD, level="INFO") as captured:
-            self.assertIsNone(self.detector.detect())
-        self.assertTrue(
-            any("Copilot markers present" in record.getMessage()
-                for record in captured.records)
-        )
-
-    def test_copilot_home_shared_only_not_detected(self):
-        """A COPILOT_HOME-relocated config dir holding only shared markers is
-        suppressed too — the gate runs on the resolved dir, wherever it lives."""
-        relocated = Path(self.tmp_dir) / "relocated-copilot"
-        (relocated / "skills").mkdir(parents=True)
-        detector = MacOSCopilotCliDetector()
-        with patch.dict(os.environ, {"COPILOT_HOME": str(relocated)}, clear=False), \
-                patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False):
-            self.assertIsNone(detector.detect())
-
-    def test_permissions_config_marker_detected(self):
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "permissions-config.json").write_text("{}", encoding="utf-8")
-        self.assertIsNotNone(self.detector.detect())
-
-    def test_unrelated_file_not_detected(self):
-        """A ~/.copilot holding only unknown junk is not a CLI install."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "random.txt").write_text("hello", encoding="utf-8")
+        ide_dir = copilot_dir / "ide"
+        ide_dir.mkdir()
+        (ide_dir / "0c.lock").write_text('{"ideName": "Visual Studio Code"}', encoding="utf-8")
         self.assertIsNone(self.detector.detect())
 
-    def test_marker_file_present_as_dir_does_not_count(self):
-        """A marker *file* name present as a directory is not a file signal."""
+    def test_real_install_with_hooks_still_detected(self):
+        """A real CLI install (binary present) that ALSO has Unbound's hooks/ is
+        still detected — the config dir never vetoes the binary gate."""
         copilot_dir = self._make_copilot_dir()
-        # settings.json as a directory should not satisfy the file marker, and
-        # it is not in the dir-marker set either -> not detected.
-        (copilot_dir / "settings.json").mkdir()
+        (copilot_dir / "hooks").mkdir()
+        _write_copilot_binary(self.user_home)
+        with patch.object(self.detector, "get_version", return_value=None):
+            self.assertIsNotNone(self.detector.detect())
+
+    # --- binary resolution variants -----------------------------------------
+
+    def test_bun_binary_detected(self):
+        """~/.bun/bin/copilot (Bun global install) -> detected."""
+        binary = self.user_home / ".bun" / "bin" / "copilot"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\necho x\n", encoding="utf-8")
+        os.chmod(binary, 0o755)
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertEqual(result["install_path"], str(binary))
+
+    @unittest.skipIf(os.name == "nt", "os.access(X_OK) has no POSIX semantics on Windows (any file reads executable)")
+    def test_non_executable_binary_not_detected(self):
+        """A ~/.local/bin/copilot that is NOT executable -> not detected (X_OK gate)."""
+        binary = self.user_home / ".local" / "bin" / "copilot"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        os.chmod(binary, 0o644)
         self.assertIsNone(self.detector.detect())
 
-    def test_detect_returns_unknown_version_when_binary_absent(self):
+    def test_detect_returns_unknown_version_when_version_probe_fails(self):
         """version falls back to 'unknown' when `copilot --version` yields nothing."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        _write_copilot_binary(self.user_home)
         with patch.object(self.detector, "get_version", return_value=None):
             result = self.detector.detect()
         self.assertEqual(result["version"], "unknown")
 
     def test_detect_all_tools_with_user_home_arg(self):
-        """detect_all_tools(user_home=...) scopes to that user and returns a list."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        """detect_all_tools(user_home=...) scopes to that user and returns a list
+        whose install_path is the resolved binary."""
+        binary = _write_copilot_binary(self.user_home)
         fresh = MacOSCopilotCliDetector()
-        results = fresh.detect_all_tools(user_home=str(self.user_home))
+        with patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch.object(fresh, "get_version", return_value=None):
+            results = fresh.detect_all_tools(user_home=str(self.user_home))
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["install_path"], str(copilot_dir))
+        self.assertEqual(results[0]["install_path"], str(binary))
 
 
 # ---------------------------------------------------------------------------
 # 2. Root all-users scan -> per-user rows with distinct install_path
 # ---------------------------------------------------------------------------
 
+def _user_of_binary(install_path: str) -> str:
+    """Return the user dir name from a ``.../Users/<name>/.local/bin/copilot`` path."""
+    # parents: .../bin -> .local -> <name>
+    return Path(install_path).parent.parent.parent.name
+
+
 class TestCopilotCliRootAllUsers(unittest.TestCase):
-    """When running as root, every qualifying user yields a distinct row."""
+    """When running as root, every user whose home has a ``copilot`` binary yields
+    a distinct row whose install_path is that user's binary."""
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
@@ -336,15 +301,17 @@ class TestCopilotCliRootAllUsers(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def _add_user(self, name: str, with_marker: bool = True) -> Path:
-        copilot_dir = self.users_dir / name / ".copilot"
-        copilot_dir.mkdir(parents=True)
-        if with_marker:
-            (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
-        return copilot_dir
+    def _add_user(self, name: str, with_binary: bool = True) -> Path:
+        user_home = self.users_dir / name
+        user_home.mkdir(parents=True)
+        if with_binary:
+            return _write_copilot_binary(user_home)
+        # An empty home (no binary) -> excluded.
+        return user_home
 
     def _run_root_scan(self) -> list:
-        """Detect as root with /Users redirected to our temp tree."""
+        """Detect as root with /Users redirected to our temp tree. The npm-global
+        resolver is neutralised so only the per-user on-disk binaries drive rows."""
         real_path = Path
         users_dir = self.users_dir
 
@@ -356,6 +323,8 @@ class TestCopilotCliRootAllUsers(unittest.TestCase):
         detector = MacOSCopilotCliDetector()
         detector.user_home = None  # force the all-users branch
         with patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch.object(MacOSCopilotCliDetector, "get_version", return_value=None), \
              patch(f"{_DETECTOR_MOD}.Path") as mock_path:
             mock_path.side_effect = _path_side_effect
             return detector._detect_all_users()
@@ -369,11 +338,11 @@ class TestCopilotCliRootAllUsers(unittest.TestCase):
         # Distinct install_path is what keeps main()'s "name:path" dedup key unique.
         self.assertEqual(len(set(install_paths)), 2)
 
-    def test_empty_user_dir_excluded_from_root_scan(self):
+    def test_user_without_binary_excluded_from_root_scan(self):
         self._add_user("alice")
-        self._add_user("carol", with_marker=False)  # empty ~/.copilot -> excluded
+        self._add_user("carol", with_binary=False)  # no binary -> excluded
         results = self._run_root_scan()
-        names = {Path(r["install_path"]).parent.name for r in results}
+        names = {_user_of_binary(r["install_path"]) for r in results}
         self.assertIn("alice", names)
         self.assertNotIn("carol", names)
 
@@ -381,8 +350,8 @@ class TestCopilotCliRootAllUsers(unittest.TestCase):
         self._add_user("alice")
         self._add_user(".hidden")  # dotted dir -> skipped by the scanner
         results = self._run_root_scan()
-        parents = {Path(r["install_path"]).parent.name for r in results}
-        self.assertNotIn(".hidden", parents)
+        names = {_user_of_binary(r["install_path"]) for r in results}
+        self.assertNotIn(".hidden", names)
 
     def test_all_rows_named_github_copilot_cli(self):
         self._add_user("alice")
@@ -805,6 +774,44 @@ class TestCopilotCliRouting(unittest.TestCase):
         self.assertEqual(cli_branch.call_count, 0)
         self.assertEqual(result["name"], "GitHub Copilot (VS Code)")
 
+    def test_cli_branch_matches_permissions_by_config_path_not_binary(self):
+        """Regression: the gate's ``install_path`` is now the BINARY, so the
+        per-user settings match must use ``config_path`` (the ~/.copilot dir the
+        settings file lives in). A settings record under config_path is attached;
+        an unrelated user's record (different config dir) is NOT — otherwise the
+        binary-path install_path would match neither and drop permissions."""
+        tool = {
+            "name": "GitHub Copilot CLI",
+            "version": "0.0.1",
+            "install_path": "/Users/x/.local/bin/copilot",   # the binary (the gate)
+            "_config_path": "/Users/x/.copilot",               # the config dir
+        }
+        self.detector._copilot_cli_mcp_extractor = MagicMock()
+        self.detector._copilot_cli_mcp_extractor.extract_mcp_config.return_value = None
+        self.detector._copilot_cli_rules_extractor = MagicMock()
+        self.detector._copilot_cli_rules_extractor.extract_all_copilot_cli_rules.return_value = []
+        self.detector._copilot_cli_settings_extractor = MagicMock()
+        self.detector._copilot_cli_settings_extractor.extract_settings.return_value = [
+            {
+                "tool_name": "GitHub Copilot CLI", "scope": "user",
+                "settings_path": "/Users/x/.copilot/settings.json",
+                "raw_settings": {"trusted_folders": ["/work"]},
+                "permissions": {"additionalDirectories": ["/work"], "allow": [], "deny": []},
+            },
+            {  # a DIFFERENT user's record — must not leak onto this row
+                "tool_name": "GitHub Copilot CLI", "scope": "user",
+                "settings_path": "/Users/other/.copilot/settings.json",
+                "raw_settings": {"trusted_folders": ["/secret"]},
+                "permissions": {"additionalDirectories": ["/secret"], "allow": [], "deny": []},
+            },
+        ]
+        result = self.detector.process_single_tool(tool)
+        self.assertIn("permissions", result)
+        # The attached permissions are THIS install's (config_path match), and the
+        # carried settings_path is under /Users/x (so filter_tool_projects_by_user
+        # keeps it for user x and drops it for everyone else).
+        self.assertEqual(result["permissions"].get("settings_path"), "/Users/x/.copilot/settings.json")
+
     def test_cli_branch_surfaces_servers_into_projects(self):
         """End-to-end: a real server config yields one project on the tool dict."""
         tool = {
@@ -895,8 +902,13 @@ class TestCopilotCliFactoryWiring(unittest.TestCase):
         self.assertIsInstance(det, WindowsCopilotCliDetector)
         self.assertEqual(det.tool_name, "GitHub Copilot CLI")
 
+    def test_detector_created_on_linux(self):
+        det = ToolDetectorFactory.create_copilot_cli_detector("Linux")
+        self.assertIsInstance(det, LinuxCopilotCliDetector)
+        self.assertEqual(det.tool_name, "GitHub Copilot CLI")
+
     def test_detector_none_on_non_supported_os(self):
-        self.assertIsNone(ToolDetectorFactory.create_copilot_cli_detector("Linux"))
+        self.assertIsNone(ToolDetectorFactory.create_copilot_cli_detector("SunOS"))
 
     def test_extractor_created_on_darwin(self):
         ext = CopilotCliMCPConfigExtractorFactory.create("Darwin")
@@ -908,8 +920,14 @@ class TestCopilotCliFactoryWiring(unittest.TestCase):
         # DRY: the Windows extractor IS-A macOS extractor (shared parser).
         self.assertIsInstance(ext, MacOSCopilotCliMCPConfigExtractor)
 
+    def test_extractor_created_on_linux(self):
+        ext = CopilotCliMCPConfigExtractorFactory.create("Linux")
+        self.assertIsInstance(ext, LinuxCopilotCliMCPConfigExtractor)
+        # DRY: the Linux extractor IS-A macOS extractor (shared parser).
+        self.assertIsInstance(ext, MacOSCopilotCliMCPConfigExtractor)
+
     def test_extractor_none_on_non_supported_os(self):
-        self.assertIsNone(CopilotCliMCPConfigExtractorFactory.create("Linux"))
+        self.assertIsNone(CopilotCliMCPConfigExtractorFactory.create("SunOS"))
 
     def test_cli_detector_registered_in_all_detectors_darwin(self):
         detectors = ToolDetectorFactory.create_all_tool_detectors("Darwin")
@@ -931,12 +949,21 @@ class TestCopilotCliFactoryWiring(unittest.TestCase):
 # 6. Windows detection: per-user marker gate (mirrors the macOS detection tests)
 # ---------------------------------------------------------------------------
 
-class TestWindowsCopilotCliDetection(unittest.TestCase):
-    """Per-user detection of ~/.copilot on Windows via the inherited marker set.
+def _write_windows_copilot_shim(user_home: Path) -> Path:
+    """Drop the per-user ``AppData/Roaming/npm/copilot.cmd`` shim and return it
+    (the first candidate ``_resolve_windows_binary`` checks; existence-gated, no
+    X_OK on Windows)."""
+    shim = user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text("@echo off\n", encoding="utf-8")
+    return shim
 
-    The Windows detector subclasses the macOS one and only overrides the
-    all-users scan, so the per-user path (marker gate, _detect_for_user, version
-    fallback) is exercised here to prove the inheritance wiring holds.
+
+class TestWindowsCopilotCliDetection(unittest.TestCase):
+    """Per-user detection on Windows gates on the ``copilot`` BINARY (the npm
+    ``copilot.cmd`` shim / ``.local/bin`` / ``.bun/bin``), not the ``~/.copilot``
+    config dir. The Windows detector subclasses the macOS one and overrides
+    ``_resolve_binary`` -> ``_resolve_windows_binary``, exercised here.
     """
 
     def setUp(self):
@@ -956,64 +983,54 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         copilot_dir.mkdir(parents=True)
         return copilot_dir
 
-    def test_no_copilot_dir_not_detected(self):
-        """No ~/.copilot at all -> not detected."""
+    def test_no_binary_not_detected(self):
+        """No copilot binary anywhere -> not detected."""
         self.assertIsNone(self.detector.detect())
 
-    def test_empty_copilot_dir_not_detected(self):
-        """~/.copilot present but empty -> not detected (no bare-dir gating)."""
-        self._make_copilot_dir()
-        self.assertIsNone(self.detector.detect())
-
-    def test_settings_json_marker_detected(self):
-        """Current CLI layout uses settings.json; row carries the GitHub publisher."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
-        result = self.detector.detect()
+    def test_binary_present_detected(self):
+        """The per-user npm ``copilot.cmd`` shim -> detected; install_path is the
+        shim; row carries the GitHub publisher."""
+        shim = _write_windows_copilot_shim(self.user_home)
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
         self.assertIsNotNone(result)
         self.assertEqual(result["name"], "GitHub Copilot CLI")
         self.assertEqual(result["publisher"], "GitHub")
-        self.assertEqual(result["install_path"], str(copilot_dir))
+        self.assertEqual(result["install_path"], str(shim))
 
-    def test_unrelated_file_not_detected(self):
-        """A ~/.copilot holding only unknown junk is not a CLI install."""
+    def test_config_dir_without_binary_not_detected(self):
+        """A ~/.copilot full of markers but NO binary is uninstall residue ->
+        not detected (the residue FP, on Windows too)."""
         copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "random.txt").write_text("hello", encoding="utf-8")
+        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        (copilot_dir / "config.json").write_text("{}", encoding="utf-8")
         self.assertIsNone(self.detector.detect())
 
-    def test_shared_only_not_detected(self):
-        """The strong-vs-shared marker split is inherited: a ~/.copilot holding
-        only the SHARED skills/ marker is the IDE Copilot agent, not the CLI."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "skills").mkdir()
-        self.assertIsNone(self.detector.detect())
-
-    def test_hooks_dir_alone_not_detected(self):
-        """hooks/ is SHARED (Unbound's own MDM onboarding writes ~/.copilot/hooks/
-        unbound.json on every enrolled device), so a hooks-only ~/.copilot is
-        suppressed on Windows too — guards that the SHARED demotion is inherited."""
+    def test_hooks_only_without_binary_not_detected(self):
+        """hooks/ alone (Unbound's MDM onboarding) with NO binary -> not detected
+        — the fleet-wide phantom-CLI FP, killed on Windows too."""
         copilot_dir = self._make_copilot_dir()
         hooks_dir = copilot_dir / "hooks"
         hooks_dir.mkdir()
         (hooks_dir / "unbound.json").write_text('{"version": 1}', encoding="utf-8")
         self.assertIsNone(self.detector.detect())
 
-    def test_detect_returns_unknown_version_when_binary_absent(self):
+    def test_detect_returns_unknown_version_when_version_probe_fails(self):
         """version falls back to 'unknown' when `copilot --version` yields nothing."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        _write_windows_copilot_shim(self.user_home)
         with patch.object(self.detector, "get_version", return_value=None):
             result = self.detector.detect()
         self.assertEqual(result["version"], "unknown")
 
     def test_detect_all_tools_with_user_home_arg(self):
-        """detect_all_tools(user_home=...) scopes to that user and returns a list."""
-        copilot_dir = self._make_copilot_dir()
-        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
+        """detect_all_tools(user_home=...) scopes to that user and returns a list
+        whose install_path is the resolved binary."""
+        shim = _write_windows_copilot_shim(self.user_home)
         fresh = WindowsCopilotCliDetector()
-        results = fresh.detect_all_tools(user_home=str(self.user_home))
+        with patch.object(fresh, "get_version", return_value=None):
+            results = fresh.detect_all_tools(user_home=str(self.user_home))
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["install_path"], str(copilot_dir))
+        self.assertEqual(results[0]["install_path"], str(shim))
 
     def test_get_version_uses_shell_true_and_parses_semver(self):
         """Windows get_version uses shell=True (npm .cmd shim) AND parses the bare
@@ -1194,15 +1211,196 @@ class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
         self.assertEqual(version, "0.0.399")
         run.assert_called_once_with(["copilot", "--version"], ANY)
 
-    def test_unknown_when_nothing_resolves_via_detect(self):
-        """No per-user binary and a failing bare probe -> version is 'unknown'
-        on the emitted row (strong-marker fixture so detection still fires)."""
-        copilot_dir = self.user_home / ".copilot"
-        copilot_dir.mkdir(parents=True)
-        (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
-        with patch(f"{_DETECTOR_MOD}.run_command", return_value=None):
+    def test_unknown_when_version_probe_fails_via_detect(self):
+        """A binary gates detection (the row fires) but a failing version probe ->
+        version is 'unknown' on the emitted row."""
+        _write_copilot_binary(self.user_home)
+        with patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch.object(self.detector, "get_version", return_value=None):
             result = self.detector.detect()
         self.assertEqual(result["version"], "unknown")
+
+
+# ---------------------------------------------------------------------------
+# 6c. Version threaded from the resolved binary into get_version.
+# ---------------------------------------------------------------------------
+
+class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
+    """``_detect_for_user`` threads the resolved binary into ``get_version`` so the
+    version is probed from THAT exact path — not re-resolved off ``self.user_home``
+    (unset on the standalone root path) and not the bare ``copilot`` PATH probe
+    (which root's PATH lacks during an MDM all-users scan).
+
+    Simulated by resolving a binary while ``self.user_home`` is None and a bare
+    ``copilot --version`` yields nothing; the version still resolves because we
+    probe the resolved binary directly.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.user_home = Path(self.tmp_dir) / "user"
+        self.user_home.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
+    def test_detect_for_user_resolves_version_with_user_home_unset(self):
+        """``self.user_home`` is None (the standalone root all-users path) and the
+        bare ``copilot`` is OFF the scanner's PATH, yet the resolved binary is
+        probed -> version is the parsed banner, NOT "unknown"."""
+        binary = _write_copilot_binary(self.user_home)  # ~/.local/bin/copilot
+        detector = MacOSCopilotCliDetector()
+        detector.user_home = None  # the standalone-root fallback path
+
+        def fake_run(command, *a, **k):
+            # Banner only when the RESOLVED binary path is probed; a bare
+            # ``copilot`` yields nothing, like root's PATH on an MDM scan.
+            if command[:1] == [str(binary)]:
+                return _VERSION_BANNER
+            return None
+
+        with patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch(f"{_DETECTOR_MOD}.run_command", side_effect=fake_run):
+            result = detector._detect_for_user(self.user_home)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+        # Version comes from probing the resolved binary, not "unknown".
+        self.assertEqual(result["version"], "0.0.399")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
+    def test_root_all_users_scan_populates_version(self):
+        """End-to-end via the root all-users ``detect()`` path: ``self.user_home``
+        stays None, ``/Users`` is redirected to a temp tree with one user that has
+        a binary, and the bare ``copilot`` is off PATH. The emitted row's version
+        is the parsed banner."""
+        users_dir = Path(self.tmp_dir) / "Users"
+        alice = users_dir / "alice"
+        alice.mkdir(parents=True)
+        binary = _write_copilot_binary(alice)
+
+        real_path = Path
+
+        def _path_side_effect(arg):
+            if str(arg) == "/Users":
+                return users_dir
+            return real_path(arg)
+
+        def fake_run(command, *a, **k):
+            if command[:1] == [str(binary)]:
+                return _VERSION_BANNER
+            return None
+
+        detector = MacOSCopilotCliDetector()
+        detector.user_home = None  # force the root all-users branch
+        with patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_DETECTOR_MOD}.resolve_npm_global_tool_bin", return_value=None), \
+             patch(f"{_DETECTOR_MOD}.run_command", side_effect=fake_run), \
+             patch(f"{_DETECTOR_MOD}.Path", side_effect=_path_side_effect):
+            result = detector.detect()
+
+        # Single qualifying user -> a single dict.
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["install_path"], str(binary))
+        self.assertEqual(result["version"], "0.0.399")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX X_OK gate + #!/bin/sh stub")
+    def test_pre_fix_no_arg_would_be_unknown(self):
+        """Non-vacuity guard: with the SAME mock and ``self.user_home`` None, a bare
+        ``get_version()`` (no arg) yields None -> the row would read "unknown";
+        ``get_version(binary)`` returns the parsed version."""
+        binary = _write_copilot_binary(self.user_home)
+        detector = MacOSCopilotCliDetector()
+        detector.user_home = None
+
+        def fake_run(command, *a, **k):
+            if command[:1] == [str(binary)]:
+                return _VERSION_BANNER
+            return None
+
+        with patch(f"{_DETECTOR_MOD}.run_command", side_effect=fake_run):
+            # No arg + user_home None -> bare ``copilot`` -> None.
+            self.assertIsNone(detector.get_version())
+            # Binary arg -> resolved binary probed -> parsed version.
+            self.assertEqual(detector.get_version(str(binary)), "0.0.399")
+
+    def test_get_version_with_binary_probes_exact_path_no_fallback(self):
+        """``get_version(binary)`` probes THAT exact path once and does NOT fall
+        back to the bare ``copilot`` probe (no double-resolve, no PATH leak)."""
+        binary = "/Users/x/.local/bin/copilot"
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=_VERSION_BANNER) as run:
+            version = MacOSCopilotCliDetector().get_version(binary)
+        self.assertEqual(version, "0.0.399")
+        run.assert_called_once_with([binary, "--version"], ANY)
+
+    def test_get_version_no_arg_back_compat_bare_probe(self):
+        """Back-compat: ``get_version()`` with no arg and ``user_home`` unset still
+        runs the bare ``copilot --version`` probe (unchanged for no-arg callers)."""
+        det = MacOSCopilotCliDetector()  # user_home defaults to None
+        with patch(f"{_DETECTOR_MOD}.run_command", return_value=_VERSION_BANNER) as run:
+            version = det.get_version()
+        self.assertEqual(version, "0.0.399")
+        run.assert_called_once_with(["copilot", "--version"], ANY)
+
+
+class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
+    """The Windows override accepts the same ``binary`` param and routes it through
+    ``_probe_version`` (``shell=True`` for the npm ``.cmd`` shim), with no
+    re-resolve and no bare fallback."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_get_version_with_binary_uses_probe_version_shell_true(self):
+        shim = r"C:\Users\someone\AppData\Roaming\npm\copilot.cmd"
+        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+        fake = MagicMock(returncode=0, stdout=banner, stderr="")
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+            version = WindowsCopilotCliDetector().get_version(shim)
+        self.assertEqual(version, "0.0.399")
+        # Routed through _probe_version -> the resolved shim path, shell=True.
+        self.assertEqual(run.call_args.args[0], [shim, "--version"])
+        self.assertIs(run.call_args.kwargs.get("shell"), True)
+
+    def test_get_version_with_binary_no_bare_fallback_on_failure(self):
+        """When the resolved-binary probe fails, get_version(binary) returns None
+        WITHOUT a second bare ``copilot`` probe (no double-probe)."""
+        shim = r"C:\Users\someone\AppData\Roaming\npm\copilot.cmd"
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()) as run:
+            self.assertIsNone(WindowsCopilotCliDetector().get_version(shim))
+        # Exactly one probe — the resolved binary — and no bare-name retry.
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], [shim, "--version"])
+
+    def test_detect_for_user_threads_binary_into_windows_get_version(self):
+        """Integration: the inherited ``_detect_for_user`` calls the Windows
+        ``get_version(binary)`` override (signature must accept the param), which
+        probes the resolved shim under shell=True -> the emitted row carries the
+        parsed version."""
+        tmp = tempfile.mkdtemp()
+        try:
+            user_home = Path(tmp) / "user"
+            shim = user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+            shim.parent.mkdir(parents=True)
+            shim.write_text("@echo off\n", encoding="utf-8")
+            banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
+            fake = MagicMock(returncode=0, stdout=banner, stderr="")
+            detector = WindowsCopilotCliDetector()
+            detector.user_home = None  # the standalone path; binary comes from the param
+            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+                result = detector._detect_for_user(user_home)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["install_path"], str(shim))
+            self.assertEqual(result["version"], "0.0.399")
+            # Probed the resolved shim (not a bare ``copilot``), shell=True.
+            self.assertEqual(run.call_args.args[0], [str(shim), "--version"])
+            self.assertIs(run.call_args.kwargs.get("shell"), True)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1226,12 +1424,12 @@ class TestWindowsCopilotCliAdminAllUsers(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def _add_user(self, name: str, with_marker: bool = True) -> Path:
-        copilot_dir = self.users_dir / name / ".copilot"
-        copilot_dir.mkdir(parents=True)
-        if with_marker:
-            (copilot_dir / "settings.json").write_text("{}", encoding="utf-8")
-        return copilot_dir
+    def _add_user(self, name: str, with_binary: bool = True) -> Path:
+        user_home = self.users_dir / name
+        user_home.mkdir(parents=True)
+        if with_binary:
+            return _write_windows_copilot_shim(user_home)
+        return user_home
 
     def _run_admin_scan(self) -> list:
         """Detect as admin with C:\\Users redirected to our temp tree."""
@@ -1246,9 +1444,18 @@ class TestWindowsCopilotCliAdminAllUsers(unittest.TestCase):
         detector = WindowsCopilotCliDetector()
         detector.user_home = None  # force the all-users branch
         with patch(f"{_WIN_DETECTOR_MOD}.is_running_as_admin", return_value=True), \
+             patch.object(WindowsCopilotCliDetector, "get_version", return_value=None), \
              patch(f"{_WIN_DETECTOR_MOD}.Path") as mock_path:
             mock_path.side_effect = _path_side_effect
             return detector._detect_all_users()
+
+    @staticmethod
+    def _user_of(install_path: str) -> str:
+        """Derive the user dir name from a ``.../Users/<name>/AppData/...`` path."""
+        for parent in Path(install_path).parents:
+            if parent.parent.name == "Users":
+                return parent.name
+        return ""
 
     def test_two_users_yield_two_distinct_rows(self):
         alice = self._add_user("alice")
@@ -1259,11 +1466,11 @@ class TestWindowsCopilotCliAdminAllUsers(unittest.TestCase):
         # Distinct install_path is what keeps main()'s "name:path" dedup key unique.
         self.assertEqual(len(set(install_paths)), 2)
 
-    def test_empty_user_dir_excluded_from_admin_scan(self):
+    def test_user_without_binary_excluded_from_admin_scan(self):
         self._add_user("alice")
-        self._add_user("carol", with_marker=False)  # empty ~/.copilot -> excluded
+        self._add_user("carol", with_binary=False)  # no binary -> excluded
         results = self._run_admin_scan()
-        names = {Path(r["install_path"]).parent.name for r in results}
+        names = {self._user_of(r["install_path"]) for r in results}
         self.assertIn("alice", names)
         self.assertNotIn("carol", names)
 
@@ -1271,8 +1478,8 @@ class TestWindowsCopilotCliAdminAllUsers(unittest.TestCase):
         self._add_user("alice")
         self._add_user(".hidden")  # dotted dir -> skipped by the scanner
         results = self._run_admin_scan()
-        parents = {Path(r["install_path"]).parent.name for r in results}
-        self.assertNotIn(".hidden", parents)
+        names = {self._user_of(r["install_path"]) for r in results}
+        self.assertNotIn(".hidden", names)
 
     def test_all_rows_named_github_copilot_cli(self):
         self._add_user("alice")
@@ -1289,10 +1496,10 @@ class TestWindowsCopilotCliAdminAllUsers(unittest.TestCase):
             detector.user_home = None
             results = detector._detect_all_users()
         # The temp C:\Users tree is never consulted (not patched in); the real
-        # current-user home almost certainly has no ~/.copilot in CI -> empty.
-        admin_parents = {Path(r["install_path"]).parent.name for r in results}
-        self.assertNotIn("alice", admin_parents)
-        self.assertNotIn("bob", admin_parents)
+        # current-user home almost certainly has no copilot binary in CI -> empty.
+        names = {self._user_of(r["install_path"]) for r in results}
+        self.assertNotIn("alice", names)
+        self.assertNotIn("bob", names)
 
 
 # ---------------------------------------------------------------------------
@@ -2356,6 +2563,31 @@ class TestCopilotCliSkillsRouting(unittest.TestCase):
         self.assertNotIn("/Users/x/.copilot/skills/deploy", paths)
         self.assertNotIn("/Users/x", paths)
 
+    def test_user_skills_coalesce_under_config_path_not_binary(self):
+        # Regression (mirror of the permissions test): install_path is now the
+        # BINARY, so user-scope skills must coalesce under config_path (~/.copilot),
+        # NOT the binary path. The install_key fallback to install_path only kicks
+        # in for older payloads with no config_path.
+        tool = {
+            "name": "GitHub Copilot CLI",
+            "version": "1.0.55",
+            "install_path": "/Users/x/.local/bin/copilot",  # the binary (the gate)
+            "_config_path": "/Users/x/.copilot",             # the config dir
+        }
+        us1 = self._skill("deploy", "/Users/x/.copilot/skills/deploy/SKILL.md", scope="user")
+        us2 = self._skill("review", "/Users/x/.agents/skills/review/SKILL.md", scope="user")
+        self.detector._copilot_cli_skills_extractor = MagicMock()
+        self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [us1, us2], "project_skills": [],
+        }
+        result = self.detector.process_single_tool(tool)
+        # Coalesced under the CONFIG dir row, not the binary path.
+        proj = [p for p in result["projects"] if p["path"] == "/Users/x/.copilot"]
+        self.assertEqual(len(proj), 1)
+        self.assertEqual(sorted(s["skill_name"] for s in proj[0]["skills"]), ["deploy", "review"])
+        # The binary path is NOT used as a project-row key.
+        self.assertNotIn("/Users/x/.local/bin/copilot", [p["path"] for p in result["projects"]])
+
     def test_skills_only_project_survives(self):
         self.detector._copilot_cli_skills_extractor = MagicMock()
         self.detector._copilot_cli_skills_extractor.extract_all_skills.return_value = {
@@ -2513,6 +2745,43 @@ class TestAdminScanOwnHomeNotDoubleCounted(unittest.TestCase):
             mcp_helpers.extract_claude_plugin_mcp_configs_with_root_support([])
         # admin home already covered by the loop -> the own-home re-add is skipped
         self.assertEqual(calls.count("own-home"), 0)
+
+
+# ---------------------------------------------------------------------------
+# 20. Linux skills user-level guard: a root/MDM scan must NOT double-count a
+#     non-scanner user's ~/.agents (or ~/.claude) skills as project skills
+# ---------------------------------------------------------------------------
+
+class TestLinuxRootSkillsUserLevelGuard(unittest.TestCase):
+    """On a Linux root/MDM scan the project walk must recognize EVERY user's
+    user-level skill dir (``/home/<user>/.agents/skills`` and ``/root/.agents/
+    skills``) as user-level, so it is not re-emitted as a project skill — it is
+    already reported user-scope by ``_extract_user_level_skills``.
+
+    Regression: the base ``is_user_level_claude_subdir(type_dir)`` derives the
+    users-root from ``Path.home()`` (``/root`` under a root scan, whose parent is
+    ``/``), so a non-scanner ``/home/<user>/.agents/skills`` was misclassified as a
+    project skill -> double-count. ``LinuxCopilotCliSkillsExtractor`` overrides
+    this via ``_is_user_level_skill_dir``, pinning the users-root to ``/home`` and
+    adding an explicit ``/root`` check. Pure path-logic, so it is deterministic on
+    every CI runner (the project has no Linux runner)."""
+
+    def _is_user(self, p: str) -> bool:
+        return LinuxCopilotCliSkillsExtractor._is_user_level_skill_dir(Path(p))
+
+    def test_root_home_agents_skills_is_user_level(self):
+        self.assertTrue(self._is_user("/root/.agents/skills"))
+        self.assertTrue(self._is_user("/root/.claude/skills"))
+
+    def test_home_user_skills_still_user_level(self):
+        self.assertTrue(self._is_user("/home/alice/.agents/skills"))
+        self.assertTrue(self._is_user("/home/alice/.claude/skills"))
+
+    def test_real_project_skills_not_user_level(self):
+        # Project repos under either /home/<user> or /root stay project-scope.
+        self.assertFalse(self._is_user("/home/alice/repo/.github/skills"))
+        self.assertFalse(self._is_user("/root/repo/.github/skills"))
+        self.assertFalse(self._is_user("/home/alice/repo/.agents/skills"))
 
 
 if __name__ == "__main__":

@@ -955,6 +955,31 @@ def _iter_admin_user_homes(is_admin: bool, users_dir: Optional[Path]) -> List[Pa
     return []
 
 
+def _own_home_already_scanned(admin_homes: List[Path]) -> bool:
+    """True when the current process's home is already among ``admin_homes``.
+
+    The admin/root branches scan every dir under the users root and then
+    separately re-process ``Path.home()`` to cover root's own home. That extra
+    step is correct on macOS/Linux, where the privileged account's home
+    (``/var/root`` / ``/root``) lives *outside* the users root. On Windows the
+    admin is a normal ``C:\\Users\\<name>`` profile already covered by the
+    ``C:\\Users`` scan, so re-processing ``Path.home()`` double-counts its
+    configs (WEB-4673). This guard lets callers skip the re-add only in that
+    case (case-insensitive path match, since Windows paths are not case-sensitive).
+    """
+    def _norm(p: Path) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(str(p.resolve())))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    try:
+        home_n = _norm(Path.home())
+    except Exception:
+        return False
+    return any(_norm(d) == home_n for d in admin_homes)
+
+
 def read_global_mcp_config(
     config_path: Path,
     tool_name: str = "MCP",
@@ -1224,9 +1249,11 @@ def extract_ide_global_configs_with_root_support(
                 logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
                 continue
 
-        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             try:
                 root_configs = extract_configs_for_user_func(Path.home())
                 all_configs.extend(root_configs)
@@ -1536,9 +1563,11 @@ def extract_dual_path_configs_with_root_support(
             except (ValueError, OSError):
                 pass
 
-        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             if preferred_path.exists():
                 root_projects = extract_from_file_func(preferred_path)
                 if root_projects:
@@ -1700,9 +1729,11 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
                 except (PermissionError, OSError) as e:
                     logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
-        # On Darwin/Windows also scan the admin's own home (not in users_dir)
+        # On Darwin also scan the admin's own home (/var/root, not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its claude.ai MCP servers (WEB-4673).
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
     else:
         extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
@@ -1954,9 +1985,11 @@ def extract_claude_plugin_mcp_configs_with_root_support(
 
                 _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
-        # On Darwin/Windows also scan admin's own home plugins (not in users_dir)
+        # On Darwin also scan the admin's own home plugins (not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its plugin MCP configs (WEB-4673).
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
     else:
         extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)

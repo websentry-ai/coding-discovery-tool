@@ -379,7 +379,9 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         if not callable(find_install_dir):
             return None
         try:
-            if find_install_dir() is None:
+            # Pass the scanned user's home so an admin/MDM multi-user scan probes
+            # THIS user's per-user install dir, not the scanner's (Windows).
+            if find_install_dir(user_home) is None:
                 return None
         except (PermissionError, OSError):
             return None

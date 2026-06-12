@@ -199,17 +199,46 @@ class TestWindowsCoworkDetect(unittest.TestCase):
             self.assertIsNone(self.Detector().detect())
 
     def test_sessions_plus_install_detected(self):
-        self._make_sessions()
+        sdir = self._make_sessions()
         install = self.home / "AppData" / "Local" / "Programs" / "Claude"
         with patch.dict(os.environ, {"APPDATA": str(self.appdata)}), \
              patch.object(self.Detector, "_find_install_dir", return_value=install):
             result = self.Detector().detect()
         self.assertIsNotNone(result)
-        self.assertEqual(result["install_path"], str(install))
+        # install_path is the gated SESSIONS dir (consistent with macOS + central path).
+        self.assertEqual(result["install_path"], str(sdir))
 
     def test_no_appdata_not_detected(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(self.Detector().detect())
+
+    def test_central_scan_uses_scanned_user_home_not_scanner(self):
+        """Regression (admin/MDM FN): the central path must resolve the install
+        dir under the SCANNED user's home, not the scanner's Path.home(). User B
+        has the per-user install; the scanner home has none -> B is still
+        detected. (Real _find_install_dir, not mocked.)"""
+        b_sessions = self.home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
+        b_sessions.mkdir(parents=True)
+        (self.home / "AppData" / "Local" / "Programs" / "Claude").mkdir(parents=True)
+        scanner_home = Path(self.tmp.name + "_scanner")
+        scanner_home.mkdir()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_WIN_MOD}.Path.home", return_value=scanner_home):
+            result = _detect_claude_cowork(self.Detector(), self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(b_sessions))
+
+    def test_central_scan_scanner_install_not_attributed_to_other_user(self):
+        """Inverse: install only under the scanner's home, user B has only the
+        sessions residue -> B not detected (no cross-user attribution)."""
+        b_sessions = self.home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
+        b_sessions.mkdir(parents=True)
+        scanner_home = Path(self.tmp.name + "_scanner")
+        (scanner_home / "AppData" / "Local" / "Programs" / "Claude").mkdir(parents=True)
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_WIN_MOD}.Path.home", return_value=scanner_home):
+            result = _detect_claude_cowork(self.Detector(), self.home)
+        self.assertIsNone(result)
 
 
 class TestLinuxCoworkDetect(unittest.TestCase):
@@ -236,15 +265,14 @@ class TestLinuxCoworkDetect(unittest.TestCase):
              patch.object(self.Detector, "_find_install_dir", return_value=None):
             self.assertIsNone(self.Detector().detect())
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only: Linux detector install-path string semantics (backslash on Windows)")
     def test_sessions_plus_install_detected(self):
-        self._make_sessions()
+        sdir = self._make_sessions()
         with patch(f"{_LINUX_MOD}.get_linux_user_homes", return_value=[self.home]), \
              patch.object(self.Detector, "_find_install_dir", return_value=Path("/opt/Claude")):
             result = self.Detector().detect()
         self.assertIsNotNone(result)
-        # The OS module reports the resolved install dir as install_path.
-        self.assertEqual(result["install_path"], "/opt/Claude")
+        # install_path is the gated SESSIONS dir (consistent with macOS + central path).
+        self.assertEqual(result["install_path"], str(sdir))
 
     def test_multi_user_residue_does_not_leak(self):
         """Two users with sessions but NO install -> not detected for either."""

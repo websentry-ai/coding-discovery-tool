@@ -34,9 +34,14 @@ def _get_cowork_sessions_dir() -> Optional[Path]:
     return Path(appdata) / "Claude" / COWORK_SESSIONS_DIR
 
 
-def _candidate_install_dirs() -> List[Path]:
-    """Common locations where Claude Desktop is installed on Windows."""
-    user_home = Path.home()
+def _candidate_install_dirs(user_home: Path) -> List[Path]:
+    """Common locations where Claude Desktop is installed on Windows.
+
+    ``user_home`` is the home of the user being scanned (not necessarily the
+    scanner's own home): under an admin/MDM multi-user scan the per-user
+    ``AppData\\Local\\Programs\\Claude`` install lives under the scanned user's
+    profile, so probing ``Path.home()`` would miss it.
+    """
     return [
         user_home / "AppData" / "Local" / "Programs" / "Claude",
         user_home / "AppData" / "Local" / "Programs" / "claude",
@@ -82,7 +87,10 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
         return {
             "name": self.tool_name,
             "version": self.get_version(),
-            "install_path": str(app_install),
+            # Report the sessions dir (consistent with the macOS detector and the
+            # central ``_detect_claude_cowork`` path). ``app_install`` is the gate,
+            # not the reported path.
+            "install_path": str(sessions_dir),
         }
 
     def get_version(self) -> Optional[str]:
@@ -95,8 +103,9 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
         """
         return None
 
-    def _find_install_dir(self) -> Optional[Path]:
-        for candidate in _candidate_install_dirs():
+    def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
+        home = user_home or getattr(self, "user_home", None) or Path.home()
+        for candidate in _candidate_install_dirs(Path(home)):
             try:
                 if candidate.exists() and candidate.is_dir():
                     return candidate

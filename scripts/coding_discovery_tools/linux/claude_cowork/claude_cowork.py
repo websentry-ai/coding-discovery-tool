@@ -79,7 +79,10 @@ class LinuxClaudeCoworkDetector(BaseToolDetector):
             return {
                 "name": self.tool_name,
                 "version": self.get_version(),
-                "install_path": str(app_install),
+                # Report the sessions dir (consistent with the macOS detector and
+                # the central ``_detect_claude_cowork`` path). ``app_install`` is
+                # the gate, not the reported path.
+                "install_path": str(sessions_dir),
             }
         return None
 
@@ -92,7 +95,9 @@ class LinuxClaudeCoworkDetector(BaseToolDetector):
         """
         return None
 
-    def _find_install_dir(self) -> Optional[Path]:
+    def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
+        # ``user_home`` is accepted for a uniform call signature with the central
+        # path; Linux install dirs are machine-global so it is unused here.
         for candidate in _candidate_install_dirs():
             try:
                 if candidate.exists() and candidate.is_dir():

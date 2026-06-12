@@ -5,6 +5,7 @@ This module handles detection of tools that are installed per-user, checking
 user-specific paths like ~/.nvm, ~/.bun, and user configuration directories.
 """
 
+import json
 import logging
 import os
 import platform
@@ -80,6 +81,10 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     # Claude Cowork detection
     elif tool_name == "claude cowork":
         return _detect_claude_cowork(detector, user_home)
+
+    # Junie detection
+    elif tool_name == "junie":
+        return _detect_junie(detector, user_home)
 
     # Default: Use detector's standard detection
     return detector.detect()
@@ -336,7 +341,16 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
 
 
 def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Claude Cowork installation for a user."""
+    """Detect Claude Cowork installation for a user.
+
+    Requires BOTH the on-disk Cowork sessions tree AND a present Claude Desktop
+    install. The per-user Claude config tree (which holds the sessions dir)
+    survives uninstall (anthropics/claude-code#25013), so on Linux/Windows
+    gating on the sessions dir alone produced false positives. macOS already
+    AND-requires ``/Applications/Claude.app``; Linux/Windows now AND-require an
+    install dir resolved by the OS detector's ``_find_install_dir`` (keeping the
+    install-dir candidate lists in the OS modules — one source of truth).
+    """
     system = platform.system()
     if system == "Darwin":
         app_path = Path("/Applications/Claude.app")
@@ -346,20 +360,219 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         except OSError:
             return None
         sessions_dir = user_home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        require_install_dir = False
     elif system == "Linux":
         sessions_dir = user_home / ".config" / "Claude" / COWORK_SESSIONS_DIR
+        require_install_dir = True
     else:
         sessions_dir = user_home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
+        require_install_dir = True
 
     try:
-        if sessions_dir.exists() and sessions_dir.is_dir():
+        if not (sessions_dir.exists() and sessions_dir.is_dir()):
+            return None
+    except (PermissionError, OSError):
+        return None
+
+    if require_install_dir:
+        find_install_dir = getattr(detector, "_find_install_dir", None)
+        if not callable(find_install_dir):
+            return None
+        try:
+            # Pass the scanned user's home so an admin/MDM multi-user scan probes
+            # THIS user's per-user install dir, not the scanner's (Windows).
+            if find_install_dir(user_home) is None:
+                return None
+        except (PermissionError, OSError):
+            return None
+
+    return {
+        "name": detector.tool_name,
+        "version": detector.get_version(),
+        "install_path": str(sessions_dir)
+    }
+
+
+def _junie_version_from_config(user_home: Path) -> Optional[str]:
+    """Read the Junie version from ``~/.junie/config.json`` (or settings.json).
+
+    ``~/.junie`` is residue and must NOT gate detection, but once Junie is
+    confirmed via the binary/plugin it is still the authoritative version source.
+    Best-effort: any read/parse error yields None ("Unknown" downstream).
+    """
+    junie_dir = user_home / ".junie"
+    for name in ("config.json", "settings.json"):
+        config_file = junie_dir / name
+        try:
+            if not config_file.exists():
+                continue
+            with open(config_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("version"), str):
+                return data["version"]
+        except (json.JSONDecodeError, OSError, PermissionError) as e:
+            logger.debug(f"Could not read Junie config file {config_file}: {e}")
+            continue
+    return None
+
+
+def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect Junie installation for a user.
+
+    Gates on a real install signal — the Junie CLI **binary** OR the **Junie
+    plugin** present in a JetBrains IDE — not on the ``~/.junie`` directory.
+    ``~/.junie`` is a user-authored guidelines dir (AGENTS.md / config.json):
+    it survives uninstall AND is created by usage rather than install, so
+    gating on it produced false positives. ``~/.junie`` remains the version
+    source and the rules/MCP extraction source.
+
+    The JetBrains plugin check is delegated to the OS detector's
+    ``_has_junie_jetbrains_plugin`` (keeps the OS-specific JetBrains detector
+    choice in the OS module, mirroring the ``_find_install_dir`` delegation used
+    for Claude Cowork).
+    """
+    junie_bin = find_junie_binary_for_user(user_home)
+    if junie_bin:
+        return {
+            "name": detector.tool_name,
+            "version": _junie_version_from_config(user_home) or "Unknown",
+            "install_path": junie_bin,
+        }
+
+    plugin_check = getattr(detector, "_has_junie_jetbrains_plugin", None)
+    if callable(plugin_check):
+        try:
+            plugin_path = plugin_check(user_home)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Junie JetBrains plugin check failed for {user_home}: {e}")
+            plugin_path = None
+        if plugin_path:
             return {
                 "name": detector.tool_name,
-                "version": detector.get_version(),
-                "install_path": str(sessions_dir)
+                "version": _junie_version_from_config(user_home) or "Unknown",
+                "install_path": plugin_path,
             }
-    except (PermissionError, OSError):
-        pass
+
+    return None
+
+
+def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
+    """Find the absolute path to the ``junie`` CLI binary for a specific user.
+
+    Mirrors ``find_claude_binary_for_user``. Junie's CLI ships a shim at
+    ``~/.local/bin/junie`` plus versioned builds under
+    ``~/.local/share/junie/versions/<v>/junie``, and is also installable via
+    Homebrew, Bun and npm-global. Machine-global candidates (Homebrew,
+    /usr/local) are owner-attributed under a root/MDM scan so one user's install
+    is not fanned out to every user (the 93b5fc2 cross-user FP class). Never
+    raises.
+
+    Args:
+        user_home: Path to the user's home directory.
+
+    Returns:
+        Absolute path to the junie binary as a string, or None if not found.
+    """
+    if platform.system() == "Windows":
+        # Existence-gated, not os.access(X_OK): on Windows X_OK is True for any
+        # file, so it cannot distinguish a binary.
+        npm_dir = user_home / "AppData" / "Roaming" / "npm"
+        candidates = [
+            user_home / ".local" / "bin" / "junie.exe",
+            user_home / ".local" / "bin" / "junie",
+            npm_dir / "junie.cmd",
+            npm_dir / "junie.exe",
+            user_home / ".bun" / "bin" / "junie.exe",
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    return str(candidate)
+            except (PermissionError, OSError):
+                continue
+
+        # Native installer keeps the real binary under a versioned subdir; pick
+        # the newest version so a stale older build isn't reported.
+        versions_dir = user_home / ".local" / "share" / "junie" / "versions"
+        try:
+            if versions_dir.exists():
+                version_dirs = sorted(
+                    (d for d in versions_dir.iterdir() if d.is_dir()),
+                    key=_cursor_agent_version_key,
+                    reverse=True,
+                )
+                for version_dir in version_dirs:
+                    versioned = version_dir / "junie.exe"
+                    try:
+                        if versioned.exists():
+                            return str(versioned)
+                    except (PermissionError, OSError):
+                        continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not enumerate Windows junie versions: {e}")
+        return None
+
+    # POSIX (macOS / Linux).
+    user_relative = [
+        user_home / ".local" / "bin" / "junie",        # Official installer shim
+        user_home / ".bun" / "bin" / "junie",          # Bun global install
+        user_home / ".npm-global" / "bin" / "junie",   # npm global prefix
+    ]
+    # Homebrew and /usr/local are MACHINE-GLOBAL — always probed, but under a
+    # root/MDM multi-user scan each is owner-attributed (the loop below) so one
+    # user's install isn't fanned out to every user.
+    machine_global = [
+        Path("/opt/homebrew/bin/junie"),   # Apple Silicon Homebrew
+        Path("/usr/local/bin/junie"),      # Intel Mac / manual install
+    ]
+
+    is_root = is_running_as_root()
+    for candidate in machine_global + user_relative:
+        try:
+            if candidate.exists() and os.access(str(candidate), os.X_OK):
+                if is_root and candidate in machine_global \
+                        and not machine_global_binary_owned_by_user(candidate, user_home):
+                    continue
+                return str(candidate)
+        except (PermissionError, OSError):
+            continue
+
+    # Versioned install dir: pick the newest version's junie.
+    versions_dir = user_home / ".local" / "share" / "junie" / "versions"
+    try:
+        if versions_dir.exists():
+            version_dirs = sorted(
+                (d for d in versions_dir.iterdir() if d.is_dir()),
+                key=_cursor_agent_version_key,
+                reverse=True,
+            )
+            for version_dir in version_dirs:
+                versioned = version_dir / "junie"
+                try:
+                    if versioned.exists() and os.access(str(versioned), os.X_OK):
+                        return str(versioned)
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate junie versions: {e}")
+
+    # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix
+    # -g`` resolves the scanner's prefix, not the user's.
+    npm_resolved = resolve_npm_global_tool_bin("junie", user_home, is_root)
+    if npm_resolved:
+        return npm_resolved
+
+    # PATH backstop: non-root only — under root ``which`` resolves the scanner's
+    # PATH, mis-attributing its junie to a user who has only residue.
+    if not is_root:
+        which_path = run_command(["which", "junie"], VERSION_TIMEOUT)
+        if which_path:
+            try:
+                resolved = Path(which_path)
+                if resolved.exists() and os.access(str(resolved), os.X_OK):
+                    return str(resolved)
+            except (PermissionError, OSError):
+                pass
 
     return None
 

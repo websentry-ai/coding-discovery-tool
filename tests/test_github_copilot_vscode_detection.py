@@ -204,17 +204,53 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
         self.assertEqual(self._detect(), [])
 
     def test_marketplace_present_does_not_invoke_builtin_fallback(self):
-        """Existing Windows glob path unchanged: a marketplace github.copilot*
-        folder is detected and the new built-in fallback is never consulted."""
+        """Windows now reads the LIVE extensions.json registry (matching
+        macOS/Linux): a registered github.copilot entry is detected and the
+        built-in fallback is never consulted."""
         self._make_code_user_dir()
-        mk = self.user_home / ".vscode" / "extensions" / "github.copilot-1.250.0"
-        mk.mkdir(parents=True)
-        (mk / "package.json").write_text(json.dumps({"version": "1.250.0"}), encoding="utf-8")
+        reg = self.user_home / ".vscode" / "extensions" / "extensions.json"
+        reg.parent.mkdir(parents=True)
+        reg.write_text(
+            json.dumps([{"identifier": {"id": "github.copilot"}, "version": "1.250.0"}]),
+            encoding="utf-8",
+        )
         with patch.object(self.Detector, "_detect_vscode_builtin_copilot") as spy, \
              patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", [self.app_ext]):
             res = self.Detector()._detect_vscode_for_user(self.user_home)
         spy.assert_not_called()
         self.assertEqual([r["version"] for r in res], ["1.250.0"])
+
+    def test_residue_extension_folder_only_not_detected(self):
+        """REGRESSION GUARD (FIX 2): an uninstalled Copilot whose extension
+        FOLDER survives (microsoft/vscode#81046) but is absent from the live
+        extensions.json registry must NOT be detected. The old folder glob
+        produced a phantom row here; the registry read does not. The built-in
+        fallback is still consulted (and finds nothing, since no Code/User dir)."""
+        # Surviving extension folder, but extensions.json lists nothing.
+        ext_dir = self.user_home / ".vscode" / "extensions"
+        residue = ext_dir / "github.copilot-1.250.0"
+        residue.mkdir(parents=True)
+        (residue / "package.json").write_text(json.dumps({"version": "1.250.0"}), encoding="utf-8")
+        (ext_dir / "extensions.json").write_text(json.dumps([]), encoding="utf-8")
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", [self.app_ext]):
+            res = self.Detector()._detect_vscode_for_user(self.user_home)
+        self.assertEqual(res, [])
+
+    def test_live_registry_entry_detected(self):
+        """A live github.copilot-chat registry entry -> detected with the
+        registered version and the extensions dir as install_path."""
+        ext_dir = self.user_home / ".vscode" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "extensions.json").write_text(
+            json.dumps([{"identifier": {"id": "github.copilot-chat"}, "version": "0.30.0"}]),
+            encoding="utf-8",
+        )
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", [self.app_ext]):
+            res = self.Detector()._detect_vscode_for_user(self.user_home)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot Chat (VS Code)")
+        self.assertEqual(res[0]["version"], "0.30.0")
+        self.assertEqual(res[0]["install_path"], str(ext_dir))
 
     def test_builtin_plain_copilot_labeled_generic(self):
         self._make_code_user_dir()

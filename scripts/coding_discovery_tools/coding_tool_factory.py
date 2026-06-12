@@ -736,7 +736,7 @@ class ToolDetectorFactory:
             ToolDetectorFactory.create_roo_detector(os_name),
         ]
 
-        # Add Claude Cowork detector for macOS and Windows
+        # Add Claude Cowork detector for macOS, Windows, and Linux
         claude_cowork_detector = ToolDetectorFactory.create_claude_cowork_detector(os_name)
         if claude_cowork_detector is not None:
             detectors.append(claude_cowork_detector)

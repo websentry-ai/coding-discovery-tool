@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseCopilotDetector
+from ...vscode_extension_helpers import find_extension_in_editor
 from ...windows_extraction_helpers import is_running_as_admin
 from ..jetbrains.jetbrains import WindowsJetBrainsDetector
 
@@ -110,58 +111,30 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         """
         Detect VS Code Copilot for a specific user.
 
-        Scans %USERPROFILE%\\.vscode\\extensions for folders starting with github.copilot*.
+        Reads the LIVE ``.vscode\\extensions\\extensions.json`` registry rather
+        than globbing for ``github.copilot*`` folders. VS Code rewrites this
+        registry on uninstall, but the extension FOLDER survives
+        (microsoft/vscode#81046), so the old folder glob produced phantom rows
+        for uninstalled Copilot. This matches the SAFE macOS/Linux path.
         """
         results = []
         vscode_ext_dir = user_home / ".vscode" / "extensions"
 
-        # Note: don't early-return when the marketplace extensions dir is absent
-        # — a built-in-Copilot user may have no .vscode\extensions at all, and the
-        # built-in fallback below still needs to run.
-        if not vscode_ext_dir.exists():
-            logger.debug(f"VS Code extensions directory not found: {vscode_ext_dir}")
-            copilot_dirs = []
-        else:
-            try:
-                # Look for github.copilot* directories
-                copilot_dirs = list(vscode_ext_dir.glob("github.copilot*"))
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Error scanning VS Code extensions: {e}")
-                copilot_dirs = []
-
-        try:
-            for copilot_dir in copilot_dirs:
-                if not copilot_dir.is_dir():
-                    continue
-
-                version = "unknown"
-                pkg_json = copilot_dir / "package.json"
-
-                if pkg_json.exists():
-                    data = _load_jsonc(pkg_json)
-                    if data:
-                        version = data.get('version', 'unknown')
-
-                if version == "unknown" and "-" in copilot_dir.name:
-                    try:
-                        version = copilot_dir.name.rsplit('-', 1)[1]
-                    except IndexError:
-                        pass
-
-                ext_name = "GitHub Copilot (VS Code)"
-                if "copilot-chat" in copilot_dir.name.lower():
-                    ext_name = "GitHub Copilot Chat (VS Code)"
-
-                results.append({
-                    "name": ext_name,
-                    "version": version,
-                    "publisher": "GitHub",
-                    "install_path": str(copilot_dir)
-                })
-                logger.info(f"Detected: {ext_name} v{version} at {copilot_dir}")
-
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Error scanning VS Code extensions: {e}")
+        for ext_id, name in (
+            ("github.copilot", "GitHub Copilot (VS Code)"),
+            ("github.copilot-chat", "GitHub Copilot Chat (VS Code)"),
+        ):
+            entry = find_extension_in_editor(user_home, "Code", ext_id)
+            if entry is None:
+                continue
+            _location, version = entry
+            results.append({
+                "name": name,
+                "version": version or "unknown",
+                "publisher": "GitHub",
+                "install_path": str(vscode_ext_dir),
+            })
+            logger.info(f"Detected: {name} v{version or 'unknown'} at {vscode_ext_dir}")
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
         # marketplace Copilot extension is present, so built-in users — and their

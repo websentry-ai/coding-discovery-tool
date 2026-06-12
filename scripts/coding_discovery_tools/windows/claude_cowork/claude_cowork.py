@@ -67,19 +67,22 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
         if not sessions_present:
             return None
 
-        # If we can locate the actual Claude Desktop install dir, report it
-        # as the install_path; otherwise fall back to the sessions dir, which
-        # is at least a stable location associated with this device.
+        # Require the Claude Desktop install to be present. The per-user
+        # ``%APPDATA%\Claude`` tree (which holds the sessions dir) survives an
+        # uninstall (anthropics/claude-code#25013), so reporting on the sessions
+        # dir alone produced false positives. Gate on a real install dir.
         app_install = self._find_install_dir()
-        install_path = str(app_install) if app_install else str(sessions_dir)
+        if app_install is None:
+            logger.debug(
+                "Cowork sessions present but no Claude Desktop install found; "
+                "treating as residue (not installed)."
+            )
+            return None
 
-        # An on-disk sessions tree without the app present is unusual but
-        # not impossible (uninstall + leftover state). Still report it —
-        # the sessions dir is the data we actually care about.
         return {
             "name": self.tool_name,
             "version": self.get_version(),
-            "install_path": install_path,
+            "install_path": str(app_install),
         }
 
     def get_version(self) -> Optional[str]:

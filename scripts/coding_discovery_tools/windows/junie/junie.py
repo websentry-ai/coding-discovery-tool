@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseToolDetector
+from ...user_tool_detector import find_junie_binary_for_user
 from ...windows_extraction_helpers import scan_windows_user_directories
+from ..jetbrains.jetbrains import WindowsJetBrainsDetector
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +57,69 @@ class WindowsJunieDetector(BaseToolDetector):
         return None
 
     def _detect_junie_for_user(self, user_home: Path) -> Optional[Dict]:
-        """Detect Junie installation for a specific user."""
-        junie_dir = user_home / self.JUNIE_DIR_NAME
+        """Detect Junie installation for a specific user.
 
-        if not junie_dir.exists() or not junie_dir.is_dir():
+        Gates on a real install signal — the Junie CLI binary OR the Junie
+        plugin in a JetBrains IDE — not on the ``%USERPROFILE%\\.junie``
+        directory, which is user-authored guidelines residue that survives
+        uninstall. ``.junie`` is still used as the version source.
+        """
+        junie_bin = find_junie_binary_for_user(user_home)
+        install_path: Optional[str] = junie_bin
+
+        if not install_path:
+            install_path = self._has_junie_jetbrains_plugin(user_home)
+
+        if not install_path:
             return None
 
-        logger.debug(f"Found Junie directory at: {junie_dir}")
+        logger.debug(f"Detected Junie install signal at: {install_path}")
 
-        version = self._get_version_from_config(junie_dir)
+        version = self._get_version_from_config(user_home / self.JUNIE_DIR_NAME)
 
         return {
             "name": self.tool_name,
             "version": version or "Unknown",
-            "install_path": str(junie_dir)
+            "install_path": install_path
         }
+
+    def _has_junie_jetbrains_plugin(self, user_home: Path) -> Optional[str]:
+        """Return an install_path if the Junie plugin is present in a JetBrains
+        IDE belonging to ``user_home``, else None.
+
+        On Windows ``WindowsJetBrainsDetector.detect()`` already honors
+        ``self.user_home`` (its ``jetbrains_config_dir`` property derives from it),
+        so the scan is scoped by construction. We additionally guard each match by
+        confirming the IDE config path is under ``user_home`` so a stray
+        cross-user entry can never be attributed to the user being scanned. The
+        JetBrains detector itself is never modified.
+        """
+        try:
+            jetbrains_detector = WindowsJetBrainsDetector()
+            jetbrains_detector.user_home = user_home
+            all_ides = jetbrains_detector.detect() or []
+        except (PermissionError, OSError) as e:
+            logger.debug(f"JetBrains scan for Junie failed under {user_home}: {e}")
+            return None
+
+        for ide in all_ides:
+            config_path = ide.get("_config_path") or ide.get("install_path")
+            if not self._path_under_user_home(config_path, user_home):
+                continue
+            for plugin_name in ide.get("plugins", []):
+                if "junie" in plugin_name.lower():
+                    return config_path
+        return None
+
+    @staticmethod
+    def _path_under_user_home(config_path: Optional[str], user_home: Path) -> bool:
+        """True if ``config_path`` is inside ``user_home`` (strict scoping guard)."""
+        if not config_path:
+            return False
+        try:
+            return Path(config_path).resolve().is_relative_to(user_home.resolve())
+        except (OSError, ValueError):
+            return False
 
     def _get_version_from_config(self, junie_dir: Path) -> Optional[str]:
         """Try to extract Junie version from configuration files."""
@@ -83,7 +133,7 @@ class WindowsJunieDetector(BaseToolDetector):
                 if config_file.exists():
                     with open(config_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        if 'version' in data:
+                        if isinstance(data, dict) and isinstance(data.get('version'), str):
                             return data['version']
             except (json.JSONDecodeError, OSError, PermissionError) as e:
                 logger.debug(f"Could not read config file {config_file}: {e}")

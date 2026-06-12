@@ -556,13 +556,13 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
 
     # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix
     # -g`` resolves the scanner's prefix, not the user's.
-    npm_resolved = resolve_npm_global_tool_bin("junie", user_home, is_running_as_root())
+    npm_resolved = resolve_npm_global_tool_bin("junie", user_home, is_root)
     if npm_resolved:
         return npm_resolved
 
     # PATH backstop: non-root only — under root ``which`` resolves the scanner's
     # PATH, mis-attributing its junie to a user who has only residue.
-    if not is_running_as_root():
+    if not is_root:
         which_path = run_command(["which", "junie"], VERSION_TIMEOUT)
         if which_path:
             try:

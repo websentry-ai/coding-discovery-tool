@@ -287,7 +287,7 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
         # Distinct install_path per tool so the (name:path) dedup keeps all three.
         return {"name": name, "version": "1.0", "install_path": f"/opt/{name}", "projects": []}
 
-    def _run_main_capture_manifest(self, send_report_result=(True, False)):
+    def _run_main_capture_manifest(self, send_report_result=(True, False), filter_error=None):
         """Run main() with three crafted tools for one user:
           ToolOK        -> hash mismatch -> send path -> send result varies -> appended
           ToolHashMatch -> hash match    -> dedup short-circuit            -> appended
@@ -311,7 +311,7 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
 
         def _filter(tool_with_projects, _user_home):
             if tool_with_projects["name"] == "ToolErr":
-                raise PermissionError("simulated read failure")
+                raise (filter_error if filter_error is not None else PermissionError("simulated read failure"))
             return tool_with_projects
 
         detector.filter_tool_projects_by_user.side_effect = _filter
@@ -411,6 +411,22 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
         # not derived from the manifest: a user whose every tool errored would
         # still be covered (bounding the prune scope correctly).
         captured = self._run_main_capture_manifest()
+        self.assertEqual(captured.get("covered_home_users"), ["alice"])
+
+    def test_generic_read_error_fails_closed_manifest_none(self):
+        # A NON-Permission read error sends NO scan_event=failed, so the backend can't tell the
+        # scan was unclean. The completed event must fail closed: manifest=None (legacy = no prune),
+        # so a transient error can never drive a wrongful device-wide delete. (A PermissionError, by
+        # contrast, DOES send a failed event and keeps a real manifest — covered by the test above.)
+        captured = self._run_main_capture_manifest(
+            filter_error=RuntimeError("simulated generic read failure")
+        )
+        self.assertIn("manifest", captured, "completed event was never sent")
+        self.assertIsNone(
+            captured["manifest"],
+            "a generic (non-Permission) read error must fail closed -> manifest=None",
+        )
+        # covered_home_users is still reported (telemetry of who was enumerated).
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
 
 

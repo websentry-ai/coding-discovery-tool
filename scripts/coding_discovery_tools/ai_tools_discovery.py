@@ -2311,6 +2311,9 @@ def main():
 
         # (home_user, tool_name) tools seen this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
+        # Fail closed: if a read error below omits a live tool from the manifest, send manifest=None
+        # (backend treats as legacy = no prune) rather than risk wrongly deleting an installed tool.
+        scanned_manifest_complete = True
 
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
@@ -2666,12 +2669,17 @@ def main():
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
+                            # Backend won't see this scan as unclean -> don't let it prune from a partial manifest.
+                            scanned_manifest_complete = False
 
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name, "user": user_name}, level="warning")
                         logger.info("")
 
                     except Exception as e:
                         logger.error(f"Error processing {tool_name} for user {user_name}: {e}", exc_info=True)
+                        # No scan_event=failed is sent here, so the backend can't see this gap;
+                        # mark the manifest incomplete so the completed event sends manifest=None.
+                        scanned_manifest_complete = False
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name}, level="warning")
                         logger.info("")
 
@@ -2688,6 +2696,8 @@ def main():
 
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
+                # Tool omitted device-wide with no failed event -> manifest is incomplete.
+                scanned_manifest_complete = False
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
@@ -2735,7 +2745,13 @@ def main():
 
         # only the completed event carries manifest + covered users (backend prunes from them)
         logger.info("Sending scan completed event...")
-        manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+        # Fail closed: if any tool/user read errored without a scan_event=failed, the manifest may be
+        # missing a live tool -> send manifest=None so the backend treats this run as legacy (no prune).
+        if scanned_manifest_complete:
+            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+        else:
+            manifest = None
+            logger.warning("Scan had read errors; sending manifest=None to skip pruning this run")
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx,

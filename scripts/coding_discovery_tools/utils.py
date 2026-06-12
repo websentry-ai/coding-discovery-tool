@@ -589,7 +589,9 @@ def send_scan_event(
     app_name: Optional[str] = None,
     home_user: Optional[str] = None,
     scan_error: Optional[Dict] = None,
-    sentry_context: Optional[Dict] = None
+    sentry_context: Optional[Dict] = None,
+    manifest: Optional[List[Dict]] = None,
+    covered_home_users: Optional[List[str]] = None
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -604,6 +606,10 @@ def send_scan_event(
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
         sentry_context: Optional context dict forwarded to Sentry on failure
+        manifest: Optional [{"home_user", "tool_name"}] seen this run; sent only on
+            "completed" so the backend set-diffs it to prune the rest.
+        covered_home_users: Optional home users covered; sent only on "completed" to
+            bound the prune scope.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -622,6 +628,12 @@ def send_scan_event(
 
     if scan_error:
         payload["scan_error"] = scan_error
+
+    if manifest is not None:
+        payload["manifest"] = manifest
+
+    if covered_home_users is not None:
+        payload["covered_home_users"] = covered_home_users
 
     return send_report_to_backend(
         backend_url,

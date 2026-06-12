@@ -2439,6 +2439,12 @@ def main():
         # Track failed reports for persistence
         failed_reports = []
 
+        # (home_user, tool_name) tools seen this run; backend set-diffs it in "completed" to prune the rest.
+        scanned_manifest = set()
+        # Fail closed: if a read error below omits a live tool from the manifest, send manifest=None
+        # (backend treats as legacy = no prune) rather than risk wrongly deleting an installed tool.
+        scanned_manifest_complete = True
+
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
@@ -2749,6 +2755,8 @@ def main():
                         if local_payload_hash and cached_hash == local_payload_hash:
                             if not args.summary and not args.payload:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
+                            # unchanged but still installed -> record so the backend won't prune it
+                            scanned_manifest.add((user_name, tool_name))
                         else:
                             if not args.summary and not args.payload:
                                 logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
@@ -2760,10 +2768,14 @@ def main():
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                                 if local_payload_hash:
                                     discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
+                                # read + uploaded -> record so the backend won't prune it
+                                scanned_manifest.add((user_name, tool_name))
                             else:
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                                 if retryable:
                                     failed_reports.append(single_tool_report)
+                                # read OK, only upload failed (retried later) -> still installed, so record it (manifest = seen, not uploaded)
+                                scanned_manifest.add((user_name, tool_name))
 
                         if not args.summary and not args.payload:
                             logger.info("")
@@ -2787,12 +2799,17 @@ def main():
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
+                            # Backend won't see this scan as unclean -> don't let it prune from a partial manifest.
+                            scanned_manifest_complete = False
 
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name, "user": user_name}, level="warning")
                         logger.info("")
 
                     except Exception as e:
                         logger.error(f"Error processing {tool_name} for user {user_name}: {e}", exc_info=True)
+                        # No scan_event=failed is sent here, so the backend can't see this gap;
+                        # mark the manifest incomplete so the completed event sends manifest=None.
+                        scanned_manifest_complete = False
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name}, level="warning")
                         logger.info("")
 
@@ -2809,6 +2826,8 @@ def main():
 
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
+                # Tool omitted device-wide with no failed event -> manifest is incomplete.
+                scanned_manifest_complete = False
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
@@ -2856,11 +2875,19 @@ def main():
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 
-        # Send scan completed event AFTER all scanning
+        # only the completed event carries manifest + covered users (backend prunes from them)
         logger.info("Sending scan completed event...")
+        # Fail closed: if any tool/user read errored without a scan_event=failed, the manifest may be
+        # missing a live tool -> send manifest=None so the backend treats this run as legacy (no prune).
+        if scanned_manifest_complete:
+            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+        else:
+            manifest = None
+            logger.warning("Scan had read errors; sending manifest=None to skip pruning this run")
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
-            args.app_name, sentry_context=sentry_ctx
+            args.app_name, sentry_context=sentry_ctx,
+            manifest=manifest, covered_home_users=all_users
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

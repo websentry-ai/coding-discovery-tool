@@ -146,6 +146,7 @@ class TestCentralCoworkMacUnchanged(unittest.TestCase):
             result = _detect_claude_cowork(det, self.home)
         self.assertIsNone(result)
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: macOS /Applications/Claude.app path semantics (backslash on Windows)")
     def test_app_present_and_sessions_detected_without_find_install_dir(self):
         sdir = self._make_sessions()
         det = _make_detector(install_dir=None)
@@ -235,6 +236,7 @@ class TestLinuxCoworkDetect(unittest.TestCase):
              patch.object(self.Detector, "_find_install_dir", return_value=None):
             self.assertIsNone(self.Detector().detect())
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: Linux detector install-path string semantics (backslash on Windows)")
     def test_sessions_plus_install_detected(self):
         self._make_sessions()
         with patch(f"{_LINUX_MOD}.get_linux_user_homes", return_value=[self.home]), \

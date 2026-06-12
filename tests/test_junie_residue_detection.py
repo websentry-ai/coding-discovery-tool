@@ -200,6 +200,7 @@ class TestFindJunieBinaryRootAttribution(unittest.TestCase):
         self.addCleanup(p_exists.stop)
         self.addCleanup(p_access.stop)
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
     def test_homebrew_skipped_when_root_owned_by_other(self):
         """Under root, /opt/homebrew/bin/junie owned by a DIFFERENT user's home
         is skipped (not fanned out); no user-local binary -> None."""
@@ -212,6 +213,7 @@ class TestFindJunieBinaryRootAttribution(unittest.TestCase):
              patch(f"{_MOD}.run_command", return_value=None):
             self.assertIsNone(find_junie_binary_for_user(self.home))
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
     def test_homebrew_attributed_when_root_owned_by_this_user(self):
         """Under root, /opt/homebrew/bin/junie owned by THIS user's home is
         attributed (returned)."""

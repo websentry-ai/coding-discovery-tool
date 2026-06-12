@@ -2716,6 +2716,46 @@ class TestAdminScanOwnHomeNotDoubleCounted(unittest.TestCase):
         self.assertIn(self.home, calls)
         self.assertIn(root_home, calls)  # added via the root re-add step
 
+    def test_dual_path_helper_no_double_count(self):
+        """extract_dual_path_configs_with_root_support: own preferred path read once
+        (the admin home is already covered by the loop, so the re-add is skipped)."""
+        preferred = self.home / "config.json"
+        preferred.write_text("{}", encoding="utf-8")
+        fallback = self.home / "fallback.json"  # absent; preferred wins
+        calls = []
+
+        def extract_from_file(path):
+            calls.append(Path(path))
+            return [{"path": str(Path(path).parent), "mcpServers": [{"name": "s"}]}]
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch("platform.system", return_value="Darwin"):
+            result = mcp_helpers.extract_dual_path_configs_with_root_support(
+                preferred, fallback, extract_from_file)
+        self.assertEqual(calls.count(preferred), 1, f"preferred read {calls.count(preferred)}x")
+        self.assertEqual(len(result), 1)  # not duplicated
+
+    def test_dual_path_helper_still_adds_root_home_outside_users(self):
+        """macOS case: root's own preferred path (outside /Users) is still read."""
+        root_home = Path(self.tmp_dir) / "var_root"
+        root_home.mkdir()
+        preferred = root_home / "config.json"
+        preferred.write_text("{}", encoding="utf-8")
+        fallback = root_home / "fallback.json"
+        calls = []
+
+        def extract_from_file(path):
+            calls.append(Path(path))
+            return [{"path": str(Path(path).parent), "mcpServers": [{"name": "s"}]}]
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=root_home), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_dual_path_configs_with_root_support(
+                preferred, fallback, extract_from_file)
+        self.assertIn(preferred, calls)  # root home outside /Users -> re-add still fires
+
     def test_claudeai_helper_no_double_count(self):
         """extract_claudeai_mcp_servers_with_root_support: own ~/.claude scanned once."""
         (self.home / ".claude").mkdir()

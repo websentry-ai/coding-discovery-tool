@@ -2226,7 +2226,6 @@ def main():
         except ImportError:
             from . import logging_helpers as _lh
         logging.getLogger(_lh.__name__).setLevel(logging.WARNING)
-        # ...the per-item merge/add lines, and internal dict diagnostics.
         # Roll-up totals and headlines stay on `logger`.
         detail_logger.setLevel(logging.WARNING)
     # Hook-triggered invocations pass the api_key via env so it never appears
@@ -2711,7 +2710,7 @@ def main():
                             logger.info("  └──────────────────────────────────────────────────────────────────")
                             logger.info("")
 
-                        if args.dump or args.payload:
+                        if args.payload:
                             payload_logger.info("  Complete JSON payload being sent to backend:")
                             payload_logger.info("  " + "=" * 70)
                             try:

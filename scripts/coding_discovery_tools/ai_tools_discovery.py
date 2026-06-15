@@ -2200,14 +2200,11 @@ def main():
     verbosity.add_argument(
         '--dump',
         action='store_true',
-        help='Also log the full per-tool JSON payload sent to the backend.',
-    )
-    verbosity.add_argument(
-        '--summary',
-        action='store_true',
-        help='Suppress per-tool detail output: Report Summary box, transport '
-             'lines (Sending / ✓ sent), and logging_helpers sub-boxes. Keeps '
-             'headline output, per-tool totals, warnings, and errors.',
+        help='Show ALL detail logs: per-file rule/MCP/settings boxes, '
+             'per-project merge/add lines, internal diagnostics, the per-tool '
+             'Report Summary box, and transport lines (Sending / ✓ sent). '
+             'Default output is concise (headlines, per-tool totals, warnings, '
+             'errors). For the JSON sent to the backend, use --payload.',
     )
     verbosity.add_argument(
         '--payload',
@@ -2221,11 +2218,14 @@ def main():
         logging.getLogger().setLevel(logging.WARNING)
         payload_logger.setLevel(logging.INFO)
     elif not args.dump:
+        # Concise is the DEFAULT; --dump restores full detail. Quiet the
+        # per-file rule/MCP/settings sub-boxes (logging_helpers)...
         try:
             from scripts.coding_discovery_tools import logging_helpers as _lh
         except ImportError:
             from . import logging_helpers as _lh
         logging.getLogger(_lh.__name__).setLevel(logging.WARNING)
+        # ...plus the per-item merge/add lines and internal dict diagnostics.
         # Roll-up totals and headlines stay on `logger`.
         detail_logger.setLevel(logging.WARNING)
     # Hook-triggered invocations pass the api_key via env so it never appears

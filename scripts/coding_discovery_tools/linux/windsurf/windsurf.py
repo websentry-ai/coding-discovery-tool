@@ -46,6 +46,10 @@ class LinuxWindsurfDetector(BaseToolDetector):
                     "install_path": str(p),
                 }
 
+        # NOTE: do NOT fall back to ``~/.windsurf`` existence — that config dir
+        # (~475 MB) survives uninstall, so it would report a phantom Windsurf
+        # after the IDE is gone (WEB-4771). The macOS/Windows detectors gate on
+        # the app/binary only; match them.
         for user_home in get_linux_user_homes():
             for rel in _USER_RELATIVE_PATHS:
                 p = user_home / rel
@@ -55,14 +59,6 @@ class LinuxWindsurfDetector(BaseToolDetector):
                         "version": self.get_version(),
                         "install_path": str(p),
                     }
-            # Config directory presence
-            windsurf_dir = user_home / ".windsurf"
-            if windsurf_dir.exists():
-                return {
-                    "name": self.tool_name,
-                    "version": self.get_version(),
-                    "install_path": str(windsurf_dir),
-                }
 
         return None
 

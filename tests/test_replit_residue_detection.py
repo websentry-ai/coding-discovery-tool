@@ -307,24 +307,28 @@ class TestLinuxReplitResidue(unittest.TestCase):
         ``/usr/share/*`` entries were dropped."""
         self.assertIn(Path("/usr/lib/replit"), self.detector._candidate_install_dirs())
 
-    def test_which_replit_backstop_detected(self):
-        """No resource-tree install, but ``which replit`` resolves to a real
-        path -> detected. Proves the PATH backstop survives."""
-        replit_bin = self.root / "usr" / "bin" / "replit"
-        replit_bin.parent.mkdir(parents=True, exist_ok=True)
-        replit_bin.write_text("")
+    def test_which_replit_pypi_collision_not_detected(self):
+        """WEB-4771: ``which replit`` resolving to a ``replit`` on PATH that is
+        NOT Replit Desktop (e.g. the PyPI ``replit`` package's console script),
+        with no install resource tree, must NOT be detected. The ``which``
+        backstop was removed precisely because it name-collided with the PyPI
+        package and reported a phantom Replit Desktop."""
+        # Simulate the PyPI `replit` entry point sitting on PATH.
+        pypi_bin = self.root / "usr" / "bin" / "replit"
+        pypi_bin.parent.mkdir(parents=True, exist_ok=True)
+        pypi_bin.write_text("")
 
         def fake_run(cmd, *a, **k):
-            # ``which replit`` -> the real tmp path; version probes -> None.
+            # A `replit` IS resolvable on PATH (the collision) ...
             if cmd[:1] == ["which"]:
-                return str(replit_bin)
+                return str(pypi_bin)
             return None
 
         with patch.object(self.detector, "_candidate_install_dirs", return_value=[]), \
              patch.object(self.mod, "run_command", side_effect=fake_run):
             result = self.detector.detect()
-        self.assertIsNotNone(result)
-        self.assertEqual(result["install_path"], str(replit_bin))
+        # ... but with no resource tree, it is no longer reported.
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

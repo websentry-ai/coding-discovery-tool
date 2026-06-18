@@ -51,7 +51,11 @@ class LinuxCursorDetector(BaseToolDetector):
                     "install_path": str(p),
                 }
 
-        # 3. Per-user paths
+        # 3. Per-user binary paths.
+        # NOTE: do NOT fall back to ``~/.cursor`` existence — that config dir
+        # survives uninstall and is shared with Cursor CLI / rules tooling, so it
+        # would report a phantom Cursor after the IDE is gone (WEB-4771). The
+        # macOS/Windows detectors gate on the app/binary only; match them.
         for user_home in get_linux_user_homes():
             for rel in _USER_RELATIVE_PATHS:
                 p = user_home / rel
@@ -61,15 +65,6 @@ class LinuxCursorDetector(BaseToolDetector):
                         "version": self.get_version(),
                         "install_path": str(p),
                     }
-
-            # .cursor dir in home (config presence)
-            cursor_dir = user_home / ".cursor"
-            if cursor_dir.exists():
-                return {
-                    "name": self.tool_name,
-                    "version": self.get_version(),
-                    "install_path": str(cursor_dir),
-                }
 
         return None
 

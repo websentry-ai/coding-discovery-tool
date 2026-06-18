@@ -39,8 +39,7 @@ class LinuxReplitDetector(BaseToolDetector):
 
     def detect(self) -> Optional[Dict]:
         """
-        Detect Replit by requiring a real install resource tree, with the
-        ``which replit`` lookup as a backstop.
+        Detect Replit by requiring a real install resource tree.
 
         A genuine Replit Desktop install ships either a packed
         ``resources/app.asar`` (Electron Forge ``asar: true``) or the legacy
@@ -51,6 +50,11 @@ class LinuxReplitDetector(BaseToolDetector):
         positives. ``.local/share/Replit`` is now only honoured as part of a
         resource-tree check (it is one of the candidate install dirs), not as a
         bare-dir-exists gate.
+
+        The ``which replit`` backstop was removed (WEB-4771): the PyPI package
+        ``replit`` installs a ``replit`` console script, so the backstop
+        name-collided and reported a phantom Replit Desktop for any Python dev
+        who ran ``pip install replit``. The resource-tree gate is authoritative.
         """
         install_dir = self._find_install_dir()
         if install_dir:
@@ -58,14 +62,6 @@ class LinuxReplitDetector(BaseToolDetector):
                 "name": self.tool_name,
                 "version": self.get_version() or "Unknown",
                 "install_path": str(install_dir),
-            }
-
-        which_path = self._check_replit_command()
-        if which_path:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version() or "Unknown",
-                "install_path": which_path,
             }
 
         return None
@@ -155,15 +151,4 @@ class LinuxReplitDetector(BaseToolDetector):
                     return output
         except Exception as e:
             logger.debug(f"replit --version failed: {e}")
-        return None
-
-    def _check_replit_command(self) -> Optional[str]:
-        try:
-            output = run_command(["which", "replit"], VERSION_TIMEOUT)
-            if output:
-                path = output.strip()
-                if Path(path).exists():
-                    return path
-        except Exception as e:
-            logger.debug(f"Could not check for replit command: {e}")
         return None

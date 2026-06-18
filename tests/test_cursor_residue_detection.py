@@ -1,4 +1,4 @@
-"""WEB-4771: the Linux Cursor IDE detector must not report a phantom Cursor from
+"""The Linux Cursor IDE detector must not report a phantom Cursor from
 ``~/.cursor`` residue.
 
 ``~/.cursor`` survives uninstall and is shared with Cursor CLI / rules tooling,

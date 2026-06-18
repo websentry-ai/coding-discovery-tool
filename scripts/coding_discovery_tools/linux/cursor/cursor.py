@@ -54,8 +54,8 @@ class LinuxCursorDetector(BaseToolDetector):
         # 3. Per-user binary paths.
         # NOTE: do NOT fall back to ``~/.cursor`` existence — that config dir
         # survives uninstall and is shared with Cursor CLI / rules tooling, so it
-        # would report a phantom Cursor after the IDE is gone (WEB-4771). The
-        # macOS/Windows detectors gate on the app/binary only; match them.
+        # would report a phantom Cursor after the IDE is gone. The macOS/Windows
+        # detectors gate on the app/binary only; match them.
         for user_home in get_linux_user_homes():
             for rel in _USER_RELATIVE_PATHS:
                 p = user_home / rel

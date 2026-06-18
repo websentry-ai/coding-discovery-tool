@@ -1,4 +1,4 @@
-"""WEB-4771: the Linux Windsurf detector must not report a phantom Windsurf from
+"""The Linux Windsurf detector must not report a phantom Windsurf from
 ``~/.windsurf`` residue.
 
 ``~/.windsurf`` (~475 MB) survives uninstall, so a bare-dir-exists fallback

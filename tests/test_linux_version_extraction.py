@@ -129,21 +129,18 @@ class TestLinuxReplitVersion(unittest.TestCase):
     def test_reads_version_from_package_json(self):
         _write_resource_json(self.fake_install, "package.json", "2.0.1")
         with patch.object(self.detector, "_candidate_install_dirs", return_value=[self.fake_install]):
-            with patch.object(self.detector, "_version_via_command", return_value=None):
-                version = self.detector.get_version()
+            version = self.detector.get_version()
         self.assertEqual(version, "2.0.1")
 
-    def test_falls_back_to_command_when_no_install(self):
+    def test_no_install_returns_none_without_command_fallback(self):
+        # With no package.json (e.g. an asar-only install) get_version returns
+        # None -> detect() reports "Unknown". We deliberately do NOT shell out to
+        # ``replit --version`` — it name-collides with the PyPI ``replit``
+        # package and would report the wrong version.
         with patch.object(self.detector, "_candidate_install_dirs", return_value=[]):
-            with patch.object(self.detector, "_version_via_command", return_value="0.5.0"):
-                version = self.detector.get_version()
-        self.assertEqual(version, "0.5.0")
-
-    def test_returns_none_when_no_install_and_no_command(self):
-        with patch.object(self.detector, "_candidate_install_dirs", return_value=[]):
-            with patch.object(self.detector, "_version_via_command", return_value=None):
-                version = self.detector.get_version()
+            version = self.detector.get_version()
         self.assertIsNone(version)
+        self.assertFalse(hasattr(self.detector, "_version_via_command"))
 
 
 if __name__ == "__main__":

@@ -67,13 +67,13 @@ usage() {
     echo ""
     echo "Usage:"
     echo "  Install (discover):  $0 [--command discover] --api-key <key> --domain <url>"
-    echo "  Install (onboard):   $0 --command onboard --api-key <key> --discovery-key <key> [--domain <url>]"
+    echo "  Install (onboard):   $0 --command onboard --api-key <key> [--domain <url>]"
     echo "  Uninstall:           $0 --uninstall"
     echo ""
     echo "Options:"
     echo "  --command <name>     Subcommand to schedule: 'discover' (default) or 'onboard'"
     echo "  --api-key <key>      User API key (or discovery key when --command discover)"
-    echo "  --discovery-key <k>  Discovery key (required for --command onboard)"
+    echo "  --discovery-key <k>  Org discovery key (optional; only for sudo/MDM all-users scans)"
     echo "  --domain <url>       Backend URL (e.g., https://backend.getunbound.ai)"
     echo "  --uninstall          Remove the scheduled job"
     echo "  --help               Show this help message"
@@ -309,11 +309,9 @@ case "\$COMMAND" in
         fi
         ;;
     onboard)
-        # Re-run the full unbound onboard flow daily.
-        if [ -z "\$DISCOVERY_KEY" ]; then
-            log "ERROR: discovery_key missing from stored credentials (required for onboard)"
-            exit 1
-        fi
+        # Re-run the full unbound onboard flow daily. Per-user onboarding scans
+        # with the user's own API key (WEB-4891), so a separate discovery key is
+        # optional here — it is forwarded only when one was stored (older setups).
         # Use the path that was resolved at setup time first. This survives nvm version
         # switches, non-standard npm prefix layouts, and any other case where the
         # scheduler's minimal PATH wouldn't find the binary. Fall back to a fresh PATH
@@ -331,9 +329,13 @@ case "\$COMMAND" in
         ARGS=(onboard)
         [ -n "\$DOMAIN" ] && ARGS+=(--domain "\$DOMAIN")
         log "Executing: unbound onboard (keys via env vars) \${DOMAIN:+--domain \$DOMAIN}"
-        UNBOUND_API_KEY="\$API_KEY" UNBOUND_DISCOVERY_KEY="\$DISCOVERY_KEY" "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        if [ -n "\$DISCOVERY_KEY" ]; then
+            UNBOUND_API_KEY="\$API_KEY" UNBOUND_DISCOVERY_KEY="\$DISCOVERY_KEY" "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        else
+            UNBOUND_API_KEY="\$API_KEY" "\$UNBOUND_BIN" "\${ARGS[@]}" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        fi
         if [ \$EXIT_CODE -ne 0 ] && tail -40 "\$LOG_DIR/scheduled.log" | grep -qiE "401|[Ii]nvalid.*(api.?key|key)|[Uu]nauthorized"; then
-            log "HINT: Auth error detected — your API key may have been rotated in the Unbound dashboard. Re-run to update stored credentials: unbound onboard --set-cron --api-key <NEW_KEY> --discovery-key <NEW_DISCOVERY_KEY>"
+            log "HINT: Auth error detected — your API key may have been rotated in the Unbound dashboard. Re-run to update stored credentials: unbound onboard --set-cron --api-key <NEW_KEY>"
         fi
         ;;
     *)
@@ -647,10 +649,9 @@ if [ -z "$API_KEY" ]; then
     echo "Error: --api-key is required"
     usage
 fi
-if [ "$COMMAND" = "onboard" ] && [ -z "$DISCOVERY_KEY" ]; then
-    echo "Error: --discovery-key is required when --command onboard"
-    usage
-fi
+# --discovery-key is optional for onboard: per-user onboarding scans with the
+# user's own API key (WEB-4891). It is only needed for sudo/MDM (all-users)
+# enrollment, which is scheduled via --command discover, not onboard.
 if [ "$COMMAND" = "discover" ] && [ -z "$DOMAIN" ]; then
     echo "Error: --domain is required when --command discover"
     usage

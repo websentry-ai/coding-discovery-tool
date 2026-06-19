@@ -97,13 +97,13 @@ Unbound Scheduled Run Setup (Windows)
 
 Usage:
   Install (discover):  .\setup-scheduled-scan.ps1 -ApiKey <key> -Domain <url>
-  Install (onboard):   .\setup-scheduled-scan.ps1 -Command onboard -ApiKey <key> -DiscoveryKey <key> [-Domain <url>]
+  Install (onboard):   .\setup-scheduled-scan.ps1 -Command onboard -ApiKey <key> [-Domain <url>]
   Uninstall:           .\setup-scheduled-scan.ps1 -Uninstall
 
 Options:
   -Command <name>     'discover' (default) or 'onboard'
   -ApiKey <key>       User API key (or discovery key when -Command discover)
-  -DiscoveryKey <k>   Discovery key (required for -Command onboard)
+  -DiscoveryKey <k>   Org discovery key (optional; only for sudo/MDM all-users scans)
   -Domain <url>       Backend URL
   -Uninstall          Remove the scheduled task
 '@
@@ -252,10 +252,8 @@ switch ($Command) {
         Write-Log ("Discover exited with code {0}" -f $ec)
     }
     'onboard' {
-        if ([string]::IsNullOrEmpty($DiscoveryKey)) {
-            Write-Log "ERROR: discovery_key missing from Credential Manager (required for onboard command)"
-            exit 1
-        }
+        # Per-user onboarding scans with the user's own API key (WEB-4891), so a
+        # discovery key is optional — forward it only when one was stored.
         $unbound = (Get-Command unbound -ErrorAction SilentlyContinue).Source
         if (-not $unbound) {
             Write-Log "ERROR: 'unbound' CLI not found in PATH. Install with: npm install -g unbound-cli"
@@ -264,7 +262,7 @@ switch ($Command) {
         # Credentials go via env vars — Win32_Process.CommandLine is readable by any
         # authenticated user and Windows Event Log 4688 captures full command lines.
         $env:UNBOUND_API_KEY       = $ApiKey
-        $env:UNBOUND_DISCOVERY_KEY = $DiscoveryKey
+        if (-not [string]::IsNullOrEmpty($DiscoveryKey)) { $env:UNBOUND_DISCOVERY_KEY = $DiscoveryKey }
         $cmdArgs = @('onboard')
         if (-not [string]::IsNullOrEmpty($Domain)) { $cmdArgs += @('--domain', $Domain) }
         Write-Log "Executing: unbound onboard (credentials via env vars) ..."
@@ -401,10 +399,8 @@ if ([string]::IsNullOrEmpty($ApiKey)) {
     Write-Host "Error: -ApiKey is required"
     Show-Usage
 }
-if ($Command -eq 'onboard' -and [string]::IsNullOrEmpty($DiscoveryKey)) {
-    Write-Host "Error: -DiscoveryKey is required when -Command onboard"
-    Show-Usage
-}
+# -DiscoveryKey is optional for onboard: per-user onboarding scans with the
+# user's own API key (WEB-4891). It is only needed for sudo/MDM all-users scans.
 if ($Command -eq 'discover' -and [string]::IsNullOrEmpty($Domain)) {
     Write-Host "Error: -Domain is required when -Command discover"
     Show-Usage

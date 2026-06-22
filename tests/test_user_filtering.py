@@ -253,6 +253,24 @@ class TestRealUserOrNone(unittest.TestCase):
     def test_none_input_rejected(self):
         self.assertIsNone(_real_user_or_none(None))
 
+    def test_windows_builtin_service_identities_rejected(self):
+        for name in (
+            "NT AUTHORITY\\LOCAL SERVICE",
+            "NT AUTHORITY\\NETWORK SERVICE",
+            "NT AUTHORITY\\SYSTEM",
+            "nt authority\\local service",  # case-insensitive domain
+            "NT SERVICE\\MSSQLSERVER",  # any NT SERVICE principal
+        ):
+            self.assertIsNone(_real_user_or_none(name), name)
+
+    def test_bare_windows_builtins_rejected(self):
+        for name in ("Administrator", "LocalSystem", "LOCAL SERVICE", "Network Service"):
+            self.assertIsNone(_real_user_or_none(name), name)
+
+    def test_domain_qualified_human_is_stripped_self_contained(self):
+        # Self-contained: strips DOMAIN\\ even if a caller skips get_user_info.
+        self.assertEqual(_real_user_or_none("CORP\\alice"), "alice")
+
 
 class TestGetAuditUser(unittest.TestCase):
     """get_audit_user() returns the real human OR None (never junk)."""

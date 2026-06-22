@@ -485,6 +485,12 @@ _NON_HUMAN_USERS: FrozenSet[str] = frozenset(
         "root",
         "system",
         "unknown",
+        # Windows built-in / service identities (may also appear bare, without a
+        # DOMAIN prefix, depending on how whoami resolves them).
+        "administrator",
+        "localsystem",
+        "local service",
+        "network service",
         # Common Linux service accounts.
         "www-data",
         "postgres",
@@ -494,6 +500,11 @@ _NON_HUMAN_USERS: FrozenSet[str] = frozenset(
         "mysql",
     }
 )
+
+# Windows domains that only ever own service principals (e.g.
+# ``NT AUTHORITY\LOCAL SERVICE``, ``NT SERVICE\MSSQLSERVER``). Any user under
+# these is a service account, never a human end-user.
+_NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
 
 
 def _strip_windows_domain(name: str) -> str:
@@ -518,25 +529,34 @@ def _real_user_or_none(name: Optional[str]) -> Optional[str]:
     """Return the trimmed username if it is a real human, otherwise None.
 
     Maps junk / service / machine identities to None so scan-lifecycle audit
-    payloads never attribute a machine to a non-human account. Rejected
-    (case-insensitive, after trimming):
+    payloads never attribute a machine to a non-human account. This is the
+    canonical filter and is self-contained: it strips any Windows ``DOMAIN\\``
+    prefix itself, so it is safe regardless of the caller's path. Rejected
+    (case-insensitive, after trimming + domain-stripping):
       - empty / whitespace-only
+      - anything under the ``NT AUTHORITY`` / ``NT SERVICE`` Windows domains
+        (e.g. ``NT AUTHORITY\\LOCAL SERVICE``, ``NT SERVICE\\MSSQLSERVER``)
       - the literal ``"unknown"``
-      - exactly ``"root"`` or ``"SYSTEM"``
+      - ``"root"``, ``"system"``, and Windows built-ins (administrator,
+        localsystem, local service, network service)
       - anything starting with ``"_"`` (macOS daemon accounts)
       - anything ending with ``"$"`` (Windows machine accounts)
       - common Linux service accounts (www-data, postgres, nobody, daemon,
         nginx, mysql)
 
     Args:
-        name: Candidate username (may be None).
+        name: Candidate username (may be None, may be ``DOMAIN\\username``).
 
     Returns:
-        The trimmed username if it is a real human, otherwise None.
+        The trimmed, domain-stripped username if it is a real human, else None.
     """
     if not name:
         return None
-    stripped = name.strip()
+    raw = name.strip()
+    # Reject service principals by their Windows domain before stripping it.
+    if "\\" in raw and raw.split("\\")[0].strip().lower() in _NON_HUMAN_WINDOWS_DOMAINS:
+        return None
+    stripped = _strip_windows_domain(raw).strip()
     if not stripped:
         return None
     if stripped.startswith("_"):

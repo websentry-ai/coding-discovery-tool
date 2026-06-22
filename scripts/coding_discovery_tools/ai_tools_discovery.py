@@ -2324,6 +2324,10 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
+    # The real-human-or-None audit identity, captured once below via
+    # get_audit_user(). Initialized here so the failure closures can pass it
+    # safely even if they fire before capture (in which case it is still None).
+    system_user = None
 
     def _mark_run_failed(error_type: str, message: str) -> None:
         """Best-effort: tell the backend this run failed. Idempotent (a flag race
@@ -2344,6 +2348,7 @@ def main():
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                 },
                 sentry_context=sentry_ctx,
+                system_user=system_user,
             )
         except Exception:
             pass
@@ -2496,6 +2501,12 @@ def main():
         # home_user when this is None.
         with time_step("get_system_user", "detect"):
             system_user = get_audit_user()
+        if system_user is None:
+            logger.debug(
+                "Audit system_user resolved to None (non-human or undetectable "
+                "context); tool reports fall back to home_user and lifecycle "
+                "events omit system_user"
+            )
         sentry_ctx["system_user"] = system_user
 
         # Send scan in_progress event BEFORE scanning

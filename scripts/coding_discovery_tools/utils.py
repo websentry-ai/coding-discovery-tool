@@ -477,6 +477,91 @@ def get_all_users_linux() -> List[str]:
     return users
 
 
+# Identities that are never a real human end-user. We map these to None for the
+# audit/payload value so the backend never attributes a machine to a service
+# account. Matching is case-insensitive against the whole, trimmed name.
+_NON_HUMAN_USERS: FrozenSet[str] = frozenset(
+    {
+        "root",
+        "system",
+        "unknown",
+        # Common Linux service accounts.
+        "www-data",
+        "postgres",
+        "nobody",
+        "daemon",
+        "nginx",
+        "mysql",
+    }
+)
+
+
+def _strip_windows_domain(name: str) -> str:
+    """Return the bare username from a Windows ``DOMAIN\\username`` string.
+
+    ``whoami`` on Windows returns ``DOMAIN\\username`` (or ``MACHINE\\username``);
+    we only want the trailing username component. Names without a backslash are
+    returned unchanged.
+
+    Args:
+        name: Raw whoami output (possibly ``DOMAIN\\username``).
+
+    Returns:
+        The bare username with any domain prefix stripped.
+    """
+    if name and "\\" in name:
+        return name.split("\\")[-1]
+    return name
+
+
+def _real_user_or_none(name: Optional[str]) -> Optional[str]:
+    """Return the trimmed username if it is a real human, otherwise None.
+
+    Maps junk / service / machine identities to None so scan-lifecycle audit
+    payloads never attribute a machine to a non-human account. Rejected
+    (case-insensitive, after trimming):
+      - empty / whitespace-only
+      - the literal ``"unknown"``
+      - exactly ``"root"`` or ``"SYSTEM"``
+      - anything starting with ``"_"`` (macOS daemon accounts)
+      - anything ending with ``"$"`` (Windows machine accounts)
+      - common Linux service accounts (www-data, postgres, nobody, daemon,
+        nginx, mysql)
+
+    Args:
+        name: Candidate username (may be None).
+
+    Returns:
+        The trimmed username if it is a real human, otherwise None.
+    """
+    if not name:
+        return None
+    stripped = name.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("_"):
+        return None
+    if stripped.endswith("$"):
+        return None
+    if stripped.lower() in _NON_HUMAN_USERS:
+        return None
+    return stripped
+
+
+def get_audit_user() -> Optional[str]:
+    """Return the real human user running the scan, or None.
+
+    This is the value to attach to scan-lifecycle audit payloads: it is the
+    real human OR None, never a junk/service/machine identity. For
+    container/daemon/root scans where no human can be resolved, returns None
+    rather than a synthesized owner.
+
+    Returns:
+        The real human username, or None when no human user can be resolved.
+    """
+    return _real_user_or_none(get_user_info())
+
+
 def get_user_info() -> str:
     """
     Get current user information (whoami equivalent).
@@ -485,23 +570,27 @@ def get_user_info() -> str:
 
     On macOS, when running as root, finds the user with the most storage space
     in /Users directory to get the actual user instead of "root".
-    
+
     On Windows, when running as administrator, finds the actual logged-in user
     by querying explorer.exe process owner, Win32_ComputerSystem, or active console
     session instead of returning "Administrator" or "admin".
-    
+
+    NOTE: This ALWAYS returns a usable, non-None string (falling back to
+    "unknown"). Callers that build filesystem paths like ``/Users/<user>`` rely
+    on that guarantee. For an audit/payload value that is the real human OR
+    None, use ``get_audit_user()`` instead.
+
     Returns:
-        Current username as string
+        Current username as string (never None)
     """
     try:
         username = None
-        
+
         if platform.system() == "Windows":
             # Use whoami command on Windows (works reliably)
             whoami_output = run_command(["whoami"], COMMAND_TIMEOUT)
             # Extract just the username if whoami returns DOMAIN\username format
-            if username and "\\" in username:
-                username = username.split("\\")[-1]
+            username = _strip_windows_domain(whoami_output) if whoami_output else None
         else:
             # On macOS/Linux, check if running as root first
             current_user = run_command(["whoami"], COMMAND_TIMEOUT)
@@ -589,7 +678,8 @@ def send_scan_event(
     app_name: Optional[str] = None,
     home_user: Optional[str] = None,
     scan_error: Optional[Dict] = None,
-    sentry_context: Optional[Dict] = None
+    sentry_context: Optional[Dict] = None,
+    system_user: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -604,6 +694,9 @@ def send_scan_event(
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
         sentry_context: Optional context dict forwarded to Sentry on failure
+        system_user: Optional real human user running the scan (or None). Used by
+            the backend to attribute empty machines. MUST be a real human or
+            None (see ``get_audit_user``), never a junk/service identity.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -616,6 +709,9 @@ def send_scan_event(
 
     if app_name:
         payload["app_name"] = app_name
+
+    if system_user:
+        payload["system_user"] = system_user
 
     if home_user:
         payload["home_user"] = home_user

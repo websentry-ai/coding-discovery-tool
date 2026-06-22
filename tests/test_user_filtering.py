@@ -11,8 +11,12 @@ from scripts.coding_discovery_tools.utils import (
     _fetch_dscl_batch_data,
     _is_human_user_macos,
     _parse_dscl_list_output,
+    _real_user_or_none,
+    _strip_windows_domain,
     get_all_users_macos,
     get_all_users_windows,
+    get_audit_user,
+    get_user_info,
 )
 
 EMPTY_BATCH = DsclBatchData(uid_map={}, shell_map={}, hidden_set=frozenset())
@@ -204,6 +208,101 @@ class TestGetAllUsersWindows(unittest.TestCase):
         self.assertIn("bob", result)
         for excluded in ("Public", "Default", "Default User", "All Users", "TEMP", ".hidden"):
             self.assertNotIn(excluded, result)
+
+
+class TestRealUserOrNone(unittest.TestCase):
+    """The audit helper: real human in -> trimmed name; junk/service -> None."""
+
+    def test_real_human_passes_through(self):
+        self.assertEqual(_real_user_or_none("alice"), "alice")
+
+    def test_real_human_is_trimmed(self):
+        self.assertEqual(_real_user_or_none("  alice  "), "alice")
+
+    def test_root_rejected(self):
+        self.assertIsNone(_real_user_or_none("root"))
+
+    def test_root_case_insensitive(self):
+        self.assertIsNone(_real_user_or_none("ROOT"))
+
+    def test_macos_daemon_underscore_prefix_rejected(self):
+        self.assertIsNone(_real_user_or_none("_windowserver"))
+
+    def test_system_rejected(self):
+        self.assertIsNone(_real_user_or_none("SYSTEM"))
+
+    def test_windows_machine_account_trailing_dollar_rejected(self):
+        self.assertIsNone(_real_user_or_none("WIN-ABC$"))
+
+    def test_linux_service_account_rejected(self):
+        self.assertIsNone(_real_user_or_none("www-data"))
+
+    def test_other_linux_service_accounts_rejected(self):
+        for name in ("postgres", "nobody", "daemon", "nginx", "mysql"):
+            self.assertIsNone(_real_user_or_none(name), name)
+
+    def test_unknown_literal_rejected(self):
+        self.assertIsNone(_real_user_or_none("unknown"))
+
+    def test_empty_string_rejected(self):
+        self.assertIsNone(_real_user_or_none(""))
+
+    def test_whitespace_only_rejected(self):
+        self.assertIsNone(_real_user_or_none("   "))
+
+    def test_none_input_rejected(self):
+        self.assertIsNone(_real_user_or_none(None))
+
+
+class TestGetAuditUser(unittest.TestCase):
+    """get_audit_user() returns the real human OR None (never junk)."""
+
+    @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="alice")
+    def test_returns_real_human(self, _mock):
+        self.assertEqual(get_audit_user(), "alice")
+
+    @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="root")
+    def test_root_maps_to_none(self, _mock):
+        self.assertIsNone(get_audit_user())
+
+    @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="unknown")
+    def test_unknown_maps_to_none(self, _mock):
+        self.assertIsNone(get_audit_user())
+
+
+class TestGetUserInfoGuaranteedString(unittest.TestCase):
+    """get_user_info() must always return a usable string for /Users paths."""
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value="alice")
+    def test_returns_string_for_normal_user(self, _cmd, _sys):
+        result = get_user_info()
+        self.assertEqual(result, "alice")
+        self.assertIsInstance(result, str)
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value=None)
+    def test_falls_back_to_unknown_never_none(self, _cmd, _sys):
+        # When every resolution method yields nothing, the /Users-path resolver
+        # must still return a non-None string (so callers never build /Users/None).
+        # getpass is imported locally inside get_user_info, so patch the stdlib module.
+        with patch("getpass.getuser", return_value=""):
+            result = get_user_info()
+        self.assertIsNotNone(result)
+        self.assertEqual(result, "unknown")
+
+
+class TestStripWindowsDomain(unittest.TestCase):
+    """Windows DOMAIN\\username parse yields the bare username."""
+
+    def test_domain_prefix_stripped(self):
+        self.assertEqual(_strip_windows_domain("CORP\\bob"), "bob")
+
+    def test_machine_prefix_stripped(self):
+        self.assertEqual(_strip_windows_domain("WIN-ABC\\alice"), "alice")
+
+    def test_no_backslash_returned_unchanged(self):
+        self.assertEqual(_strip_windows_domain("alice"), "alice")
 
 
 if __name__ == "__main__":

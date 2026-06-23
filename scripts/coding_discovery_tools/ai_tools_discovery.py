@@ -27,8 +27,8 @@ from typing import Dict, Iterator, List, Optional, Callable
 # killed — a SIGKILL leaves a fresh-mtime lock that would otherwise block the next
 # run. Kept in sync with the parent timeouts in setup/mdm/onboard.py and
 # unbound-cli's discover.js (which pass --timeout and use a larger kill backstop).
-# 90 minutes. Pass --timeout <=0 to disable.
-DEFAULT_RUN_TIMEOUT_SECONDS = 5400
+# 150 minutes. Pass --timeout <=0 to disable.
+DEFAULT_RUN_TIMEOUT_SECONDS = 9000
 
 SCRIPT_VERSION = "1.1.0"
 

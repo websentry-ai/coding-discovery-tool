@@ -273,18 +273,28 @@ class TestRealUserOrNone(unittest.TestCase):
 
 
 class TestGetAuditUser(unittest.TestCase):
-    """get_audit_user() returns the real human OR None (never junk)."""
+    """get_audit_user() returns the real human OR None (never junk).
 
+    These exercise the non-Windows resolution path (get_user_info()), so they
+    pin platform.system to "Darwin" — otherwise on a Windows CI runner
+    get_audit_user() takes the raw-whoami branch and the runner's real account
+    leaks past the get_user_info() patch. The Windows raw-whoami branch is
+    covered by TestGetAuditUserWindowsService.
+    """
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="alice")
-    def test_returns_real_human(self, _mock):
+    def test_returns_real_human(self, _mock_user, _mock_platform):
         self.assertEqual(get_audit_user(), "alice")
 
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="root")
-    def test_root_maps_to_none(self, _mock):
+    def test_root_maps_to_none(self, _mock_user, _mock_platform):
         self.assertIsNone(get_audit_user())
 
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
     @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="unknown")
-    def test_unknown_maps_to_none(self, _mock):
+    def test_unknown_maps_to_none(self, _mock_user, _mock_platform):
         self.assertIsNone(get_audit_user())
 
 

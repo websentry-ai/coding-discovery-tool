@@ -584,6 +584,16 @@ def get_audit_user() -> Optional[str]:
     Returns:
         The real human username, or None when no human user can be resolved.
     """
+    # On Windows, resolve the RAW, domain-qualified identity (``whoami`` →
+    # ``DOMAIN\\user``) so _real_user_or_none can apply its NT AUTHORITY /
+    # NT SERVICE domain rejection. get_user_info() pre-strips the ``DOMAIN\\``
+    # prefix (path-building needs the bare name), which would otherwise hide a
+    # service principal like ``NT SERVICE\\MSSQLSERVER`` behind its bare,
+    # non-denylisted name. Fall back to get_user_info() if whoami yields nothing.
+    if platform.system() == "Windows":
+        raw = run_command(["whoami"], COMMAND_TIMEOUT)
+        if raw:
+            return _real_user_or_none(raw)
     return _real_user_or_none(get_user_info())
 
 

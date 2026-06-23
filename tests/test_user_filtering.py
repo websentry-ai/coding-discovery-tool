@@ -288,6 +288,39 @@ class TestGetAuditUser(unittest.TestCase):
         self.assertIsNone(get_audit_user())
 
 
+class TestGetAuditUserWindowsService(unittest.TestCase):
+    """On Windows, get_audit_user must apply the domain-based rejection to the
+    RAW whoami output. get_user_info() pre-strips the DOMAIN\\ prefix, so a
+    service principal like NT SERVICE\\MSSQLSERVER would otherwise leak through
+    as the bare, non-denylisted name 'MSSQLSERVER'.
+    """
+
+    @patch("scripts.coding_discovery_tools.utils.run_command")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_nt_service_named_accounts_rejected(self, _sys, mock_cmd):
+        for raw in (
+            "NT SERVICE\\MSSQLSERVER",
+            "NT SERVICE\\WinDefend",
+            "NT AUTHORITY\\SYSTEM",
+            "NT AUTHORITY\\LOCAL SERVICE",
+        ):
+            mock_cmd.return_value = raw
+            self.assertIsNone(get_audit_user(), raw)
+
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value="CORP\\alice")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_domain_qualified_human_passes(self, _sys, _cmd):
+        self.assertEqual(get_audit_user(), "alice")
+
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value=None)
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_empty_whoami_falls_back_to_get_user_info(self, _sys, _cmd):
+        with patch(
+            "scripts.coding_discovery_tools.utils.get_user_info", return_value="bob"
+        ):
+            self.assertEqual(get_audit_user(), "bob")
+
+
 class TestGetUserInfoGuaranteedString(unittest.TestCase):
     """get_user_info() must always return a usable string for /Users paths."""
 

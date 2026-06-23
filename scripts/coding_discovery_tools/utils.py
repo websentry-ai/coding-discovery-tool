@@ -480,6 +480,11 @@ def get_all_users_linux() -> List[str]:
 # Identities that are never a real human end-user. We map these to None for the
 # audit/payload value so the backend never attributes a machine to a service
 # account. Matching is case-insensitive against the whole, trimmed name.
+# Trade-off: a rare human whose login literally equals one of these (e.g. an
+# admin named "administrator", or a person named "daemon"/"nginx") is also
+# rejected. We accept that — for audit attribution a false None is safer than
+# mislabelling a machine with a service identity (the FE shows "No AI tools
+# detected" rather than a wrong owner).
 _NON_HUMAN_USERS: FrozenSet[str] = frozenset(
     {
         "root",
@@ -591,9 +596,10 @@ def get_user_info() -> str:
     On macOS, when running as root, finds the user with the most storage space
     in /Users directory to get the actual user instead of "root".
 
-    On Windows, when running as administrator, finds the actual logged-in user
-    by querying explorer.exe process owner, Win32_ComputerSystem, or active console
-    session instead of returning "Administrator" or "admin".
+    On Windows, returns ``whoami`` with any ``DOMAIN\\`` prefix stripped, falling
+    back to ``getpass.getuser()``. (It does NOT currently resolve the real
+    interactive user when running as a service/SYSTEM — get_audit_user() maps
+    such non-human identities to None.)
 
     NOTE: This ALWAYS returns a usable, non-None string (falling back to
     "unknown"). Callers that build filesystem paths like ``/Users/<user>`` rely

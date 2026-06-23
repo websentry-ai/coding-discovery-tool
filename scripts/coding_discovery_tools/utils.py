@@ -477,6 +477,126 @@ def get_all_users_linux() -> List[str]:
     return users
 
 
+# Identities that are never a real human end-user. We map these to None for the
+# audit/payload value so the backend never attributes a machine to a service
+# account. Matching is case-insensitive against the whole, trimmed name.
+# Trade-off: a rare human whose login literally equals one of these (e.g. an
+# admin named "administrator", or a person named "daemon"/"nginx") is also
+# rejected. We accept that — for audit attribution a false None is safer than
+# mislabelling a machine with a service identity (the FE shows "No AI tools
+# detected" rather than a wrong owner).
+_NON_HUMAN_USERS: FrozenSet[str] = frozenset(
+    {
+        "root",
+        "system",
+        "unknown",
+        # Windows built-in / service identities (may also appear bare, without a
+        # DOMAIN prefix, depending on how whoami resolves them).
+        "administrator",
+        "localsystem",
+        "local service",
+        "network service",
+        # Common Linux service accounts.
+        "www-data",
+        "postgres",
+        "nobody",
+        "daemon",
+        "nginx",
+        "mysql",
+    }
+)
+
+# Windows domains that only ever own service principals (e.g.
+# ``NT AUTHORITY\LOCAL SERVICE``, ``NT SERVICE\MSSQLSERVER``). Any user under
+# these is a service account, never a human end-user.
+_NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
+
+
+def _strip_windows_domain(name: str) -> str:
+    """Return the bare username from a Windows ``DOMAIN\\username`` string.
+
+    ``whoami`` on Windows returns ``DOMAIN\\username`` (or ``MACHINE\\username``);
+    we only want the trailing username component. Names without a backslash are
+    returned unchanged.
+
+    Args:
+        name: Raw whoami output (possibly ``DOMAIN\\username``).
+
+    Returns:
+        The bare username with any domain prefix stripped.
+    """
+    if name and "\\" in name:
+        return name.split("\\")[-1]
+    return name
+
+
+def _real_user_or_none(name: Optional[str]) -> Optional[str]:
+    """Return the trimmed username if it is a real human, otherwise None.
+
+    Maps junk / service / machine identities to None so scan-lifecycle audit
+    payloads never attribute a machine to a non-human account. This is the
+    canonical filter and is self-contained: it strips any Windows ``DOMAIN\\``
+    prefix itself, so it is safe regardless of the caller's path. Rejected
+    (case-insensitive, after trimming + domain-stripping):
+      - empty / whitespace-only
+      - anything under the ``NT AUTHORITY`` / ``NT SERVICE`` Windows domains
+        (e.g. ``NT AUTHORITY\\LOCAL SERVICE``, ``NT SERVICE\\MSSQLSERVER``)
+      - the literal ``"unknown"``
+      - ``"root"``, ``"system"``, and Windows built-ins (administrator,
+        localsystem, local service, network service)
+      - anything starting with ``"_"`` (macOS daemon accounts)
+      - anything ending with ``"$"`` (Windows machine accounts)
+      - common Linux service accounts (www-data, postgres, nobody, daemon,
+        nginx, mysql)
+
+    Args:
+        name: Candidate username (may be None, may be ``DOMAIN\\username``).
+
+    Returns:
+        The trimmed, domain-stripped username if it is a real human, else None.
+    """
+    if not name:
+        return None
+    raw = name.strip()
+    # Reject service principals by their Windows domain before stripping it.
+    if "\\" in raw and raw.split("\\")[0].strip().lower() in _NON_HUMAN_WINDOWS_DOMAINS:
+        return None
+    stripped = _strip_windows_domain(raw).strip()
+    if not stripped:
+        return None
+    if stripped.startswith("_"):
+        return None
+    if stripped.endswith("$"):
+        return None
+    if stripped.lower() in _NON_HUMAN_USERS:
+        return None
+    return stripped
+
+
+def get_audit_user() -> Optional[str]:
+    """Return the real human user running the scan, or None.
+
+    This is the value to attach to scan-lifecycle audit payloads: it is the
+    real human OR None, never a junk/service/machine identity. For
+    container/daemon/root scans where no human can be resolved, returns None
+    rather than a synthesized owner.
+
+    Returns:
+        The real human username, or None when no human user can be resolved.
+    """
+    # On Windows, resolve the RAW, domain-qualified identity (``whoami`` →
+    # ``DOMAIN\\user``) so _real_user_or_none can apply its NT AUTHORITY /
+    # NT SERVICE domain rejection. get_user_info() pre-strips the ``DOMAIN\\``
+    # prefix (path-building needs the bare name), which would otherwise hide a
+    # service principal like ``NT SERVICE\\MSSQLSERVER`` behind its bare,
+    # non-denylisted name. Fall back to get_user_info() if whoami yields nothing.
+    if platform.system() == "Windows":
+        raw = run_command(["whoami"], COMMAND_TIMEOUT)
+        if raw:
+            return _real_user_or_none(raw)
+    return _real_user_or_none(get_user_info())
+
+
 def get_user_info() -> str:
     """
     Get current user information (whoami equivalent).
@@ -485,23 +605,28 @@ def get_user_info() -> str:
 
     On macOS, when running as root, finds the user with the most storage space
     in /Users directory to get the actual user instead of "root".
-    
-    On Windows, when running as administrator, finds the actual logged-in user
-    by querying explorer.exe process owner, Win32_ComputerSystem, or active console
-    session instead of returning "Administrator" or "admin".
-    
+
+    On Windows, returns ``whoami`` with any ``DOMAIN\\`` prefix stripped, falling
+    back to ``getpass.getuser()``. (It does NOT currently resolve the real
+    interactive user when running as a service/SYSTEM — get_audit_user() maps
+    such non-human identities to None.)
+
+    NOTE: This ALWAYS returns a usable, non-None string (falling back to
+    "unknown"). Callers that build filesystem paths like ``/Users/<user>`` rely
+    on that guarantee. For an audit/payload value that is the real human OR
+    None, use ``get_audit_user()`` instead.
+
     Returns:
-        Current username as string
+        Current username as string (never None)
     """
     try:
         username = None
-        
+
         if platform.system() == "Windows":
             # Use whoami command on Windows (works reliably)
             whoami_output = run_command(["whoami"], COMMAND_TIMEOUT)
             # Extract just the username if whoami returns DOMAIN\username format
-            if username and "\\" in username:
-                username = username.split("\\")[-1]
+            username = _strip_windows_domain(whoami_output) if whoami_output else None
         else:
             # On macOS/Linux, check if running as root first
             current_user = run_command(["whoami"], COMMAND_TIMEOUT)
@@ -589,7 +714,8 @@ def send_scan_event(
     app_name: Optional[str] = None,
     home_user: Optional[str] = None,
     scan_error: Optional[Dict] = None,
-    sentry_context: Optional[Dict] = None
+    sentry_context: Optional[Dict] = None,
+    system_user: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -604,6 +730,9 @@ def send_scan_event(
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
         sentry_context: Optional context dict forwarded to Sentry on failure
+        system_user: Optional real human user running the scan (or None). Used by
+            the backend to attribute empty machines. MUST be a real human or
+            None (see ``get_audit_user``), never a junk/service identity.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -616,6 +745,9 @@ def send_scan_event(
 
     if app_name:
         payload["app_name"] = app_name
+
+    if system_user:
+        payload["system_user"] = system_user
 
     if home_user:
         payload["home_user"] = home_user

@@ -403,6 +403,40 @@ class TestScanEvents(unittest.TestCase):
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_event_includes_system_user_when_provided(self, _sleep):
+        """A real human system_user is included in the lifecycle payload."""
+        success, _retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "completed",
+            system_user="alice",
+        )
+
+        self.assertTrue(success)
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["system_user"], "alice")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_event_omits_system_user_when_none(self, _sleep):
+        """system_user is omitted from the payload when None (no junk owner)."""
+        success, _retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "in_progress",
+            system_user=None,
+        )
+
+        self.assertTrue(success)
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertNotIn("system_user", payload)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_scan_failed_with_user_error(self, _sleep):
         """Test sending scan failed event with user-specific error."""
         scan_error = {

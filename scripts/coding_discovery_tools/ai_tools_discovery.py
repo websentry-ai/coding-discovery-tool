@@ -76,7 +76,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -130,7 +130,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -2327,6 +2327,10 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
+    # The real-human-or-None audit identity, captured once below via
+    # get_audit_user(). Initialized here so the failure closures can pass it
+    # safely even if they fire before capture (in which case it is still None).
+    system_user = None
 
     def _mark_run_failed(error_type: str, message: str) -> None:
         """Best-effort: tell the backend this run failed. Idempotent (a flag race
@@ -2347,6 +2351,7 @@ def main():
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                 },
                 sentry_context=sentry_ctx,
+                system_user=system_user,
             )
         except Exception:
             pass
@@ -2491,9 +2496,20 @@ def main():
             logger.info(f"  - {user}")
         logger.info("")
 
-        # Get system_user once (who is running the script) for audit purposes
+        # Get the real human running the script (or None) once, for audit
+        # attribution. This must be a real human OR None — never root /
+        # _service / SYSTEM / a Windows machine account / "unknown" — so the
+        # backend never attributes an empty machine to a service identity. The
+        # data-report path (generate_single_tool_report) falls back to
+        # home_user when this is None.
         with time_step("get_system_user", "detect"):
-            system_user = get_user_info()
+            system_user = get_audit_user()
+        if system_user is None:
+            logger.debug(
+                "Audit system_user resolved to None (non-human or undetectable "
+                "context); tool reports fall back to home_user and lifecycle "
+                "events omit system_user"
+            )
         sentry_ctx["system_user"] = system_user
 
         # Send scan in_progress event BEFORE scanning
@@ -2501,7 +2517,7 @@ def main():
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
-                args.app_name, sentry_context=sentry_ctx
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user
             )
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
@@ -2786,7 +2802,7 @@ def main():
                         success, _ = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
-                            sentry_context=sentry_ctx
+                            sentry_context=sentry_ctx, system_user=system_user
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
@@ -2863,7 +2879,7 @@ def main():
         logger.info("Sending scan completed event...")
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
-            args.app_name, sentry_context=sentry_ctx
+            args.app_name, sentry_context=sentry_ctx, system_user=system_user
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

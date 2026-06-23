@@ -28,7 +28,13 @@ def _normalize_url(url):
 def scan_one(server_name, server_config):
     """Scan a single server; returns the per-server object {name, command, url, args, scan}."""
     servers = transform_mcp_servers_to_array({server_name: server_config})
-    return servers[0] if servers else None
+    obj = servers[0] if servers else None
+    # Forward the base64 script body the hook attached for local-script servers
+    # (it resolved the path with cwd; we run detached without it). The backend
+    # recomputes sha256 -> `script:<hash>` fingerprint and stores the body.
+    if obj is not None and isinstance(server_config, dict) and server_config.get('script_content'):
+        obj['script_content'] = server_config['script_content']
+    return obj
 
 
 def _curl_config_quote(value):

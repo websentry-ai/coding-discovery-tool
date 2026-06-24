@@ -64,6 +64,8 @@ class WindowsJetBrainsDetector(BaseToolDetector):
     IDE_NAME_MAPPING = {
         "IntelliJIdea": "IntelliJ IDEA",
         "IdeaIC": "IntelliJ IDEA Community",
+        "IdeaIE": "IntelliJ IDEA Educational",
+        "Aqua": "Aqua",
         "PyCharm": "PyCharm",
         "PyCharmCE": "PyCharm Community",
         "WebStorm": "WebStorm",

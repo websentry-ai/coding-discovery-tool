@@ -34,6 +34,8 @@ def scan_one(server_name, server_config):
     # recomputes sha256 -> `script:<hash>` fingerprint and stores the body.
     if obj is not None and isinstance(server_config, dict) and server_config.get('script_content'):
         obj['script_content'] = server_config['script_content']
+        print(f"info: forwarding script_content ({len(server_config['script_content'])} b64 chars) for {server_name}",
+              file=sys.stderr)
     return obj
 
 

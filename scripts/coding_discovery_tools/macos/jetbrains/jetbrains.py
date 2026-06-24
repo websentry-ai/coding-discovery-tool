@@ -196,8 +196,8 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
     @staticmethod
     def _detect_plan(folder_name: str) -> str:
-        """Return 'Free' for Community editions, 'Licensed' otherwise."""
-        if "IdeaIC" in folder_name or "PyCharmCE" in folder_name:
+        """Return 'Free' for Community/Educational editions, 'Licensed' otherwise."""
+        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
             return "Free"
         return "Licensed"
 

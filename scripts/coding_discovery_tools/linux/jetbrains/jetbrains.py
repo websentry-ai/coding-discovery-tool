@@ -154,7 +154,7 @@ class LinuxJetBrainsDetector(BaseToolDetector):
 
     @staticmethod
     def _detect_plan(folder_name: str) -> str:
-        if "IdeaIC" in folder_name or "PyCharmCE" in folder_name:
+        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
             return "Free"
         return "Licensed"
 

@@ -27,6 +27,8 @@ class MacOSJetBrainsDetector(BaseToolDetector):
     IDE_NAME_MAPPING = {
         "IntelliJIdea": "IntelliJ IDEA",
         "IdeaIC": "IntelliJ IDEA Community",
+        "IdeaIE": "IntelliJ IDEA Educational",
+        "Aqua": "Aqua",
         "PyCharm": "PyCharm",
         "PyCharmCE": "PyCharm Community",
         "WebStorm": "WebStorm",
@@ -42,6 +44,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
     # Folders to skip when scanning JetBrains directory
     SKIP_FOLDERS = {
+        "consent", "DeviceId", "JetBrainsClient",
         "consentOptions", "PrivacyPolicy", "Toolbox",
     }
 
@@ -193,8 +196,8 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
     @staticmethod
     def _detect_plan(folder_name: str) -> str:
-        """Return 'Free' for Community editions, 'Licensed' otherwise."""
-        if "IdeaIC" in folder_name or "PyCharmCE" in folder_name:
+        """Return 'Free' for Community/Educational editions, 'Licensed' otherwise."""
+        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
             return "Free"
         return "Licensed"
 

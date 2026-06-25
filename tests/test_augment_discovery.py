@@ -378,6 +378,43 @@ class TestAugmentMCPNestings(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_workspace_walk_skips_user_augment_dir(self):
+        """A user-home ``~/.augment`` already collected as USER scope must NOT be
+        re-collected by the workspace walk as PROJECT scope — otherwise the same
+        MCP servers are duplicated under two project paths (Greptile finding). A
+        genuine project ``.augment`` is still collected."""
+        tmp = tempfile.mkdtemp()
+        try:
+            root = Path(tmp)
+            user_augment = root / "home" / ".augment"
+            user_augment.mkdir(parents=True)
+            (user_augment / "settings.json").write_text(json.dumps({
+                "mcpServers": {"db": {"command": "mcp-db"}},
+            }), encoding="utf-8")
+            proj_augment = root / "repo" / ".augment"
+            proj_augment.mkdir(parents=True)
+            (proj_augment / "settings.json").write_text(json.dumps({
+                "mcpServers": {"proj": {"command": "mcp-proj"}},
+            }), encoding="utf-8")
+
+            extractor = MacOSAugmentMCPConfigExtractor()
+            # Pretend the user-home ~/.augment was already collected as USER scope.
+            extractor._scanned_user_augment_dirs = {user_augment.resolve()}
+
+            projects = []
+            # Drive the walk from the temp ancestor (current_depth=0 avoids the
+            # relative_to('/') path that breaks on Windows) with the system-skip
+            # predicate neutralised for the temp tree.
+            with patch.object(extractor, "_should_skip_workspace_path", return_value=False):
+                extractor._walk_for_workspace_configs(root, root, projects, current_depth=0)
+
+            paths = {p["path"] for p in projects}
+            # User-home .augment SKIPPED (no project entry); the real repo kept.
+            self.assertNotIn(str(user_augment.parent), paths)
+            self.assertIn(str(proj_augment.parent), paths)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # 5. Windows + Linux subclasses import/instantiate (smoke)

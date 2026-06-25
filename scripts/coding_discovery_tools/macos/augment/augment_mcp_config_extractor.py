@@ -78,6 +78,12 @@ class MacOSAugmentMCPConfigExtractor(BaseMCPConfigExtractor):
         (``<project>/.augment/settings.json``). Returns a ``projects`` dict, or
         None if empty.
         """
+        # Track each user-home ``~/.augment`` collected as USER scope so the
+        # workspace walk below doesn't re-collect the same settings.json as a
+        # PROJECT-scope config — that would duplicate the identical MCP servers
+        # under two project paths (~/.augment as user + the home dir as project).
+        self._scanned_user_augment_dirs = set()
+
         projects = extract_ide_global_configs_with_root_support(
             self._extract_user_configs_for_user,
             tool_name=_TOOL_NAME,
@@ -93,6 +99,12 @@ class MacOSAugmentMCPConfigExtractor(BaseMCPConfigExtractor):
     def _extract_user_configs_for_user(self, user_home: Path) -> List[Dict]:
         """Read the User-scope MCP config(s) for a single user's ``~/.augment``."""
         augment_dir = _resolve_augment_dir(user_home)
+        if not hasattr(self, "_scanned_user_augment_dirs"):
+            self._scanned_user_augment_dirs = set()
+        try:
+            self._scanned_user_augment_dirs.add(augment_dir.resolve())
+        except (OSError, RuntimeError):
+            self._scanned_user_augment_dirs.add(augment_dir)
         configs: List[Dict] = []
 
         settings_config = self._read_mcp_config(
@@ -151,6 +163,14 @@ class MacOSAugmentMCPConfigExtractor(BaseMCPConfigExtractor):
                     if not item.is_dir() or item.is_symlink():
                         continue
                     if item.name == _AUGMENT_DIR_NAME:
+                        # Skip a user-home ~/.augment already collected as USER
+                        # scope, so its MCP servers aren't duplicated as project.
+                        try:
+                            resolved = item.resolve()
+                        except (OSError, RuntimeError):
+                            resolved = item
+                        if resolved in getattr(self, "_scanned_user_augment_dirs", set()):
+                            continue
                         config = self._read_mcp_config(
                             item / _SETTINGS_FILENAME, str(item.parent), "project"
                         )

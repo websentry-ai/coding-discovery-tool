@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
+import scripts.coding_discovery_tools.mcp_extraction_helpers as mcp_helpers
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 from scripts.coding_discovery_tools.coding_tool_factory import (
     CopilotCliMCPConfigExtractorFactory,
@@ -493,6 +494,7 @@ class TestCopilotCliMcpExtraction(unittest.TestCase):
 _MCP_MOD = (
     "scripts.coding_discovery_tools.macos.copilot_cli.mcp_config_extractor"
 )
+_MCP_HELPERS_MOD = "scripts.coding_discovery_tools.mcp_extraction_helpers"
 
 
 class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
@@ -2655,6 +2657,134 @@ class TestWindowsCopilotCliSkillsExtraction(unittest.TestCase):
         from scripts.coding_discovery_tools.coding_tool_base import BaseCopilotCliSkillsExtractor
         self.assertTrue(issubclass(WindowsCopilotCliSkillsExtractor, BaseCopilotCliSkillsExtractor))
         self.assertNotIn(MacOSCopilotCliSkillsExtractor, WindowsCopilotCliSkillsExtractor.__mro__)
+
+
+class TestAdminScanOwnHomeNotDoubleCounted(unittest.TestCase):
+    """WEB-4673 (bug 2): an admin all-users scan must not re-process the admin's
+    own home when it is already among the scanned user dirs (the Windows case,
+    where the admin is a normal C:\\Users\\<name> profile). On macOS the root home
+    (/var/root) is outside /Users, so it is still added."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.home = Path(self.tmp_dir) / "Alice"
+        self.home.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_helper_true_when_home_in_list(self):
+        with patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home):
+            self.assertTrue(mcp_helpers._own_home_already_scanned([self.home]))
+
+    def test_helper_false_when_home_outside_list(self):
+        other = Path(self.tmp_dir) / "Bob"
+        other.mkdir()
+        with patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home):
+            self.assertFalse(mcp_helpers._own_home_already_scanned([other]))
+
+    def test_global_helper_no_double_count(self):
+        """extract_ide_global_configs_with_root_support: own home processed once."""
+        calls = []
+
+        def extract_func(uh):
+            calls.append(Path(uh))
+            return [{"path": str(Path(uh) / ".copilot"), "mcpServers": [{"name": "s"}]}]
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch("platform.system", return_value="Darwin"):
+            result = mcp_helpers.extract_ide_global_configs_with_root_support(extract_func)
+        self.assertEqual(calls.count(self.home), 1, f"home processed {calls.count(self.home)}x")
+        self.assertEqual(len(result), 1)  # not duplicated
+
+    def test_global_helper_still_adds_root_home_outside_users(self):
+        """macOS case: root's own home (outside /Users) is still added separately."""
+        root_home = Path(self.tmp_dir) / "var_root"
+        root_home.mkdir()
+        calls = []
+
+        def extract_func(uh):
+            calls.append(Path(uh))
+            return []
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=root_home), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_ide_global_configs_with_root_support(extract_func)
+        self.assertIn(self.home, calls)
+        self.assertIn(root_home, calls)  # added via the root re-add step
+
+    def test_dual_path_helper_no_double_count(self):
+        """extract_dual_path_configs_with_root_support: own preferred path read once
+        (the admin home is already covered by the loop, so the re-add is skipped)."""
+        preferred = self.home / "config.json"
+        preferred.write_text("{}", encoding="utf-8")
+        fallback = self.home / "fallback.json"  # absent; preferred wins
+        calls = []
+
+        def extract_from_file(path):
+            calls.append(Path(path))
+            return [{"path": str(Path(path).parent), "mcpServers": [{"name": "s"}]}]
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch("platform.system", return_value="Darwin"):
+            result = mcp_helpers.extract_dual_path_configs_with_root_support(
+                preferred, fallback, extract_from_file)
+        self.assertEqual(calls.count(preferred), 1, f"preferred read {calls.count(preferred)}x")
+        self.assertEqual(len(result), 1)  # not duplicated
+
+    def test_dual_path_helper_still_adds_root_home_outside_users(self):
+        """macOS case: root's own preferred path (outside /Users) is still read."""
+        root_home = Path(self.tmp_dir) / "var_root"
+        root_home.mkdir()
+        preferred = root_home / "config.json"
+        preferred.write_text("{}", encoding="utf-8")
+        fallback = root_home / "fallback.json"
+        calls = []
+
+        def extract_from_file(path):
+            calls.append(Path(path))
+            return [{"path": str(Path(path).parent), "mcpServers": [{"name": "s"}]}]
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=root_home), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_dual_path_configs_with_root_support(
+                preferred, fallback, extract_from_file)
+        self.assertIn(preferred, calls)  # root home outside /Users -> re-add still fires
+
+    def test_claudeai_helper_no_double_count(self):
+        """extract_claudeai_mcp_servers_with_root_support: own ~/.claude scanned once."""
+        (self.home / ".claude").mkdir()
+        calls = []
+
+        def fake_scan(claude_dir, projects):
+            calls.append(Path(claude_dir))
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_MCP_HELPERS_MOD}.extract_claudeai_mcp_servers", side_effect=fake_scan), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_claudeai_mcp_servers_with_root_support([])
+        self.assertEqual(calls.count(self.home / ".claude"), 1)
+
+    def test_plugin_helper_no_double_count(self):
+        """extract_claude_plugin_mcp_configs_with_root_support: own home not re-scanned."""
+        calls = []
+
+        def fake_own(projects, plugin_lookup=None):
+            calls.append("own-home")
+
+        with patch(f"{_MCP_HELPERS_MOD}._iter_admin_user_homes", return_value=[self.home]), \
+             patch(f"{_MCP_HELPERS_MOD}.Path.home", return_value=self.home), \
+             patch(f"{_MCP_HELPERS_MOD}.extract_claude_plugin_mcp_configs", side_effect=fake_own), \
+             patch("platform.system", return_value="Darwin"):
+            mcp_helpers.extract_claude_plugin_mcp_configs_with_root_support([])
+        # admin home already covered by the loop -> the own-home re-add is skipped
+        self.assertEqual(calls.count("own-home"), 0)
 
 
 # ---------------------------------------------------------------------------

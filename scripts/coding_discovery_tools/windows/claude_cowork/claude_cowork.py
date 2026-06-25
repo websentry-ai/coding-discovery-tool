@@ -34,9 +34,14 @@ def _get_cowork_sessions_dir() -> Optional[Path]:
     return Path(appdata) / "Claude" / COWORK_SESSIONS_DIR
 
 
-def _candidate_install_dirs() -> List[Path]:
-    """Common locations where Claude Desktop is installed on Windows."""
-    user_home = Path.home()
+def _candidate_install_dirs(user_home: Path) -> List[Path]:
+    """Common locations where Claude Desktop is installed on Windows.
+
+    ``user_home`` is the home of the user being scanned (not necessarily the
+    scanner's own home): under an admin/MDM multi-user scan the per-user
+    ``AppData\\Local\\Programs\\Claude`` install lives under the scanned user's
+    profile, so probing ``Path.home()`` would miss it.
+    """
     return [
         user_home / "AppData" / "Local" / "Programs" / "Claude",
         user_home / "AppData" / "Local" / "Programs" / "claude",
@@ -67,19 +72,25 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
         if not sessions_present:
             return None
 
-        # If we can locate the actual Claude Desktop install dir, report it
-        # as the install_path; otherwise fall back to the sessions dir, which
-        # is at least a stable location associated with this device.
+        # Require the Claude Desktop install to be present. The per-user
+        # ``%APPDATA%\Claude`` tree (which holds the sessions dir) survives an
+        # uninstall (anthropics/claude-code#25013), so reporting on the sessions
+        # dir alone produced false positives. Gate on a real install dir.
         app_install = self._find_install_dir()
-        install_path = str(app_install) if app_install else str(sessions_dir)
+        if app_install is None:
+            logger.debug(
+                "Cowork sessions present but no Claude Desktop install found; "
+                "treating as residue (not installed)."
+            )
+            return None
 
-        # An on-disk sessions tree without the app present is unusual but
-        # not impossible (uninstall + leftover state). Still report it —
-        # the sessions dir is the data we actually care about.
         return {
             "name": self.tool_name,
             "version": self.get_version(),
-            "install_path": install_path,
+            # Report the sessions dir (consistent with the macOS detector and the
+            # central ``_detect_claude_cowork`` path). ``app_install`` is the gate,
+            # not the reported path.
+            "install_path": str(sessions_dir),
         }
 
     def get_version(self) -> Optional[str]:
@@ -92,8 +103,9 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
         """
         return None
 
-    def _find_install_dir(self) -> Optional[Path]:
-        for candidate in _candidate_install_dirs():
+    def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
+        home = user_home or getattr(self, "user_home", None) or Path.home()
+        for candidate in _candidate_install_dirs(Path(home)):
             try:
                 if candidate.exists() and candidate.is_dir():
                     return candidate

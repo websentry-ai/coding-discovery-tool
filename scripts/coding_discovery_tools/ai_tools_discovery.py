@@ -76,7 +76,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -130,7 +130,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -141,6 +141,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 payload_logger = logging.getLogger(__name__ + ".payload")
+detail_logger = logging.getLogger(__name__ + ".detail")
 configure_logger()
 
 
@@ -834,7 +835,7 @@ class AIToolsDetector:
                     "rules": []
                 }
                 new_count += 1
-                logger.info(f"  Added new project from MCP config: {project_path} ({num_servers} MCP servers)")
+                detail_logger.info(f"  Added new project from MCP config: {project_path} ({num_servers} MCP servers)")
         
         if mcp_projects:
             logger.info(f"  MCP config merge complete: {len(mcp_projects)} projects processed ({merged_count} merged, {new_count} new), {total_mcp_servers} total MCP servers")
@@ -883,7 +884,7 @@ class AIToolsDetector:
                 if additional_mcp_data and "additionalMcpData" not in projects_dict[project_path]:
                     projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
                 merged_count += 1
-                logger.info(f"  Merged Claude MCP config into existing project: {project_path} ({num_servers} MCP servers)")
+                detail_logger.info(f"  Merged Claude MCP config into existing project: {project_path} ({num_servers} MCP servers)")
                 # Ensure rules field exists
                 if "rules" not in projects_dict[project_path]:
                     projects_dict[project_path]["rules"] = []
@@ -898,7 +899,7 @@ class AIToolsDetector:
                     new_project["additionalMcpData"] = additional_mcp_data
                 projects_dict[project_path] = new_project
                 new_count += 1
-                logger.info(f"  Added new project from Claude MCP config: {project_path} ({num_servers} MCP servers)")
+                detail_logger.info(f"  Added new project from Claude MCP config: {project_path} ({num_servers} MCP servers)")
         
         if mcp_projects:
             logger.info(f"  Claude MCP config merge complete: {len(mcp_projects)} projects processed ({merged_count} merged, {new_count} new), {total_mcp_servers} total MCP servers")
@@ -939,7 +940,7 @@ class AIToolsDetector:
                     projects_dict[project_path]["skills"] = []
                 projects_dict[project_path]["skills"].extend(skills)
                 merged_count += 1
-                logger.info(f"  Merged skills into project: {project_path} ({num_skills} skills)")
+                detail_logger.info(f"  Merged skills into project: {project_path} ({num_skills} skills)")
             else:
                 # Create new project entry with skills array
                 projects_dict[project_path] = {
@@ -949,7 +950,7 @@ class AIToolsDetector:
                     "mcpServers": []
                 }
                 new_count += 1
-                logger.info(f"  Added new project from skills: {project_path} ({num_skills} skills)")
+                detail_logger.info(f"  Added new project from skills: {project_path} ({num_skills} skills)")
 
         if skills_projects:
             logger.info(f"  Skills merge complete: {len(skills_projects)} projects processed ({merged_count} merged, {new_count} new), {total_skills} total skills")
@@ -986,7 +987,7 @@ class AIToolsDetector:
                     projects_dict[project_path]["rules"] = []
                 projects_dict[project_path]["rules"].extend(rules)
                 merged_count += 1
-                logger.info(f"  Merged rules into existing project: {project_path} ({num_rules} rules)")
+                detail_logger.info(f"  Merged rules into existing project: {project_path} ({num_rules} rules)")
             else:
                 # Create new project entry with rules
                 projects_dict[project_path] = {
@@ -996,7 +997,7 @@ class AIToolsDetector:
                     "mcpServers": []
                 }
                 new_count += 1
-                logger.info(f"  Added new project from rules: {project_path} ({num_rules} rules)")
+                detail_logger.info(f"  Added new project from rules: {project_path} ({num_rules} rules)")
 
         if rules_projects:
             logger.info(f"  Rules merge complete: {len(rules_projects)} projects processed ({merged_count} merged, {new_count} new), {total_rules} total rules")
@@ -1175,12 +1176,12 @@ class AIToolsDetector:
         if self._claude_settings_extractor:
             try:
                 settings = self._claude_settings_extractor.extract_settings()
-                logger.info(f"  Settings extraction returned: {settings is not None}, count: {len(settings) if settings else 0}")
+                detail_logger.info(f"  Settings extraction returned: {settings is not None}, count: {len(settings) if settings else 0}")
                 if settings:
                     num_settings = len(settings)
                     logger.info(f"  ✓ Found {num_settings} settings file(s)")
                     tool["_settings"] = settings
-                    logger.info(f"  ✓ Stored _settings in tool dict (keys: {list(tool.keys())})")
+                    detail_logger.info(f"  ✓ Stored _settings in tool dict (keys: {list(tool.keys())})")
                     log_settings_details(settings, tool_name)
                 else:
                     logger.warning("  ⚠ No settings found - extract_settings() returned None or empty list")
@@ -2091,8 +2092,8 @@ class AIToolsDetector:
         if "_config_path" in tool:
             tool_dict["_config_path"] = tool["_config_path"]
 
-        logger.info(f"  Checking for settings in tool dict for {tool_name}...")
-        logger.info(f"  Tool dict keys: {list(tool.keys())}")
+        detail_logger.info(f"  Checking for settings in tool dict for {tool_name}...")
+        detail_logger.info(f"  Tool dict keys: {list(tool.keys())}")
 
         if "_settings" in tool:
             try:
@@ -2110,13 +2111,13 @@ class AIToolsDetector:
                         permissions = None
                 else:
                     settings_list = tool["_settings"]
-                    logger.info(f"  ✓ Found _settings in tool dict, count: {len(settings_list) if settings_list else 0}")
+                    detail_logger.info(f"  ✓ Found _settings in tool dict, count: {len(settings_list) if settings_list else 0}")
                     permissions = transform_settings_to_backend_format(settings_list)
 
                 if permissions:
                     tool_dict["permissions"] = permissions
                     logger.info(f"  ✓ Added permissions to {tool_name} report")
-                    logger.info(f"  Permissions keys: {list(permissions.keys())}")
+                    detail_logger.info(f"  Permissions keys: {list(permissions.keys())}")
                 else:
                     logger.warning(f"  ⚠ Permissions transformation returned None for {tool_name}")
                     logger.warning(f"  Settings that were passed: {tool['_settings']}")
@@ -2199,14 +2200,11 @@ def main():
     verbosity.add_argument(
         '--dump',
         action='store_true',
-        help='Also log the full per-tool JSON payload sent to the backend.',
-    )
-    verbosity.add_argument(
-        '--summary',
-        action='store_true',
-        help='Suppress per-tool detail output: Report Summary box, transport '
-             'lines (Sending / ✓ sent), and logging_helpers sub-boxes. Keeps '
-             'headline output, per-tool totals, warnings, and errors.',
+        help='Show ALL detail logs: per-file rule/MCP/settings boxes, '
+             'per-project merge/add lines, internal diagnostics, the per-tool '
+             'Report Summary box, and transport lines (Sending / ✓ sent). '
+             'Default output is concise (headlines, per-tool totals, warnings, '
+             'errors). For the JSON sent to the backend, use --payload.',
     )
     verbosity.add_argument(
         '--payload',
@@ -2219,12 +2217,17 @@ def main():
     if args.payload:
         logging.getLogger().setLevel(logging.WARNING)
         payload_logger.setLevel(logging.INFO)
-    elif args.summary:
+    elif not args.dump:
+        # Concise is the DEFAULT; --dump restores full detail. Quiet the
+        # per-file rule/MCP/settings sub-boxes (logging_helpers)...
         try:
             from scripts.coding_discovery_tools import logging_helpers as _lh
         except ImportError:
             from . import logging_helpers as _lh
         logging.getLogger(_lh.__name__).setLevel(logging.WARNING)
+        # ...plus the per-item merge/add lines and internal dict diagnostics.
+        # Roll-up totals and headlines stay on `logger`.
+        detail_logger.setLevel(logging.WARNING)
     # Hook-triggered invocations pass the api_key via env so it never appears
     # in argv / /proc/<pid>/cmdline. CLI --api-key remains supported for MDM
     # and direct-script usage.
@@ -2324,6 +2327,10 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
+    # The real-human-or-None audit identity, captured once below via
+    # get_audit_user(). Initialized here so the failure closures can pass it
+    # safely even if they fire before capture (in which case it is still None).
+    system_user = None
 
     def _mark_run_failed(error_type: str, message: str) -> None:
         """Best-effort: tell the backend this run failed. Idempotent (a flag race
@@ -2344,6 +2351,7 @@ def main():
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                 },
                 sentry_context=sentry_ctx,
+                system_user=system_user,
             )
         except Exception:
             pass
@@ -2488,9 +2496,20 @@ def main():
             logger.info(f"  - {user}")
         logger.info("")
 
-        # Get system_user once (who is running the script) for audit purposes
+        # Get the real human running the script (or None) once, for audit
+        # attribution. This must be a real human OR None — never root /
+        # _service / SYSTEM / a Windows machine account / "unknown" — so the
+        # backend never attributes an empty machine to a service identity. The
+        # data-report path (generate_single_tool_report) falls back to
+        # home_user when this is None.
         with time_step("get_system_user", "detect"):
-            system_user = get_user_info()
+            system_user = get_audit_user()
+        if system_user is None:
+            logger.debug(
+                "Audit system_user resolved to None (non-human or undetectable "
+                "context); tool reports fall back to home_user and lifecycle "
+                "events omit system_user"
+            )
         sentry_ctx["system_user"] = system_user
 
         # Send scan in_progress event BEFORE scanning
@@ -2498,7 +2517,7 @@ def main():
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
-                args.app_name, sentry_context=sentry_ctx
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user
             )
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
@@ -2674,7 +2693,7 @@ def main():
                             'rules': num_rules
                         })
 
-                        if not args.summary and not args.payload:
+                        if args.dump:
                             logger.info("")
                             logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
                             logger.info(f"  │ User: {user_name}")
@@ -2707,7 +2726,7 @@ def main():
                             logger.info("  └──────────────────────────────────────────────────────────────────")
                             logger.info("")
 
-                        if args.dump or args.payload:
+                        if args.payload:
                             payload_logger.info("  Complete JSON payload being sent to backend:")
                             payload_logger.info("  " + "=" * 70)
                             try:
@@ -2747,16 +2766,16 @@ def main():
 
                         cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
                         if local_payload_hash and cached_hash == local_payload_hash:
-                            if not args.summary and not args.payload:
+                            if args.dump:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
-                            if not args.summary and not args.payload:
+                            if args.dump:
                                 logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
                             with time_step("send_report_per_tool_user", "send"):
                                 success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                             if success:
-                                if not args.summary and not args.payload:
+                                if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                                 if local_payload_hash:
                                     discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
@@ -2765,7 +2784,7 @@ def main():
                                 if retryable:
                                     failed_reports.append(single_tool_report)
 
-                        if not args.summary and not args.payload:
+                        if args.dump:
                             logger.info("")
 
                     except PermissionError as e:
@@ -2783,7 +2802,7 @@ def main():
                         success, _ = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
-                            sentry_context=sentry_ctx
+                            sentry_context=sentry_ctx, system_user=system_user
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
@@ -2860,7 +2879,7 @@ def main():
         logger.info("Sending scan completed event...")
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
-            args.app_name, sentry_context=sentry_ctx
+            args.app_name, sentry_context=sentry_ctx, system_user=system_user
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

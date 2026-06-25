@@ -45,8 +45,13 @@ class _AugmentSkillsHarness(unittest.TestCase):
             return self.extractor.extract_all_skills()
 
     def _extract_project_only(self, repo: Path):
+        # ``_filesystem_root`` is pinned to the temp ancestor so the walk's
+        # ``relative_to(root)`` depth check works on Windows too (a real path like
+        # ``C:\...\repo`` is not relative to the macOS class's default ``/``).
         with patch.object(self.extractor, "_scan_all_user_homes",
                           side_effect=lambda fn: None), \
+             patch.object(self.extractor, "_filesystem_root",
+                          return_value=Path(self.tmp_dir)), \
              patch.object(self.extractor, "_iter_top_level_dirs", return_value=[repo]), \
              patch.object(self.extractor, "_should_skip_walk_item", return_value=False), \
              patch.object(self.extractor, "_is_user_level_skill_dir", return_value=False):

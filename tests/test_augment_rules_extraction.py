@@ -67,9 +67,16 @@ class _AugmentRulesHarness(unittest.TestCase):
             return self.extractor.extract_all_augment_rules()
 
     def _extract_with_project_root(self, repo: Path):
-        """Run extraction with the project walk pinned to ``repo`` (no user scan)."""
+        """Run extraction with the project walk pinned to ``repo`` (no user scan).
+
+        ``_filesystem_root`` is pinned to the temp ancestor so the walk's
+        ``relative_to(root)`` depth check works on Windows too (a real path like
+        ``C:\\...\\repo`` is not relative to the macOS class's default ``/``).
+        """
         with patch.object(self.extractor, "_scan_all_user_homes",
                           side_effect=lambda fn: None), \
+             patch.object(self.extractor, "_filesystem_root",
+                          return_value=Path(self.tmp_dir)), \
              patch.object(self.extractor, "_iter_top_level_dirs", return_value=[repo]), \
              patch(f"{_RULES_MOD}.should_skip_system_path", return_value=False):
             return self.extractor.extract_all_augment_rules()
@@ -181,6 +188,8 @@ class TestAugmentRulesNoUserProjectDuplication(_AugmentRulesHarness):
 
         with patch.object(self.extractor, "_scan_all_user_homes",
                           side_effect=lambda fn: fn(self.user_home)), \
+             patch.object(self.extractor, "_filesystem_root",
+                          return_value=Path(self.tmp_dir)), \
              patch.object(self.extractor, "_iter_top_level_dirs",
                           return_value=[self.user_home]), \
              patch(f"{_RULES_MOD}.should_skip_system_path", return_value=False):

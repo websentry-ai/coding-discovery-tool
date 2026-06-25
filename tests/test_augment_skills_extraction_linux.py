@@ -51,6 +51,8 @@ class TestLinuxAugmentSkills(unittest.TestCase):
         (commands_dir / "review.md").write_text("review", encoding="utf-8")
         with patch.object(self.extractor, "_scan_all_user_homes",
                           side_effect=lambda fn: None), \
+             patch.object(self.extractor, "_filesystem_root",
+                          return_value=Path(self.tmp_dir)), \
              patch.object(self.extractor, "_iter_top_level_dirs", return_value=[repo]), \
              patch.object(self.extractor, "_should_skip_walk_item", return_value=False), \
              patch.object(self.extractor, "_is_user_level_skill_dir", return_value=False):

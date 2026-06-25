@@ -245,7 +245,9 @@ class TestAugmentDetection(unittest.TestCase):
         jbrows = [r for r in rows if r["name"] == "Augment (IntelliJ IDEA)"]
         self.assertEqual(len(jbrows), 1)
         # Attributed to bob (the IDE owner), NOT alice (the other scanned home).
-        self.assertEqual(jbrows[0]["_config_path"], "/Users/bob/.augment")
+        # Build the expected via Path so the separator matches the host OS
+        # (production stringifies a Path; a literal "/Users/..." breaks on Windows).
+        self.assertEqual(jbrows[0]["_config_path"], str(Path("/Users/bob") / ".augment"))
 
     def test_all_three_surfaces_as_separate_rows(self):
         _write_auggie_binary(self.user_home)

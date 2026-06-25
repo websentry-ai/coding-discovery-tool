@@ -8,6 +8,7 @@ per-user attribution under a simulated root scan does not leak across users.
 """
 
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import scripts.coding_discovery_tools.utils as utils_mod
@@ -128,6 +129,65 @@ class TestAugmentPerUserAttribution(unittest.TestCase):
                          "install_path": "/Users/alice/.local/bin/auggie",
                          "projects": [{"path": "/Users/bob/repo", "rules": [{"x": 1}]}]}
         self.assertTrue(_augment_owned_by_user(tool_filtered, "/Users/bob"))
+
+
+class TestAugmentUserSkillsNoCrossUserLeak(unittest.TestCase):
+    """FIX 1: under a root all-users scan ``_get_augment_skills`` returns ALL
+    users' user-scope skills in one flat list. Each skill must be keyed under ITS
+    OWN owner home (derived from its ``file_path``) so the per-user project filter
+    scopes A's skill to A and B's skill to B — no cross-user content leak.
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def _detector_with_two_user_skills(self):
+        d = AIToolsDetector(os_name="Darwin")
+        d._augment_mcp_extractor = MagicMock()
+        d._augment_mcp_extractor.extract_mcp_config.return_value = None
+        d._augment_rules_extractor = MagicMock()
+        d._augment_rules_extractor.extract_all_augment_rules.return_value = []
+        d._augment_settings_extractor = MagicMock()
+        d._augment_settings_extractor.extract_settings.return_value = []
+        # A root all-users scan: BOTH users' user-scope skills in one flat list,
+        # each carrying its own home in file_path.
+        d._augment_skills_extractor = MagicMock()
+        d._augment_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [
+                {"skill_name": "a", "type": "skill", "scope": "user",
+                 "file_path": "/Users/alice/.augment/skills/a/SKILL.md"},
+                {"skill_name": "b", "type": "skill", "scope": "user",
+                 "file_path": "/Users/bob/.augment/skills/b/SKILL.md"},
+            ],
+            "project_skills": [],
+        }
+        return d
+
+    def test_each_users_skills_scoped_to_their_own_home(self):
+        d = self._detector_with_two_user_skills()
+        # Canonical row is alice's Auggie CLI (the surface that carries the
+        # shared config). Its skills are keyed by each skill's OWNER home.
+        cli = {"name": "Auggie CLI", "version": "0.30.0",
+               "install_path": "/Users/alice/.local/bin/auggie",
+               "_config_path": "/Users/alice/.augment"}
+        d._set_canonical_augment_surface([cli])
+        processed = d.process_single_tool(cli)
+
+        # Skills live under BOTH owner homes, not all under alice's install_key.
+        by_path = {p["path"]: p for p in processed["projects"]}
+        self.assertIn("/Users/alice", by_path)
+        self.assertIn("/Users/bob", by_path)
+
+        # Per-user filtering scopes each user's skills to their own home.
+        alice_view = d.filter_tool_projects_by_user(processed, Path("/Users/alice"))
+        bob_view = d.filter_tool_projects_by_user(processed, Path("/Users/bob"))
+
+        alice_names = {s["skill_name"] for p in alice_view["projects"] for s in p["skills"]}
+        bob_names = {s["skill_name"] for p in bob_view["projects"] for s in p["skills"]}
+
+        # Alice's row carries ONLY alice's skill; bob's ONLY bob's. No leak.
+        self.assertEqual(alice_names, {"a"})
+        self.assertEqual(bob_names, {"b"})
 
 
 if __name__ == "__main__":

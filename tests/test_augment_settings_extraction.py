@@ -5,8 +5,11 @@ Exercises the outermost surface (``extract_settings()``) plus the D6 regression:
 ``hooks`` must survive end-to-end through ``transform_settings_to_backend_format``
 inside ``raw_settings`` (the transformer does NOT lift hooks). Also covers
 ``toolPermissions`` -> allow/deny/ask mapping, ``shellInputRegex`` retention,
-scope precedence, and sad-paths (JSONC, invalid JSON in one scope, oversize,
-missing).
+scope precedence, and sad-paths (JSONC, invalid JSON, oversize, missing).
+
+The extractor collects USER + MANAGED scopes only — there is no project/local
+filesystem walk (those scopes cannot be surfaced in the tool-level permissions
+blob the backend supports, so the expensive whole-disk walk was removed).
 """
 
 import json
@@ -44,13 +47,13 @@ class _AugmentSettingsHarness(unittest.TestCase):
         self.augment_dir = self.user_home / ".augment"
         self.augment_dir.mkdir(parents=True)
         self.extractor = MacOSAugmentSettingsExtractor()
-        # Scope to this user, no managed file, no filesystem walk.
+        # Scope to this user, no managed file. The extractor does no project
+        # filesystem walk (user + managed scopes only).
         self._patchers = [
             patch.object(self.extractor, "_user_settings_scan",
                          side_effect=lambda fn: fn(self.user_home)),
             patch.object(self.extractor, "_managed_settings_path",
                          return_value=Path(self.tmp_dir) / "nope" / "settings.json"),
-            patch.object(self.extractor, "_iter_top_level_dirs", return_value=[]),
         ]
         for p in self._patchers:
             p.start()
@@ -161,23 +164,12 @@ class TestAugmentSettingsSadPaths(_AugmentSettingsHarness):
         self.assertEqual(len(records), 1)
         self.assertIn("read", records[0]["permissions"]["allow"])
 
-    def test_invalid_json_in_one_scope_skips_only_that_file(self):
-        # User file is broken; a project file is valid -> only the project record.
-        # The temp dir lives under /var, which the real should_skip_system_path
-        # skips, so neutralise it for the project walk (mirrors the rules suite).
+    def test_invalid_user_json_yields_empty(self):
+        # A broken user settings file is warned-and-skipped; there is no project
+        # walk to fall back on, so the result is empty.
         self._write_user_settings("{ not json at all")
-        project_dir = self.user_home / "repo" / ".augment"
-        project_dir.mkdir(parents=True)
-        (project_dir / "settings.json").write_text(json.dumps({
-            "toolPermissions": [_tool_perm("ok", "allow")],
-        }), encoding="utf-8")
-        with patch.object(self.extractor, "_iter_top_level_dirs",
-                          return_value=[self.user_home / "repo"]), \
-             patch(f"{_SETTINGS_MOD}.should_skip_system_path", return_value=False):
-            records = self.extractor.extract_settings()
-        scopes = sorted(r["scope"] for r in records)
-        self.assertEqual(scopes, ["project"])
-        self.assertIn("ok", records[0]["permissions"]["allow"])
+        records = self.extractor.extract_settings()
+        self.assertEqual(records, [])
 
     def test_oversize_file_truncated_skipped(self):
         with patch(f"{_SETTINGS_MOD}._MAX_SETTINGS_BYTES", 10):
@@ -189,31 +181,47 @@ class TestAugmentSettingsSadPaths(_AugmentSettingsHarness):
         records = self.extractor.extract_settings()
         self.assertEqual(records, [])
 
-    def test_local_scope_from_settings_local_json(self):
+
+class TestAugmentNoProjectWalk(_AugmentSettingsHarness):
+    """FIX 3: project/local settings are no longer collected (no whole-disk walk).
+
+    Planting a ``<project>/.augment/settings.json`` (and ``settings.local.json``)
+    anywhere on disk must NOT surface a project/local record — only user +
+    managed scopes are extracted.
+    """
+
+    def test_project_settings_not_collected(self):
+        # A planted project ``.augment/settings.json`` (+ local) must NOT surface:
+        # the extractor does no filesystem walk, so no project/local record exists
+        # even though the file is on disk and reachable.
+        self._write_user_settings({"toolPermissions": [_tool_perm("u", "allow")]})
         project_dir = self.user_home / "repo" / ".augment"
         project_dir.mkdir(parents=True)
+        (project_dir / "settings.json").write_text(json.dumps({
+            "toolPermissions": [_tool_perm("project-tool", "allow")],
+        }), encoding="utf-8")
         (project_dir / "settings.local.json").write_text(json.dumps({
             "toolPermissions": [_tool_perm("local-tool", "allow")],
         }), encoding="utf-8")
-        with patch.object(self.extractor, "_iter_top_level_dirs",
-                          return_value=[self.user_home / "repo"]), \
-             patch(f"{_SETTINGS_MOD}.should_skip_system_path", return_value=False):
-            records = self.extractor.extract_settings()
-        self.assertTrue(any(r["scope"] == "local" for r in records))
+        records = self.extractor.extract_settings()
+        # Only the user-scope record; no project/local records.
+        scopes = sorted(r["scope"] for r in records)
+        self.assertEqual(scopes, ["user"])
 
-    def test_user_home_augment_not_double_counted_as_project(self):
-        """The user-home ~/.augment must be skipped by the project walk."""
+    def test_managed_settings_surface(self):
+        """FIX 3: managed /etc/augment/settings.json permissions DO surface
+        (they were extracted-then-dropped by the old consumer ``own`` filter)."""
         self._write_user_settings({"toolPermissions": [_tool_perm("u", "allow")]})
-        # Point the project walk at the user home itself; ~/.augment must be
-        # skipped by the user-augment-dir guard (not just the system-path skip,
-        # so neutralise the latter to actually exercise the guard).
-        with patch.object(self.extractor, "_iter_top_level_dirs",
-                          return_value=[self.user_home]), \
-             patch(f"{_SETTINGS_MOD}.should_skip_system_path", return_value=False):
+        managed_dir = Path(self.tmp_dir) / "etc" / "augment"
+        managed_dir.mkdir(parents=True)
+        managed_path = managed_dir / "settings.json"
+        managed_path.write_text(json.dumps({
+            "toolPermissions": [_tool_perm("managed-tool", "deny")],
+        }), encoding="utf-8")
+        with patch.object(self.extractor, "_managed_settings_path", return_value=managed_path):
             records = self.extractor.extract_settings()
-        # Exactly one record (the user-scope one), no duplicate project record.
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["scope"], "user")
+        scopes = sorted(r["scope"] for r in records)
+        self.assertEqual(scopes, ["managed", "user"])
 
 
 if __name__ == "__main__":

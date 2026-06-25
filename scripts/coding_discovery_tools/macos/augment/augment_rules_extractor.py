@@ -91,7 +91,13 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
         projects_by_root: Dict[str, List[Dict]] = {}
 
         self._extract_user_rules(projects_by_root)
-        self._extract_project_level_rules(self._filesystem_root(), projects_by_root)
+        # Compute the user-home ``~/.augment`` set ONCE (via the all-users seam)
+        # so the project walk skips them instead of re-collecting user rules as
+        # scope "project".
+        user_augment_dirs = self._user_augment_dirs()
+        self._extract_project_level_rules(
+            self._filesystem_root(), projects_by_root, user_augment_dirs
+        )
 
         return build_project_list(projects_by_root)
 
@@ -128,33 +134,45 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
     # -- Project (project-scope) ---------------------------------------------
 
     def _extract_project_level_rules(
-        self, root_path: Path, projects_by_root: Dict[str, List[Dict]]
+        self,
+        root_path: Path,
+        projects_by_root: Dict[str, List[Dict]],
+        user_augment_dirs: set,
     ) -> None:
         """Walk for project-level rules from the filesystem root."""
         if root_path == self._filesystem_root():
             try:
                 for top_dir in self._iter_top_level_dirs(root_path):
                     try:
-                        self._walk_for_project_rules(root_path, top_dir, projects_by_root, current_depth=1)
+                        self._walk_for_project_rules(
+                            root_path, top_dir, projects_by_root, user_augment_dirs, current_depth=1
+                        )
                     except (PermissionError, OSError) as e:
                         logger.debug(f"Skipping {top_dir}: {e}")
                         continue
             except (PermissionError, OSError) as e:
                 logger.warning(f"Error accessing root directory: {e}")
         else:
-            self._walk_for_project_rules(root_path, root_path, projects_by_root, current_depth=0)
+            self._walk_for_project_rules(
+                root_path, root_path, projects_by_root, user_augment_dirs, current_depth=0
+            )
 
     def _walk_for_project_rules(
         self,
         root_path: Path,
         current_dir: Path,
         projects_by_root: Dict[str, List[Dict]],
+        user_augment_dirs: set,
         current_depth: int = 0,
     ) -> None:
         """Recursively walk collecting ``.augment-guidelines``, ``.augment/rules/**``,
         and hierarchical ``AGENTS.md`` / ``CLAUDE.md``.
 
         Symlinked directories are skipped (loop/perf risk on customer machines).
+        User-home ``~/.augment`` dirs (in ``user_augment_dirs``) are skipped — they
+        are already collected as user scope; descending here would re-emit the same
+        ``~/.augment/rules/**`` files as scope "project" (different project_root, so
+        ``_deduplicate_project_items`` — which dedups within one project — misses it).
         """
         if current_depth > MAX_SEARCH_DEPTH:
             return
@@ -176,11 +194,19 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
                     except ValueError:
                         continue
 
-                    if not item.is_dir():
+                    # Skip non-dirs and symlinked dirs BEFORE the .augment
+                    # handling / recursion (mirrors the mcp + settings walk
+                    # ordering) so a symlinked .augment can't be followed.
+                    if not item.is_dir() or item.is_symlink():
                         continue
 
                     if item.name == AUGMENT_DIR_NAME:
-                        # .augment/rules/** lives here; handle, don't recurse in.
+                        # .augment/rules/** lives here; skip the user-home
+                        # ~/.augment (collected as user scope) to avoid
+                        # re-emitting user rules as scope "project"; otherwise
+                        # handle this project's tree (don't recurse in).
+                        if item.resolve() in user_augment_dirs:
+                            continue
                         self._add_rules_tree(
                             item / RULES_DIR_NAME,
                             _find_augment_dir_root,
@@ -189,10 +215,9 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
                         )
                         continue
 
-                    if item.is_symlink():
-                        continue
-
-                    self._walk_for_project_rules(root_path, item, projects_by_root, current_depth + 1)
+                    self._walk_for_project_rules(
+                        root_path, item, projects_by_root, user_augment_dirs, current_depth + 1
+                    )
 
                 except (PermissionError, OSError):
                     continue
@@ -296,6 +321,24 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
             logger.debug(f"Permission/OS error reading rule file {rule_file}: {e}")
         except Exception as e:
             logger.debug(f"Error extracting rule file {rule_file}: {e}")
+
+    def _user_augment_dirs(self) -> set:
+        """Resolved set of user-home ``~/.augment`` dirs to skip in the project walk.
+
+        Built via the all-users ``_scan_all_user_homes`` seam so it works per-OS
+        (the Linux/Windows subclasses override only that seam). Mirrors the
+        settings extractor's identically-named helper.
+        """
+        dirs = set()
+
+        def collect(user_home: Path) -> None:
+            try:
+                dirs.add(_resolve_augment_dir(user_home).resolve())
+            except (PermissionError, OSError):
+                pass
+
+        self._scan_all_user_homes(collect)
+        return dirs
 
     # -- OS-specific seams (overridden by the Windows/Linux subclasses) -------
 

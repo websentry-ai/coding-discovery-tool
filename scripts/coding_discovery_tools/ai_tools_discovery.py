@@ -1466,6 +1466,35 @@ class AIToolsDetector:
         except Exception:
             return file_path
 
+    @staticmethod
+    def _augment_skill_owner_home(skill: Dict) -> Optional[str]:
+        """Derive the owning user's home dir from a user-scope skill's file_path.
+
+        Mirrors ``_copilot_skill_owner_home``. User skills live at
+        ``<home>/.augment/skills/...`` or ``<home>/.augment/commands/...``; the
+        home is the path prefix before the ``/.augment/`` marker. Keying user
+        skills under the owner's home (not the single canonical ``install_key``)
+        lets the per-user project filter scope them correctly under root scans —
+        without this, a root all-users scan keys EVERY user's skills under one
+        home, leaking user A's skill content onto user B's row.
+
+        Operates on the raw path string (not ``pathlib``) to preserve the
+        original separator style; handles the Windows ``\\`` separator variant.
+        Returns None when the file_path is missing/unparseable so the caller can
+        fall back to the canonical install_key (matching copilot).
+        """
+        file_path = skill.get("file_path", "")
+        if not file_path:
+            return None
+        try:
+            for marker in ("/.augment/", "\\.augment\\"):
+                idx = file_path.find(marker)
+                if idx != -1:
+                    return file_path[:idx]
+            return None
+        except Exception:
+            return None
+
     def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
         """
         Process the GitHub Copilot CLI: extract its MCP config + rules and return
@@ -1691,6 +1720,8 @@ class AIToolsDetector:
             except Exception as e:
                 logger.warning(f"  Augment MCP extraction failed: {e}")
                 self._augment_mcp_cache = None
+        else:
+            self._augment_mcp_cache = None
         return self._augment_mcp_cache
 
     def _get_augment_settings(self) -> List[Dict]:
@@ -1785,9 +1816,15 @@ class AIToolsDetector:
         project_skills = skills_result.get("project_skills", [])
 
         install_key = tool.get("_config_path") or tool.get("install_path") or str(Path.home())
+        # User-scope skills key under the OWNING user's home (derived from each
+        # skill's file_path), NOT this row's single install_key — so under a
+        # root/all-users scan filter_tool_projects_by_user scopes each user's
+        # skills to their own home (no cross-user leak). Falls back to
+        # install_key when file_path is missing/unparseable (matches copilot).
         for skill in user_skills:
+            skill_key = self._augment_skill_owner_home(skill) or install_key
             bucket = projects_dict.setdefault(
-                install_key, {"mcpServers": [], "rules": [], "skills": []}
+                skill_key, {"mcpServers": [], "rules": [], "skills": []}
             )
             bucket.setdefault("skills", []).append(skill)
 
@@ -1806,10 +1843,19 @@ class AIToolsDetector:
         logger.info(f"  Extracting {tool.get('name')} permissions...")
         all_settings = self._get_augment_settings()
         config_dir = tool.get("_config_path") or tool.get("install_path", "")
+        # Keep this row's USER-scope record (settings file directly under the
+        # canonical ~/.augment) AND the MANAGED-scope record (fixed machine path
+        # /etc/augment, attached to the canonical row — filter_tool_projects_by_user
+        # preserves managed). The transform then selects highest precedence
+        # (managed > user) for the effective policy. The extractor no longer emits
+        # project/local scopes (they can't be surfaced in the tool-level blob).
         own = [
             s for s in all_settings
-            if config_dir and s.get("settings_path")
-            and Path(str(s["settings_path"])).parent == Path(config_dir)
+            if s.get("scope") == "managed"
+            or (
+                config_dir and s.get("settings_path")
+                and Path(str(s["settings_path"])).parent == Path(config_dir)
+            )
         ]
         permissions_payload = transform_settings_to_backend_format(own) if own else None
 

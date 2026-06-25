@@ -5,8 +5,12 @@ Augment persists settings in ``settings.json`` files. This extractor reads:
 
   - User:    ``~/.augment/settings.json`` (root-aware all-users scan)
   - Managed: ``/etc/augment/settings.json``
-  - Project: ``<ws>/.augment/settings.json`` (scope "project") and
-             ``<ws>/.augment/settings.local.json`` (scope "local")
+
+Project/local-scope settings (``<ws>/.augment/settings.json`` /
+``settings.local.json``) are intentionally NOT collected: they cannot be
+surfaced in the tool-level ``permissions`` blob the backend supports (the
+consumer keeps only the user-row + managed scopes), so an expensive
+whole-filesystem walk to extract records that are then dropped is avoided.
 
 ``toolPermissions`` is parsed into ``permissions.{allow,deny,ask}`` (an array of
 ``{toolName, shellInputRegex?, eventType, permission.type}``; a present
@@ -22,13 +26,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ...coding_tool_base import BaseAugmentSettingsExtractor
-from ...constants import MAX_SEARCH_DEPTH
 from ...macos_extraction_helpers import (
-    get_top_level_directories,
     is_running_as_root,
     scan_user_directories,
-    should_skip_path,
-    should_skip_system_path,
 )
 from ...mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
 from .augment import _resolve_augment_dir
@@ -36,9 +36,7 @@ from .augment import _resolve_augment_dir
 logger = logging.getLogger(__name__)
 
 TOOL_NAME = "Augment Code"
-AUGMENT_DIR_NAME = ".augment"
 SETTINGS_FILENAME = "settings.json"
-SETTINGS_LOCAL_FILENAME = "settings.local.json"
 TOOL_PERMISSIONS_KEY = "toolPermissions"
 # Cap an over-large settings file so a runaway file can't blow up the payload.
 _MAX_SETTINGS_BYTES = 1_000_000
@@ -80,10 +78,14 @@ def _parse_jsonc(path: Path) -> Optional[Dict]:
 
 
 def _parse_tool_permissions(settings_data: Dict[str, Any]) -> Dict[str, List[str]]:
-    """Map ``toolPermissions`` into ``{allow, deny, ask, additionalDirectories}``.
+    """Map ``toolPermissions`` into ``{allow, deny, ask}``.
 
     Each entry is ``{toolName, shellInputRegex?, eventType, permission.type}``; a
     present ``shellInputRegex`` is appended to the tool name as ``toolName(regex)``.
+
+    ``additionalDirectories`` is always emitted EMPTY (kept for permissions-dict
+    shape parity with the other extractors): Augment has no trusted-folders /
+    additional-directories concept, so nothing populates it.
     """
     buckets: Dict[str, List[str]] = {"allow": [], "deny": [], "ask": [], "additionalDirectories": []}
     entries = settings_data.get(TOOL_PERMISSIONS_KEY)
@@ -138,7 +140,6 @@ class MacOSAugmentSettingsExtractor(BaseAugmentSettingsExtractor):
 
         self._extract_user_settings(records)
         self._extract_managed_settings(records)
-        self._extract_project_settings(records)
 
         return records
 
@@ -165,85 +166,6 @@ class MacOSAugmentSettingsExtractor(BaseAugmentSettingsExtractor):
         except Exception as e:
             logger.debug(f"Error extracting managed Augment settings: {e}")
 
-    def _extract_project_settings(self, records: List[Dict]) -> None:
-        """Walk for ``<ws>/.augment/settings.json`` + ``settings.local.json``."""
-        root_path = self._filesystem_root()
-        user_augment_dirs = self._user_augment_dirs()
-        try:
-            for top_dir in self._iter_top_level_dirs(root_path):
-                try:
-                    self._walk_for_project_settings(
-                        root_path, top_dir, records, user_augment_dirs, current_depth=1
-                    )
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Skipping {top_dir}: {e}")
-                    continue
-        except (PermissionError, OSError) as e:
-            logger.warning(f"Error accessing root directory: {e}")
-
-    def _walk_for_project_settings(
-        self,
-        root_path: Path,
-        current_dir: Path,
-        records: List[Dict],
-        user_augment_dirs,
-        current_depth: int = 0,
-    ) -> None:
-        """Recursively look for ``<project>/.augment/settings*.json`` (bounded).
-
-        The user-home ``~/.augment`` dirs are skipped here (handled as user scope).
-        """
-        if current_depth > MAX_SEARCH_DEPTH:
-            return
-        try:
-            for item in current_dir.iterdir():
-                try:
-                    if should_skip_path(item) or should_skip_system_path(item):
-                        continue
-                    if not item.is_dir() or item.is_symlink():
-                        continue
-                    if item.name == AUGMENT_DIR_NAME:
-                        if item.resolve() in user_augment_dirs:
-                            continue
-                        self._extract_augment_dir_settings(item, records)
-                        continue
-                    self._walk_for_project_settings(
-                        root_path, item, records, user_augment_dirs, current_depth + 1
-                    )
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {item}: {e}")
-                    continue
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error walking {current_dir}: {e}")
-
-    def _extract_augment_dir_settings(self, augment_dir: Path, records: List[Dict]) -> None:
-        """Read settings.json (project) + settings.local.json (local) in a dir."""
-        for filename, scope in (
-            (SETTINGS_FILENAME, "project"),
-            (SETTINGS_LOCAL_FILENAME, "local"),
-        ):
-            settings_path = augment_dir / filename
-            settings_data = _parse_jsonc(settings_path)
-            if settings_data is not None:
-                records.append(_build_record(scope, settings_path, settings_data))
-
-    def _user_augment_dirs(self) -> set:
-        """Resolved set of user-home ``~/.augment`` dirs to skip in the project walk."""
-        dirs = set()
-
-        def collect(user_home: Path) -> None:
-            try:
-                dirs.add(_resolve_augment_dir(user_home).resolve())
-            except (PermissionError, OSError):
-                pass
-
-        self._user_settings_scan(collect)
-        return dirs
-
     # -- OS-specific seams (overridden by the Windows/Linux subclasses) -------
 
     def _user_settings_scan(self, extract_for_user) -> None:
@@ -256,11 +178,3 @@ class MacOSAugmentSettingsExtractor(BaseAugmentSettingsExtractor):
     def _managed_settings_path(self) -> Path:
         """Managed (org-level) settings file path."""
         return Path("/etc/augment/settings.json")
-
-    def _filesystem_root(self) -> Path:
-        """Root the project walk starts from (POSIX ``/`` on macOS)."""
-        return Path("/")
-
-    def _iter_top_level_dirs(self, root_path: Path) -> List[Path]:
-        """Top-level dirs under the filesystem root, system dirs excluded."""
-        return list(get_top_level_directories(root_path))

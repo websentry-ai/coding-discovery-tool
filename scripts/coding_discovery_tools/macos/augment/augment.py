@@ -254,6 +254,13 @@ class MacOSAugmentDetector(BaseToolDetector):
     def _detect_jetbrains_for_user(self, user_home: Path) -> List[Dict]:
         results: List[Dict] = []
         jetbrains_detector = self._make_jetbrains_detector()
+        # KNOWN REDUNDANCY (parity, not a bug): setting ``user_home`` is ignored by
+        # ``MacOSJetBrainsDetector``, which rescans ALL users under root — so under
+        # an all-users scan this runs N times redundantly (N = user count). This is
+        # inherited parity with the shipped Copilot detector
+        # (``detect_copilot.py:_detect_jetbrains_for_user``); the final rows dedup
+        # correctly via ``tool_key``. Fixing it would alter shared JetBrains
+        # behavior affecting Copilot — out of scope here.
         jetbrains_detector.user_home = user_home
 
         for ide in jetbrains_detector.detect() or []:

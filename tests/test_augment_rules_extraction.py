@@ -166,6 +166,34 @@ class TestAugmentProjectRules(_AugmentRulesHarness):
         self.assertIn("applyTo", fm_rule["content"])
 
 
+class TestAugmentRulesNoUserProjectDuplication(_AugmentRulesHarness):
+    """FIX 2: when the project walk descends into a user-home ``~/.augment`` it
+    must NOT re-collect ``~/.augment/rules/**`` as scope "project" (which would
+    duplicate the user-scope rule under a different project_root, defeating the
+    per-project dedup). The user-augment-dir guard skips it.
+    """
+
+    def test_user_rule_not_duplicated_as_project(self):
+        # The SAME home is seen by both the user scan and the project walk.
+        rules_dir = self.augment_dir / "rules"
+        rules_dir.mkdir()
+        (rules_dir / "style.md").write_text("two spaces", encoding="utf-8")
+
+        with patch.object(self.extractor, "_scan_all_user_homes",
+                          side_effect=lambda fn: fn(self.user_home)), \
+             patch.object(self.extractor, "_iter_top_level_dirs",
+                          return_value=[self.user_home]), \
+             patch(f"{_RULES_MOD}.should_skip_system_path", return_value=False):
+            projects = self.extractor.extract_all_augment_rules()
+
+        style_rules = [r for r in _all_rules(projects) if r["file_name"] == "style.md"]
+        # Exactly ONE record, and it is the user-scope one (not a project dup).
+        self.assertEqual(len(style_rules), 1)
+        self.assertEqual(style_rules[0]["scope"], "user")
+        roots = {p["project_root"] for p in projects if p.get("rules")}
+        self.assertEqual(roots, {str(self.augment_dir)})
+
+
 class TestAugmentRulesSadPaths(_AugmentRulesHarness):
     def test_symlink_loop_does_not_hang(self):
         repo = self.user_home / "repo"

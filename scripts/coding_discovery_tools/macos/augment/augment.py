@@ -262,38 +262,59 @@ class MacOSAugmentDetector(BaseToolDetector):
         }]
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
-        results: List[Dict] = []
-        for user_home in self._iter_scan_homes():
-            try:
-                results.extend(self._detect_jetbrains_for_user(user_home))
-            except (PermissionError, OSError) as exc:
-                logger.debug(f"Skipping Augment JetBrains for {user_home}: {exc}")
-        return results
+        """Detect Augment's JetBrains plugin, attributing each IDE to its OWNER.
 
-    def _detect_jetbrains_for_user(self, user_home: Path) -> List[Dict]:
-        results: List[Dict] = []
-        jetbrains_detector = self._make_jetbrains_detector()
-        # KNOWN REDUNDANCY (parity, not a bug): setting ``user_home`` is ignored by
-        # ``MacOSJetBrainsDetector``, which rescans ALL users under root — so under
-        # an all-users scan this runs N times redundantly (N = user count). This is
-        # inherited parity with the shipped Copilot detector
-        # (``detect_copilot.py:_detect_jetbrains_for_user``); the final rows dedup
-        # correctly via ``tool_key``. Fixing it would alter shared JetBrains
-        # behavior affecting Copilot — out of scope here.
-        jetbrains_detector.user_home = user_home
+        ``MacOSJetBrainsDetector`` already scans the running user's home (and ALL
+        users under root), so we invoke it ONCE and derive each IDE's owning user
+        from the IDE's own config path. Stamping the outer scan home instead would,
+        under a root all-users scan, attribute one user's IDE to another user's
+        ``~/.augment`` (wrong permissions/config) and re-run the scan N times.
+        """
+        candidate_homes = self._iter_scan_homes()
+        try:
+            ides = self._make_jetbrains_detector().detect() or []
+        except (PermissionError, OSError) as exc:
+            logger.debug(f"Skipping Augment JetBrains detection: {exc}")
+            return []
 
-        for ide in jetbrains_detector.detect() or []:
+        results: List[Dict] = []
+        for ide in ides:
             plugins = ide.get("plugins", [])
-            if any(_JETBRAINS_PLUGIN_MATCH in str(name).lower() for name in plugins):
-                results.append({
-                    "name": f"Augment ({ide['name']})",
-                    "version": ide.get("version", "unknown"),
-                    "publisher": "Augment Computer",
-                    "ide": ide["name"],
-                    "install_path": ide.get("config_path") or ide.get("install_path"),
-                    "_config_path": str(_resolve_augment_dir(user_home)),
-                })
+            if not any(_JETBRAINS_PLUGIN_MATCH in str(name).lower() for name in plugins):
+                continue
+            ide_path = ide.get("config_path") or ide.get("install_path")
+            owner_home = self._augment_owner_home_for_path(ide_path, candidate_homes)
+            results.append({
+                "name": f"Augment ({ide['name']})",
+                "version": ide.get("version", "unknown"),
+                "publisher": "Augment Computer",
+                "ide": ide["name"],
+                "install_path": ide_path,
+                "_config_path": str(_resolve_augment_dir(owner_home)),
+            })
         return results
+
+    def _augment_owner_home_for_path(self, ide_path, candidate_homes: List[Path]) -> Path:
+        """Owning user's home for a JetBrains IDE config path.
+
+        Matches the IDE's own path against the scanned user homes (longest prefix
+        wins) so each row's ``_config_path`` points at the IDE owner's
+        ``~/.augment`` — correct under a root all-users scan where the JetBrains
+        detector returns every user's IDEs. Falls back to the scoped/current home
+        when no scanned home is a prefix. Separator-normalised for Windows.
+        """
+        if ide_path:
+            ide_norm = str(ide_path).replace("\\", "/").rstrip("/")
+            best = None
+            best_len = -1
+            for home in candidate_homes:
+                home_norm = str(home).replace("\\", "/").rstrip("/")
+                if home_norm and (ide_norm == home_norm or ide_norm.startswith(home_norm + "/")):
+                    if len(home_norm) > best_len:
+                        best, best_len = home, len(home_norm)
+            if best is not None:
+                return best
+        return self.user_home or Path.home()
 
     def _make_jetbrains_detector(self):
         """OS seam: the JetBrains detector for this platform."""

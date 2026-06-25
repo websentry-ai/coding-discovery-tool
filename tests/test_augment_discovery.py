@@ -224,6 +224,29 @@ class TestAugmentDetection(unittest.TestCase):
             rows = self.detector.detect() or []
         self.assertEqual([r for r in rows if r["name"].startswith("Augment (")], [])
 
+    def test_jetbrains_root_scan_attributes_config_to_ide_owner(self):
+        """FIX H2: under a root all-users scan the JetBrains detector returns
+        EVERY user's IDEs; each Augment JetBrains row's ``_config_path`` must point
+        at the IDE OWNER's ``~/.augment`` (derived from the IDE config path), not
+        the outer scan home."""
+        self.detector.user_home = None  # simulate a root all-users scan
+        bob_ide = {
+            "name": "IntelliJ IDEA",
+            "version": "2024.1",
+            "plugins": ["Augment"],
+            "config_path": "/Users/bob/Library/Application Support/JetBrains/IntelliJIdea2024.1",
+            "install_path": "/Users/bob/Library/Application Support/JetBrains/IntelliJIdea2024.1",
+        }
+        with patch.object(self.detector, "_iter_scan_homes",
+                          return_value=[Path("/Users/alice"), Path("/Users/bob")]), \
+             patch.object(self.detector, "_make_jetbrains_detector") as jb:
+            jb.return_value.detect.return_value = [bob_ide]
+            rows = self.detector.detect() or []
+        jbrows = [r for r in rows if r["name"] == "Augment (IntelliJ IDEA)"]
+        self.assertEqual(len(jbrows), 1)
+        # Attributed to bob (the IDE owner), NOT alice (the other scanned home).
+        self.assertEqual(jbrows[0]["_config_path"], "/Users/bob/.augment")
+
     def test_all_three_surfaces_as_separate_rows(self):
         _write_auggie_binary(self.user_home)
         self._write_vscode_ext()

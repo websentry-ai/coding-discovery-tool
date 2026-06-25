@@ -359,6 +359,89 @@ class BaseCopilotCliSettingsExtractor(ABC):
         pass
 
 
+class BaseAugmentRulesExtractor(ABC):
+    """Abstract base class for extracting Augment Code rules from all projects.
+
+    For Augment Code (config under ``~/.augment/``), distinct from the IDE
+    Copilot/Claude surfaces. Mirrors ``BaseCopilotCliRulesExtractor`` — a single
+    product, no ``tool_name`` argument.
+    """
+
+    @abstractmethod
+    def extract_all_augment_rules(self) -> List[Dict]:
+        """
+        Extract all Augment Code rules from all projects on the machine.
+
+        Searches for:
+        - User (scope "user"): ``~/.augment/user-guidelines.md`` and
+          ``~/.augment/rules/**/*.{md,mdx}``
+        - Project (scope "project"): repo-root ``.augment-guidelines``,
+          ``<ws>/.augment/rules/**/*.{md,mdx}``, and ``AGENTS.md`` / ``CLAUDE.md``
+          discovered hierarchically (depth-bounded).
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root directory
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated, scope)
+        """
+        pass
+
+
+class BaseAugmentSettingsExtractor(ABC):
+    """Abstract base class for extracting Augment Code settings/permissions.
+
+    For Augment Code (config under ``~/.augment/``). Mirrors
+    ``BaseClaudeSettingsExtractor`` — returns a list of per-scope settings dicts
+    routed through ``transform_settings_to_backend_format``.
+    """
+
+    @abstractmethod
+    def extract_settings(self) -> Optional[List[Dict]]:
+        """
+        Extract Augment Code settings (permissions + full settings JSON).
+
+        Searches for:
+        - User: ``~/.augment/settings.json``
+        - Managed: ``/etc/augment/settings.json``
+        - Project: ``<ws>/.augment/settings.json`` and
+          ``<ws>/.augment/settings.local.json`` (local scope)
+
+        ``toolPermissions`` is parsed into ``permissions.{allow,deny,ask}`` and the
+        full settings JSON (including ``hooks``) is preserved in ``raw_settings``.
+
+        Returns:
+            List of per-scope settings dicts, or ``None``/empty if nothing found.
+        """
+        pass
+
+
+class BaseAugmentSkillsExtractor(ABC):
+    """Abstract base class for extracting Augment Code skills.
+
+    For Augment Code. Augment has no plugin system, so skills carry
+    ``source="standalone"``.
+    """
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all Augment Code skills from all projects on the machine.
+
+        Searches:
+        - User-level: ~/.augment/skills/<name>/SKILL.md, ~/.augment/commands/*.md
+        - Project-level: **/.augment/commands/*.md, **/.augment/skills/<name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope "user")
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
 class BaseJunieRulesExtractor(ABC):
     """Abstract base class for extracting Junie rules from all projects."""
 

@@ -26,6 +26,9 @@ from .coding_tool_base import (
     BaseCopilotCliRulesExtractor,
     BaseCopilotCliSettingsExtractor,
     BaseCopilotCliSkillsExtractor,
+    BaseAugmentRulesExtractor,
+    BaseAugmentSettingsExtractor,
+    BaseAugmentSkillsExtractor,
     BaseMCPConfigExtractor,
     BaseClaudeSettingsExtractor,
     BaseCursorSettingsExtractor,
@@ -122,6 +125,13 @@ from .macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesE
 from .macos.copilot_cli.copilot_cli_settings_extractor import MacOSCopilotCliSettingsExtractor
 from .macos.copilot_cli.copilot_cli_skills_extractor import MacOSCopilotCliSkillsExtractor
 
+# macOS - Augment Code (Auggie CLI + VS Code + JetBrains surfaces; ~/.augment)
+from .macos.augment.augment import MacOSAugmentDetector
+from .macos.augment.augment_mcp_config_extractor import MacOSAugmentMCPConfigExtractor
+from .macos.augment.augment_rules_extractor import MacOSAugmentRulesExtractor
+from .macos.augment.augment_settings_extractor import MacOSAugmentSettingsExtractor
+from .macos.augment.augment_skills_extractor import MacOSAugmentSkillsExtractor
+
 # Windows - Copilot
 from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
 from .windows.github_copilot.mcp_config_extractor import WindowsGitHubCopilotMCPConfigExtractor
@@ -133,6 +143,13 @@ from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfig
 from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
 from .windows.copilot_cli.copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
 from .windows.copilot_cli.copilot_cli_skills_extractor import WindowsCopilotCliSkillsExtractor
+
+# Windows - Augment Code
+from .windows.augment.augment import WindowsAugmentDetector
+from .windows.augment.augment_mcp_config_extractor import WindowsAugmentMCPConfigExtractor
+from .windows.augment.augment_rules_extractor import WindowsAugmentRulesExtractor
+from .windows.augment.augment_settings_extractor import WindowsAugmentSettingsExtractor
+from .windows.augment.augment_skills_extractor import WindowsAugmentSkillsExtractor
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
@@ -219,6 +236,11 @@ from .linux import (
     LinuxCopilotCliRulesExtractor,
     LinuxCopilotCliSettingsExtractor,
     LinuxCopilotCliSkillsExtractor,
+    LinuxAugmentDetector,
+    LinuxAugmentMCPConfigExtractor,
+    LinuxAugmentRulesExtractor,
+    LinuxAugmentSettingsExtractor,
+    LinuxAugmentSkillsExtractor,
     LinuxCodexDetector,
     LinuxCodexRulesExtractor,
     LinuxCodexMCPConfigExtractor,
@@ -676,6 +698,22 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_augment_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Augment Code detector for the OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+        if os_name == "Darwin":
+            return MacOSAugmentDetector()
+        elif os_name == "Windows":
+            return WindowsAugmentDetector()
+        elif os_name == "Linux":
+            return LinuxAugmentDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_jetbrains_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate JetBrains IDEs detector for the OS.
@@ -792,6 +830,11 @@ class ToolDetectorFactory:
         copilot_cli_detector = ToolDetectorFactory.create_copilot_cli_detector(os_name)
         if copilot_cli_detector is not None:
             detectors.append(copilot_cli_detector)
+
+        # Add Augment Code detector (macOS + Windows + Linux)
+        augment_detector = ToolDetectorFactory.create_augment_detector(os_name)
+        if augment_detector is not None:
+            detectors.append(augment_detector)
 
         # Add JetBrains detector for macOS
         jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
@@ -1554,6 +1597,103 @@ class CopilotCliSkillsExtractorFactory:
             return WindowsCopilotCliSkillsExtractor()
         elif os_name == "Linux":
             return LinuxCopilotCliSkillsExtractor()
+        else:
+            return None
+
+
+class AugmentMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Augment Code MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create an Augment Code MCP config extractor for the OS.
+
+        The parser + User-scope read are OS-agnostic; the Windows/Linux extractors
+        are thin subclasses overriding only the workspace walk.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSAugmentMCPConfigExtractor()
+        elif os_name == "Windows":
+            return WindowsAugmentMCPConfigExtractor()
+        elif os_name == "Linux":
+            return LinuxAugmentMCPConfigExtractor()
+        else:
+            return None
+
+
+class AugmentRulesExtractorFactory:
+    """Factory for creating OS-specific Augment Code rules extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseAugmentRulesExtractor]:
+        """
+        Create an Augment Code rules extractor for the OS.
+
+        The source set + depth-bounded walk are shared in the macOS class; the
+        Windows/Linux subclasses override only the OS-specific seams.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSAugmentRulesExtractor()
+        elif os_name == "Windows":
+            return WindowsAugmentRulesExtractor()
+        elif os_name == "Linux":
+            return LinuxAugmentRulesExtractor()
+        else:
+            return None
+
+
+class AugmentSettingsExtractorFactory:
+    """Factory for creating OS-specific Augment Code settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseAugmentSettingsExtractor]:
+        """
+        Create an Augment Code settings/permissions extractor for the OS.
+
+        Parses ``toolPermissions`` + preserves the full settings JSON (incl.
+        hooks) in raw_settings; Windows/Linux are thin subclasses overriding the
+        all-users scan, managed path, and filesystem seams.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSAugmentSettingsExtractor()
+        elif os_name == "Windows":
+            return WindowsAugmentSettingsExtractor()
+        elif os_name == "Linux":
+            return LinuxAugmentSettingsExtractor()
+        else:
+            return None
+
+
+class AugmentSkillsExtractorFactory:
+    """Factory for creating OS-specific Augment Code skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseAugmentSkillsExtractor]:
+        """
+        Create an Augment Code skills extractor for the OS.
+
+        Reuses the shared skills engine; Windows/Linux are thin (single-threaded)
+        subclasses overriding only the OS seams.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSAugmentSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsAugmentSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxAugmentSkillsExtractor()
         else:
             return None
 

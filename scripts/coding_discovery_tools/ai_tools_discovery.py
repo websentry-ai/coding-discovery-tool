@@ -68,6 +68,10 @@ try:
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
         CopilotCliSkillsExtractorFactory,
+        AugmentMCPConfigExtractorFactory,
+        AugmentRulesExtractorFactory,
+        AugmentSettingsExtractorFactory,
+        AugmentSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -122,6 +126,10 @@ except ImportError:
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
         CopilotCliSkillsExtractorFactory,
+        AugmentMCPConfigExtractorFactory,
+        AugmentRulesExtractorFactory,
+        AugmentSettingsExtractorFactory,
+        AugmentSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
@@ -180,6 +188,20 @@ def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     )
     has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
     return owns_install or has_data
+
+
+def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
+    """Whether a filtered Augment surface should be emitted for ``user_home``.
+
+    Augment surfaces share one per-user ``~/.augment`` config dir (carried as
+    ``_config_path``). Under a root all-users scan the per-user loop re-runs for
+    every user, so a non-owner with no per-user data would otherwise get a
+    phantom surface row. This applies the same ``_config_path``-keyed ownership
+    logic as the Copilot CLI gate. (Secondary guard: the canonical/non-canonical
+    split already strips config from non-canonical rows, but the canonical row's
+    config + permissions still need scoping to the owning user.)
+    """
+    return _copilot_cli_owned_by_user(tool_filtered, user_home)
 
 
 class AIToolsDetector:
@@ -272,6 +294,25 @@ class AIToolsDetector:
             # computed once per scan from the full detected-tools list (prefer the
             # Chat row). None until set by the detection loop.
             self._canonical_vscode_copilot: Optional[str] = None
+
+            # Augment Code MCP + rules + settings + skills extractors (all OSes).
+            self._augment_mcp_extractor = AugmentMCPConfigExtractorFactory.create(self.system)
+            self._augment_rules_extractor = AugmentRulesExtractorFactory.create(self.system)
+            self._augment_settings_extractor = AugmentSettingsExtractorFactory.create(self.system)
+            self._augment_skills_extractor = AugmentSkillsExtractorFactory.create(self.system)
+
+            # Augment ships three surfaces sharing one ~/.augment config. The shared
+            # config (MCP/rules/skills/permissions) is the same whichever surface
+            # asks for it, so memoize each whole-disk walk to run at most once per
+            # scan, and attach it to a single canonical surface (the canonical
+            # picker below) so it is not duplicated across surface rows.
+            self._augment_rules_cache: Optional[List[Dict]] = None
+            self._augment_skills_cache: Optional[Dict] = None
+            self._augment_mcp_cache: Optional[Dict] = None
+            self._augment_settings_cache: Optional[List[Dict]] = None
+            # Canonical Augment surface name (lowercased) that carries the shared
+            # config; computed once per scan. None until set by the detection loop.
+            self._canonical_augment_surface: Optional[str] = None
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -1610,6 +1651,187 @@ class AIToolsDetector:
         else:
             self._canonical_vscode_copilot = None
 
+    # -- Augment Code: memoized shared-config accessors -----------------------
+
+    def _get_augment_rules(self) -> List[Dict]:
+        """Return the shared Augment rules, memoized per scan ([] on failure)."""
+        if self._augment_rules_cache is not None:
+            return self._augment_rules_cache
+        if self._augment_rules_extractor:
+            try:
+                self._augment_rules_cache = self._augment_rules_extractor.extract_all_augment_rules() or []
+            except Exception as e:
+                logger.warning(f"  Augment rules extraction failed: {e}")
+                self._augment_rules_cache = []
+        else:
+            self._augment_rules_cache = []
+        return self._augment_rules_cache
+
+    def _get_augment_skills(self) -> Dict:
+        """Return the shared Augment skills, memoized per scan ({} on failure)."""
+        if self._augment_skills_cache is not None:
+            return self._augment_skills_cache
+        if self._augment_skills_extractor:
+            try:
+                self._augment_skills_cache = self._augment_skills_extractor.extract_all_skills() or {}
+            except Exception as e:
+                logger.warning(f"  Augment skills extraction failed: {e}")
+                self._augment_skills_cache = {}
+        else:
+            self._augment_skills_cache = {}
+        return self._augment_skills_cache
+
+    def _get_augment_mcp(self) -> Optional[Dict]:
+        """Return the shared Augment MCP config, memoized per scan (None on failure)."""
+        if self._augment_mcp_cache is not None:
+            return self._augment_mcp_cache
+        if self._augment_mcp_extractor:
+            try:
+                self._augment_mcp_cache = self._augment_mcp_extractor.extract_mcp_config()
+            except Exception as e:
+                logger.warning(f"  Augment MCP extraction failed: {e}")
+                self._augment_mcp_cache = None
+        return self._augment_mcp_cache
+
+    def _get_augment_settings(self) -> List[Dict]:
+        """Return the shared Augment settings, memoized per scan ([] on failure)."""
+        if self._augment_settings_cache is not None:
+            return self._augment_settings_cache
+        if self._augment_settings_extractor:
+            try:
+                self._augment_settings_cache = self._augment_settings_extractor.extract_settings() or []
+            except Exception as e:
+                logger.warning(f"  Augment settings extraction failed: {e}")
+                self._augment_settings_cache = []
+        else:
+            self._augment_settings_cache = []
+        return self._augment_settings_cache
+
+    def _set_canonical_augment_surface(self, tools: List[Dict]) -> None:
+        """Pick the single Augment surface that should carry the shared config.
+
+        Preference: Auggie CLI > Augment (VS Code) > first JetBrains row. Computed
+        once from the full detected list so exactly ONE surface is enriched; the
+        non-canonical surfaces emit bare detection rows. None when no Augment
+        surface is present.
+        """
+        names_lower = [t.get("name", "").lower() for t in tools]
+        if "auggie cli" in names_lower:
+            self._canonical_augment_surface = "auggie cli"
+        elif "augment (vs code)" in names_lower:
+            self._canonical_augment_surface = "augment (vs code)"
+        else:
+            jetbrains = next((n for n in names_lower if n.startswith("augment (")), None)
+            self._canonical_augment_surface = jetbrains
+
+    def _process_augment_tool(self, tool: Dict) -> Dict:
+        """
+        Process an Augment Code surface row.
+
+        Augment ships three surfaces sharing one ``~/.augment`` config. Only the
+        canonical surface (``_canonical_augment_surface``) carries the shared
+        MCP/rules/skills/permissions; the non-canonical surfaces emit a bare
+        detection row (``projects=[]``, no permissions) so the surface still shows
+        in inventory without duplicating config.
+
+        Returns a tool dict with ``name``, ``version``, ``install_path``,
+        ``_config_path`` and ``projects``.
+        """
+        tool_name = tool.get("name", "").lower()
+
+        result = {
+            "name": tool.get("name"),
+            "version": tool.get("version"),
+            "install_path": tool.get("install_path"),
+            "_config_path": tool.get("_config_path"),
+        }
+        if "ide" in tool:
+            result["ide"] = tool["ide"]
+
+        if tool_name != self._canonical_augment_surface:
+            logger.info(f"  {tool.get('name')} is a non-canonical Augment surface; emitting bare row")
+            result["projects"] = []
+            return result
+
+        projects_dict: Dict[str, Dict] = {}
+
+        logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+        mcp_config = self._get_augment_mcp()
+        if mcp_config and "projects" in mcp_config:
+            for project in mcp_config["projects"]:
+                project_path = project.get("path", "")
+                if project_path:
+                    bucket = projects_dict.setdefault(
+                        project_path, {"mcpServers": [], "rules": [], "skills": []}
+                    )
+                    bucket["mcpServers"] = self._union_mcp_servers(
+                        bucket.get("mcpServers", []), project.get("mcpServers", [])
+                    )
+            log_mcp_details(projects_dict, tool_name)
+
+        logger.info(f"  Extracting {tool.get('name')} rules...")
+        for rules_project in self._get_augment_rules():
+            project_root = rules_project.get("project_root", "")
+            rules = rules_project.get("rules", [])
+            if project_root:
+                bucket = projects_dict.setdefault(
+                    project_root, {"mcpServers": [], "rules": [], "skills": []}
+                )
+                bucket["rules"] = self._deduplicate_project_items(rules)
+
+        logger.info(f"  Extracting {tool.get('name')} skills...")
+        skills_result = self._get_augment_skills()
+        user_skills = skills_result.get("user_skills", [])
+        project_skills = skills_result.get("project_skills", [])
+
+        install_key = tool.get("_config_path") or tool.get("install_path") or str(Path.home())
+        for skill in user_skills:
+            bucket = projects_dict.setdefault(
+                install_key, {"mcpServers": [], "rules": [], "skills": []}
+            )
+            bucket.setdefault("skills", []).append(skill)
+
+        for skills_project in project_skills:
+            project_root = skills_project.get("project_root", "")
+            skills = skills_project.get("skills", [])
+            if not project_root:
+                continue
+            bucket = projects_dict.setdefault(
+                project_root, {"mcpServers": [], "rules": [], "skills": []}
+            )
+            existing = bucket.setdefault("skills", [])
+            existing.extend(skills)
+            bucket["skills"] = self._deduplicate_project_items(existing)
+
+        logger.info(f"  Extracting {tool.get('name')} permissions...")
+        all_settings = self._get_augment_settings()
+        config_dir = tool.get("_config_path") or tool.get("install_path", "")
+        own = [
+            s for s in all_settings
+            if config_dir and s.get("settings_path")
+            and Path(str(s["settings_path"])).parent == Path(config_dir)
+        ]
+        permissions_payload = transform_settings_to_backend_format(own) if own else None
+
+        projects_list = [
+            {
+                "path": path,
+                "mcpServers": data.get("mcpServers", []),
+                "rules": data.get("rules", []),
+                "skills": data.get("skills", []),
+            }
+            for path, data in projects_dict.items()
+            if not self._is_project_empty(data)
+        ]
+
+        logger.info(f"  ✓ Final project count: {len(projects_list)} project(s)")
+        logger.info("=" * 70)
+
+        result["projects"] = projects_list
+        if permissions_payload:
+            result["permissions"] = permissions_payload
+        return result
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
@@ -1643,6 +1865,13 @@ class AIToolsDetector:
         # through the IDE Copilot path (rules + VS Code/JetBrains MCP).
         if tool_name == "github copilot cli":
             return self._process_copilot_cli_tool(tool)
+
+        # Augment Code surfaces (Auggie CLI / Augment (VS Code) / Augment (<IDE>)).
+        # MUST come before the generic JetBrains ``_config_path`` fallback below —
+        # Augment JetBrains rows carry ``_config_path`` and would otherwise route
+        # to the JetBrains handler.
+        if tool_name == "auggie cli" or tool_name.startswith("augment ("):
+            return self._process_augment_tool(tool)
 
         if "github copilot" in tool_name:
             logger.info(f"  Extracting {tool_name} rules...")
@@ -2170,6 +2399,7 @@ class AIToolsDetector:
         user_info = get_user_info()
         tools = self.detect_all_tools()
         self._set_canonical_vscode_copilot(tools)
+        self._set_canonical_augment_surface(tools)
 
         tools_with_projects = []
         for tool in tools:
@@ -2566,6 +2796,8 @@ def main():
 
         # Pick the single VS Code Copilot row that should carry the shared skills.
         detector._set_canonical_vscode_copilot(tools)
+        # Pick the single Augment surface that should carry the shared config.
+        detector._set_canonical_augment_surface(tools)
 
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
@@ -2614,6 +2846,18 @@ def main():
                         if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
                             logger.info(
                                 f"  Skipping Copilot CLI for {user_name}: config dir "
+                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+                                f"not owned by this user and no per-user data"
+                            )
+                            continue
+
+                        # Ownership gate (Augment surfaces): same ~/.augment-keyed
+                        # logic so a non-owner under a root scan doesn't get a
+                        # phantom surface row.
+                        if (tool_name == "Auggie CLI" or tool_name.lower().startswith("augment (")) \
+                                and not _augment_owned_by_user(tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping {tool_name} for {user_name}: config dir "
                                 f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
                                 f"not owned by this user and no per-user data"
                             )

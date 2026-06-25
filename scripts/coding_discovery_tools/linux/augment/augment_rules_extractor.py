@@ -7,6 +7,7 @@ OS-specific seams via ``linux_extraction_helpers`` (note the Linux
 ``should_skip_system_path`` must NOT skip ``/home``).
 """
 
+import logging
 from pathlib import Path
 from typing import List
 
@@ -20,6 +21,8 @@ from ...linux_extraction_helpers import (
 )
 from ...macos.augment.augment_rules_extractor import MacOSAugmentRulesExtractor
 
+logger = logging.getLogger(__name__)
+
 
 class LinuxAugmentRulesExtractor(MacOSAugmentRulesExtractor):
     """Augment Code rules extractor on Linux (overrides OS seams only)."""
@@ -28,8 +31,13 @@ class LinuxAugmentRulesExtractor(MacOSAugmentRulesExtractor):
         return is_running_as_root()
 
     def _scan_all_user_homes(self, extract_for_user) -> None:
+        # Guard each user so one unreadable home (PermissionError/OSError) can't
+        # abort the whole multi-user scan — parity with the Linux skills extractor.
         for user_home in get_linux_user_homes():
-            extract_for_user(Path(user_home))
+            try:
+                extract_for_user(Path(user_home))
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping {user_home}: {e}")
 
     def _filesystem_root(self) -> Path:
         return Path("/")

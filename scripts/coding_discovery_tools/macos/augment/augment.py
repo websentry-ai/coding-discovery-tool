@@ -228,19 +228,38 @@ class MacOSAugmentDetector(BaseToolDetector):
         return results
 
     def _detect_vscode_for_user(self, user_home: Path) -> List[Dict]:
-        results: List[Dict] = []
+        """Emit AT MOST ONE "Augment (VS Code)" row per user.
+
+        Both the stable (``augment.vscode-augment``) and nightly
+        (``augment.vscode-augment-nightly``) extensions can be installed at once.
+        Emitting both produces two identically-named rows sharing one
+        ``_config_path`` -> duplicate canonical candidates. Prefer the stable
+        extension; fall back to nightly only when stable is absent, using the
+        chosen extension's version.
+        """
         vscode_ext_path = user_home / ".vscode" / "extensions" / "extensions.json"
+        versions_by_id: Dict[str, str] = {}
         for ext in _load_extension_json(vscode_ext_path):
             ext_id = ext.get("identifier", {}).get("id", "").lower()
             if ext_id in _VSCODE_EXTENSION_IDS:
-                results.append({
-                    "name": "Augment (VS Code)",
-                    "version": ext.get("version", "unknown"),
-                    "publisher": "Augment Computer",
-                    "install_path": str(vscode_ext_path.parent),
-                    "_config_path": str(_resolve_augment_dir(user_home)),
-                })
-        return results
+                # _VSCODE_EXTENSION_IDS is ordered (stable, nightly); index 0 is
+                # the stable id we prefer.
+                versions_by_id[ext_id] = ext.get("version", "unknown")
+
+        chosen_version = next(
+            (versions_by_id[ext_id] for ext_id in _VSCODE_EXTENSION_IDS
+             if ext_id in versions_by_id),
+            None,
+        )
+        if chosen_version is None:
+            return []
+        return [{
+            "name": "Augment (VS Code)",
+            "version": chosen_version,
+            "publisher": "Augment Computer",
+            "install_path": str(vscode_ext_path.parent),
+            "_config_path": str(_resolve_augment_dir(user_home)),
+        }]
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         results: List[Dict] = []

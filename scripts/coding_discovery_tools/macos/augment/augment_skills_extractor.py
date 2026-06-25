@@ -117,25 +117,27 @@ class MacOSAugmentSkillsExtractor(BaseAugmentSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
-                        if item.name in AUGMENT_PARENT_DIR_NAMES:
-                            for config in AUGMENT_ITEM_CONFIGS:
-                                type_dir = item / config.dir_name
-                                if type_dir.exists() and type_dir.is_dir():
-                                    if not self._is_user_level_skill_dir(type_dir):
-                                        extract_augment_items_from_directory(
-                                            type_dir,
-                                            projects_by_root,
-                                            self._extract_single_rule_file,
-                                            add_skill_to_project,
-                                            config,
-                                        )
-                            continue
+                    # Skip non-dirs and symlinked dirs BEFORE the .augment
+                    # handling / recursion (mirrors the rules + mcp + settings
+                    # walk ordering) so a symlinked .augment can't be followed.
+                    if not item.is_dir() or item.is_symlink():
+                        continue
 
-                        if item.is_symlink():
-                            continue
+                    if item.name in AUGMENT_PARENT_DIR_NAMES:
+                        for config in AUGMENT_ITEM_CONFIGS:
+                            type_dir = item / config.dir_name
+                            if type_dir.exists() and type_dir.is_dir():
+                                if not self._is_user_level_skill_dir(type_dir):
+                                    extract_augment_items_from_directory(
+                                        type_dir,
+                                        projects_by_root,
+                                        self._extract_single_rule_file,
+                                        add_skill_to_project,
+                                        config,
+                                    )
+                        continue
 
-                        self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)
+                    self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)
 
                 except (PermissionError, OSError):
                     continue

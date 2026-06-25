@@ -151,12 +151,39 @@ class TestAugmentDetection(unittest.TestCase):
         self.assertEqual(vsc[0]["version"], "2.0.1")
         self.assertEqual(vsc[0]["publisher"], "Augment Computer")
 
+    def _write_vscode_exts(self, exts):
+        """Write multiple extensions: ``exts`` is a list of (ext_id, version)."""
+        ext_path = self.user_home / ".vscode" / "extensions" / "extensions.json"
+        ext_path.parent.mkdir(parents=True, exist_ok=True)
+        ext_path.write_text(json.dumps([
+            {"identifier": {"id": ext_id}, "version": version}
+            for ext_id, version in exts
+        ]), encoding="utf-8")
+        return ext_path
+
     def test_vscode_nightly_id_matched(self):
         self._write_vscode_ext(ext_id="augment.vscode-augment-nightly", version="2.0.1-nightly")
         with patch.object(self.detector, "_make_jetbrains_detector") as jb:
             jb.return_value.detect.return_value = []
             rows = self.detector.detect()
-        self.assertTrue(any(r["name"] == "Augment (VS Code)" for r in rows))
+        vsc = [r for r in rows if r["name"] == "Augment (VS Code)"]
+        # FIX C: nightly-only -> one row with nightly's version.
+        self.assertEqual(len(vsc), 1)
+        self.assertEqual(vsc[0]["version"], "2.0.1-nightly")
+
+    def test_vscode_stable_and_nightly_emit_single_stable_row(self):
+        """FIX C: both stable + nightly installed -> exactly ONE "Augment (VS Code)"
+        row, carrying the STABLE extension's version (preferred over nightly)."""
+        self._write_vscode_exts([
+            ("augment.vscode-augment-nightly", "2.0.1-nightly"),
+            ("augment.vscode-augment", "1.5.0"),
+        ])
+        with patch.object(self.detector, "_make_jetbrains_detector") as jb:
+            jb.return_value.detect.return_value = []
+            rows = self.detector.detect()
+        vsc = [r for r in rows if r["name"] == "Augment (VS Code)"]
+        self.assertEqual(len(vsc), 1)
+        self.assertEqual(vsc[0]["version"], "1.5.0")
 
     def test_corrupt_extensions_json_yields_no_vscode_row(self):
         ext_path = self.user_home / ".vscode" / "extensions" / "extensions.json"
@@ -347,6 +374,27 @@ class TestAugmentCrossPlatformSmoke(unittest.TestCase):
         self.assertEqual(LinuxAugmentDetector().tool_name, "Augment Code")
         self.assertIsInstance(LinuxAugmentMCPConfigExtractor(), MacOSAugmentMCPConfigExtractor)
         LinuxAugmentSkillsExtractor()
+
+    def test_windows_skills_skip_predicate_parity(self):
+        """FIX E: the Windows skills walk-skip predicate must, like the macOS base
+        and the Windows RULES extractor, skip other-tool config dirs (``~/.<tool>``)
+        while still descending into ``.augment``.
+
+        Paths are built from separate components (not a backslash literal) so
+        ``.parts`` splits correctly on BOTH the macOS and Windows CI runners.
+        """
+        extractor = WindowsAugmentSkillsExtractor()
+        anchor = Path(Path.home().anchor)
+        # Other-tool config dirs are skipped (no descent into another tool's bundle).
+        self.assertTrue(
+            extractor._should_skip_walk_item(anchor / "Users" / "alice" / ".cursor"))
+        self.assertTrue(
+            extractor._should_skip_walk_item(
+                anchor / "Users" / "alice" / "repo" / ".claude" / "skills"))
+        # ``.augment`` itself must NOT be skipped (it must stay traversable).
+        self.assertFalse(
+            extractor._should_skip_walk_item(
+                anchor / "Users" / "alice" / "repo" / ".augment"))
 
 
 if __name__ == "__main__":

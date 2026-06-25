@@ -11,6 +11,7 @@ enumeration, and the user-level-dir check.
 from pathlib import Path
 from typing import List
 
+from ...constants import traverses_other_tool_config_dir
 from ...macos.augment.augment_skills_extractor import MacOSAugmentSkillsExtractor
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
@@ -32,7 +33,15 @@ class WindowsAugmentSkillsExtractor(MacOSAugmentSkillsExtractor):
         return extract_single_rule_file(*args, **kwargs)
 
     def _should_skip_walk_item(self, item: Path) -> bool:
-        return should_skip_path(item, get_windows_system_directories())
+        # Match the macOS base + the Windows RULES extractor + the Copilot
+        # Windows skills walk: also skip other-tool config dirs (``~/.<tool>``)
+        # so the walk does not descend into another tool's bundled config. The
+        # ``.augment`` dir is NOT in OTHER_TOOL_CONFIG_DIRS, so it stays
+        # traversable.
+        return (
+            should_skip_path(item, get_windows_system_directories())
+            or traverses_other_tool_config_dir(item)
+        )
 
     def _scan_all_user_homes(self, extract_for_user) -> None:
         scan_windows_user_directories(extract_for_user)

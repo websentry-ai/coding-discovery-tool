@@ -14,6 +14,7 @@ The temp dir lives under /var (skipped by the real ``should_skip_system_path``),
 so the project walk neutralises the skip predicate via the extractor's seam.
 """
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -132,6 +133,39 @@ class TestAugmentProjectSkills(_AugmentSkillsHarness):
         all_skills = [s for p in result["project_skills"] for s in p["skills"]]
         names = sorted(s["skill_name"] for s in all_skills)
         self.assertEqual(names, ["alpha", "beta"])
+
+
+class TestAugmentSkillsSadPaths(_AugmentSkillsHarness):
+    def test_symlinked_augment_dir_not_followed(self):
+        """FIX A: a symlinked ``.augment`` in the project walk must be skipped
+        BEFORE the parent-dir handling, so its skills are never collected (same
+        class of bug already fixed in the rules walk; loop/perf risk)."""
+        # A real .augment skills tree lives OUTSIDE the scanned repo.
+        target_augment = self.user_home / "external" / ".augment"
+        self._write_nested_skill(target_augment, "leaked")
+
+        # The scanned repo exposes .augment ONLY via a symlink to the target.
+        repo = self.user_home / "repo"
+        repo.mkdir(parents=True)
+        try:
+            os.symlink(str(target_augment), str(repo / ".augment"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported")
+
+        result = self._extract_project_only(repo)
+        all_names = {s["skill_name"] for p in result["project_skills"] for s in p["skills"]}
+        # The symlinked .augment must NOT be followed -> no "leaked" skill.
+        self.assertNotIn("leaked", all_names)
+        self.assertEqual(result["project_skills"], [])
+
+    def test_real_augment_dir_still_collected(self):
+        """No behaviour change for a NON-symlink ``.augment``: still collected."""
+        repo = self.user_home / "repo"
+        augment = repo / ".augment"
+        self._write_nested_skill(augment, "kept")
+        result = self._extract_project_only(repo)
+        all_names = {s["skill_name"] for p in result["project_skills"] for s in p["skills"]}
+        self.assertIn("kept", all_names)
 
 
 if __name__ == "__main__":

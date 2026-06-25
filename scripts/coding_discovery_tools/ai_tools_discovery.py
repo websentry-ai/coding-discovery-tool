@@ -152,6 +152,12 @@ payload_logger = logging.getLogger(__name__ + ".payload")
 detail_logger = logging.getLogger(__name__ + ".detail")
 configure_logger()
 
+# Distinct "unset" sentinel for the per-scan Augment memo caches. ``None`` is a
+# LEGITIMATE cached value (e.g. no MCP configured), so it cannot double as the
+# "not yet computed" marker — otherwise the expensive whole-disk walk re-runs on
+# every accessor call whenever the real result is ``None``.
+_AUGMENT_CACHE_UNSET = object()
+
 
 def _normalise_path(p: str) -> str:
     """Normalise a path string for cross-platform comparison.
@@ -196,12 +202,35 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     Augment surfaces share one per-user ``~/.augment`` config dir (carried as
     ``_config_path``). Under a root all-users scan the per-user loop re-runs for
     every user, so a non-owner with no per-user data would otherwise get a
-    phantom surface row. This applies the same ``_config_path``-keyed ownership
-    logic as the Copilot CLI gate. (Secondary guard: the canonical/non-canonical
-    split already strips config from non-canonical rows, but the canonical row's
-    config + permissions still need scoping to the owning user.)
+    phantom surface row. Ownership is "owns the ``_config_path`` dir OR has
+    user-owned data".
+
+    Unlike the Copilot CLI gate, MANAGED-scope permissions do NOT count as
+    user-owned data: managed (org-wide ``/etc/augment``) policy is attached to
+    the canonical row and survives ``filter_tool_projects_by_user`` for EVERY
+    user, so treating its mere presence as data would manufacture a phantom row
+    for a non-owner. User-owned data is: per-user ``projects`` OR a permissions
+    block whose scope is a non-managed (user/local) scope.
     """
-    return _copilot_cli_owned_by_user(tool_filtered, user_home)
+    own_path = tool_filtered.get("_config_path") or tool_filtered.get("install_path", "")
+    own_norm = _normalise_path(own_path)
+    user_norm = _normalise_path(str(user_home))
+    owns_install = bool(own_norm) and (
+        own_norm == user_norm or own_norm.startswith(user_norm + "/")
+    )
+
+    if bool(tool_filtered.get("projects")):
+        return True
+
+    # A permissions block survives filtering for this user iff it is managed
+    # (kept for everyone) or its settings_path is under this user's home (kept
+    # only for the owner). Managed alone must NOT count; a surviving non-managed
+    # block means this user owns user-scope permissions here.
+    perms = tool_filtered.get("permissions")
+    if perms is not None and perms.get("settings_source") != "managed":
+        return True
+
+    return owns_install
 
 
 class AIToolsDetector:
@@ -306,13 +335,20 @@ class AIToolsDetector:
             # asks for it, so memoize each whole-disk walk to run at most once per
             # scan, and attach it to a single canonical surface (the canonical
             # picker below) so it is not duplicated across surface rows.
-            self._augment_rules_cache: Optional[List[Dict]] = None
-            self._augment_skills_cache: Optional[Dict] = None
-            self._augment_mcp_cache: Optional[Dict] = None
-            self._augment_settings_cache: Optional[List[Dict]] = None
-            # Canonical Augment surface name (lowercased) that carries the shared
-            # config; computed once per scan. None until set by the detection loop.
-            self._canonical_augment_surface: Optional[str] = None
+            # Use the UNSET sentinel (not None) so a legitimate cached ``None``
+            # (e.g. no MCP configured) still short-circuits the accessor instead
+            # of re-running the expensive walk on every call (D4 memoization).
+            self._augment_rules_cache = _AUGMENT_CACHE_UNSET
+            self._augment_skills_cache = _AUGMENT_CACHE_UNSET
+            self._augment_mcp_cache = _AUGMENT_CACHE_UNSET
+            self._augment_settings_cache = _AUGMENT_CACHE_UNSET
+            # Per-user canonical Augment surface: maps each user's ``_config_path``
+            # (their ~/.augment) -> the chosen surface name (lowercased) that
+            # carries the shared config for THAT user. Computed once per scan.
+            # Keyed per-config so a root multi-user scan picks a canonical surface
+            # for EACH user independently (user A's CLI doesn't steal canonical
+            # status from user B who only has VS Code).
+            self._canonical_augment_surface_by_config: Dict[str, str] = {}
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -1684,7 +1720,7 @@ class AIToolsDetector:
 
     def _get_augment_rules(self) -> List[Dict]:
         """Return the shared Augment rules, memoized per scan ([] on failure)."""
-        if self._augment_rules_cache is not None:
+        if self._augment_rules_cache is not _AUGMENT_CACHE_UNSET:
             return self._augment_rules_cache
         if self._augment_rules_extractor:
             try:
@@ -1698,7 +1734,7 @@ class AIToolsDetector:
 
     def _get_augment_skills(self) -> Dict:
         """Return the shared Augment skills, memoized per scan ({} on failure)."""
-        if self._augment_skills_cache is not None:
+        if self._augment_skills_cache is not _AUGMENT_CACHE_UNSET:
             return self._augment_skills_cache
         if self._augment_skills_extractor:
             try:
@@ -1711,8 +1747,13 @@ class AIToolsDetector:
         return self._augment_skills_cache
 
     def _get_augment_mcp(self) -> Optional[Dict]:
-        """Return the shared Augment MCP config, memoized per scan (None on failure)."""
-        if self._augment_mcp_cache is not None:
+        """Return the shared Augment MCP config, memoized per scan (None on failure).
+
+        ``None`` is a legitimate result (no MCP configured), so the guard checks
+        the distinct UNSET sentinel — otherwise a cached ``None`` would re-trigger
+        the full MCP walk on every call, defeating the once-per-scan memoization.
+        """
+        if self._augment_mcp_cache is not _AUGMENT_CACHE_UNSET:
             return self._augment_mcp_cache
         if self._augment_mcp_extractor:
             try:
@@ -1726,7 +1767,7 @@ class AIToolsDetector:
 
     def _get_augment_settings(self) -> List[Dict]:
         """Return the shared Augment settings, memoized per scan ([] on failure)."""
-        if self._augment_settings_cache is not None:
+        if self._augment_settings_cache is not _AUGMENT_CACHE_UNSET:
             return self._augment_settings_cache
         if self._augment_settings_extractor:
             try:
@@ -1738,37 +1779,70 @@ class AIToolsDetector:
             self._augment_settings_cache = []
         return self._augment_settings_cache
 
-    def _set_canonical_augment_surface(self, tools: List[Dict]) -> None:
-        """Pick the single Augment surface that should carry the shared config.
+    @staticmethod
+    def _is_augment_surface(name_lower: str) -> bool:
+        """True for an Augment surface name (Auggie CLI or an ``Augment (...)`` row)."""
+        return name_lower == "auggie cli" or name_lower.startswith("augment (")
 
-        Preference: Auggie CLI > Augment (VS Code) > first JetBrains row. Computed
-        once from the full detected list so exactly ONE surface is enriched; the
-        non-canonical surfaces emit bare detection rows. None when no Augment
-        surface is present.
+    @staticmethod
+    def _pick_canonical_augment_name(names_lower: List[str]) -> Optional[str]:
+        """Pick the canonical surface among ``names_lower`` (all sharing one config).
+
+        Preference: Auggie CLI > Augment (VS Code) > first JetBrains row. None when
+        the group is empty.
         """
-        names_lower = [t.get("name", "").lower() for t in tools]
         if "auggie cli" in names_lower:
-            self._canonical_augment_surface = "auggie cli"
-        elif "augment (vs code)" in names_lower:
-            self._canonical_augment_surface = "augment (vs code)"
-        else:
-            jetbrains = next((n for n in names_lower if n.startswith("augment (")), None)
-            self._canonical_augment_surface = jetbrains
+            return "auggie cli"
+        if "augment (vs code)" in names_lower:
+            return "augment (vs code)"
+        return next((n for n in names_lower if n.startswith("augment (")), None)
+
+    def _set_canonical_augment_surface(self, tools: List[Dict]) -> None:
+        """Pick the canonical Augment surface PER USER (keyed by ``_config_path``).
+
+        Augment surfaces share one ``~/.augment`` config dir PER USER. Under a root
+        multi-user scan, each user's surfaces carry that user's ``_config_path``, so
+        the canonical pick must be computed per-config — otherwise a single global
+        winner (e.g. user A's CLI) would leave a different user (B, VS Code only)
+        with a bare row that drops B's config.
+
+        Groups the Augment surfaces by ``_config_path`` and stores, per group, the
+        best surface name (Auggie CLI > Augment (VS Code) > first JetBrains) in
+        ``_canonical_augment_surface_by_config``. Missing/empty ``_config_path``
+        groups under ``""``. Computed once per scan from the full detected list.
+        """
+        names_by_config: Dict[str, List[str]] = {}
+        for tool in tools:
+            name_lower = tool.get("name", "").lower()
+            if not self._is_augment_surface(name_lower):
+                continue
+            cfg = tool.get("_config_path") or ""
+            names_by_config.setdefault(cfg, []).append(name_lower)
+
+        self._canonical_augment_surface_by_config = {
+            cfg: chosen
+            for cfg, names_lower in names_by_config.items()
+            if (chosen := self._pick_canonical_augment_name(names_lower)) is not None
+        }
 
     def _process_augment_tool(self, tool: Dict) -> Dict:
         """
         Process an Augment Code surface row.
 
-        Augment ships three surfaces sharing one ``~/.augment`` config. Only the
-        canonical surface (``_canonical_augment_surface``) carries the shared
+        Augment ships three surfaces sharing one ``~/.augment`` config PER USER.
+        Only the canonical surface for that user's ``_config_path``
+        (``_canonical_augment_surface_by_config``) carries the shared
         MCP/rules/skills/permissions; the non-canonical surfaces emit a bare
         detection row (``projects=[]``, no permissions) so the surface still shows
-        in inventory without duplicating config.
+        in inventory without duplicating config. Keying canonical status per
+        ``_config_path`` means a root multi-user scan picks a winner for EACH user
+        independently (so a VS Code-only user still carries their config).
 
         Returns a tool dict with ``name``, ``version``, ``install_path``,
         ``_config_path`` and ``projects``.
         """
         tool_name = tool.get("name", "").lower()
+        cfg = tool.get("_config_path") or ""
 
         result = {
             "name": tool.get("name"),
@@ -1779,7 +1853,7 @@ class AIToolsDetector:
         if "ide" in tool:
             result["ide"] = tool["ide"]
 
-        if tool_name != self._canonical_augment_surface:
+        if tool_name != self._canonical_augment_surface_by_config.get(cfg):
             logger.info(f"  {tool.get('name')} is a non-canonical Augment surface; emitting bare row")
             result["projects"] = []
             return result

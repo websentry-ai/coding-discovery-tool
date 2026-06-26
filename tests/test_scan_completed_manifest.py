@@ -4,11 +4,12 @@ Tests for WEB-4679: the scan "completed" event carries a manifest of the
 set of enumerated home users, so the backend can set-diff and soft-delete
 (prune) tools that are no longer installed.
 
-Correctness property under test (the load-bearing one): a tool whose read
-ERRORED is NEVER recorded in the manifest, so a transient read failure can
-never be mistaken for an uninstall. Tools that were sent successfully OR
-short-circuited by the local hash-match dedup (still installed, just unchanged)
-ARE recorded.
+Correctness property under test (the load-bearing one): the manifest is built
+from DETECTION/presence, not extraction success. A tool that was detected present
+is recorded even if reading its config/rules errored, so a read failure can never
+be mistaken for an uninstall (and never fail-closes the manifest to None). A tool
+whose DETECTOR errored (presence unknown) is also kept. A tool is omitted ONLY
+when its detector ran cleanly and did not find it (a real uninstall).
 
 Seams (mirroring the existing suite in test_send_and_persist.py /
 test_discovery_flow.py):
@@ -257,17 +258,17 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
         )
 
 
-class TestManifestExcludesErroredReads(unittest.TestCase):
-    """The load-bearing property: a tool whose read raises is OMITTED from the
-    manifest, while a successfully-sent tool and a hash-match (unchanged, still
-    installed) tool are BOTH included.
+class TestManifestFromPresence(unittest.TestCase):
+    """The load-bearing property: the manifest is built from DETECTION/presence, not
+    extraction success. A detected tool is recorded even if reading its config errored
+    (so a read failure is never mistaken for an uninstall and never nulls the manifest),
+    and a tool whose DETECTOR errored is kept too. A tool is omitted ONLY when its
+    detector ran cleanly and did not find it.
 
-    Seam: main() driven in-process with a mocked detector + discovery_cache and
-    a captured send_scan_event. This is necessary because the per-(tool, user)
-    loop body — with its success / hash-match / PermissionError branches — lives
-    inline inside main() and is not an independently callable unit. No
-    production code was changed to enable this; every name patched here is a
-    module-level import already present in ai_tools_discovery.
+    Seam: main() driven in-process with a mocked detector + discovery_cache and a
+    captured send_scan_event. The per-(tool, user) loop body lives inline inside main(),
+    so this is the only seam where the success / hash-match / read-error branches can be
+    forced deterministically. No production code was changed to enable this.
     """
 
     def setUp(self):
@@ -287,15 +288,16 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
         # Distinct install_path per tool so the (name:path) dedup keeps all three.
         return {"name": name, "version": "1.0", "install_path": f"/opt/{name}", "projects": []}
 
-    def _run_main_capture_manifest(self, send_report_result=(True, False), filter_error=None):
+    def _run_main_capture_manifest(self, send_report_result=(True, False), filter_error=None, detector_failure=None):
         """Run main() with three crafted tools for one user:
-          ToolOK        -> hash mismatch -> send path -> send result varies -> appended
-          ToolHashMatch -> hash match    -> dedup short-circuit            -> appended
-          ToolErr       -> filter raises PermissionError                   -> NOT appended
-        send_report_result controls send_report_to_backend's (success, retryable)
-        return — pass (False, True) to exercise a read-success / upload-failure.
-        Returns the captured (manifest, covered_home_users) from the completed
-        send_scan_event call.
+          ToolOK        -> hash mismatch -> send path
+          ToolHashMatch -> hash match    -> dedup short-circuit
+          ToolErr       -> filter raises (read/extraction error)
+        All three are DETECTED, so all three must appear in the manifest (presence-based).
+        send_report_result controls send_report_to_backend's (success, retryable).
+        detector_failure: if set, detect_all_tools reports that tool_name via its `failures`
+        set (a detector error) — it must also appear in the manifest though it isn't "found".
+        Returns the captured (manifest, covered_home_users) from the completed send_scan_event.
         """
         adm = self.adm
 
@@ -305,7 +307,13 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
 
         detector = Mock()
         detector.get_device_id.return_value = "dev-xyz"
-        detector.detect_all_tools.return_value = [tool_ok, tool_hm, tool_err]
+
+        def _detect_all(user_home=None, failures=None):
+            # A detector error surfaces via the `failures` set (presence unknown -> kept in manifest).
+            if detector_failure and failures is not None:
+                failures.add(detector_failure)
+            return [tool_ok, tool_hm, tool_err]
+        detector.detect_all_tools.side_effect = _detect_all
         detector._set_canonical_vscode_copilot.return_value = None
         detector.process_single_tool.side_effect = lambda t: t
 
@@ -366,43 +374,30 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
 
         return captured
 
-    def test_errored_tool_excluded_success_and_hashmatch_included(self):
+    def test_read_error_keeps_tool_in_manifest(self):
+        # A tool whose config read ERRORS is still detected present -> stays in the manifest (a read failure isn't an uninstall).
         captured = self._run_main_capture_manifest()
 
         self.assertIn("manifest", captured, "completed event was never sent")
+        self.assertIsNotNone(captured["manifest"], "a read error must NOT fail-close the manifest to None")
         pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
 
-        # Success path recorded.
-        self.assertIn(("alice", "ToolOK"), pairs)
-        # Hash-match (unchanged, still installed) recorded.
-        self.assertIn(("alice", "ToolHashMatch"), pairs)
-        # Errored read is the load-bearing exclusion: a read failure must never
-        # look like an uninstall.
-        self.assertNotIn(("alice", "ToolErr"), pairs)
-        # Exactly the two non-errored pairs, nothing else.
-        self.assertEqual(len(captured["manifest"]), 2)
+        self.assertIn(("alice", "ToolOK"), pairs)         # sent path
+        self.assertIn(("alice", "ToolHashMatch"), pairs)  # hash-match (unchanged, still installed)
+        self.assertIn(("alice", "ToolErr"), pairs)        # read errored but DETECTED -> kept
+        self.assertEqual(len(captured["manifest"]), 3)
 
-    def test_read_success_but_upload_failure_still_in_manifest(self):
-        # A tool whose READ succeeds but whose UPLOAD fails transiently
-        # (send_report_to_backend -> (False, retryable=True)) is still installed.
-        # It MUST stay in the manifest; otherwise the backend would mistake a
-        # transient upload failure for an uninstall and prune a live tool. This
-        # fails before the fix (ToolOK absent when its upload fails) and passes
-        # after (the manifest tracks what was SEEN, not what uploaded).
+    def test_upload_failure_keeps_tool_in_manifest(self):
+        # Presence is recorded before extraction, so a transient UPLOAD failure still keeps the tool in the manifest.
         captured = self._run_main_capture_manifest(send_report_result=(False, True))
 
         self.assertIn("manifest", captured, "completed event was never sent")
         pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
-
-        # Read-success tool whose upload FAILED is still recorded.
-        self.assertIn(("alice", "ToolOK"), pairs)
-        # Hash-match (no upload at all) still recorded.
-        self.assertIn(("alice", "ToolHashMatch"), pairs)
-        # An errored READ remains excluded — that path is unchanged.
-        self.assertNotIn(("alice", "ToolErr"), pairs)
-        # Manifest is identical to the all-uploads-succeed case: read-success is
-        # what counts, not upload success.
-        self.assertEqual(len(captured["manifest"]), 2)
+        # All three detected tools present, regardless of upload outcome / read error.
+        self.assertEqual(
+            pairs,
+            {("alice", "ToolOK"), ("alice", "ToolHashMatch"), ("alice", "ToolErr")},
+        )
 
     def test_covered_home_users_includes_user_with_no_manifest_entry(self):
         # covered_home_users must come from the full enumeration (all_users),
@@ -413,21 +408,28 @@ class TestManifestExcludesErroredReads(unittest.TestCase):
         captured = self._run_main_capture_manifest()
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
 
-    def test_generic_read_error_fails_closed_manifest_none(self):
-        # A NON-Permission read error sends NO scan_event=failed, so the backend can't tell the
-        # scan was unclean. The completed event must fail closed: manifest=None (legacy = no prune),
-        # so a transient error can never drive a wrongful device-wide delete. (A PermissionError, by
-        # contrast, DOES send a failed event and keeps a real manifest — covered by the test above.)
+    def test_generic_read_error_does_not_fail_close(self):
+        # Regression: a generic read error used to fail-close the manifest to None (blocking all pruning); it must no longer.
         captured = self._run_main_capture_manifest(
             filter_error=RuntimeError("simulated generic read failure")
         )
         self.assertIn("manifest", captured, "completed event was never sent")
-        self.assertIsNone(
+        self.assertIsNotNone(
             captured["manifest"],
-            "a generic (non-Permission) read error must fail closed -> manifest=None",
+            "a generic read error must NOT fail-close the manifest to None",
         )
-        # covered_home_users is still reported (telemetry of who was enumerated).
+        pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
+        self.assertIn(("alice", "ToolErr"), pairs)
+        self.assertEqual(len(captured["manifest"]), 3)
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
+
+    def test_detector_error_keeps_tool_in_manifest(self):
+        # A tool whose DETECTOR errors (presence unknown) is kept in the manifest. ToolGhost isn't "found" but its detector failed -> must appear.
+        captured = self._run_main_capture_manifest(detector_failure="ToolGhost")
+        pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
+        self.assertIn(("alice", "ToolGhost"), pairs)
+        # The three detected tools are present too (ToolErr kept despite its read error).
+        self.assertEqual(len(captured["manifest"]), 4)
 
 
 if __name__ == "__main__":

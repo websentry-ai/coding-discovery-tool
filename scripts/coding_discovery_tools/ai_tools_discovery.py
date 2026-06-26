@@ -279,7 +279,7 @@ class AIToolsDetector:
         """
         return self._device_id_extractor.extract_device_id()
 
-    def detect_all_tools(self, user_home: Optional[Path] = None) -> List[Dict]:
+    def detect_all_tools(self, user_home: Optional[Path] = None, failures: Optional[set] = None) -> List[Dict]:
         """
         Detect all supported AI tools.
         
@@ -310,6 +310,9 @@ class AIToolsDetector:
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
                 report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
+                # Detection errored: record the tool so the caller can keep it (presence unknown != uninstalled).
+                if failures is not None:
+                    failures.add(detector.tool_name)
 
         return tools
 
@@ -2309,11 +2312,8 @@ def main():
         # Track failed reports for persistence
         failed_reports = []
 
-        # (home_user, tool_name) tools seen this run; backend set-diffs it in "completed" to prune the rest.
+        # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
-        # Fail closed: if a read error below omits a live tool from the manifest, send manifest=None
-        # (backend treats as legacy = no prune) rather than risk wrongly deleting an installed tool.
-        scanned_manifest_complete = True
 
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
@@ -2398,7 +2398,13 @@ def main():
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             with time_step("detect_tools", "detect"):
-                user_tools = detector.detect_all_tools(user_home=user_home)
+                user_detect_failures = set()
+                user_tools = detector.detect_all_tools(
+                    user_home=user_home, failures=user_detect_failures
+                )
+            # Detector errored -> presence unknown -> keep it in the manifest (don't treat as uninstalled).
+            for failed_tool_name in user_detect_failures:
+                scanned_manifest.add((user, failed_tool_name))
 
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
@@ -2459,6 +2465,9 @@ def main():
                         user_home = Path.home()
 
                     try:
+                        # Record presence before extraction so a read error below can't drop a live tool.
+                        scanned_manifest.add((user_name, tool_name))
+
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
@@ -2474,6 +2483,8 @@ def main():
                                 f"{tool_filtered.get('install_path')!r} not owned by this "
                                 f"user and no per-user data"
                             )
+                            # Not actually present for this user -> undo the optimistic presence record.
+                            scanned_manifest.discard((user_name, tool_name))
                             continue
 
                         # Detect subscription plan for Claude Code
@@ -2625,8 +2636,6 @@ def main():
                         if local_payload_hash and cached_hash == local_payload_hash:
                             if not args.summary and not args.payload:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
-                            # unchanged but still installed -> record so the backend won't prune it
-                            scanned_manifest.add((user_name, tool_name))
                         else:
                             if not args.summary and not args.payload:
                                 logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
@@ -2638,14 +2647,10 @@ def main():
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                                 if local_payload_hash:
                                     discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
-                                # read + uploaded -> record so the backend won't prune it
-                                scanned_manifest.add((user_name, tool_name))
                             else:
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                                 if retryable:
                                     failed_reports.append(single_tool_report)
-                                # read OK, only upload failed (retried later) -> still installed, so record it (manifest = seen, not uploaded)
-                                scanned_manifest.add((user_name, tool_name))
 
                         if not args.summary and not args.payload:
                             logger.info("")
@@ -2669,17 +2674,12 @@ def main():
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
-                            # Backend won't see this scan as unclean -> don't let it prune from a partial manifest.
-                            scanned_manifest_complete = False
 
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name, "user": user_name}, level="warning")
                         logger.info("")
 
                     except Exception as e:
                         logger.error(f"Error processing {tool_name} for user {user_name}: {e}", exc_info=True)
-                        # No scan_event=failed is sent here, so the backend can't see this gap;
-                        # mark the manifest incomplete so the completed event sends manifest=None.
-                        scanned_manifest_complete = False
                         report_to_sentry(e, {**sentry_ctx, "phase": "process_tool_user", "tool_name": tool_name}, level="warning")
                         logger.info("")
 
@@ -2696,8 +2696,9 @@ def main():
 
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
-                # Tool omitted device-wide with no failed event -> manifest is incomplete.
-                scanned_manifest_complete = False
+                # Extraction failed device-wide but the tool was detected -> keep it for all users (no prune).
+                for u in all_users:
+                    scanned_manifest.add((u, tool_name))
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
@@ -2745,13 +2746,8 @@ def main():
 
         # only the completed event carries manifest + covered users (backend prunes from them)
         logger.info("Sending scan completed event...")
-        # Fail closed: if any tool/user read errored without a scan_event=failed, the manifest may be
-        # missing a live tool -> send manifest=None so the backend treats this run as legacy (no prune).
-        if scanned_manifest_complete:
-            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
-        else:
-            manifest = None
-            logger.warning("Scan had read errors; sending manifest=None to skip pruning this run")
+        # manifest = (home_user, tool_name) detected present; backend set-diffs it to prune the rest.
+        manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx,

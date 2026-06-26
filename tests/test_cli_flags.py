@@ -1,5 +1,5 @@
 """
-Tests for the --dump / --summary / --payload verbosity flags.
+Tests for the --dump / --payload verbosity flags.
 """
 import argparse
 import io
@@ -15,13 +15,12 @@ def _build_parser():
     parser.add_argument('--app_name')
     g = parser.add_mutually_exclusive_group()
     g.add_argument('--dump', action='store_true')
-    g.add_argument('--summary', action='store_true')
     g.add_argument('--payload', action='store_true')
     return parser
 
 
 class TestVerbosityFlagsMutex(unittest.TestCase):
-    """argparse should reject any two-of-three verbosity flag combination."""
+    """argparse should reject combining the verbosity flags (--dump/--payload)."""
 
     def setUp(self):
         self.parser = _build_parser()
@@ -33,38 +32,25 @@ class TestVerbosityFlagsMutex(unittest.TestCase):
     def test_dump_alone_ok(self):
         args = self.parser.parse_args(['--api-key', 'k', '--domain', 'd', '--dump'])
         self.assertTrue(args.dump)
-        self.assertFalse(args.summary)
-        self.assertFalse(args.payload)
-
-    def test_summary_alone_ok(self):
-        args = self.parser.parse_args(['--api-key', 'k', '--domain', 'd', '--summary'])
-        self.assertTrue(args.summary)
-        self.assertFalse(args.dump)
         self.assertFalse(args.payload)
 
     def test_payload_alone_ok(self):
         args = self.parser.parse_args(['--api-key', 'k', '--domain', 'd', '--payload'])
         self.assertTrue(args.payload)
         self.assertFalse(args.dump)
-        self.assertFalse(args.summary)
 
     def test_no_flags_defaults_all_false(self):
         args = self.parser.parse_args(['--api-key', 'k', '--domain', 'd'])
         self.assertFalse(args.dump)
-        self.assertFalse(args.summary)
         self.assertFalse(args.payload)
 
-    def test_dump_and_summary_rejected(self):
-        self._expect_exit('--dump', '--summary')
+    def test_summary_flag_rejected(self):
+        # --summary was removed; concise is the default. A stale caller passing
+        # it must fail loudly (argparse exit), not silently get default output.
+        self._expect_exit('--summary')
 
     def test_dump_and_payload_rejected(self):
         self._expect_exit('--dump', '--payload')
-
-    def test_summary_and_payload_rejected(self):
-        self._expect_exit('--summary', '--payload')
-
-    def test_all_three_rejected(self):
-        self._expect_exit('--dump', '--summary', '--payload')
 
 
 class TestLoggingHelpersSuppression(unittest.TestCase):
@@ -72,8 +58,8 @@ class TestLoggingHelpersSuppression(unittest.TestCase):
     Setting the logging_helpers module's logger to WARNING must silence the
     INFO output of log_rules_details / log_mcp_details / log_settings_details.
 
-    This is the property --summary relies on; we test it directly so a future
-    rename of the module doesn't silently break --summary.
+    This is the property the concise default relies on; we test it directly so
+    a future module rename doesn't silently break the default suppression.
     """
 
     def setUp(self):

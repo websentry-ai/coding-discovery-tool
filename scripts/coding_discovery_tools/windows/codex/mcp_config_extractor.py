@@ -59,9 +59,7 @@ class WindowsCodexMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         projects = []
 
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
+        projects.extend(self._extract_global_config())
 
         project_configs = self._extract_project_level_configs()
         projects.extend(project_configs)
@@ -73,15 +71,16 @@ class WindowsCodexMCPConfigExtractor(BaseMCPConfigExtractor):
             "projects": projects
         }
 
-    def _extract_global_config(self) -> Optional[Dict[str, Union[str, List[Dict[str, Any]]]]]:
+    def _extract_global_config(self) -> List[Dict[str, Union[str, List[Dict[str, Any]]]]]:
         """
         Extract global MCP config from ~/.codex/config.toml.
 
-        When running as administrator, collects global configs from ALL users.
-        Returns the first non-empty config found, or None if none found.
+        When running as administrator, accumulates global configs from ALL users
+        (de-duplicated by path). Single-user / non-admin yields a 0-or-1 element
+        list, identical in content to the single dict (or None) returned before.
 
         Returns:
-            Dict with 'path' and 'mcpServers' keys, or None if not found
+            List of config dicts with 'path' and 'mcpServers' keys (empty if none found)
         """
         return extract_codex_global_mcp_config_with_admin_support(
             self.GLOBAL_MCP_CONFIG_PATH,

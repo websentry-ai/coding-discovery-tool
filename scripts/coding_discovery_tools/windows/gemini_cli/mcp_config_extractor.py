@@ -37,9 +37,8 @@ class WindowsGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         projects = []
 
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
+        # Extract global config(s) — one per user when running as administrator
+        projects.extend(self._extract_global_config())
 
         project_configs = self._extract_project_level_configs()
         projects.extend(project_configs)
@@ -47,17 +46,16 @@ class WindowsGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
         # Return None if no configs found
         if not projects:
             return None
-        
+
         return {
             "projects": projects
         }
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_config(self) -> List[Dict]:
         """
         Extract global MCP config from ~/.gemini/settings.json
-        
+
         When running as administrator, collects global configs from ALL users.
-        Returns the first non-empty config found, or None if none found.
         """
         return extract_global_mcp_config_with_root_support(
             self.GLOBAL_MCP_CONFIG_PATH,

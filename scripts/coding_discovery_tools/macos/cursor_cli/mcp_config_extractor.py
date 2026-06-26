@@ -59,10 +59,8 @@ class MacOSCursorCliMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         projects = []
 
-        # Extract global config
-        global_config = self._extract_global_config()
-        if global_config:
-            projects.append(global_config)
+        # Extract global config(s) — one per user when running as root
+        projects.extend(self._extract_global_config())
 
         # Extract project-level configs
         project_configs = self._extract_project_level_configs()
@@ -73,12 +71,11 @@ class MacOSCursorCliMCPConfigExtractor(BaseMCPConfigExtractor):
 
         return {"projects": projects}
 
-    def _extract_global_config(self) -> Optional[Dict]:
+    def _extract_global_config(self) -> List[Dict]:
         """
         Extract global MCP config from ~/.cursor/mcp.json.
 
         When running as root, collects global configs from ALL users.
-        Returns the first non-empty config found, or None if none found.
         """
         return extract_global_mcp_config_with_root_support(
             self.GLOBAL_MCP_CONFIG_PATH,

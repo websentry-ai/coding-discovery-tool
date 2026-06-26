@@ -97,6 +97,110 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     return None
 
 
+def resolve_npm_global_tool_bin(
+    tool: str, user_home: Path, is_root: bool
+) -> Optional[str]:
+    """Resolve the install path of an npm-global Node CLI (e.g. ``gemini``,
+    ``openclaw``) whose real binary lives at ``<npm global prefix>/bin/<tool>``.
+
+    The npm global prefix varies (Homebrew node, nvm, pnpm), so we resolve it
+    dynamically with ``npm prefix -g`` AND probe a set of static fallbacks.
+
+    GUARD (cross-user FP class fixed in commit 93b5fc2): ``npm prefix -g``
+    resolves the SCANNER's npm config — under a root/MDM multi-user scan that is
+    NOT the target user's prefix, so honouring it would attribute the scanner's
+    install to a user who has only residue. The ``npm prefix -g`` probe and the
+    machine-global ``/opt/homebrew/bin`` fallback are therefore gated behind
+    ``not is_root``. The ``user_home``-relative fallbacks (``~/.npm-global/bin``,
+    nvm under ``user_home``, pnpm under ``user_home``) are correctly scoped to
+    the user and stay unconditional. Never raises.
+
+    Args:
+        tool: The CLI/binary name (e.g. ``"gemini"`` / ``"openclaw"``).
+        user_home: Home dir of the user being scanned.
+        is_root: Whether the scan is running as root/SYSTEM.
+
+    Returns:
+        Absolute path to the resolved executable as a string, or None.
+    """
+    candidates: List[Path] = []
+
+    # 1. Dynamic npm global prefix — SCANNER-scoped, so non-root only.
+    if not is_root:
+        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        if prefix:
+            prefix = prefix.strip()
+            if prefix:
+                candidates.append(Path(prefix) / "bin" / tool)
+
+    # 2. Machine-global Homebrew prefix — non-root only (shared install).
+    if not is_root:
+        candidates.append(Path("/opt/homebrew/bin") / tool)
+
+    # 3. user_home-relative fallbacks — always safe (scoped to this user).
+    candidates.append(user_home / ".npm-global" / "bin" / tool)
+    candidates.append(user_home / ".local" / "share" / "pnpm" / tool)  # pnpm global
+    try:
+        nvm_node = user_home / ".nvm" / "versions" / "node"
+        if nvm_node.exists():
+            for version_dir in sorted(nvm_node.iterdir()):
+                try:
+                    if version_dir.is_dir():
+                        candidates.append(version_dir / "bin" / tool)
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
+
+    for candidate in candidates:
+        try:
+            if candidate.exists() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except (PermissionError, OSError):
+            continue
+
+    return None
+
+
+def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
+    """Under a root/MDM multi-user scan, decide whether a MACHINE-GLOBAL binary
+    (Homebrew / /usr/local / /usr/bin) should be attributed to ``user_home``.
+
+    - Owned by a REGULAR user (Homebrew on macOS and manual /usr/local installs
+      are owned by the installing user): attribute to that owner ONLY — this is
+      what prevents one user's install fanning out to every user (the 93b5fc2
+      cross-user FP).
+    - Owned by ROOT/system (uid 0, e.g. /usr/bin/claude from apt/dnf): genuinely
+      system-wide and available to every user, so attribute to whoever is being
+      scanned.
+
+    Never raises: any stat/pwd failure returns False (do not attribute).
+
+    Args:
+        candidate: Absolute path to a machine-global binary.
+        user_home: Home dir of the user currently being scanned.
+
+    Returns:
+        True if the binary should be attributed to ``user_home``, else False.
+    """
+    try:
+        uid = os.stat(str(candidate)).st_uid
+    except (OSError, PermissionError):
+        return False
+    if uid == 0:
+        return True  # system-wide -> available to every scanned user
+    if pwd is None:
+        return False  # POSIX-only; should never be hit on Windows
+    try:
+        owner_home = Path(pwd.getpwuid(uid).pw_dir)
+    except (KeyError, OSError, AttributeError):
+        return False
+    try:
+        return owner_home.resolve() == user_home.resolve()
+    except (OSError, RuntimeError):
+        return owner_home == user_home
+
+
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()
@@ -373,6 +477,126 @@ def get_all_users_linux() -> List[str]:
     return users
 
 
+# Identities that are never a real human end-user. We map these to None for the
+# audit/payload value so the backend never attributes a machine to a service
+# account. Matching is case-insensitive against the whole, trimmed name.
+# Trade-off: a rare human whose login literally equals one of these (e.g. an
+# admin named "administrator", or a person named "daemon"/"nginx") is also
+# rejected. We accept that — for audit attribution a false None is safer than
+# mislabelling a machine with a service identity (the FE shows "No AI tools
+# detected" rather than a wrong owner).
+_NON_HUMAN_USERS: FrozenSet[str] = frozenset(
+    {
+        "root",
+        "system",
+        "unknown",
+        # Windows built-in / service identities (may also appear bare, without a
+        # DOMAIN prefix, depending on how whoami resolves them).
+        "administrator",
+        "localsystem",
+        "local service",
+        "network service",
+        # Common Linux service accounts.
+        "www-data",
+        "postgres",
+        "nobody",
+        "daemon",
+        "nginx",
+        "mysql",
+    }
+)
+
+# Windows domains that only ever own service principals (e.g.
+# ``NT AUTHORITY\LOCAL SERVICE``, ``NT SERVICE\MSSQLSERVER``). Any user under
+# these is a service account, never a human end-user.
+_NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
+
+
+def _strip_windows_domain(name: str) -> str:
+    """Return the bare username from a Windows ``DOMAIN\\username`` string.
+
+    ``whoami`` on Windows returns ``DOMAIN\\username`` (or ``MACHINE\\username``);
+    we only want the trailing username component. Names without a backslash are
+    returned unchanged.
+
+    Args:
+        name: Raw whoami output (possibly ``DOMAIN\\username``).
+
+    Returns:
+        The bare username with any domain prefix stripped.
+    """
+    if name and "\\" in name:
+        return name.split("\\")[-1]
+    return name
+
+
+def _real_user_or_none(name: Optional[str]) -> Optional[str]:
+    """Return the trimmed username if it is a real human, otherwise None.
+
+    Maps junk / service / machine identities to None so scan-lifecycle audit
+    payloads never attribute a machine to a non-human account. This is the
+    canonical filter and is self-contained: it strips any Windows ``DOMAIN\\``
+    prefix itself, so it is safe regardless of the caller's path. Rejected
+    (case-insensitive, after trimming + domain-stripping):
+      - empty / whitespace-only
+      - anything under the ``NT AUTHORITY`` / ``NT SERVICE`` Windows domains
+        (e.g. ``NT AUTHORITY\\LOCAL SERVICE``, ``NT SERVICE\\MSSQLSERVER``)
+      - the literal ``"unknown"``
+      - ``"root"``, ``"system"``, and Windows built-ins (administrator,
+        localsystem, local service, network service)
+      - anything starting with ``"_"`` (macOS daemon accounts)
+      - anything ending with ``"$"`` (Windows machine accounts)
+      - common Linux service accounts (www-data, postgres, nobody, daemon,
+        nginx, mysql)
+
+    Args:
+        name: Candidate username (may be None, may be ``DOMAIN\\username``).
+
+    Returns:
+        The trimmed, domain-stripped username if it is a real human, else None.
+    """
+    if not name:
+        return None
+    raw = name.strip()
+    # Reject service principals by their Windows domain before stripping it.
+    if "\\" in raw and raw.split("\\")[0].strip().lower() in _NON_HUMAN_WINDOWS_DOMAINS:
+        return None
+    stripped = _strip_windows_domain(raw).strip()
+    if not stripped:
+        return None
+    if stripped.startswith("_"):
+        return None
+    if stripped.endswith("$"):
+        return None
+    if stripped.lower() in _NON_HUMAN_USERS:
+        return None
+    return stripped
+
+
+def get_audit_user() -> Optional[str]:
+    """Return the real human user running the scan, or None.
+
+    This is the value to attach to scan-lifecycle audit payloads: it is the
+    real human OR None, never a junk/service/machine identity. For
+    container/daemon/root scans where no human can be resolved, returns None
+    rather than a synthesized owner.
+
+    Returns:
+        The real human username, or None when no human user can be resolved.
+    """
+    # On Windows, resolve the RAW, domain-qualified identity (``whoami`` →
+    # ``DOMAIN\\user``) so _real_user_or_none can apply its NT AUTHORITY /
+    # NT SERVICE domain rejection. get_user_info() pre-strips the ``DOMAIN\\``
+    # prefix (path-building needs the bare name), which would otherwise hide a
+    # service principal like ``NT SERVICE\\MSSQLSERVER`` behind its bare,
+    # non-denylisted name. Fall back to get_user_info() if whoami yields nothing.
+    if platform.system() == "Windows":
+        raw = run_command(["whoami"], COMMAND_TIMEOUT)
+        if raw:
+            return _real_user_or_none(raw)
+    return _real_user_or_none(get_user_info())
+
+
 def get_user_info() -> str:
     """
     Get current user information (whoami equivalent).
@@ -381,23 +605,28 @@ def get_user_info() -> str:
 
     On macOS, when running as root, finds the user with the most storage space
     in /Users directory to get the actual user instead of "root".
-    
-    On Windows, when running as administrator, finds the actual logged-in user
-    by querying explorer.exe process owner, Win32_ComputerSystem, or active console
-    session instead of returning "Administrator" or "admin".
-    
+
+    On Windows, returns ``whoami`` with any ``DOMAIN\\`` prefix stripped, falling
+    back to ``getpass.getuser()``. (It does NOT currently resolve the real
+    interactive user when running as a service/SYSTEM — get_audit_user() maps
+    such non-human identities to None.)
+
+    NOTE: This ALWAYS returns a usable, non-None string (falling back to
+    "unknown"). Callers that build filesystem paths like ``/Users/<user>`` rely
+    on that guarantee. For an audit/payload value that is the real human OR
+    None, use ``get_audit_user()`` instead.
+
     Returns:
-        Current username as string
+        Current username as string (never None)
     """
     try:
         username = None
-        
+
         if platform.system() == "Windows":
             # Use whoami command on Windows (works reliably)
             whoami_output = run_command(["whoami"], COMMAND_TIMEOUT)
             # Extract just the username if whoami returns DOMAIN\username format
-            if username and "\\" in username:
-                username = username.split("\\")[-1]
+            username = _strip_windows_domain(whoami_output) if whoami_output else None
         else:
             # On macOS/Linux, check if running as root first
             current_user = run_command(["whoami"], COMMAND_TIMEOUT)
@@ -486,8 +715,9 @@ def send_scan_event(
     home_user: Optional[str] = None,
     scan_error: Optional[Dict] = None,
     sentry_context: Optional[Dict] = None,
+    system_user: Optional[str] = None,
     manifest: Optional[List[Dict]] = None,
-    covered_home_users: Optional[List[str]] = None
+    covered_home_users: Optional[List[str]] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -502,6 +732,9 @@ def send_scan_event(
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
         sentry_context: Optional context dict forwarded to Sentry on failure
+        system_user: Optional real human user running the scan (or None). Used by
+            the backend to attribute empty machines. MUST be a real human or
+            None (see ``get_audit_user``), never a junk/service identity.
         manifest: Optional [{"home_user", "tool_name"}] seen this run; sent only on
             "completed" so the backend set-diffs it to prune the rest.
         covered_home_users: Optional home users covered; sent only on "completed" to
@@ -518,6 +751,9 @@ def send_scan_event(
 
     if app_name:
         payload["app_name"] = app_name
+
+    if system_user:
+        payload["system_user"] = system_user
 
     if home_user:
         payload["home_user"] = home_user
@@ -746,19 +982,27 @@ def _backoff(attempt: int, delays: List[int]) -> None:
 def _get_queue_file_path() -> Path:
     """Return platform-appropriate queue file path.
 
+    If AI_DISCOVERY_QUEUE_FILE is set (and non-empty) in the environment,
+    that path is used verbatim. This lets the test harness redirect the
+    queue away from the real per-UID /var/tmp file so an interrupted test
+    can never leave a fixture that a later real agent run would drain and
+    POST to production.
+
     On Unix, /var/tmp persists across reboots (unlike /tmp).
     The filename includes the current UID so that different users
     (e.g. root via MDM vs. a regular login user) each get their own
     queue file, avoiding PermissionError on files created with 0600.
     On Windows, fall back to the standard temp directory (already per-user).
     """
+    override = (os.environ.get("AI_DISCOVERY_QUEUE_FILE") or "").strip()
+    if override:
+        return Path(os.path.expanduser(os.path.expandvars(override)))
     if platform.system() == "Windows":
         return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
     uid = os.getuid()
     return Path(f"/var/tmp/ai-discovery-queue-{uid}.json")
 
 
-QUEUE_FILE = _get_queue_file_path()
 QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
@@ -773,8 +1017,9 @@ def save_failed_reports(reports: List[Dict]) -> None:
         ]
         # Keep only the most recent entries to prevent unbounded growth
         envelopes = envelopes[-MAX_QUEUE_SIZE:]
-        _write_file_secure(QUEUE_FILE, json.dumps(envelopes).encode())
-        logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
+        queue_file = _get_queue_file_path()
+        _write_file_secure(queue_file, json.dumps(envelopes).encode())
+        logger.info(f"Saved {len(reports)} failed report(s) to {queue_file}")
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
         report_to_sentry(e, {"phase": "queue"}, level="warning")
@@ -792,11 +1037,12 @@ def load_pending_reports() -> List[Dict]:
             f" -- can be removed with: sudo rm {old_shared}"
         )
 
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
 
     try:
-        envelopes = json.loads(QUEUE_FILE.read_text())
+        envelopes = json.loads(queue_file.read_text())
     except Exception as e:
         logger.warning(f"Could not load pending reports: {e}")
         report_to_sentry(e, {"phase": "queue"}, level="warning")
@@ -822,16 +1068,20 @@ def load_pending_reports() -> List[Dict]:
 
 def _load_queue_file_safe() -> List[Dict]:
     """Load existing queue file contents, returning an empty list on any error."""
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
     try:
-        return json.loads(QUEUE_FILE.read_text())
+        return json.loads(queue_file.read_text())
     except Exception:
         return []
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
     """Write data to a file with restricted permissions (0600 on Unix)."""
+    # Ensure the parent exists so a queue-path override with a missing parent
+    # doesn't silently drop the write (and lose the failed reports).
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     # Restrict permissions to owner-only (rw-------) on Unix systems
     try:

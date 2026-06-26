@@ -2,10 +2,12 @@
 Integration tests for send_report_to_backend() and queue persistence.
 
 Uses a real HTTP server on localhost — curl hits it directly.
-Only mocks: time.sleep (speed), QUEUE_FILE path (isolation), _SENTRY_DSN (no real Sentry).
+Only mocks: time.sleep (speed), the queue path via AI_DISCOVERY_QUEUE_FILE
+(isolation), _SENTRY_DSN (no real Sentry).
 """
 
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -274,11 +276,14 @@ class TestPersistence(unittest.TestCase):
     def setUp(self):
         self._tmp_dir = tempfile.mkdtemp()
         self._queue_path = Path(self._tmp_dir) / "queue.json"
-        self._orig_queue_file = utils_mod.QUEUE_FILE
-        utils_mod.QUEUE_FILE = self._queue_path
+        self._orig_queue_env = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(self._queue_path)
 
     def tearDown(self):
-        utils_mod.QUEUE_FILE = self._orig_queue_file
+        if self._orig_queue_env is None:
+            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+        else:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._orig_queue_env
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     def test_persist_and_drain_lifecycle(self):
@@ -395,6 +400,40 @@ class TestScanEvents(unittest.TestCase):
 
         payload = json.loads(self.server.requests[0]["body"])
         self.assertEqual(payload["scan_event"], "completed")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_event_includes_system_user_when_provided(self, _sleep):
+        """A real human system_user is included in the lifecycle payload."""
+        success, _retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "completed",
+            system_user="alice",
+        )
+
+        self.assertTrue(success)
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["system_user"], "alice")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_event_omits_system_user_when_none(self, _sleep):
+        """system_user is omitted from the payload when None (no junk owner)."""
+        success, _retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "in_progress",
+            system_user=None,
+        )
+
+        self.assertTrue(success)
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertNotIn("system_user", payload)
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")

@@ -28,10 +28,12 @@ logger = logging.getLogger(__name__)
 # below to a temp fallback, but the home candidate is always derived from this
 # so a second acquire_lock() in the same process re-evaluates home first instead
 # of treating an already-resolved temp dir as a trusted non-private candidate.
+_CACHE_FILENAME = "discovery-cache.json"
+_LOCK_FILENAME = "discovery.lock"
 _HOME_STATE_DIR = Path.home() / ".unbound"
 UNBOUND_DIR = _HOME_STATE_DIR
-CACHE_PATH = UNBOUND_DIR / "discovery-cache.json"
-LOCK_PATH = UNBOUND_DIR / "discovery.lock"
+CACHE_PATH = UNBOUND_DIR / _CACHE_FILENAME
+LOCK_PATH = UNBOUND_DIR / _LOCK_FILENAME
 
 STALE_LOCK_SECONDS = 15 * 60
 HEARTBEAT_INTERVAL_SECONDS = 60
@@ -141,6 +143,11 @@ def _try_state_dir(path: Path, is_private: bool) -> bool:
                 if st.st_mode & 0o077:
                     last_lock_error = f"state dir not private (mode {oct(stat.S_IMODE(st.st_mode))}): {path}"
                     return False
+        # Reject a candidate whose existing cache file this uid can't read (foreign-owned 0600 in a shared HOME).
+        cache_file = path / _CACHE_FILENAME
+        if cache_file.exists() and not os.access(str(cache_file), os.R_OK):
+            last_lock_error = f"state dir holds unreadable cache file (foreign-owned?): {cache_file}"
+            return False
         return True
     except OSError as e:
         last_lock_error = str(e)
@@ -155,10 +162,13 @@ def _ensure_state_dir() -> bool:
     for path, is_private in _state_dir_candidates():
         if _try_state_dir(path, is_private):
             if path != UNBOUND_DIR:
-                logger.warning(f"home state dir unusable; using fallback state dir {path}")
+                logger.warning(
+                    f"home state dir unusable ({last_lock_error or 'unknown'}); "
+                    f"using fallback state dir {path}"
+                )
                 UNBOUND_DIR = path
-                CACHE_PATH = path / "discovery-cache.json"
-                LOCK_PATH = path / "discovery.lock"
+                CACHE_PATH = path / _CACHE_FILENAME
+                LOCK_PATH = path / _LOCK_FILENAME
             # An earlier candidate (e.g. an unwritable home) may have set
             # last_lock_error; clear it now that we have a usable dir so a
             # successful (possibly fallen-back) acquire never reports a stale
@@ -246,12 +256,50 @@ def get_cached_hash(tool_name: str, home_user: str, cache: Optional[dict] = None
     return None
 
 
+def _read_lock_pid() -> Optional[int]:
+    """The lock file's first whitespace-delimited token is the owner PID
+    (written as ``"{pid} {iso}\\n"``). Returns None if it can't be parsed."""
+    try:
+        with LOCK_PATH.open("r", encoding="utf-8") as f:
+            tokens = f.readline().split()
+        return int(tokens[0]) if tokens else None
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """POSIX liveness probe via signal 0. Conservative: on any error other than
+    'no such process' (e.g. EPERM = exists but other-owned) treat as alive."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _lock_is_live() -> bool:
+    """True if the lock is held by a still-running process.
+
+    On POSIX a lock whose recorded PID is dead is NOT live, so a discovery run
+    killed without a chance to clean up (e.g. SIGKILL when the parent
+    onboard/setup subprocess timeout fires) does not block the next run for the
+    full STALE_LOCK_SECONDS window. A live owner still needs a fresh heartbeat to
+    count as live, matching the original zombie tolerance and guarding against
+    PID reuse. Falls back to mtime freshness when the PID can't be read or
+    checked (e.g. Windows)."""
     try:
         age = time.time() - LOCK_PATH.stat().st_mtime
     except OSError:
         return False
-    return age < STALE_LOCK_SECONDS
+    fresh = age < STALE_LOCK_SECONDS
+    pid = _read_lock_pid()
+    if pid is not None and os.name == "posix":
+        return _pid_alive(pid) and fresh
+    return fresh
 
 
 def acquire_lock() -> str:
@@ -267,6 +315,14 @@ def acquire_lock() -> str:
         return "contended"
 
     if LOCK_PATH.exists():
+        # Log WHY we're stealing so a rerun is distinguishable in logs: recovery
+        # from a predecessor killed without cleanup (dead PID) vs a plain stale
+        # (heartbeat-died) lock.
+        _stale_pid = _read_lock_pid()
+        if _stale_pid is not None and os.name == "posix" and not _pid_alive(_stale_pid):
+            logger.info(f"stealing discovery lock from dead PID {_stale_pid} (predecessor killed without cleanup)")
+        else:
+            logger.info("stealing stale discovery lock (heartbeat older than the stale window)")
         try:
             LOCK_PATH.unlink()
         except OSError as e:

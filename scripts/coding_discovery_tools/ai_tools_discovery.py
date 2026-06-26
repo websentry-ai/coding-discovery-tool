@@ -2881,6 +2881,7 @@ def main():
                     RuntimeError("Discovery found no tools"),
                     context=no_tools_ctx,
                     level="warning",
+                    priority=True,
                 )
             except Exception:
                 pass

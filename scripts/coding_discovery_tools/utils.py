@@ -1479,6 +1479,7 @@ def report_to_sentry(
     exception: Exception,
     context: Optional[Dict] = None,
     level: str = "error",
+    priority: bool = False,
 ) -> None:
     """Send an event to Sentry using the raw HTTP store endpoint.
 
@@ -1486,6 +1487,10 @@ def report_to_sentry(
         exception: The exception to report.
         context: Extra tags/context (e.g. phase, tool_name, http_code).
         level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+        priority: Bypass the per-run event cap so a terminal once-per-run
+            diagnostic (e.g. the no_tools_found summary) is not starved by
+            earlier per-tool errors. Still honors the circuit breaker (a dead
+            transport can't be helped) and dedup (no spam).
     """
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
@@ -1501,8 +1506,12 @@ def report_to_sentry(
         if _sentry_dead_this_run:
             return
         # Collapse duplicate events and hard-cap the synchronous curls per run.
+        # priority events skip the count cap (but never dedup or the breaker) so a
+        # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
         signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
-        if signature in _sentry_sent_signatures or _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
+        if signature in _sentry_sent_signatures:
+            return
+        if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
             return
         _sentry_sent_signatures.add(signature)
         _sentry_event_count += 1

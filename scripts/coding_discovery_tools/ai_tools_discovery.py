@@ -1503,30 +1503,35 @@ class AIToolsDetector:
             return file_path
 
     @staticmethod
-    def _augment_skill_owner_home(skill: Dict) -> Optional[str]:
-        """Derive the owning user's home dir from a user-scope skill's file_path.
+    def _augment_skill_project_root(skill: Dict) -> Optional[str]:
+        """Derive the project_root for a user-scope Augment skill/command.
 
-        Mirrors ``_copilot_skill_owner_home``. User skills live at
-        ``<home>/.augment/skills/...`` or ``<home>/.augment/commands/...``; the
-        home is the path prefix before the ``/.augment/`` marker. Keying user
-        skills under the owner's home (not the single canonical ``install_key``)
-        lets the per-user project filter scope them correctly under root scans —
-        without this, a root all-users scan keys EVERY user's skills under one
-        home, leaking user A's skill content onto user B's row.
+        Augment reads user skills/commands from ``<home>/.augment``,
+        ``<home>/.claude`` and ``<home>/.agents`` (each with ``skills/`` and
+        ``commands/``). The project_root is the CONFIG DIR the item lives in — the
+        path prefix up to and including that marker (e.g. ``<home>/.augment``),
+        NOT the bare home. This (a) coalesces ``~/.augment`` skills with the same
+        row's ``~/.augment`` rules/MCP into ONE project (the backend keys an
+        AIToolProject per path, so a bare-home root would surface a spurious
+        project), while ``~/.claude`` / ``~/.agents`` skills group honestly under
+        their own dir; and (b) keeps each item owner-scoped (the home is in the
+        path) so the per-user project filter attributes it correctly under root
+        scans — preventing cross-user skill-content leakage.
 
         Operates on the raw path string (not ``pathlib``) to preserve the
-        original separator style; handles the Windows ``\\`` separator variant.
-        Returns None when the file_path is missing/unparseable so the caller can
-        fall back to the canonical install_key (matching copilot).
+        original separator; handles the Windows ``\\`` variant. Returns None when
+        the file_path is missing/unparseable so the caller falls back to install_key.
         """
         file_path = skill.get("file_path", "")
         if not file_path:
             return None
         try:
-            for marker in ("/.augment/", "\\.augment\\"):
-                idx = file_path.find(marker)
-                if idx != -1:
-                    return file_path[:idx]
+            for marker in (".augment", ".claude", ".agents"):
+                for sep in ("/", "\\"):
+                    idx = file_path.find(f"{sep}{marker}{sep}")
+                    if idx != -1:
+                        # up to and including the marker dir (drop the trailing sep)
+                        return file_path[: idx + 1 + len(marker)]
             return None
         except Exception:
             return None
@@ -1896,7 +1901,7 @@ class AIToolsDetector:
         # skills to their own home (no cross-user leak). Falls back to
         # install_key when file_path is missing/unparseable (matches copilot).
         for skill in user_skills:
-            skill_key = self._augment_skill_owner_home(skill) or install_key
+            skill_key = self._augment_skill_project_root(skill) or install_key
             bucket = projects_dict.setdefault(
                 skill_key, {"mcpServers": [], "rules": [], "skills": []}
             )

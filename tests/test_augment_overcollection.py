@@ -334,8 +334,10 @@ class TestAugmentManagedOnlyOwnership(unittest.TestCase):
 class TestAugmentUserSkillsNoCrossUserLeak(unittest.TestCase):
     """FIX 1: under a root all-users scan ``_get_augment_skills`` returns ALL
     users' user-scope skills in one flat list. Each skill must be keyed under ITS
-    OWN owner home (derived from its ``file_path``) so the per-user project filter
-    scopes A's skill to A and B's skill to B — no cross-user content leak.
+    OWN config dir (``<owner-home>/.augment`` etc., derived from its ``file_path``)
+    so the per-user project filter scopes A's skill to A and B's skill to B — no
+    cross-user content leak — and ~/.augment skills coalesce with that row's
+    ~/.augment rules/MCP rather than a bare-home project.
     """
 
     def setUp(self):
@@ -366,17 +368,18 @@ class TestAugmentUserSkillsNoCrossUserLeak(unittest.TestCase):
     def test_each_users_skills_scoped_to_their_own_home(self):
         d = self._detector_with_two_user_skills()
         # Canonical row is alice's Auggie CLI (the surface that carries the
-        # shared config). Its skills are keyed by each skill's OWNER home.
+        # shared config). Its skills are keyed by each skill's OWNER config dir.
         cli = {"name": "Auggie CLI", "version": "0.30.0",
                "install_path": "/Users/alice/.local/bin/auggie",
                "_config_path": "/Users/alice/.augment"}
         d._set_canonical_augment_surface([cli])
         processed = d.process_single_tool(cli)
 
-        # Skills live under BOTH owner homes, not all under alice's install_key.
+        # Skills live under each owner's ~/.augment (config dir), not all under
+        # alice's install_key and not under a bare home.
         by_path = {p["path"]: p for p in processed["projects"]}
-        self.assertIn("/Users/alice", by_path)
-        self.assertIn("/Users/bob", by_path)
+        self.assertIn("/Users/alice/.augment", by_path)
+        self.assertIn("/Users/bob/.augment", by_path)
 
         # Per-user filtering scopes each user's skills to their own home.
         alice_view = d.filter_tool_projects_by_user(processed, Path("/Users/alice"))
@@ -388,6 +391,31 @@ class TestAugmentUserSkillsNoCrossUserLeak(unittest.TestCase):
         # Alice's row carries ONLY alice's skill; bob's ONLY bob's. No leak.
         self.assertEqual(alice_names, {"a"})
         self.assertEqual(bob_names, {"b"})
+
+
+class TestAugmentSkillProjectRoot(unittest.TestCase):
+    """``_augment_skill_project_root`` returns the CONFIG DIR a user skill lives in
+    (so ~/.augment skills coalesce with ~/.augment rules/MCP), across .augment /
+    .claude / .agents, and stays owner-scoped. None when unparseable."""
+
+    def _root(self, file_path):
+        return AIToolsDetector._augment_skill_project_root({"file_path": file_path})
+
+    def test_augment_marker(self):
+        self.assertEqual(self._root("/Users/x/.augment/skills/a/SKILL.md"), "/Users/x/.augment")
+
+    def test_claude_marker(self):
+        self.assertEqual(self._root("/Users/x/.claude/skills/a/SKILL.md"), "/Users/x/.claude")
+
+    def test_agents_marker(self):
+        self.assertEqual(self._root("/Users/x/.agents/skills/a/SKILL.md"), "/Users/x/.agents")
+
+    def test_windows_separator(self):
+        self.assertEqual(self._root(r"C:\Users\x\.augment\skills\a\SKILL.md"), r"C:\Users\x\.augment")
+
+    def test_missing_or_unparseable_returns_none(self):
+        self.assertIsNone(self._root(""))
+        self.assertIsNone(self._root("/Users/x/random/file.md"))
 
 
 if __name__ == "__main__":

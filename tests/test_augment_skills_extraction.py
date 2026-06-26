@@ -88,6 +88,23 @@ class TestAugmentUserSkills(_AugmentSkillsHarness):
         self.assertEqual(user[0]["type"], "command")
         self.assertEqual(user[0]["skill_name"], "review")
 
+    def test_user_skills_from_claude_and_agents_dirs(self):
+        # Augment also loads home-scope skills from ~/.claude and ~/.agents
+        # (docs.augmentcode.com/cli/skills), not just ~/.augment.
+        self._write_nested_skill(self.user_home / ".claude", "from-claude")
+        self._write_nested_skill(self.user_home / ".agents", "from-agents")
+        result = self._extract_user_only()
+        names = {s["skill_name"] for s in result["user_skills"]}
+        self.assertIn("from-claude", names)
+        self.assertIn("from-agents", names)
+
+    def test_user_command_from_claude_dir(self):
+        # Auggie honors ~/.claude/commands for Claude compatibility.
+        self._write_command(self.user_home / ".claude", "claude-cmd")
+        result = self._extract_user_only()
+        cmds = {s["skill_name"] for s in result["user_skills"] if s["type"] == "command"}
+        self.assertIn("claude-cmd", cmds)
+
     def test_missing_skill_md_skipped(self):
         # A skill subdir with NO SKILL.md is not collected.
         (self.augment_dir / "skills" / "empty").mkdir(parents=True)
@@ -121,6 +138,15 @@ class TestAugmentProjectSkills(_AugmentSkillsHarness):
         self.assertEqual(len(result["project_skills"]), 1)
         self.assertEqual(result["project_skills"][0]["project_root"], str(repo))
         self.assertEqual(result["project_skills"][0]["skills"][0]["skill_name"], "perf")
+
+    def test_project_skill_from_claude_dir(self):
+        # Project-scope .claude/skills is collected too (grouped under the repo).
+        repo = self.user_home / "repo"
+        self._write_nested_skill(repo / ".claude", "claude-proj-skill")
+        result = self._extract_project_only(repo)
+        all_skills = [s for p in result["project_skills"] for s in p["skills"]]
+        names = {s["skill_name"] for s in all_skills}
+        self.assertIn("claude-proj-skill", names)
 
     def test_project_skills_deduped(self):
         # The dedup happens downstream in process_single_tool; here verify the

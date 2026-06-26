@@ -34,13 +34,19 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 AUGMENT_DIR_NAME = ".augment"
+CLAUDE_DIR_NAME = ".claude"
+AGENTS_DIR_NAME = ".agents"
 SKILLS_DIR_NAME = "skills"
 COMMANDS_DIR_NAME = "commands"
 SKILL_FILE_NAME = "SKILL.md"
 
-# Project-level + user-level skill/command roots live under .augment.
-AUGMENT_PARENT_DIR_NAMES = (AUGMENT_DIR_NAME,)
-AUGMENT_USER_DIR_NAMES = (AUGMENT_DIR_NAME,)
+# Augment loads skills/commands from .augment, .claude AND .agents — in BOTH the
+# workspace and the home dir (docs.augmentcode.com/cli/skills; .claude/commands is
+# also honored for Claude compatibility). So the same .claude/.agents item is
+# reported under Claude Code / Copilot CLI AND Augment; that is intentional — each
+# tool reports what it actually loads, and the backend dedups per (tool, home_user).
+AUGMENT_PARENT_DIR_NAMES = (AUGMENT_DIR_NAME, CLAUDE_DIR_NAME, AGENTS_DIR_NAME)
+AUGMENT_USER_DIR_NAMES = (AUGMENT_DIR_NAME, CLAUDE_DIR_NAME, AGENTS_DIR_NAME)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Config-driven item type definitions
@@ -109,17 +115,12 @@ def extract_augment_user_level_items(
 ) -> None:
     """Extract user-level Augment skills/commands from a user's home directory.
 
-    The ``~/.augment`` dir is resolved via ``_resolve_augment_dir`` so the
-    detector / MCP / rules / settings / skills extractors all agree on the
-    config-dir location. Delegates to the shared engine.
+    Looks under each of ``AUGMENT_USER_DIR_NAMES`` (``~/.augment``, ``~/.claude``,
+    ``~/.agents``) since Augment loads home-scope skills/commands from all three.
+    Delegates to the shared engine.
     """
-    # Lazy import to avoid an import cycle (macos/augment/__init__ -> the skills
-    # extractor -> this helper). _resolve_augment_dir is OS-agnostic.
-    from .macos.augment.augment import _resolve_augment_dir
-
-    config_dir = _resolve_augment_dir(user_home)
     extract_user_level_items(
-        config_dir.parent, user_skills, extract_single_rule_file_func, configs,
-        user_dir_names=(config_dir.name,),
+        user_home, user_skills, extract_single_rule_file_func, configs,
+        user_dir_names=AUGMENT_USER_DIR_NAMES,
         parent_dir_names=AUGMENT_PARENT_DIR_NAMES,
     )

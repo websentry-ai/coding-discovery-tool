@@ -10,6 +10,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -1607,6 +1608,50 @@ def reset_sentry_run_state() -> None:
     _sentry_dead_this_run = False
 
 
+def _ip_is_loopback(host: str) -> bool:
+    """True when ``host`` is a loopback IP literal (IPv4 incl. shorthand, ::1, IPv4-mapped)."""
+    try:
+        return socket.inet_aton(host)[0] == 127
+    except OSError:
+        pass
+    try:
+        packed = socket.inet_pton(socket.AF_INET6, host)
+    except (OSError, AttributeError):
+        return False
+    if packed == b"\x00" * 15 + b"\x01":
+        return True
+    if packed[:12] == b"\x00" * 10 + b"\xff\xff":
+        return packed[12] == 127
+    return False
+
+
+def _event_domain_is_loopback(domain: str) -> bool:
+    """True when ``domain``'s host is loopback. Plain string parsing, no urllib (Zscaler)."""
+    if not domain:
+        return False
+    host = domain.strip().lower()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") <= 1:
+        host = host.split(":", 1)[0]
+    if host == "localhost" or host.endswith(".localhost") or host == "0.0.0.0":
+        return True
+    return _ip_is_loopback(host)
+
+
+def _is_ci_or_local_event(ctx: Dict) -> bool:
+    """True for CI/local-run events (loopback report domain). Never raises; defaults False."""
+    try:
+        return _event_domain_is_loopback(str(ctx.get("domain") or ""))
+    except Exception:
+        return False
+
+
 def report_to_sentry(
     exception: Exception,
     context: Optional[Dict] = None,
@@ -1633,6 +1678,10 @@ def report_to_sentry(
             return
 
         ctx = context or {}
+
+        if _is_ci_or_local_event(ctx):
+            logger.debug("Sentry reporting skipped (CI/local run)")
+            return
 
         global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
         # Circuit breaker: once the transport looks dead, stop calling Sentry for the

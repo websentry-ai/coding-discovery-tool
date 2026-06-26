@@ -1475,6 +1475,85 @@ def reset_sentry_run_state() -> None:
     _sentry_dead_this_run = False
 
 
+# CI / local-run noise filter -- acts as the "before_send" hook the raw-HTTP
+# transport lacks. The discovery CI suite runs the real script against a loopback
+# mock gateway on clean GitHub-hosted runners, so every scan finds zero tools and
+# the previously log-only paths self-report to the *production* Sentry project:
+# no_tools_found / send-failure / timeout / signal events with zero customer
+# impact (DISCOVERY-TOOL-SCRIPT-17 / -13 / -12 / -D). Drop them at the source
+# using three signals, each ~0-false-positive on customer machines:
+#   - a CI environment marker (GITHUB_ACTIONS / CI) -- ground truth, and the only
+#     signal that also covers the bare-context extract/detect emits that carry
+#     neither of the two below;
+#   - the report target (domain) is a loopback host -- a real install always
+#     points at the customer's gateway URL, never 127.0.0.1 / localhost;
+#   - the OS account is a GitHub-hosted-runner account (runner / runneradmin).
+# The runner-account check would also drop events from a real customer whose OS
+# account is literally named "runner"/"runneradmin"; that is vanishingly rare and
+# only costs us our own error telemetry, never customer data (the discovery
+# report itself is sent on a separate path).
+_CI_RUNNER_USERS = frozenset({"runner", "runneradmin"})
+_CI_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _running_in_ci() -> bool:
+    """True when a CI environment marker is set. GitHub Actions (this project's
+    CI) always sets ``GITHUB_ACTIONS=true``; ``CI=true`` is the cross-runner
+    convention. Customer machines (MDM / LaunchAgent) set neither."""
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() in _CI_TRUTHY:
+        return True
+    return os.environ.get("CI", "").strip().lower() in _CI_TRUTHY
+
+
+def _event_domain_is_loopback(domain: str) -> bool:
+    """Return True when ``domain`` points at a loopback host.
+
+    Extracts the host from a value like ``http://127.0.0.1:57412`` with plain
+    string ops -- no urllib (forbidden in this codebase for Zscaler reasons, and
+    a DNS-free host extraction needs none). Matches the 127.0.0.0/8 range (only
+    as a real dotted quad, so an FQDN like ``127.example.com`` is not mistaken
+    for loopback), ``localhost``, the IPv6 loopback ``::1``, and ``0.0.0.0``.
+    """
+    if not domain:
+        return False
+    host = domain.strip().lower()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    # Keep only the authority's host[:port]: drop any path/query, then userinfo.
+    host = host.split("/", 1)[0].split("?", 1)[0]
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):  # bracketed IPv6 literal, e.g. [::1]:9000
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") <= 1:
+        host = host.split(":", 1)[0]  # strip :port from a host:port pair
+    # else: a bare IPv6 literal such as "::1" -- leave it intact.
+    if host in ("localhost", "::1", "0.0.0.0"):
+        return True
+    octets = host.split(".")
+    return len(octets) == 4 and octets[0] == "127" and all(o.isdigit() for o in octets)
+
+
+def _is_ci_or_local_event(ctx: Dict) -> bool:
+    """Return True when an event clearly originates from a CI / local test run
+    rather than a real customer machine, so it can be dropped before reaching the
+    production Sentry project.
+
+    Never raises and defaults to False -- a parse error must not suppress a
+    genuine error report.
+    """
+    try:
+        if _running_in_ci():
+            return True
+        if _event_domain_is_loopback(str(ctx.get("domain") or "")):
+            return True
+        if str(ctx.get("system_user") or "").strip().lower() in _CI_RUNNER_USERS:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def report_to_sentry(
     exception: Exception,
     context: Optional[Dict] = None,
@@ -1494,6 +1573,13 @@ def report_to_sentry(
             return
 
         ctx = context or {}
+
+        # Drop CI / local test-run noise before it reaches production Sentry (see
+        # _is_ci_or_local_event). Done first so dropped events never touch the
+        # dedup set or per-run counters below.
+        if _is_ci_or_local_event(ctx):
+            logger.debug("Sentry reporting skipped (CI/local run)")
+            return
 
         global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
         # Circuit breaker: once the transport looks dead, stop calling Sentry for the

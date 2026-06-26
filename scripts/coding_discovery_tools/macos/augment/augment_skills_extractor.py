@@ -126,7 +126,15 @@ class MacOSAugmentSkillsExtractor(BaseAugmentSkillsExtractor):
                     if item.name in AUGMENT_PARENT_DIR_NAMES:
                         for config in AUGMENT_ITEM_CONFIGS:
                             type_dir = item / config.dir_name
-                            if type_dir.exists() and type_dir.is_dir():
+                            # Guard the skills/commands subdir against symlinks too
+                            # (mirrors the parent .augment guard above): under a
+                            # root MDM scan a user could point .augment/skills at an
+                            # arbitrary dir and have the scanner traverse it.
+                            if (
+                                type_dir.exists()
+                                and type_dir.is_dir()
+                                and not type_dir.is_symlink()
+                            ):
                                 if not self._is_user_level_skill_dir(type_dir):
                                     extract_augment_items_from_directory(
                                         type_dir,

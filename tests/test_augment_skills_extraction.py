@@ -193,6 +193,26 @@ class TestAugmentSkillsSadPaths(_AugmentSkillsHarness):
         all_names = {s["skill_name"] for p in result["project_skills"] for s in p["skills"]}
         self.assertIn("kept", all_names)
 
+    def test_symlinked_skills_subdir_not_traversed(self):
+        """A symlinked ``.augment/skills`` subdir must NOT be traversed — mirrors
+        the parent ``.augment`` symlink guard. Under a root MDM scan a user could
+        point ``.augment/skills`` at an arbitrary dir; the scanner must not follow
+        it. (The parent ``.augment`` here is a real dir; only ``skills`` is the
+        symlink.)"""
+        external = Path(self.tmp_dir) / "external" / "skills"
+        (external / "leaked").mkdir(parents=True)
+        (external / "leaked" / "SKILL.md").write_text("leaked")
+        repo = self.user_home / "repo"
+        (repo / ".augment").mkdir(parents=True)
+        try:
+            os.symlink(str(external), str(repo / ".augment" / "skills"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported")
+        result = self._extract_project_only(repo)
+        names = {s["skill_name"] for p in result["project_skills"] for s in p["skills"]}
+        self.assertNotIn("leaked", names)
+        self.assertEqual(result["project_skills"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

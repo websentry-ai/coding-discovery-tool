@@ -2475,6 +2475,10 @@ def main():
             else:
                 all_users = []
 
+            # Pre-fallback count is the key no-tools discriminator: 0 here means the
+            # macOS/AD enumeration missed every account (the fallback below masks 0->1).
+            homes_enumerated = len(all_users)
+
             # If no users found, fall back to current user
             if not all_users:
                 all_users = [get_user_info()]
@@ -2874,6 +2878,32 @@ def main():
             )
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
+
+        # No-tools telemetry: a zero-tool scan is otherwise silent — we cannot tell
+        # an enumeration miss from a timing race from a genuinely empty device.
+        # Emit ONE enriched warning with the discriminators. Fire-and-forget:
+        # telemetry must never raise into / slow the scan.
+        if not tools:
+            try:
+                no_tools_ctx = {
+                    **sentry_ctx,
+                    "phase": "no_tools_found",
+                    "homes_enumerated": homes_enumerated,
+                    "users_scanned": len(all_users),
+                    "used_fallback_user": homes_enumerated == 0,
+                    "os": platform.system(),
+                    "duration_ms": round((time.monotonic() - t_start) * 1000),
+                }
+                if hasattr(os, "getuid"):
+                    no_tools_ctx["is_root"] = os.getuid() == 0
+                report_to_sentry(
+                    RuntimeError("Discovery found no tools"),
+                    context=no_tools_ctx,
+                    level="warning",
+                    priority=True,
+                )
+            except Exception:
+                pass
 
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")

@@ -1611,6 +1611,7 @@ def report_to_sentry(
     exception: Exception,
     context: Optional[Dict] = None,
     level: str = "error",
+    priority: bool = False,
 ) -> None:
     """Send an event to Sentry using the raw HTTP store endpoint.
 
@@ -1618,6 +1619,12 @@ def report_to_sentry(
         exception: The exception to report.
         context: Extra tags/context (e.g. phase, tool_name, http_code).
         level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+        priority: Best-effort guarantee a terminal once-per-run diagnostic
+            (e.g. the no_tools_found summary) is delivered. Bypasses both the
+            per-run event cap AND the circuit breaker so earlier transient
+            per-tool send failures can't silently skip it -- it still gets ONE
+            attempt at the end of the run (bounded: at most one ~4s curl). Dedup
+            is still honored (no spam). Reserve for a single terminal event/run.
     """
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
@@ -1630,11 +1637,17 @@ def report_to_sentry(
         global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
         # Circuit breaker: once the transport looks dead, stop calling Sentry for the
         # rest of the run so a blocked endpoint can't add its timeout to every failure.
-        if _sentry_dead_this_run:
+        # priority events bypass it for ONE bounded attempt so a transient mid-scan
+        # outage doesn't silently drop the terminal diagnostic.
+        if _sentry_dead_this_run and not priority:
             return
         # Collapse duplicate events and hard-cap the synchronous curls per run.
+        # priority events skip the count cap + breaker (but never dedup) so a
+        # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
         signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
-        if signature in _sentry_sent_signatures or _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
+        if signature in _sentry_sent_signatures:
+            return
+        if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
             return
         _sentry_sent_signatures.add(signature)
         _sentry_event_count += 1

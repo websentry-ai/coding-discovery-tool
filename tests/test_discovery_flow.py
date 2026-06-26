@@ -1351,5 +1351,93 @@ class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
         self.assertEqual(context.get("phase"), "extract")
 
 
+class TestNoToolsSentryEvent(unittest.TestCase):
+    """main() emits exactly one enriched 'no_tools_found' warning on a zero-tool
+    scan (the only signal that distinguishes an enumeration miss from a genuinely
+    empty device) and stays silent when any tool is detected."""
+
+    @staticmethod
+    def _context_of(call):
+        # report_to_sentry is invoked two ways in the codebase: context as the
+        # keyword `context=` (the no-tools path) and context positionally as the
+        # 2nd arg (extraction/process paths). Read whichever is present.
+        args, kwargs = call
+        if "context" in kwargs:
+            return kwargs["context"]
+        return args[1] if len(args) > 1 else {}
+
+    def _run_main(self, detect_return, mock_sentry):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev"
+        detector_inst.detect_all_tools.return_value = detect_return
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value="runner"), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", argv):
+            detector_inst._set_canonical_vscode_copilot = Mock()
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_fires_on_zero_tool_scan(self):
+        mock_sentry = Mock()
+        self._run_main([], mock_sentry)
+
+        no_tools_calls = [
+            c for c in mock_sentry.call_args_list
+            if self._context_of(c).get("phase") == "no_tools_found"
+        ]
+        self.assertEqual(len(no_tools_calls), 1, "expected exactly one no_tools_found event")
+
+        call = no_tools_calls[0]
+        args, kwargs = call
+        # Exception is positional, RuntimeError with the fixed message.
+        self.assertIsInstance(args[0], RuntimeError)
+        self.assertEqual(str(args[0]), "Discovery found no tools")
+        self.assertEqual(kwargs.get("level"), "warning")
+
+        ctx = self._context_of(call)
+        # get_all_users_linux -> [] means enumeration missed every account, so the
+        # current-user fallback supplies the single scanned home.
+        self.assertEqual(ctx.get("homes_enumerated"), 0)
+        self.assertEqual(ctx.get("users_scanned"), 1)
+        self.assertIs(ctx.get("used_fallback_user"), True)
+        self.assertIn("device_id", ctx)
+        self.assertIn("run_id", ctx)
+        self.assertIn("duration_ms", ctx)
+        # PII guard: no list-valued context (e.g. the raw user list) may leak.
+        for key, value in ctx.items():
+            self.assertNotIsInstance(value, list, f"context key {key!r} is a list")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_does_not_fire_when_tools_found(self):
+        mock_sentry = Mock()
+        self._run_main(
+            [{"name": "Claude Code", "version": "1.0", "install_path": "/home/runner/.claude"}],
+            mock_sentry,
+        )
+
+        no_tools_calls = [
+            c for c in mock_sentry.call_args_list
+            if self._context_of(c).get("phase") == "no_tools_found"
+        ]
+        self.assertEqual(no_tools_calls, [], "no_tools_found must not fire when a tool is detected")
+
+
 if __name__ == "__main__":
     unittest.main()

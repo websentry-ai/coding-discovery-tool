@@ -503,25 +503,25 @@ class TestSentryPriorityBypassesCap(unittest.TestCase):
         utils_mod, "_parse_sentry_dsn",
         return_value={"key": "k", "store_url": "http://sentry.invalid/store/"},
     )
-    def test_priority_still_respects_breaker_and_dedup(self, _dsn, mock_subprocess):
+    def test_priority_bypasses_breaker_but_respects_dedup(self, _dsn, mock_subprocess):
         mock_subprocess.run.return_value = Mock(returncode=0, stdout="200", stderr="")
 
-        # Breaker open => even a priority event is suppressed (dead transport).
+        # Breaker open from earlier (possibly transient) failures => a priority event
+        # STILL gets its one bounded attempt, so the terminal diagnostic isn't lost.
         utils_mod._sentry_dead_this_run = True
         utils_mod.report_to_sentry(
             RuntimeError("Discovery found no tools"),
             {"phase": "no_tools_found"}, priority=True,
         )
-        self.assertEqual(mock_subprocess.run.call_count, 0)
+        self.assertEqual(mock_subprocess.run.call_count, 1)
 
-        # Breaker closed but signature already sent => deduped even with priority.
-        utils_mod._sentry_dead_this_run = False
-        utils_mod._sentry_sent_signatures = {("RuntimeError", "no_tools_found", None)}
+        # Dedup is still honored even with priority: the same signature (added by the
+        # send above) is not re-sent, so a priority event can never spam.
         utils_mod.report_to_sentry(
             RuntimeError("Discovery found no tools"),
             {"phase": "no_tools_found"}, priority=True,
         )
-        self.assertEqual(mock_subprocess.run.call_count, 0)
+        self.assertEqual(mock_subprocess.run.call_count, 1)
 
 
 if __name__ == "__main__":

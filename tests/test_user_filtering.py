@@ -11,8 +11,12 @@ from scripts.coding_discovery_tools.utils import (
     _fetch_dscl_batch_data,
     _is_human_user_macos,
     _parse_dscl_list_output,
+    _real_user_or_none,
+    _strip_windows_domain,
     get_all_users_macos,
     get_all_users_windows,
+    get_audit_user,
+    get_user_info,
 )
 
 EMPTY_BATCH = DsclBatchData(uid_map={}, shell_map={}, hidden_set=frozenset())
@@ -204,6 +208,162 @@ class TestGetAllUsersWindows(unittest.TestCase):
         self.assertIn("bob", result)
         for excluded in ("Public", "Default", "Default User", "All Users", "TEMP", ".hidden"):
             self.assertNotIn(excluded, result)
+
+
+class TestRealUserOrNone(unittest.TestCase):
+    """The audit helper: real human in -> trimmed name; junk/service -> None."""
+
+    def test_real_human_passes_through(self):
+        self.assertEqual(_real_user_or_none("alice"), "alice")
+
+    def test_real_human_is_trimmed(self):
+        self.assertEqual(_real_user_or_none("  alice  "), "alice")
+
+    def test_root_rejected(self):
+        self.assertIsNone(_real_user_or_none("root"))
+
+    def test_root_case_insensitive(self):
+        self.assertIsNone(_real_user_or_none("ROOT"))
+
+    def test_macos_daemon_underscore_prefix_rejected(self):
+        self.assertIsNone(_real_user_or_none("_windowserver"))
+
+    def test_system_rejected(self):
+        self.assertIsNone(_real_user_or_none("SYSTEM"))
+
+    def test_windows_machine_account_trailing_dollar_rejected(self):
+        self.assertIsNone(_real_user_or_none("WIN-ABC$"))
+
+    def test_linux_service_account_rejected(self):
+        self.assertIsNone(_real_user_or_none("www-data"))
+
+    def test_other_linux_service_accounts_rejected(self):
+        for name in ("postgres", "nobody", "daemon", "nginx", "mysql"):
+            self.assertIsNone(_real_user_or_none(name), name)
+
+    def test_unknown_literal_rejected(self):
+        self.assertIsNone(_real_user_or_none("unknown"))
+
+    def test_empty_string_rejected(self):
+        self.assertIsNone(_real_user_or_none(""))
+
+    def test_whitespace_only_rejected(self):
+        self.assertIsNone(_real_user_or_none("   "))
+
+    def test_none_input_rejected(self):
+        self.assertIsNone(_real_user_or_none(None))
+
+    def test_windows_builtin_service_identities_rejected(self):
+        for name in (
+            "NT AUTHORITY\\LOCAL SERVICE",
+            "NT AUTHORITY\\NETWORK SERVICE",
+            "NT AUTHORITY\\SYSTEM",
+            "nt authority\\local service",  # case-insensitive domain
+            "NT SERVICE\\MSSQLSERVER",  # any NT SERVICE principal
+        ):
+            self.assertIsNone(_real_user_or_none(name), name)
+
+    def test_bare_windows_builtins_rejected(self):
+        for name in ("Administrator", "LocalSystem", "LOCAL SERVICE", "Network Service"):
+            self.assertIsNone(_real_user_or_none(name), name)
+
+    def test_domain_qualified_human_is_stripped_self_contained(self):
+        # Self-contained: strips DOMAIN\\ even if a caller skips get_user_info.
+        self.assertEqual(_real_user_or_none("CORP\\alice"), "alice")
+
+
+class TestGetAuditUser(unittest.TestCase):
+    """get_audit_user() returns the real human OR None (never junk).
+
+    These exercise the non-Windows resolution path (get_user_info()), so they
+    pin platform.system to "Darwin" — otherwise on a Windows CI runner
+    get_audit_user() takes the raw-whoami branch and the runner's real account
+    leaks past the get_user_info() patch. The Windows raw-whoami branch is
+    covered by TestGetAuditUserWindowsService.
+    """
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="alice")
+    def test_returns_real_human(self, _mock_user, _mock_platform):
+        self.assertEqual(get_audit_user(), "alice")
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="root")
+    def test_root_maps_to_none(self, _mock_user, _mock_platform):
+        self.assertIsNone(get_audit_user())
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils.get_user_info", return_value="unknown")
+    def test_unknown_maps_to_none(self, _mock_user, _mock_platform):
+        self.assertIsNone(get_audit_user())
+
+
+class TestGetAuditUserWindowsService(unittest.TestCase):
+    """On Windows, get_audit_user must apply the domain-based rejection to the
+    RAW whoami output. get_user_info() pre-strips the DOMAIN\\ prefix, so a
+    service principal like NT SERVICE\\MSSQLSERVER would otherwise leak through
+    as the bare, non-denylisted name 'MSSQLSERVER'.
+    """
+
+    @patch("scripts.coding_discovery_tools.utils.run_command")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_nt_service_named_accounts_rejected(self, _sys, mock_cmd):
+        for raw in (
+            "NT SERVICE\\MSSQLSERVER",
+            "NT SERVICE\\WinDefend",
+            "NT AUTHORITY\\SYSTEM",
+            "NT AUTHORITY\\LOCAL SERVICE",
+        ):
+            mock_cmd.return_value = raw
+            self.assertIsNone(get_audit_user(), raw)
+
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value="CORP\\alice")
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_domain_qualified_human_passes(self, _sys, _cmd):
+        self.assertEqual(get_audit_user(), "alice")
+
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value=None)
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_empty_whoami_falls_back_to_get_user_info(self, _sys, _cmd):
+        with patch(
+            "scripts.coding_discovery_tools.utils.get_user_info", return_value="bob"
+        ):
+            self.assertEqual(get_audit_user(), "bob")
+
+
+class TestGetUserInfoGuaranteedString(unittest.TestCase):
+    """get_user_info() must always return a usable string for /Users paths."""
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value="alice")
+    def test_returns_string_for_normal_user(self, _cmd, _sys):
+        result = get_user_info()
+        self.assertEqual(result, "alice")
+        self.assertIsInstance(result, str)
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils.run_command", return_value=None)
+    def test_falls_back_to_unknown_never_none(self, _cmd, _sys):
+        # When every resolution method yields nothing, the /Users-path resolver
+        # must still return a non-None string (so callers never build /Users/None).
+        # getpass is imported locally inside get_user_info, so patch the stdlib module.
+        with patch("getpass.getuser", return_value=""):
+            result = get_user_info()
+        self.assertIsNotNone(result)
+        self.assertEqual(result, "unknown")
+
+
+class TestStripWindowsDomain(unittest.TestCase):
+    """Windows DOMAIN\\username parse yields the bare username."""
+
+    def test_domain_prefix_stripped(self):
+        self.assertEqual(_strip_windows_domain("CORP\\bob"), "bob")
+
+    def test_machine_prefix_stripped(self):
+        self.assertEqual(_strip_windows_domain("WIN-ABC\\alice"), "alice")
+
+    def test_no_backslash_returned_unchanged(self):
+        self.assertEqual(_strip_windows_domain("alice"), "alice")
 
 
 if __name__ == "__main__":

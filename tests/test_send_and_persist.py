@@ -15,7 +15,7 @@ import unittest
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
@@ -403,6 +403,40 @@ class TestScanEvents(unittest.TestCase):
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_event_includes_system_user_when_provided(self, _sleep):
+        """A real human system_user is included in the lifecycle payload."""
+        success, _retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "completed",
+            system_user="alice",
+        )
+
+        self.assertTrue(success)
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["system_user"], "alice")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_scan_event_omits_system_user_when_none(self, _sleep):
+        """system_user is omitted from the payload when None (no junk owner)."""
+        success, _retryable = send_scan_event(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            "run-uuid-1234",
+            "in_progress",
+            system_user=None,
+        )
+
+        self.assertTrue(success)
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertNotIn("system_user", payload)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_scan_failed_with_user_error(self, _sleep):
         """Test sending scan failed event with user-specific error."""
         scan_error = {
@@ -455,6 +489,73 @@ class TestScanEvents(unittest.TestCase):
         self.assertEqual(payload["scan_event"], "failed")
         self.assertNotIn("home_user", payload)  # No user context for device-level errors
         self.assertEqual(payload["scan_error"]["error_type"], "RuntimeError")
+
+
+class TestSentryPriorityBypassesCap(unittest.TestCase):
+    """A priority=True event (the terminal no_tools_found summary) bypasses the
+    per-run event cap, but still respects the circuit breaker and dedup."""
+
+    def setUp(self):
+        self._reset_budget()
+
+    def tearDown(self):
+        self._reset_budget()
+
+    @staticmethod
+    def _reset_budget():
+        utils_mod._sentry_event_count = 0
+        utils_mod._sentry_sent_signatures = set()
+        utils_mod._sentry_consecutive_fails = 0
+        utils_mod._sentry_dead_this_run = False
+
+    @patch.object(utils_mod, "subprocess")
+    @patch.object(
+        utils_mod, "_parse_sentry_dsn",
+        return_value={"key": "k", "store_url": "http://sentry.invalid/store/"},
+    )
+    def test_priority_event_bypasses_count_cap(self, _dsn, mock_subprocess):
+        mock_subprocess.run.return_value = Mock(returncode=0, stdout="200", stderr="")
+        utils_mod._sentry_event_count = utils_mod._SENTRY_MAX_EVENTS_PER_RUN
+
+        # Non-priority event with a fresh signature is dropped: cap reached.
+        utils_mod.report_to_sentry(
+            RuntimeError("capped"), {"phase": "detect", "tool_name": "X"}
+        )
+        self.assertEqual(mock_subprocess.run.call_count, 0)
+
+        # The terminal priority event still sends despite the exhausted budget.
+        utils_mod.report_to_sentry(
+            RuntimeError("Discovery found no tools"),
+            {"phase": "no_tools_found"},
+            level="warning",
+            priority=True,
+        )
+        self.assertEqual(mock_subprocess.run.call_count, 1)
+
+    @patch.object(utils_mod, "subprocess")
+    @patch.object(
+        utils_mod, "_parse_sentry_dsn",
+        return_value={"key": "k", "store_url": "http://sentry.invalid/store/"},
+    )
+    def test_priority_bypasses_breaker_but_respects_dedup(self, _dsn, mock_subprocess):
+        mock_subprocess.run.return_value = Mock(returncode=0, stdout="200", stderr="")
+
+        # Breaker open from earlier (possibly transient) failures => a priority event
+        # STILL gets its one bounded attempt, so the terminal diagnostic isn't lost.
+        utils_mod._sentry_dead_this_run = True
+        utils_mod.report_to_sentry(
+            RuntimeError("Discovery found no tools"),
+            {"phase": "no_tools_found"}, priority=True,
+        )
+        self.assertEqual(mock_subprocess.run.call_count, 1)
+
+        # Dedup is still honored even with priority: the same signature (added by the
+        # send above) is not re-sent, so a priority event can never spam.
+        utils_mod.report_to_sentry(
+            RuntimeError("Discovery found no tools"),
+            {"phase": "no_tools_found"}, priority=True,
+        )
+        self.assertEqual(mock_subprocess.run.call_count, 1)
 
 
 if __name__ == "__main__":

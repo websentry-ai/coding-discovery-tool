@@ -10,6 +10,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -477,6 +478,126 @@ def get_all_users_linux() -> List[str]:
     return users
 
 
+# Identities that are never a real human end-user. We map these to None for the
+# audit/payload value so the backend never attributes a machine to a service
+# account. Matching is case-insensitive against the whole, trimmed name.
+# Trade-off: a rare human whose login literally equals one of these (e.g. an
+# admin named "administrator", or a person named "daemon"/"nginx") is also
+# rejected. We accept that — for audit attribution a false None is safer than
+# mislabelling a machine with a service identity (the FE shows "No AI tools
+# detected" rather than a wrong owner).
+_NON_HUMAN_USERS: FrozenSet[str] = frozenset(
+    {
+        "root",
+        "system",
+        "unknown",
+        # Windows built-in / service identities (may also appear bare, without a
+        # DOMAIN prefix, depending on how whoami resolves them).
+        "administrator",
+        "localsystem",
+        "local service",
+        "network service",
+        # Common Linux service accounts.
+        "www-data",
+        "postgres",
+        "nobody",
+        "daemon",
+        "nginx",
+        "mysql",
+    }
+)
+
+# Windows domains that only ever own service principals (e.g.
+# ``NT AUTHORITY\LOCAL SERVICE``, ``NT SERVICE\MSSQLSERVER``). Any user under
+# these is a service account, never a human end-user.
+_NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
+
+
+def _strip_windows_domain(name: str) -> str:
+    """Return the bare username from a Windows ``DOMAIN\\username`` string.
+
+    ``whoami`` on Windows returns ``DOMAIN\\username`` (or ``MACHINE\\username``);
+    we only want the trailing username component. Names without a backslash are
+    returned unchanged.
+
+    Args:
+        name: Raw whoami output (possibly ``DOMAIN\\username``).
+
+    Returns:
+        The bare username with any domain prefix stripped.
+    """
+    if name and "\\" in name:
+        return name.split("\\")[-1]
+    return name
+
+
+def _real_user_or_none(name: Optional[str]) -> Optional[str]:
+    """Return the trimmed username if it is a real human, otherwise None.
+
+    Maps junk / service / machine identities to None so scan-lifecycle audit
+    payloads never attribute a machine to a non-human account. This is the
+    canonical filter and is self-contained: it strips any Windows ``DOMAIN\\``
+    prefix itself, so it is safe regardless of the caller's path. Rejected
+    (case-insensitive, after trimming + domain-stripping):
+      - empty / whitespace-only
+      - anything under the ``NT AUTHORITY`` / ``NT SERVICE`` Windows domains
+        (e.g. ``NT AUTHORITY\\LOCAL SERVICE``, ``NT SERVICE\\MSSQLSERVER``)
+      - the literal ``"unknown"``
+      - ``"root"``, ``"system"``, and Windows built-ins (administrator,
+        localsystem, local service, network service)
+      - anything starting with ``"_"`` (macOS daemon accounts)
+      - anything ending with ``"$"`` (Windows machine accounts)
+      - common Linux service accounts (www-data, postgres, nobody, daemon,
+        nginx, mysql)
+
+    Args:
+        name: Candidate username (may be None, may be ``DOMAIN\\username``).
+
+    Returns:
+        The trimmed, domain-stripped username if it is a real human, else None.
+    """
+    if not name:
+        return None
+    raw = name.strip()
+    # Reject service principals by their Windows domain before stripping it.
+    if "\\" in raw and raw.split("\\")[0].strip().lower() in _NON_HUMAN_WINDOWS_DOMAINS:
+        return None
+    stripped = _strip_windows_domain(raw).strip()
+    if not stripped:
+        return None
+    if stripped.startswith("_"):
+        return None
+    if stripped.endswith("$"):
+        return None
+    if stripped.lower() in _NON_HUMAN_USERS:
+        return None
+    return stripped
+
+
+def get_audit_user() -> Optional[str]:
+    """Return the real human user running the scan, or None.
+
+    This is the value to attach to scan-lifecycle audit payloads: it is the
+    real human OR None, never a junk/service/machine identity. For
+    container/daemon/root scans where no human can be resolved, returns None
+    rather than a synthesized owner.
+
+    Returns:
+        The real human username, or None when no human user can be resolved.
+    """
+    # On Windows, resolve the RAW, domain-qualified identity (``whoami`` →
+    # ``DOMAIN\\user``) so _real_user_or_none can apply its NT AUTHORITY /
+    # NT SERVICE domain rejection. get_user_info() pre-strips the ``DOMAIN\\``
+    # prefix (path-building needs the bare name), which would otherwise hide a
+    # service principal like ``NT SERVICE\\MSSQLSERVER`` behind its bare,
+    # non-denylisted name. Fall back to get_user_info() if whoami yields nothing.
+    if platform.system() == "Windows":
+        raw = run_command(["whoami"], COMMAND_TIMEOUT)
+        if raw:
+            return _real_user_or_none(raw)
+    return _real_user_or_none(get_user_info())
+
+
 def get_user_info() -> str:
     """
     Get current user information (whoami equivalent).
@@ -485,23 +606,28 @@ def get_user_info() -> str:
 
     On macOS, when running as root, finds the user with the most storage space
     in /Users directory to get the actual user instead of "root".
-    
-    On Windows, when running as administrator, finds the actual logged-in user
-    by querying explorer.exe process owner, Win32_ComputerSystem, or active console
-    session instead of returning "Administrator" or "admin".
-    
+
+    On Windows, returns ``whoami`` with any ``DOMAIN\\`` prefix stripped, falling
+    back to ``getpass.getuser()``. (It does NOT currently resolve the real
+    interactive user when running as a service/SYSTEM — get_audit_user() maps
+    such non-human identities to None.)
+
+    NOTE: This ALWAYS returns a usable, non-None string (falling back to
+    "unknown"). Callers that build filesystem paths like ``/Users/<user>`` rely
+    on that guarantee. For an audit/payload value that is the real human OR
+    None, use ``get_audit_user()`` instead.
+
     Returns:
-        Current username as string
+        Current username as string (never None)
     """
     try:
         username = None
-        
+
         if platform.system() == "Windows":
             # Use whoami command on Windows (works reliably)
             whoami_output = run_command(["whoami"], COMMAND_TIMEOUT)
             # Extract just the username if whoami returns DOMAIN\username format
-            if username and "\\" in username:
-                username = username.split("\\")[-1]
+            username = _strip_windows_domain(whoami_output) if whoami_output else None
         else:
             # On macOS/Linux, check if running as root first
             current_user = run_command(["whoami"], COMMAND_TIMEOUT)
@@ -589,7 +715,8 @@ def send_scan_event(
     app_name: Optional[str] = None,
     home_user: Optional[str] = None,
     scan_error: Optional[Dict] = None,
-    sentry_context: Optional[Dict] = None
+    sentry_context: Optional[Dict] = None,
+    system_user: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -604,6 +731,9 @@ def send_scan_event(
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
         sentry_context: Optional context dict forwarded to Sentry on failure
+        system_user: Optional real human user running the scan (or None). Used by
+            the backend to attribute empty machines. MUST be a real human or
+            None (see ``get_audit_user``), never a junk/service identity.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -616,6 +746,9 @@ def send_scan_event(
 
     if app_name:
         payload["app_name"] = app_name
+
+    if system_user:
+        payload["system_user"] = system_user
 
     if home_user:
         payload["home_user"] = home_user
@@ -1475,89 +1608,55 @@ def reset_sentry_run_state() -> None:
     _sentry_dead_this_run = False
 
 
-# CI / local-run noise filter -- acts as the "before_send" hook the raw-HTTP
-# transport lacks. The discovery CI suite runs the real script against a loopback
-# mock gateway on clean GitHub-hosted runners, so every scan finds zero tools and
-# the previously log-only paths self-report to the *production* Sentry project:
-# no_tools_found / send-failure / timeout / signal events with zero customer
-# impact (DISCOVERY-TOOL-SCRIPT-17 / -13 / -12 / -D). Drop them at the source
-# using three signals, each ~0-false-positive on customer machines:
-#   - a CI environment marker (GITHUB_ACTIONS / CI) -- ground truth, and the only
-#     signal that also covers the bare-context extract/detect emits that carry
-#     neither of the two below;
-#   - the report target (domain) is a loopback host -- a real install always
-#     points at the customer's gateway URL, never 127.0.0.1 / localhost;
-#   - the OS account is a GitHub-hosted-runner account (runner / runneradmin).
-# The runner-account check would also drop events from a real customer whose OS
-# account is literally named "runner"/"runneradmin"; that is vanishingly rare and
-# only costs us our own error telemetry, never customer data (the discovery
-# report itself is sent on a separate path).
-_CI_RUNNER_USERS = frozenset({"runner", "runneradmin"})
-_CI_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-
-def _running_in_ci() -> bool:
-    """True when a CI environment marker is set. GitHub Actions (this project's
-    CI) always sets ``GITHUB_ACTIONS=true``; ``CI=true`` is the cross-runner
-    convention. Customer machines (MDM / LaunchAgent) set neither."""
-    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() in _CI_TRUTHY:
+def _ip_is_loopback(host: str) -> bool:
+    """True when ``host`` is a loopback IP literal (IPv4 incl. shorthand, ::1, IPv4-mapped)."""
+    try:
+        return socket.inet_aton(host)[0] == 127
+    except OSError:
+        pass
+    try:
+        packed = socket.inet_pton(socket.AF_INET6, host)
+    except (OSError, AttributeError):
+        return False
+    if packed == b"\x00" * 15 + b"\x01":
         return True
-    return os.environ.get("CI", "").strip().lower() in _CI_TRUTHY
+    if packed[:12] == b"\x00" * 10 + b"\xff\xff":
+        return packed[12] == 127
+    return False
 
 
 def _event_domain_is_loopback(domain: str) -> bool:
-    """Return True when ``domain`` points at a loopback host.
-
-    Extracts the host from a value like ``http://127.0.0.1:57412`` with plain
-    string ops -- no urllib (forbidden in this codebase for Zscaler reasons, and
-    a DNS-free host extraction needs none). Matches the 127.0.0.0/8 range (only
-    as a real dotted quad, so an FQDN like ``127.example.com`` is not mistaken
-    for loopback), ``localhost``, the IPv6 loopback ``::1``, and ``0.0.0.0``.
-    """
+    """True when ``domain``'s host is loopback. Plain string parsing, no urllib (Zscaler)."""
     if not domain:
         return False
     host = domain.strip().lower()
     if "://" in host:
         host = host.split("://", 1)[1]
-    # Keep only the authority's host[:port]: drop any path/query, then userinfo.
-    host = host.split("/", 1)[0].split("?", 1)[0]
+    host = host.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
     if "@" in host:
         host = host.rsplit("@", 1)[1]
-    if host.startswith("["):  # bracketed IPv6 literal, e.g. [::1]:9000
+    if host.startswith("["):
         host = host[1:].split("]", 1)[0]
     elif host.count(":") <= 1:
-        host = host.split(":", 1)[0]  # strip :port from a host:port pair
-    # else: a bare IPv6 literal such as "::1" -- leave it intact.
-    if host in ("localhost", "::1", "0.0.0.0"):
+        host = host.split(":", 1)[0]
+    if host == "localhost" or host.endswith(".localhost") or host == "0.0.0.0":
         return True
-    octets = host.split(".")
-    return len(octets) == 4 and octets[0] == "127" and all(o.isdigit() for o in octets)
+    return _ip_is_loopback(host)
 
 
 def _is_ci_or_local_event(ctx: Dict) -> bool:
-    """Return True when an event clearly originates from a CI / local test run
-    rather than a real customer machine, so it can be dropped before reaching the
-    production Sentry project.
-
-    Never raises and defaults to False -- a parse error must not suppress a
-    genuine error report.
-    """
+    """True for CI/local-run events (loopback report domain). Never raises; defaults False."""
     try:
-        if _running_in_ci():
-            return True
-        if _event_domain_is_loopback(str(ctx.get("domain") or "")):
-            return True
-        if str(ctx.get("system_user") or "").strip().lower() in _CI_RUNNER_USERS:
-            return True
+        return _event_domain_is_loopback(str(ctx.get("domain") or ""))
     except Exception:
         return False
-    return False
 
 
 def report_to_sentry(
     exception: Exception,
     context: Optional[Dict] = None,
     level: str = "error",
+    priority: bool = False,
 ) -> None:
     """Send an event to Sentry using the raw HTTP store endpoint.
 
@@ -1565,6 +1664,12 @@ def report_to_sentry(
         exception: The exception to report.
         context: Extra tags/context (e.g. phase, tool_name, http_code).
         level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+        priority: Best-effort guarantee a terminal once-per-run diagnostic
+            (e.g. the no_tools_found summary) is delivered. Bypasses both the
+            per-run event cap AND the circuit breaker so earlier transient
+            per-tool send failures can't silently skip it -- it still gets ONE
+            attempt at the end of the run (bounded: at most one ~4s curl). Dedup
+            is still honored (no spam). Reserve for a single terminal event/run.
     """
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
@@ -1574,9 +1679,6 @@ def report_to_sentry(
 
         ctx = context or {}
 
-        # Drop CI / local test-run noise before it reaches production Sentry (see
-        # _is_ci_or_local_event). Done first so dropped events never touch the
-        # dedup set or per-run counters below.
         if _is_ci_or_local_event(ctx):
             logger.debug("Sentry reporting skipped (CI/local run)")
             return
@@ -1584,11 +1686,17 @@ def report_to_sentry(
         global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
         # Circuit breaker: once the transport looks dead, stop calling Sentry for the
         # rest of the run so a blocked endpoint can't add its timeout to every failure.
-        if _sentry_dead_this_run:
+        # priority events bypass it for ONE bounded attempt so a transient mid-scan
+        # outage doesn't silently drop the terminal diagnostic.
+        if _sentry_dead_this_run and not priority:
             return
         # Collapse duplicate events and hard-cap the synchronous curls per run.
+        # priority events skip the count cap + breaker (but never dedup) so a
+        # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
         signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
-        if signature in _sentry_sent_signatures or _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
+        if signature in _sentry_sent_signatures:
+            return
+        if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
             return
         _sentry_sent_signatures.add(signature)
         _sentry_event_count += 1

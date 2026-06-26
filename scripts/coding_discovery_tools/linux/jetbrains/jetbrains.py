@@ -25,6 +25,8 @@ class LinuxJetBrainsDetector(BaseToolDetector):
     IDE_NAME_MAPPING = {
         "IntelliJIdea": "IntelliJ IDEA",
         "IdeaIC": "IntelliJ IDEA Community",
+        "IdeaIE": "IntelliJ IDEA Educational",
+        "Aqua": "Aqua",
         "PyCharm": "PyCharm",
         "PyCharmCE": "PyCharm Community",
         "WebStorm": "WebStorm",
@@ -38,7 +40,10 @@ class LinuxJetBrainsDetector(BaseToolDetector):
         "DataSpell": "DataSpell",
     }
 
-    SKIP_FOLDERS = {"consentOptions", "PrivacyPolicy", "Toolbox"}
+    SKIP_FOLDERS = {
+        "consent", "DeviceId", "JetBrainsClient",
+        "consentOptions", "PrivacyPolicy", "Toolbox",
+    }
 
     PLUGIN_NAME_OVERRIDES = {
         "ml-llm": "JetBrains AI Assistant",
@@ -149,7 +154,7 @@ class LinuxJetBrainsDetector(BaseToolDetector):
 
     @staticmethod
     def _detect_plan(folder_name: str) -> str:
-        if "IdeaIC" in folder_name or "PyCharmCE" in folder_name:
+        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
             return "Free"
         return "Licensed"
 

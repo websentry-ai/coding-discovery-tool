@@ -64,6 +64,8 @@ class WindowsJetBrainsDetector(BaseToolDetector):
     IDE_NAME_MAPPING = {
         "IntelliJIdea": "IntelliJ IDEA",
         "IdeaIC": "IntelliJ IDEA Community",
+        "IdeaIE": "IntelliJ IDEA Educational",
+        "Aqua": "Aqua",
         "PyCharm": "PyCharm",
         "PyCharmCE": "PyCharm Community",
         "WebStorm": "WebStorm",
@@ -241,8 +243,8 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         """
         Detect plan type by checking folder name and idea.log.
         """
-        # Check folder name for community edition markers
-        if "IdeaIC" in folder_name or "PyCharmCE" in folder_name:
+        # Check folder name for community/educational edition markers
+        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
             return "Community"
 
         log_file = local_dir / folder_name / "log" / "idea.log"

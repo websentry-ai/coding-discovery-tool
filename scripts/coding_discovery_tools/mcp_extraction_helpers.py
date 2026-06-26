@@ -6,6 +6,7 @@ on Windows and macOS to avoid code duplication.
 """
 
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -375,6 +376,102 @@ def _check_expired_token(cfg: Dict[str, Any], now_ms: int) -> Optional[Dict[str,
     }
 
 
+_MCP_REMOTE_HEADER_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+def _mcp_remote_server_url_hash(cfg: Dict[str, Any]) -> Optional[str]:
+    """If cfg is a stdio config that launches `mcp-remote`, return the hash
+    mcp-remote uses to key that server's cached credentials. Else None.
+
+    Mirrors mcp-remote's getServerUrlHash: md5 over the server URL, then the
+    `--resource` value (if given), then a compact JSON dump of `--header` pairs
+    sorted by key (if any), joined with '|'. Header values are hashed verbatim
+    because mcp-remote expands `${ENV}` only after computing the hash.
+    """
+    if cfg.get("url"):
+        return None
+    command = cfg.get("command")
+    args = cfg.get("args")
+    if not command or not isinstance(args, list):
+        return None
+    str_args = [a for a in args if isinstance(a, str)]
+    launches_mcp_remote = (
+        os.path.basename(str(command)).split("@", 1)[0] == "mcp-remote"
+        or any(a == "mcp-remote" or a.startswith("mcp-remote@") for a in str_args)
+    )
+    if not launches_mcp_remote:
+        return None
+
+    server_url = next((a for a in str_args if a.startswith(("http://", "https://"))), None)
+    if not server_url:
+        return None
+
+    headers: Dict[str, str] = {}
+    resource = ""
+    i = 0
+    while i < len(str_args) - 1:
+        if str_args[i] == "--header":
+            match = _MCP_REMOTE_HEADER_RE.match(str_args[i + 1])
+            if match:
+                headers[match.group(1)] = match.group(2)
+            i += 2
+            continue
+        if str_args[i] == "--resource":
+            resource = str_args[i + 1]
+            i += 2
+            continue
+        i += 1
+
+    parts = [server_url]
+    if resource:
+        parts.append(resource)
+    if headers:
+        ordered = {k: headers[k] for k in sorted(headers)}
+        parts.append(json.dumps(ordered, separators=(",", ":"), ensure_ascii=False))
+    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _mcp_remote_has_cached_token(server_url_hash: str) -> bool:
+    """True if mcp-remote already has a cached token for this server hash under
+    any installed version dir. Honors mcp-remote's $MCP_REMOTE_CONFIG_DIR."""
+    base = os.environ.get("MCP_REMOTE_CONFIG_DIR") or str(Path.home() / ".mcp-auth")
+    try:
+        return any(
+            p.is_file() and p.stat().st_size > 0
+            for p in Path(base).glob(f"mcp-remote-*/{server_url_hash}_tokens.json")
+        )
+    except OSError:
+        return False
+
+
+def _mcp_remote_unauthed_result(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return an auth_required scan result if this config launches `mcp-remote`
+    for a server it has no cached token for. Else None.
+
+    mcp-remote opens an OAuth browser tab whenever it's spawned without a usable
+    token. A discovery scan must never do that, so when no token is cached we skip
+    spawning entirely and report auth_required — the browser flow can only occur
+    if the process runs, and here it never does. When a token IS cached, we fall
+    through and scan normally (mcp-remote uses the token non-interactively)."""
+    server_url_hash = _mcp_remote_server_url_hash(cfg)
+    if server_url_hash is None or _mcp_remote_has_cached_token(server_url_hash):
+        return None
+
+    scanned_at = (
+        datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+    )
+    return {
+        "scanned_at": scanned_at,
+        "tools": None,
+        "tool_count": None,
+        "server_info": None,
+        "error": {
+            "code": "auth_required",
+            "details": {"reason": "mcp_remote_no_cached_token"},
+        },
+    }
+
+
 def _scan_servers_in_mapping(
     mcp_servers: Dict[str, Any],
 ) -> Dict[str, Dict[str, Any]]:
@@ -398,6 +495,13 @@ def _scan_servers_in_mapping(
         if expired is not None:
             _SCAN_CACHE[key] = expired
             results[name] = expired
+            continue
+        # Skip spawning mcp-remote when it has no cached token: spawning it
+        # unauthenticated opens an OAuth browser tab. Report auth_required instead.
+        unauthed = _mcp_remote_unauthed_result(cfg)
+        if unauthed is not None:
+            _SCAN_CACHE[key] = unauthed
+            results[name] = unauthed
             continue
         pending.append((name, _maybe_inject_bearer(cfg, now_ms), key))
 
@@ -955,6 +1059,31 @@ def _iter_admin_user_homes(is_admin: bool, users_dir: Optional[Path]) -> List[Pa
     return []
 
 
+def _own_home_already_scanned(admin_homes: List[Path]) -> bool:
+    """True when the current process's home is already among ``admin_homes``.
+
+    The admin/root branches scan every dir under the users root and then
+    separately re-process ``Path.home()`` to cover root's own home. That extra
+    step is correct on macOS/Linux, where the privileged account's home
+    (``/var/root`` / ``/root``) lives *outside* the users root. On Windows the
+    admin is a normal ``C:\\Users\\<name>`` profile already covered by the
+    ``C:\\Users`` scan, so re-processing ``Path.home()`` double-counts its
+    configs (WEB-4673). This guard lets callers skip the re-add only in that
+    case (case-insensitive path match, since Windows paths are not case-sensitive).
+    """
+    def _norm(p: Path) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(str(p.resolve())))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    try:
+        home_n = _norm(Path.home())
+    except Exception:
+        return False
+    return any(_norm(d) == home_n for d in admin_homes)
+
+
 def read_global_mcp_config(
     config_path: Path,
     tool_name: str = "MCP",
@@ -1224,9 +1353,11 @@ def extract_ide_global_configs_with_root_support(
                 logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
                 continue
 
-        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             try:
                 root_configs = extract_configs_for_user_func(Path.home())
                 all_configs.extend(root_configs)
@@ -1536,9 +1667,11 @@ def extract_dual_path_configs_with_root_support(
             except (ValueError, OSError):
                 pass
 
-        # On Darwin/Windows also check root/admin's own home (not included in users_dir)
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             if preferred_path.exists():
                 root_projects = extract_from_file_func(preferred_path)
                 if root_projects:
@@ -1700,9 +1833,11 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
                 except (PermissionError, OSError) as e:
                     logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
-        # On Darwin/Windows also scan the admin's own home (not in users_dir)
+        # On Darwin also scan the admin's own home (/var/root, not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its claude.ai MCP servers (WEB-4673).
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
     else:
         extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
@@ -1954,9 +2089,11 @@ def extract_claude_plugin_mcp_configs_with_root_support(
 
                 _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
-        # On Darwin/Windows also scan admin's own home plugins (not in users_dir)
+        # On Darwin also scan the admin's own home plugins (not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its plugin MCP configs (WEB-4673).
         import platform as _platform
-        if _platform.system() != "Linux":
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
     else:
         extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)

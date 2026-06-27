@@ -1,34 +1,13 @@
-"""
-Tests for WEB-4679: the scan "completed" event carries a manifest of the
-(home_user, tool_name) pairs that were actually read this run, plus the full
-set of enumerated home users, so the backend can set-diff and soft-delete
-(prune) tools that are no longer installed.
+"""WEB-4679: the "completed" scan event carries a manifest of detected (home_user, tool_name)
+pairs + the covered home users, so the backend can set-diff and prune what's gone.
 
-Correctness property under test (the load-bearing one): the manifest is built
-from per-user DETECTION/presence, not extraction success. A tool that was detected
-present is recorded even if reading its config/rules errored, so a read failure can
-never be mistaken for an uninstall (and never fail-closes the manifest to None).
-Only users who actually detected a tool get an entry (no phantom ownership). A tool
-whose DETECTOR errored marks the scan unclean (the backend skips pruning) rather than
-recording a name, since detector.tool_name is an umbrella label, not the concrete row.
+Properties: the manifest is built from per-user DETECTION (not extraction success), so a read
+error keeps a detected tool; only users who detected a tool get an entry (no phantom ownership);
+a DETECTOR error sends no manifest (backend then skips pruning).
 
-Seams (mirroring the existing suite in test_send_and_persist.py /
-test_discovery_flow.py):
-  * TestSendScanEventManifest    -> utils.send_scan_event against a real
-    localhost HTTP server (records POST bodies). Covers the payload-shaping
-    contract + backward compatibility.
-  * TestCompletedEventManifestCLI -> main() via subprocess against a real
-    localhost HTTP server. Covers the end-to-end completed-event payload and
-    that in_progress/failed events do NOT carry a manifest.
-  * TestManifestExcludesErroredReads -> main() driven IN-PROCESS with a mock
-    detector so a per-tool read error / hash-match / success can be forced
-    deterministically. This is the only seam where the errored-read branch can
-    be isolated, because the per-(tool, user) loop body lives inline in main().
-
-Only external environment is mocked: HTTP backend (real server on localhost),
-HOME (so the subprocess gets an isolated discovery lock/cache and never exits
-early on a live lock from another run), _SENTRY_DSN (no real Sentry calls),
-discovery_cache / detector (in-process seam only). No network is required.
+Seams: TestSendScanEventManifest (send_scan_event vs a localhost server), TestCompletedEventManifestCLI
+(main() via subprocess), TestManifestFromPresence (main() in-process with a mocked detector),
+TestJetBrainsNamingDeterminism (prune-key naming). Only HTTP/HOME/_SENTRY_DSN/discovery_cache are mocked.
 """
 
 import json
@@ -137,10 +116,8 @@ class TestSendScanEventManifest(_ServerTestCase):
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_empty_manifest_still_sent(self, _sleep):
-        # An empty manifest is meaningfully different from "no manifest": it
-        # tells the backend "this scope had zero readable tools" (prune-all
-        # within scope). It must be sent (key present), since the production
-        # guard is `is not None`, not truthiness.
+        # Empty manifest != "no manifest": it means "zero tools in scope" and must be sent
+        # (key present), since the backend guard is `is not None`, not truthiness.
         success, _retryable = send_scan_event(
             self.base_url,
             "test-key",
@@ -165,9 +142,7 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
 
     def _run_cli(self, timeout=600):
         env = os.environ.copy()
-        # Isolate the discovery state dir (lock + cache) under a throwaway HOME
-        # so the run never exits early on a live lock left by another process,
-        # and starts from a cold cache (deterministic hash-match behavior).
+        # Throwaway HOME: isolated lock/cache so the run isn't blocked by a live lock and starts cold.
         env["HOME"] = tempfile.mkdtemp(prefix="web4679_home_")
         return subprocess.run(
             [
@@ -235,13 +210,8 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
             )
 
     def test_covered_home_users_matches_full_enumeration_not_manifest(self):
-        # covered_home_users is sourced from the full user enumeration
-        # (all_users), NOT only from users that produced manifest entries. So a
-        # user who contributed zero manifest entries still appears in
-        # covered_home_users. We assert this invariant without needing to force
-        # a specific zero-tool user on the host: every home_user that appears in
-        # the manifest must also appear in covered_home_users, and
-        # covered_home_users must be a superset of the manifest's user set.
+        # covered_home_users comes from the full enumeration, not the manifest's users — so it must
+        # be a superset of the manifest's user set (asserted without forcing a zero-tool user).
         result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr[-2000:]}")
 
@@ -261,17 +231,9 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
 
 
 class TestManifestFromPresence(unittest.TestCase):
-    """The load-bearing property: the manifest is built from per-user DETECTION/presence,
-    not extraction success. A detected tool is recorded even if reading its config errored
-    (so a read failure is never mistaken for an uninstall and never nulls the manifest);
-    only users who detected the tool get an entry; and a DETECTOR error sends no manifest at
-    all (so the backend skips pruning) rather than recording an umbrella name.
-
-    Seam: main() driven in-process with a mocked detector + discovery_cache and a
-    captured send_scan_event. The per-(tool, user) loop body lives inline inside main(),
-    so this is the only seam where the success / hash-match / read-error branches can be
-    forced deterministically. No production code was changed to enable this.
-    """
+    """Manifest is built from per-user DETECTION: a read error keeps a detected tool; only users who
+    detected a tool get an entry; a DETECTOR error sends no manifest. Driven via main() in-process
+    with a mocked detector + captured send_scan_event."""
 
     def setUp(self):
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
@@ -291,16 +253,9 @@ class TestManifestFromPresence(unittest.TestCase):
         return {"name": name, "version": "1.0", "install_path": f"/opt/{name}", "projects": []}
 
     def _run_main_capture_manifest(self, send_report_result=(True, False), filter_error=None, detector_failure=None):
-        """Run main() with three crafted tools for one user:
-          ToolOK        -> hash mismatch -> send path
-          ToolHashMatch -> hash match    -> dedup short-circuit
-          ToolErr       -> filter raises (read/extraction error)
-        All three are DETECTED, so all three must appear in the manifest (presence-based).
-        send_report_result controls send_report_to_backend's (success, retryable).
-        detector_failure: if set, detect_all_tools reports that tool_name via its `failures`
-        set (a detector error) — it must also appear in the manifest though it isn't "found".
-        Returns the captured (manifest, covered_home_users) from the completed send_scan_event.
-        """
+        """Run main() with three detected tools for one user: ToolOK (send), ToolHashMatch (dedup
+        skip), ToolErr (filter raises). detector_failure, if set, makes detect_all_tools report a
+        detector error. Returns the captured (manifest, covered_home_users) from the completed event."""
         adm = self.adm
 
         tool_ok = self._make_tool("ToolOK")
@@ -311,7 +266,7 @@ class TestManifestFromPresence(unittest.TestCase):
         detector.get_device_id.return_value = "dev-xyz"
 
         def _detect_all(user_home=None, failures=None):
-            # A detector error surfaces via the `failures` set (presence unknown -> kept in manifest).
+            # A detector error surfaces via the `failures` set (-> scan marked incomplete).
             if detector_failure and failures is not None:
                 failures.add(detector_failure)
             return [tool_ok, tool_hm, tool_err]
@@ -404,11 +359,8 @@ class TestManifestFromPresence(unittest.TestCase):
         )
 
     def test_covered_home_users_includes_user_with_no_manifest_entry(self):
-        # covered_home_users must come from the full enumeration (all_users),
-        # so even though "alice" is the only user and one of her tools errored,
-        # she still appears. More importantly, this proves covered_home_users is
-        # not derived from the manifest: a user whose every tool errored would
-        # still be covered (bounding the prune scope correctly).
+        # covered_home_users comes from the full enumeration, not the manifest, so a user whose
+        # tools all errored is still covered (bounds the prune scope correctly).
         captured = self._run_main_capture_manifest()
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
 

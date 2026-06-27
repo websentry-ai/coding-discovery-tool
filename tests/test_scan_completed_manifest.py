@@ -5,11 +5,12 @@ set of enumerated home users, so the backend can set-diff and soft-delete
 (prune) tools that are no longer installed.
 
 Correctness property under test (the load-bearing one): the manifest is built
-from DETECTION/presence, not extraction success. A tool that was detected present
-is recorded even if reading its config/rules errored, so a read failure can never
-be mistaken for an uninstall (and never fail-closes the manifest to None). A tool
-whose DETECTOR errored (presence unknown) is also kept. A tool is omitted ONLY
-when its detector ran cleanly and did not find it (a real uninstall).
+from per-user DETECTION/presence, not extraction success. A tool that was detected
+present is recorded even if reading its config/rules errored, so a read failure can
+never be mistaken for an uninstall (and never fail-closes the manifest to None).
+Only users who actually detected a tool get an entry (no phantom ownership). A tool
+whose DETECTOR errored marks the scan unclean (the backend skips pruning) rather than
+recording a name, since detector.tool_name is an umbrella label, not the concrete row.
 
 Seams (mirroring the existing suite in test_send_and_persist.py /
 test_discovery_flow.py):
@@ -259,11 +260,11 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
 
 
 class TestManifestFromPresence(unittest.TestCase):
-    """The load-bearing property: the manifest is built from DETECTION/presence, not
-    extraction success. A detected tool is recorded even if reading its config errored
-    (so a read failure is never mistaken for an uninstall and never nulls the manifest),
-    and a tool whose DETECTOR errored is kept too. A tool is omitted ONLY when its
-    detector ran cleanly and did not find it.
+    """The load-bearing property: the manifest is built from per-user DETECTION/presence,
+    not extraction success. A detected tool is recorded even if reading its config errored
+    (so a read failure is never mistaken for an uninstall and never nulls the manifest);
+    only users who detected the tool get an entry; and a DETECTOR error marks the scan
+    unclean instead of recording an umbrella name.
 
     Seam: main() driven in-process with a mocked detector + discovery_cache and a
     captured send_scan_event. The per-(tool, user) loop body lives inline inside main(),
@@ -352,6 +353,8 @@ class TestManifestFromPresence(unittest.TestCase):
             if scan_event == "completed":
                 captured["manifest"] = kw.get("manifest")
                 captured["covered_home_users"] = kw.get("covered_home_users")
+            elif scan_event == "failed":
+                captured.setdefault("failed_events", []).append(kw.get("scan_error"))
             return (True, None)
 
         with patch.object(adm.platform, "system", return_value="Darwin"), \
@@ -423,13 +426,85 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertEqual(len(captured["manifest"]), 3)
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
 
-    def test_detector_error_keeps_tool_in_manifest(self):
-        # A tool whose DETECTOR errors (presence unknown) is kept in the manifest. ToolGhost isn't "found" but its detector failed -> must appear.
+    def test_detector_error_marks_scan_unclean(self):
+        # A DETECTOR error means presence is unknown, and detector.tool_name is only an umbrella
+        # label (e.g. "GitHub Copilot") that can't safely target the concrete install rows. So the
+        # run is marked unclean (a "failed" event) and the umbrella name is NOT added to the
+        # manifest -> the backend skips pruning rather than prune a real surface row.
         captured = self._run_main_capture_manifest(detector_failure="ToolGhost")
         pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
-        self.assertIn(("alice", "ToolGhost"), pairs)
-        # The three detected tools are present too (ToolErr kept despite its read error).
-        self.assertEqual(len(captured["manifest"]), 4)
+        self.assertNotIn(("alice", "ToolGhost"), pairs)
+        # Only the three actually-detected tools remain.
+        self.assertEqual(len(captured["manifest"]), 3)
+        self.assertTrue(
+            captured.get("failed_events"),
+            "a detector error must mark the scan unclean so the backend skips pruning this run",
+        )
+
+    def test_per_user_detection_no_phantom_ownership(self):
+        # Phantom-ownership regression: all_tools is deduped globally, so a user-scoped tool one
+        # user has must NOT be attributed to a co-resident user who did not detect it. Alice has
+        # ToolA, Bob has ToolB; the manifest must contain exactly each user's own tool.
+        adm = self.adm
+        tool_a = self._make_tool("ToolA")
+        tool_b = self._make_tool("ToolB")
+
+        detector = Mock()
+        detector.get_device_id.return_value = "dev-xyz"
+
+        def _detect_all(user_home=None, failures=None):
+            home = str(user_home or "")
+            if home.endswith("alice"):
+                return [tool_a]
+            if home.endswith("bob"):
+                return [tool_b]
+            return []
+        detector.detect_all_tools.side_effect = _detect_all
+        detector._set_canonical_vscode_copilot.return_value = None
+        detector._set_canonical_augment_surface.return_value = None
+        detector.process_single_tool.side_effect = lambda t: t
+        detector.filter_tool_projects_by_user.side_effect = lambda t, _h: t
+        detector.generate_single_tool_report.side_effect = (
+            lambda tool, device_id, home_user, system_user=None, run_id=None: {"tools": [tool]}
+        )
+
+        dc = Mock()
+        dc.acquire_lock.return_value = "acquired"
+        dc.heartbeat_start.return_value = Mock()
+        dc.get_cached_hash.return_value = None
+        dc.update_tool.return_value = None
+        dc.UNBOUND_DIR = "/tmp/unbound-test"
+        dc.last_lock_error = None
+
+        captured = {}
+
+        def _send_scan_event(domain, api_key, device_id, run_id, scan_event, app_name=None, **kw):
+            if scan_event == "completed":
+                captured["manifest"] = kw.get("manifest")
+            return (True, None)
+
+        with patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm, "AIToolsDetector", return_value=detector), \
+             patch.object(adm, "discovery_cache", dc), \
+             patch.object(adm, "get_all_users_macos", return_value=["alice", "bob"]), \
+             patch.object(adm, "compute_payload_hash", side_effect=lambda t: "h-" + t["name"]), \
+             patch.object(adm, "send_report_to_backend", return_value=(True, False)), \
+             patch.object(adm, "send_scan_event", side_effect=_send_scan_event), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
+        self.assertEqual(pairs, {("alice", "ToolA"), ("bob", "ToolB")})
+        self.assertNotIn(("bob", "ToolA"), pairs)
+        self.assertNotIn(("alice", "ToolB"), pairs)
 
 
 if __name__ == "__main__":

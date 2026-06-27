@@ -44,6 +44,7 @@ from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import send_scan_event
+from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -263,8 +264,8 @@ class TestManifestFromPresence(unittest.TestCase):
     """The load-bearing property: the manifest is built from per-user DETECTION/presence,
     not extraction success. A detected tool is recorded even if reading its config errored
     (so a read failure is never mistaken for an uninstall and never nulls the manifest);
-    only users who detected the tool get an entry; and a DETECTOR error marks the scan
-    unclean instead of recording an umbrella name.
+    only users who detected the tool get an entry; and a DETECTOR error sends no manifest at
+    all (so the backend skips pruning) rather than recording an umbrella name.
 
     Seam: main() driven in-process with a mocked detector + discovery_cache and a
     captured send_scan_event. The per-(tool, user) loop body lives inline inside main(),
@@ -426,19 +427,13 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertEqual(len(captured["manifest"]), 3)
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
 
-    def test_detector_error_marks_scan_unclean(self):
-        # A DETECTOR error means presence is unknown, and detector.tool_name is only an umbrella
-        # label (e.g. "GitHub Copilot") that can't safely target the concrete install rows. So the
-        # run is marked unclean (a "failed" event) and the umbrella name is NOT added to the
-        # manifest -> the backend skips pruning rather than prune a real surface row.
+    def test_detector_error_sends_no_manifest(self):
+        # A detector error means presence is unknown this run, so NO manifest is sent — atomically
+        # on the completed event — and the backend (seeing no manifest) skips pruning entirely.
         captured = self._run_main_capture_manifest(detector_failure="ToolGhost")
-        pairs = {(e["home_user"], e["tool_name"]) for e in captured["manifest"]}
-        self.assertNotIn(("alice", "ToolGhost"), pairs)
-        # Only the three actually-detected tools remain.
-        self.assertEqual(len(captured["manifest"]), 3)
-        self.assertTrue(
-            captured.get("failed_events"),
-            "a detector error must mark the scan unclean so the backend skips pruning this run",
+        self.assertIsNone(
+            captured["manifest"],
+            "a detector error must send no manifest so the backend can't prune from a partial scan",
         )
 
     def test_per_user_detection_no_phantom_ownership(self):
@@ -505,6 +500,45 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertEqual(pairs, {("alice", "ToolA"), ("bob", "ToolB")})
         self.assertNotIn(("bob", "ToolA"), pairs)
         self.assertNotIn(("alice", "ToolB"), pairs)
+
+
+class TestJetBrainsNamingDeterminism(unittest.TestCase):
+    """The JetBrains tool name is the backend prune key (matched exactly vs the manifest), so it
+    must exclude version and license/plan — otherwise a version bump or Free<->Licensed change
+    would orphan the install row and wrongly prune it. Fails if a change re-embeds them in the name.
+    """
+
+    def setUp(self):
+        self.det = MacOSJetBrainsDetector()
+
+    def test_display_name_is_version_free_and_stable_across_bumps(self):
+        for folder in ("PyCharm2025.3", "PyCharm2025.3.1", "PyCharm2026.1"):
+            name, version = self.det._parse_ide_name_and_version(folder)
+            self.assertEqual(name, "PyCharm", f"{folder} must map to stable 'PyCharm'")
+            self.assertNotIn(version, name, "version must not leak into the display name")
+        self.assertEqual(
+            self.det._parse_ide_name_and_version("IntelliJIdea2025.3")[0], "IntelliJ IDEA"
+        )
+
+    def test_mapping_values_carry_no_version_or_plan(self):
+        for _prefix, name in MacOSJetBrainsDetector.IDE_NAME_MAPPING.items():
+            self.assertNotRegex(name, r"\d", f"{name!r} must not embed a version digit")
+            self.assertNotIn("(", name, f"{name!r} must not embed a (plan) suffix")
+
+    def test_detected_tool_name_excludes_version_and_plan(self):
+        # detect() sets name = display_name ONLY; version and plan stay in separate fields.
+        fake_ide = {
+            "display_name": "PyCharm", "version": "2025.3.1", "plan": "Licensed",
+            "config_path": "/nonexistent/pycharm", "folder_name": "PyCharm2025.3.1",
+        }
+        with patch.object(self.det, "_scan_for_ides", return_value=[fake_ide]), \
+                patch.object(self.det, "_get_plugins", return_value=[]):
+            tools = self.det.detect()
+        self.assertEqual(tools[0]["name"], "PyCharm", "prune key (name) must be the bare display_name")
+        self.assertNotIn("2025", tools[0]["name"])
+        self.assertNotIn("Licensed", tools[0]["name"])
+        self.assertEqual(tools[0]["version"], "2025.3.1")
+        self.assertEqual(tools[0]["plan"], "Licensed")
 
 
 if __name__ == "__main__":

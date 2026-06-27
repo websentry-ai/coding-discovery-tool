@@ -2807,7 +2807,7 @@ def main():
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
-        # Detection/extraction errors this run; if non-empty the scan is marked unclean so the backend skips pruning.
+        # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
         incomplete_reasons = []
 
         # --- Drain pending reports from previous run ---
@@ -2908,14 +2908,12 @@ def main():
                 user_tools = detector.detect_all_tools(
                     user_home=user_home, failures=user_detect_failures
                 )
-            # Record per-user presence at detection: a tool this user actually has stays in the
-            # manifest even if reading/uploading it later errors (a read failure isn't an
-            # uninstall), and only users who detected the tool get an entry (no phantom ownership).
+            # Per-user presence: a detected tool stays in the manifest even if reading it later
+            # errors (a read failure isn't an uninstall).
             for detected in user_tools:
                 scanned_manifest.add((user, detected.get('name', 'Unknown')))
-            # A detector ERRORED -> presence unknown. detector.tool_name is an umbrella label
-            # (e.g. "GitHub Copilot"), not the concrete row name ("GitHub Copilot (VS Code)"),
-            # so it can't safely target the manifest. Skip pruning this run instead.
+            # A detector error means presence is unknown for this user -> mark the scan incomplete
+            # so it doesn't prune (detector.tool_name is an umbrella label, not the real row name).
             if user_detect_failures:
                 incomplete_reasons.append(f"detector error for user {user}")
 
@@ -2980,10 +2978,8 @@ def main():
                         user_home = Path.home()
 
                     try:
-                        # Only report a tool for users who actually detected it (the manifest is
-                        # the per-user presence set). all_tools is deduped globally, so without this
-                        # a user-scoped tool one user has would otherwise be reported for every
-                        # enumerated user — a phantom install the backend could never prune.
+                        # all_tools is deduped globally; only report a tool for users who actually
+                        # detected it (i.e. it's in their manifest) to avoid phantom installs.
                         if (user_name, tool_name) not in scanned_manifest:
                             continue
 
@@ -3229,8 +3225,8 @@ def main():
 
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
-                # Detected tools are already in the manifest from the detection phase, so a
-                # device-wide extraction failure here cannot drop a live tool (no re-add needed).
+                # Detected tools are already in the manifest from the detection phase, so this
+                # extraction failure can't drop a live tool.
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
@@ -3280,26 +3276,13 @@ def main():
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 
-        # Detection/extraction hit an error this run -> mark the scan unclean BEFORE the
-        # completed event so the backend's reconcile skips pruning (a missing tool may mean
-        # "couldn't read", not "uninstalled"). Sent first so scan_error is persisted before
-        # the completed event dispatches the reconcile.
-        if incomplete_reasons:
-            send_scan_event(
-                args.domain, args.api_key, device_id, run_id, "failed",
-                args.app_name,
-                scan_error={
-                    "error_type": "ScanIncomplete",
-                    "message": "; ".join(incomplete_reasons[:20]),
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                },
-                sentry_context=sentry_ctx, system_user=system_user,
-            )
-
-        # only the completed event carries manifest + covered users (backend prunes from them)
         logger.info("Sending scan completed event...")
-        # manifest = (home_user, tool_name) detected present; backend set-diffs it to prune the rest.
-        manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+        # An incomplete scan sends no manifest so the backend won't prune from a partial inventory.
+        # Carrying this on the completed event itself (vs a separate signal) keeps it atomic.
+        if incomplete_reasons:
+            manifest = None
+        else:
+            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,

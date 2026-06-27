@@ -78,6 +78,12 @@ class MacOSRooDetector(BaseToolDetector):
             List of dicts containing tool info for each IDE with Roo Code installed,
             or None if not found in any IDE
         """
+        # Per-user scan (user_home set by detect_tool_for_user): scope to THIS user only. Without
+        # this, a root scan self-enumerates /Users and attributes every user's extension to the caller.
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            return self._detect_roo_for_user(Path(scoped_home)) or None
+
         all_results = []
 
         if is_running_as_root():

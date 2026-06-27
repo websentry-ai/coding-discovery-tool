@@ -33,6 +33,11 @@ class LinuxKiloCodeDetector(BaseToolDetector):
         return "Kilo Code"
 
     def detect(self) -> Optional[Dict]:
+        # Per-user scan (user_home set by detect_tool_for_user): scope to THIS user only, else an
+        # elevated scan enumerates every home and attributes other users' extensions to the caller.
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            return self._check_user_for_kilocode(Path(scoped_home))
         for user_home in get_linux_user_homes():
             result = self._check_user_for_kilocode(user_home)
             if result:

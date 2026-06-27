@@ -66,6 +66,12 @@ class WindowsClineDetector(BaseToolDetector):
             List of dicts containing tool info for each IDE with Cline installed,
             or None if not found in any IDE
         """
+        # Per-user scan (user_home set by detect_tool_for_user): scope to THIS user only, else an
+        # elevated scan enumerates every home and attributes other users' extensions to the caller.
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            return self._detect_cline_for_user(Path(scoped_home)) or None
+
         all_results = []
 
         if is_running_as_admin():

@@ -380,13 +380,11 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
 
     def test_detector_error_sends_no_manifest(self):
-        # A detector error means presence is unknown this run, so NO manifest is sent — atomically
-        # on the completed event — and the backend (seeing no manifest) skips pruning entirely.
+        # A detector error means presence is unknown this run, so NO manifest AND no covered scope
+        # are sent — the backend then has no partial inventory/scope to prune from.
         captured = self._run_main_capture_manifest(detector_failure="ToolGhost")
-        self.assertIsNone(
-            captured["manifest"],
-            "a detector error must send no manifest so the backend can't prune from a partial scan",
-        )
+        self.assertIsNone(captured["manifest"], "detector error must send no manifest")
+        self.assertIsNone(captured.get("covered_home_users"), "no covered scope without an inventory")
 
     def test_per_user_detection_no_phantom_ownership(self):
         # Phantom-ownership regression: all_tools is deduped globally, so a user-scoped tool one
@@ -452,6 +450,21 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertEqual(pairs, {("alice", "ToolA"), ("bob", "ToolB")})
         self.assertNotIn(("bob", "ToolA"), pairs)
         self.assertNotIn(("alice", "ToolB"), pairs)
+
+
+class TestExtensionDetectorPerUserScoping(unittest.TestCase):
+    """Extension detectors must scope to the per-user home set by detect_tool_for_user, so an
+    elevated multi-user scan can't attribute one user's extension to another (phantom ownership)."""
+
+    def test_roo_detect_scopes_to_set_user_home(self):
+        from scripts.coding_discovery_tools.macos.roo_code.roo_code import MacOSRooDetector
+        det = MacOSRooDetector()
+        det.user_home = Path("/Users/alice")
+        with patch.object(det, "_detect_roo_for_user", return_value=[{"name": "Roo Code (Cursor)"}]) as m:
+            result = det.detect()
+        # Called exactly once with the SET home (not Path.home(), not per-/Users enumeration).
+        m.assert_called_once_with(Path("/Users/alice"))
+        self.assertEqual(result, [{"name": "Roo Code (Cursor)"}])
 
 
 class TestJetBrainsNamingDeterminism(unittest.TestCase):

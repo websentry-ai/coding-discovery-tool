@@ -67,12 +67,18 @@ class WindowsKiloCodeDetector(BaseToolDetector):
         Returns:
             Dict containing tool info (name, version, install_path) or None if not found
         """
+        # Per-user scan (user_home set by detect_tool_for_user): scope to THIS user only, else an
+        # elevated scan enumerates every home and attributes other users' extensions to the caller.
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            return self._check_user_for_kilocode(Path(scoped_home))
+
         # When running as administrator, scan all user directories first
         if self._is_running_as_admin():
             user_kilocode_info = self._scan_user_directories()
             if user_kilocode_info:
                 return user_kilocode_info
-        
+
         # Check current user (works for both admin and regular users)
         return self._check_user_for_kilocode(Path.home())
 

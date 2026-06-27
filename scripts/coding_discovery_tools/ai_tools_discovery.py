@@ -3277,16 +3277,17 @@ def main():
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 
         logger.info("Sending scan completed event...")
-        # An incomplete scan sends no manifest so the backend won't prune from a partial inventory.
-        # Carrying this on the completed event itself (vs a separate signal) keeps it atomic.
+        # An incomplete scan sends neither manifest nor covered scope, so the backend has no
+        # partial inventory to prune from (atomic on this event — no separate signal to lose).
         if incomplete_reasons:
-            manifest = None
+            manifest, covered = None, None
         else:
             manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+            covered = all_users
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
-            manifest=manifest, covered_home_users=all_users,
+            manifest=manifest, covered_home_users=covered,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

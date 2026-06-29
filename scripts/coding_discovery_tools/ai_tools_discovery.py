@@ -88,6 +88,7 @@ try:
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
     from . import cache as discovery_cache
+    from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -146,6 +147,7 @@ except ImportError:
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools import cache as discovery_cache
+    from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
 logger = logging.getLogger(__name__)
 payload_logger = logging.getLogger(__name__ + ".payload")
@@ -3255,6 +3257,16 @@ def main():
         else:
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
+
+        # Resolve any bare Claude connector UUIDs the backend still needs: read
+        # this device's local session files and report real names + tools. Runs
+        # as part of every discovery so it self-heals over time. Best-effort —
+        # never let it affect the discovery run's outcome.
+        try:
+            sent, failed, matched = run_sweep(args.domain, args.api_key)
+            logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
+        except Exception as sweep_err:
+            logger.debug(f"Connector UUID sweep failed: {sweep_err}")
 
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal

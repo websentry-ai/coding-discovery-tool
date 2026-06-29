@@ -54,45 +54,55 @@ def _claude_base_dir():
 
 
 def read_local_connectors():
-    """Return {uuid: {"name", "tools", "url"}} from both session folders.
+    """Return {uuid: {"name", "tools"}} from both session folders.
 
-    De-dupes a UUID seen across folders/files: prefers an entry that has a name,
-    and unions tool lists by tool name so a richer scan isn't lost.
+    Files are read newest-first so the current display name wins over a stale
+    one. A UUID identifies one connector, so when it recurs we only enrich its
+    tools from entries that carry the SAME name — a conflicting (older) name is
+    ignored rather than mixing one connector's identity with another's tools.
+
+    The session `url` is intentionally not collected: it is not needed to resolve
+    the connector (the name yields the claude-connector fingerprint) and need not
+    leave the device.
     """
     base = _claude_base_dir()
     out = {}
     if not base:
         return out
+
+    files = []
     for sub in SESSION_SUBDIRS:
         folder = base / sub
         if not folder.exists():
             continue
         try:
-            files = list(folder.glob("**/local_*.json"))
+            files.extend(folder.glob("**/local_*.json"))
         except OSError:
             continue
-        for f in files:
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+    try:
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
+
+    for f in files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for entry in (data.get("remoteMcpServersConfig") or []):
+            if not isinstance(entry, dict):
                 continue
-            for entry in (data.get("remoteMcpServersConfig") or []):
-                if not isinstance(entry, dict):
-                    continue
-                uuid = (entry.get("uuid") or "").strip()
-                name = entry.get("name")
-                if not uuid or not name:
-                    continue
-                tools = entry.get("tools") if isinstance(entry.get("tools"), list) else []
-                existing = out.get(uuid)
-                if existing is None:
-                    out[uuid] = {"name": name, "tools": list(tools), "url": entry.get("url")}
-                else:
-                    if not existing.get("name"):
-                        existing["name"] = name
-                    if not existing.get("url") and entry.get("url"):
-                        existing["url"] = entry.get("url")
-                    existing["tools"] = _union_tools(existing.get("tools") or [], tools)
+            uuid = (entry.get("uuid") or "").strip().lower()
+            name = entry.get("name")
+            if not uuid or not name:
+                continue
+            tools = entry.get("tools") if isinstance(entry.get("tools"), list) else []
+            existing = out.get(uuid)
+            if existing is None:
+                out[uuid] = {"name": name, "tools": list(tools)}
+            elif existing["name"] == name:
+                existing["tools"] = _union_tools(existing["tools"], tools)
+            # else: older/conflicting name for this UUID -> newest already won.
     return out
 
 
@@ -107,10 +117,17 @@ def _union_tools(a, b):
 
 def _run_curl(args, curl_config, timeout):
     """Run curl (config fed on stdin) and split the `-w "\\n%{http_code}"`
-    trailer off the body. Returns (http_code, body)."""
+    trailer off the body. Returns (http_code, body).
+
+    Raises RuntimeError when curl itself fails (DNS/TLS/proxy/timeout) so the
+    real reason surfaces instead of an empty status or a bare `000`.
+    """
     result = subprocess.run(
         args, input=curl_config, capture_output=True, text=True, timeout=timeout,
     )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise RuntimeError(f"curl exit {result.returncode}: {stderr[:200]}")
     out = (result.stdout or "").strip()
     if not out:
         return "", ""
@@ -139,7 +156,7 @@ def fetch_unresolved_uuids(domain, api_key):
     return [u for u in (parsed.get("uuids") or []) if u]
 
 
-def report_connector(domain, api_key, connector_uuid, name, tools, url):
+def report_connector(domain, api_key, connector_uuid, name, tools):
     """POST one resolved connector to the single-server scan endpoint.
     Returns (http_code, body)."""
     endpoint = f"{_normalize_url(domain)}{REPORT_PATH}"
@@ -151,8 +168,6 @@ def report_connector(domain, api_key, connector_uuid, name, tools, url):
             "scanned_at": datetime.now(timezone.utc).isoformat(),
         },
     }
-    if url:
-        mcp_server["url"] = url
     payload = json.dumps({"mcp_server": mcp_server, "connector_uuid": connector_uuid})
     curl_config = (
         _auth_header(api_key)
@@ -177,7 +192,7 @@ def main():
         return 2
 
     try:
-        needed = set(fetch_unresolved_uuids(args.domain, args.api_key))
+        needed = {u.strip().lower() for u in fetch_unresolved_uuids(args.domain, args.api_key) if u}
     except Exception as e:
         print(f"error: could not fetch unresolved list: {e}", file=sys.stderr)
         return 1
@@ -195,7 +210,7 @@ def main():
     for uuid, info in matches.items():
         try:
             http_code, body = report_connector(
-                args.domain, args.api_key, uuid, info["name"], info.get("tools"), info.get("url")
+                args.domain, args.api_key, uuid, info["name"], info.get("tools")
             )
         except Exception as e:
             failed += 1

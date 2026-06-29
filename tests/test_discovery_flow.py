@@ -91,6 +91,88 @@ class TestDetector(unittest.TestCase):
             self.assertIn("projects", reported_tool)
 
 
+class TestAugmentInDiscoveryFlow(unittest.TestCase):
+    """Augment Code is wired into the end-to-end discovery flow and is fail-safe."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_augment_detector_registered(self):
+        from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
+        for os_name in ("Darwin", "Windows", "Linux"):
+            names = [d.tool_name for d in ToolDetectorFactory.create_all_tool_detectors(os_name)]
+            self.assertIn("Augment Code", names)
+
+    def test_augment_surfaces_flow_through_generate_report(self):
+        """A detected Augment surface set flows through generate_report e2e: the
+        canonical CLI row carries config, the others are bare."""
+        detector = AIToolsDetector(os_name="Darwin")
+        # Stub the shared extractors (no real disk walk).
+        detector._augment_mcp_extractor = Mock()
+        detector._augment_mcp_extractor.extract_mcp_config.return_value = {
+            "projects": [{"path": "/Users/x/.augment", "mcpServers": [{"name": "s"}], "scope": "user"}],
+        }
+        detector._augment_rules_extractor = Mock()
+        detector._augment_rules_extractor.extract_all_augment_rules.return_value = []
+        detector._augment_skills_extractor = Mock()
+        detector._augment_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
+        detector._augment_settings_extractor = Mock()
+        detector._augment_settings_extractor.extract_settings.return_value = []
+
+        augment_tools = [
+            {"name": "Auggie CLI", "version": "0.30.0",
+             "install_path": "/Users/x/.local/bin/auggie", "_config_path": "/Users/x/.augment"},
+            {"name": "Augment (VS Code)", "version": "1.0",
+             "install_path": "/Users/x/.vscode/extensions", "_config_path": "/Users/x/.augment"},
+        ]
+        with patch.object(detector, "detect_all_tools", return_value=augment_tools), \
+             patch.object(detector, "get_device_id", return_value="DEV-1"):
+            report = detector.generate_report()
+
+        by_name = {t["name"]: t for t in report["tools"]}
+        self.assertIn("Auggie CLI", by_name)
+        self.assertIn("Augment (VS Code)", by_name)
+        # Canonical CLI carries the shared MCP project; the VS Code row is bare.
+        self.assertTrue(by_name["Auggie CLI"]["projects"])
+        self.assertEqual(by_name["Augment (VS Code)"]["projects"], [])
+
+    def test_failing_augment_extractor_does_not_break_scan(self):
+        """A throwing Augment extractor degrades to an empty Augment row WITHOUT
+        breaking the scan or other tools' data (memoized accessors swallow + warn)."""
+        detector = AIToolsDetector(os_name="Darwin")
+        # Augment rules/MCP/skills/settings all explode.
+        detector._augment_mcp_extractor = Mock()
+        detector._augment_mcp_extractor.extract_mcp_config.side_effect = RuntimeError("boom")
+        detector._augment_rules_extractor = Mock()
+        detector._augment_rules_extractor.extract_all_augment_rules.side_effect = RuntimeError("boom")
+        detector._augment_skills_extractor = Mock()
+        detector._augment_skills_extractor.extract_all_skills.side_effect = RuntimeError("boom")
+        detector._augment_settings_extractor = Mock()
+        detector._augment_settings_extractor.extract_settings.side_effect = RuntimeError("boom")
+
+        tools = [
+            {"name": "Auggie CLI", "version": "0.30.0",
+             "install_path": "/Users/x/.local/bin/auggie", "_config_path": "/Users/x/.augment"},
+            # An unrelated tool whose data must survive the Augment failure.
+            {"name": "OpenClaw", "version": "1.0", "install_path": "/opt/openclaw",
+             "is_installed": True},
+        ]
+        with patch.object(detector, "detect_all_tools", return_value=tools), \
+             patch.object(detector, "get_device_id", return_value="DEV-2"):
+            report = detector.generate_report()
+
+        by_name = {t["name"]: t for t in report["tools"]}
+        # Scan completed: both rows present.
+        self.assertIn("Auggie CLI", by_name)
+        self.assertIn("OpenClaw", by_name)
+        # Augment degraded to an empty row (no crash).
+        self.assertEqual(by_name["Auggie CLI"]["projects"], [])
+        # The unrelated tool's row is intact.
+        self.assertTrue(by_name["OpenClaw"]["is_installed"])
+
+
 class TestMainCLI(unittest.TestCase):
     """Integration tests that invoke main() via subprocess."""
 

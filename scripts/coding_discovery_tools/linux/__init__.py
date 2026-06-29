@@ -11,6 +11,7 @@ from .kilocode import LinuxKiloCodeDetector, LinuxKiloCodeRulesExtractor, LinuxK
 from .gemini_cli import LinuxGeminiCliDetector, LinuxGeminiCliRulesExtractor, LinuxGeminiCliMCPConfigExtractor
 from .cursor_cli import LinuxCursorCliDetector, LinuxCursorCliRulesExtractor, LinuxCursorCliMCPConfigExtractor, LinuxCursorCliSettingsExtractor
 from .copilot_cli import LinuxCopilotCliDetector, LinuxCopilotCliMCPConfigExtractor, LinuxCopilotCliRulesExtractor, LinuxCopilotCliSettingsExtractor, LinuxCopilotCliSkillsExtractor
+from .augment import LinuxAugmentDetector, LinuxAugmentMCPConfigExtractor, LinuxAugmentRulesExtractor, LinuxAugmentSettingsExtractor, LinuxAugmentSkillsExtractor
 from .codex import LinuxCodexDetector, LinuxCodexRulesExtractor, LinuxCodexMCPConfigExtractor
 from .opencode import LinuxOpenCodeDetector, LinuxOpenCodeRulesExtractor, LinuxOpenCodeMCPConfigExtractor
 from .openclaw import LinuxOpenClawDetector
@@ -54,6 +55,11 @@ __all__ = [
     "LinuxCopilotCliRulesExtractor",
     "LinuxCopilotCliSettingsExtractor",
     "LinuxCopilotCliSkillsExtractor",
+    "LinuxAugmentDetector",
+    "LinuxAugmentMCPConfigExtractor",
+    "LinuxAugmentRulesExtractor",
+    "LinuxAugmentSettingsExtractor",
+    "LinuxAugmentSkillsExtractor",
     "LinuxCodexDetector",
     "LinuxCodexRulesExtractor",
     "LinuxCodexMCPConfigExtractor",

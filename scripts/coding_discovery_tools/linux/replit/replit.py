@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import List, Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
-from ...constants import VERSION_TIMEOUT
-from ...utils import run_command
 from ...linux_extraction_helpers import get_linux_user_homes
 
 logger = logging.getLogger(__name__)
@@ -39,8 +37,7 @@ class LinuxReplitDetector(BaseToolDetector):
 
     def detect(self) -> Optional[Dict]:
         """
-        Detect Replit by requiring a real install resource tree, with the
-        ``which replit`` lookup as a backstop.
+        Detect Replit by requiring a real install resource tree.
 
         A genuine Replit Desktop install ships either a packed
         ``resources/app.asar`` (Electron Forge ``asar: true``) or the legacy
@@ -51,6 +48,11 @@ class LinuxReplitDetector(BaseToolDetector):
         positives. ``.local/share/Replit`` is now only honoured as part of a
         resource-tree check (it is one of the candidate install dirs), not as a
         bare-dir-exists gate.
+
+        The ``which replit`` backstop was removed: the PyPI package ``replit``
+        installs a ``replit`` console script, so the backstop name-collided and
+        reported a phantom Replit Desktop for any Python dev who ran
+        ``pip install replit``. The resource-tree gate is authoritative.
         """
         install_dir = self._find_install_dir()
         if install_dir:
@@ -58,14 +60,6 @@ class LinuxReplitDetector(BaseToolDetector):
                 "name": self.tool_name,
                 "version": self.get_version() or "Unknown",
                 "install_path": str(install_dir),
-            }
-
-        which_path = self._check_replit_command()
-        if which_path:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version() or "Unknown",
-                "install_path": which_path,
             }
 
         return None
@@ -109,10 +103,13 @@ class LinuxReplitDetector(BaseToolDetector):
         With Electron Forge ``asar: true`` the app tree is packed into
         ``resources/app.asar``, so the legacy ``resources/app/package.json`` is
         only present on older builds. We read it where it exists (scanning the
-        conventional system install path plus per-user sideload locations) and
-        fall back to ``replit --version``. We deliberately do NOT parse the
-        ``app.asar`` binary (zero-dep), so an asar-only install yields None here
-        and ``detect()`` reports the version as ``"Unknown"``.
+        conventional system install path plus per-user sideload locations).
+
+        We deliberately do NOT parse the ``app.asar`` binary (zero-dep) and do
+        NOT shell out to ``replit --version``: that name-collides with the PyPI
+        ``replit`` package's console script and would report the PyPI version
+        instead of the Desktop's. So an asar-only install yields None
+        here and ``detect()`` reports the version as ``"Unknown"``.
 
         Returns:
             Version string if discoverable, None otherwise.
@@ -127,7 +124,7 @@ class LinuxReplitDetector(BaseToolDetector):
             version = self._read_version_file(pkg_json)
             if version:
                 return version
-        return self._version_via_command()
+        return None
 
     def _candidate_install_dirs(self) -> List[Path]:
         dirs: List[Path] = list(_SYSTEM_INSTALL_DIRS)
@@ -144,26 +141,4 @@ class LinuxReplitDetector(BaseToolDetector):
                 return json.load(f).get("version")
         except (json.JSONDecodeError, OSError, PermissionError) as e:
             logger.debug(f"Could not read Replit version file {path}: {e}")
-        return None
-
-    def _version_via_command(self) -> Optional[str]:
-        try:
-            output = run_command(["replit", "--version"], VERSION_TIMEOUT)
-            if output:
-                output = output.strip()
-                if output:
-                    return output
-        except Exception as e:
-            logger.debug(f"replit --version failed: {e}")
-        return None
-
-    def _check_replit_command(self) -> Optional[str]:
-        try:
-            output = run_command(["which", "replit"], VERSION_TIMEOUT)
-            if output:
-                path = output.strip()
-                if Path(path).exists():
-                    return path
-        except Exception as e:
-            logger.debug(f"Could not check for replit command: {e}")
         return None

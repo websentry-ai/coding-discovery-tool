@@ -6,11 +6,14 @@ on macOS and Windows
 """
 
 import argparse
+import copy
 import json
 import logging
 import os
 import platform
+import signal
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -18,7 +21,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Callable
 
-SCRIPT_VERSION = "1.0.0"
+# Self-imposed run timeout (seconds). Discovery enforces its OWN deadline rather
+# than only being force-killed by the parent onboard/setup subprocess timeout, so
+# on a slow/hung scan it can release its lock + report the run failed BEFORE it is
+# killed — a SIGKILL leaves a fresh-mtime lock that would otherwise block the next
+# run. Kept in sync with the parent timeouts in setup/mdm/onboard.py and
+# unbound-cli's discover.js (which pass --timeout and use a larger kill backstop).
+# 150 minutes. Pass --timeout <=0 to disable.
+DEFAULT_RUN_TIMEOUT_SECONDS = 9000
+
+SCRIPT_VERSION = "1.1.0"
 
 try:
     from .coding_tool_base import BaseMCPConfigExtractor
@@ -52,17 +64,31 @@ try:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        CopilotCliMCPConfigExtractorFactory,
+        CopilotCliRulesExtractorFactory,
+        CopilotCliSettingsExtractorFactory,
+        CopilotCliSkillsExtractorFactory,
+        AugmentMCPConfigExtractorFactory,
+        AugmentRulesExtractorFactory,
+        AugmentSettingsExtractorFactory,
+        AugmentSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
+        ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from .s3_uploader import compute_payload_hash
+    from . import cache as discovery_cache
+    from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -97,21 +123,116 @@ except ImportError:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        CopilotCliMCPConfigExtractorFactory,
+        CopilotCliRulesExtractorFactory,
+        CopilotCliSettingsExtractorFactory,
+        CopilotCliSkillsExtractorFactory,
+        AugmentMCPConfigExtractorFactory,
+        AugmentRulesExtractorFactory,
+        AugmentSettingsExtractorFactory,
+        AugmentSkillsExtractorFactory,
         JunieMCPConfigExtractorFactory,
         JunieRulesExtractorFactory,
         CursorCliSettingsExtractorFactory,
         CursorCliMCPConfigExtractorFactory,
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
+        ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_all_users_macos, get_all_users_windows, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, QUEUE_FILE
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
+    from scripts.coding_discovery_tools import cache as discovery_cache
+    from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
-# Set up logger
 logger = logging.getLogger(__name__)
+payload_logger = logging.getLogger(__name__ + ".payload")
+detail_logger = logging.getLogger(__name__ + ".detail")
 configure_logger()
+
+# Distinct "unset" sentinel for the per-scan Augment memo caches. ``None`` is a
+# LEGITIMATE cached value (e.g. no MCP configured), so it cannot double as the
+# "not yet computed" marker — otherwise the expensive whole-disk walk re-runs on
+# every accessor call whenever the real result is ``None``.
+_AUGMENT_CACHE_UNSET = object()
+
+
+def _normalise_path(p: str) -> str:
+    """Normalise a path string for cross-platform comparison.
+
+    Forward-slashes separators, upper-cases a Windows drive letter, and strips a
+    trailing slash. Shared by ``filter_tool_projects_by_user`` and the per-user
+    Copilot CLI ownership gate so both compare paths identically (DRY).
+    """
+    if not p:
+        return p
+    n = p.replace('\\', '/')
+    if len(n) >= 2 and n[1] == ':':
+        n = n[0].upper() + n[1:]
+    n = n.rstrip('/')
+    return n
+
+
+def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
+    """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
+
+    The per-user scan loop re-runs for every user, so emit only when the user owns
+    the detected config dir or the per-user filter produced data for them;
+    otherwise a non-owner gets a phantom install row. CLI-scoped: IDE tools
+    legitimately share a machine-wide install. Keys on ``_config_path`` (the
+    ``~/.copilot`` dir), not ``install_path`` — install_path is now the binary,
+    which for a machine-global install lives outside any home. Older payloads
+    without ``_config_path`` fall back to ``install_path``.
+    """
+    own_path = tool_filtered.get("_config_path") or tool_filtered.get("install_path", "")
+    own_norm = _normalise_path(own_path)
+    user_norm = _normalise_path(str(user_home))
+    owns_install = bool(own_norm) and (
+        own_norm == user_norm or own_norm.startswith(user_norm + "/")
+    )
+    has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
+    return owns_install or has_data
+
+
+def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
+    """Whether a filtered Augment surface should be emitted for ``user_home``.
+
+    Augment surfaces share one per-user ``~/.augment`` config dir (carried as
+    ``_config_path``). Under a root all-users scan the per-user loop re-runs for
+    every user, so a non-owner with no per-user data would otherwise get a
+    phantom surface row. Ownership is "owns the ``_config_path`` dir OR has
+    user-owned data".
+
+    Unlike the Copilot CLI gate, MANAGED-scope permissions do NOT count as
+    user-owned data: managed (org-wide ``/etc/augment``) policy is attached to
+    the canonical row and survives ``filter_tool_projects_by_user`` for EVERY
+    user, so treating its mere presence as data would manufacture a phantom row
+    for a non-owner. User-owned data is: per-user ``projects`` OR a permissions
+    block whose scope is a non-managed (user/local) scope.
+    """
+    own_path = tool_filtered.get("_config_path") or tool_filtered.get("install_path", "")
+    own_norm = _normalise_path(own_path)
+    user_norm = _normalise_path(str(user_home))
+    owns_install = bool(own_norm) and (
+        own_norm == user_norm or own_norm.startswith(user_norm + "/")
+    )
+
+    if bool(tool_filtered.get("projects")):
+        return True
+
+    # A permissions block survives filtering for this user iff it is managed
+    # (kept for everyone) or its settings_path is under this user's home (kept
+    # only for the owner). Managed alone must NOT count; a surviving non-managed
+    # block means this user owns user-scope permissions here.
+    perms = tool_filtered.get("permissions")
+    if perms is not None and perms.get("settings_source") != "managed":
+        return True
+
+    return owns_install
 
 
 class AIToolsDetector:
@@ -158,9 +279,10 @@ class AIToolsDetector:
             self._roo_rules_extractor = RooRulesExtractorFactory.create(self.system)
             self._roo_mcp_extractor = RooMCPConfigExtractorFactory.create(self.system)
             
-            # Initialize Cline extractors (macOS only, returns None for unsupported OS)
+            # Initialize Cline extractors (macOS and Windows)
             self._cline_rules_extractor = ClineRulesExtractorFactory.create(self.system)
             self._cline_mcp_extractor = ClineMCPConfigExtractorFactory.create(self.system)
+            self._cline_skills_extractor = ClineSkillsExtractorFactory.create(self.system)
             
             # Initialize Antigravity extractors (macOS and Windows)
             self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
@@ -187,6 +309,48 @@ class AIToolsDetector:
 
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
+
+            # GitHub Copilot CLI MCP + rules + settings + skills extractors (macOS/Windows; None elsewhere)
+            self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
+            self._copilot_cli_rules_extractor = CopilotCliRulesExtractorFactory.create(self.system)
+            self._copilot_cli_settings_extractor = CopilotCliSettingsExtractorFactory.create(self.system)
+            self._copilot_cli_skills_extractor = CopilotCliSkillsExtractorFactory.create(self.system)
+
+            # Shared Copilot skills (~/.copilot/skills etc.) are tool-identity-
+            # independent: both the CLI branch and the VS Code IDE branch attach
+            # them. Memoize so the (potentially whole-disk) walk runs at most once
+            # per scan, no matter how many Copilot rows are processed.
+            self._copilot_cli_skills_cache: Optional[Dict] = None
+            # Canonical VS Code Copilot row that should carry the shared skills,
+            # computed once per scan from the full detected-tools list (prefer the
+            # Chat row). None until set by the detection loop.
+            self._canonical_vscode_copilot: Optional[str] = None
+
+            # Augment Code MCP + rules + settings + skills extractors (all OSes).
+            self._augment_mcp_extractor = AugmentMCPConfigExtractorFactory.create(self.system)
+            self._augment_rules_extractor = AugmentRulesExtractorFactory.create(self.system)
+            self._augment_settings_extractor = AugmentSettingsExtractorFactory.create(self.system)
+            self._augment_skills_extractor = AugmentSkillsExtractorFactory.create(self.system)
+
+            # Augment ships three surfaces sharing one ~/.augment config. The shared
+            # config (MCP/rules/skills/permissions) is the same whichever surface
+            # asks for it, so memoize each whole-disk walk to run at most once per
+            # scan, and attach it to a single canonical surface (the canonical
+            # picker below) so it is not duplicated across surface rows.
+            # Use the UNSET sentinel (not None) so a legitimate cached ``None``
+            # (e.g. no MCP configured) still short-circuits the accessor instead
+            # of re-running the expensive walk on every call (D4 memoization).
+            self._augment_rules_cache = _AUGMENT_CACHE_UNSET
+            self._augment_skills_cache = _AUGMENT_CACHE_UNSET
+            self._augment_mcp_cache = _AUGMENT_CACHE_UNSET
+            self._augment_settings_cache = _AUGMENT_CACHE_UNSET
+            # Per-user canonical Augment surface: maps each user's ``_config_path``
+            # (their ~/.augment) -> the chosen surface name (lowercased) that
+            # carries the shared config for THAT user. Computed once per scan.
+            # Keyed per-config so a root multi-user scan picks a canonical surface
+            # for EACH user independently (user A's CLI doesn't steal canonical
+            # status from user B who only has VS Code).
+            self._canonical_augment_surface_by_config: Dict[str, str] = {}
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -238,6 +402,7 @@ class AIToolsDetector:
                         tools.append(tool_info)
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
+                report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
 
         return tools
 
@@ -272,6 +437,7 @@ class AIToolsDetector:
             return self._cursor_rules_extractor.extract_all_cursor_rules()
         except Exception as e:
             logger.error(f"Error extracting Cursor rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cursor rules"}, level="warning")
             return []
 
     def extract_all_claude_rules(self) -> Optional[Dict]:
@@ -290,11 +456,17 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Claude rules"}, level="warning")
             return None
 
-    def extract_all_claude_skills(self) -> Optional[Dict]:
+    def extract_all_claude_skills(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract all Claude Code skills from all projects.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
 
         Returns:
             Dict with:
@@ -304,10 +476,11 @@ class AIToolsDetector:
         """
         try:
             if self._claude_skills_extractor:
-                return self._claude_skills_extractor.extract_all_skills()
+                return self._claude_skills_extractor.extract_all_skills(plugin_lookup=plugin_lookup)
             return None
         except Exception as e:
             logger.error(f"Error extracting Claude skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Claude skills"}, level="warning")
             return None
 
     def extract_all_cowork_skills(self) -> Optional[Dict]:
@@ -326,11 +499,17 @@ class AIToolsDetector:
             return None
         except Exception as e:
             logger.error(f"Error extracting Cowork skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cowork skills"}, level="warning")
             return None
 
-    def extract_all_cursor_skills(self) -> Optional[Dict]:
+    def extract_all_cursor_skills(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract all Cursor skills from all projects.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
 
         Returns:
             Dict with:
@@ -340,10 +519,30 @@ class AIToolsDetector:
         """
         try:
             if self._cursor_skills_extractor:
-                return self._cursor_skills_extractor.extract_all_skills()
+                return self._cursor_skills_extractor.extract_all_skills(plugin_lookup=plugin_lookup)
             return None
         except Exception as e:
             logger.error(f"Error extracting Cursor skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cursor skills"}, level="warning")
+            return None
+
+    def extract_all_cline_skills(self) -> Optional[Dict]:
+        """
+        Extract all Cline skills from all projects.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+            - project_skills: List of project dicts with project_root and skills
+            Returns None if extractor not available or on error.
+        """
+        try:
+            if self._cline_skills_extractor:
+                return self._cline_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Cline skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cline skills"}, level="warning")
             return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
@@ -359,6 +558,7 @@ class AIToolsDetector:
             return self._windsurf_rules_extractor.extract_all_windsurf_rules()
         except Exception as e:
             logger.error(f"Error extracting Windsurf rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Windsurf rules"}, level="warning")
             return []
 
     def extract_all_roo_rules(self) -> List[Dict]:
@@ -371,6 +571,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Roo Code rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Roo Code rules"}, level="warning")
             return []
 
     def extract_all_antigravity_rules(self) -> List[Dict]:
@@ -388,6 +589,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Antigravity rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Antigravity rules"}, level="warning")
             return []
 
     def extract_all_kilocode_rules(self) -> List[Dict]:
@@ -405,6 +607,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Kilo Code rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Kilo Code rules"}, level="warning")
             return []
 
     def extract_all_gemini_cli_rules(self) -> List[Dict]:
@@ -422,6 +625,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Gemini CLI rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Gemini CLI rules"}, level="warning")
             return []
 
     def extract_all_codex_rules(self) -> List[Dict]:
@@ -439,6 +643,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Codex rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Codex rules"}, level="warning")
             return []
 
     def extract_all_opencode_rules(self) -> List[Dict]:
@@ -456,6 +661,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting OpenCode rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "OpenCode rules"}, level="warning")
             return []
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
@@ -476,6 +682,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting GitHub Copilot rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "GitHub Copilot rules"}, level="warning")
             return []
 
     def extract_all_junie_rules(self) -> List[Dict]:
@@ -488,6 +695,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Junie rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Junie rules"}, level="warning")
             return []
 
     def extract_all_cursor_cli_rules(self) -> List[Dict]:
@@ -500,6 +708,7 @@ class AIToolsDetector:
             return []
         except Exception as e:
             logger.error(f"Error extracting Cursor CLI rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Cursor CLI rules"}, level="warning")
             return []
 
     def _process_tool_with_rules_and_mcp(
@@ -564,6 +773,7 @@ class AIToolsDetector:
                     log_rules_details(projects_dict, tool_name)
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
                 projects_dict = {}
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
@@ -588,6 +798,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
         
@@ -634,10 +845,33 @@ class AIToolsDetector:
                     logger.info("  ⚠ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
         
         return projects_dict
+
+    @staticmethod
+    def _union_mcp_servers(existing: List[Dict], incoming: List[Dict]) -> List[Dict]:
+        """Combine two MCP-server lists, de-duplicated by server name.
+
+        Multiple config sources can resolve to the same project path — most
+        notably a project whose root is the user's home directory, which yields
+        both a ``~/.claude.json`` ``projects[<home>]`` entry and a home-rooted
+        ``~/.mcp.json`` entry. Unioning (instead of overwriting) keeps both
+        sources' servers; first-seen wins, so the higher-precedence source
+        merged earlier is preserved on a name conflict.
+        """
+        merged = list(existing or [])
+        seen = {s.get("name") for s in merged if isinstance(s, dict)}
+        for server in (incoming or []):
+            name = server.get("name") if isinstance(server, dict) else None
+            if name is not None and name in seen:
+                continue
+            if name is not None:
+                seen.add(name)
+            merged.append(server)
+        return merged
 
     def _merge_mcp_configs_into_projects(
         self,
@@ -646,7 +880,7 @@ class AIToolsDetector:
     ) -> None:
         """
         Merge MCP configs into projects dictionary.
-        
+
         Args:
             mcp_projects: List of MCP project configs
             projects_dict: Dictionary mapping project paths to project configs
@@ -662,8 +896,11 @@ class AIToolsDetector:
             total_mcp_servers += num_servers
             
             if project_path in projects_dict:
-                # Merge MCP config into existing project
-                projects_dict[project_path]["mcpServers"] = mcp_servers
+                # Merge (union) MCP config into existing project so a second
+                # source for the same path can't overwrite the first's servers.
+                projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                    projects_dict[project_path].get("mcpServers", []), mcp_servers
+                )
                 merged_count += 1
                 logger.info(f"  Merged MCP config into existing project: {project_path} ({num_servers} MCP servers)")
                 # Ensure rules field exists
@@ -677,7 +914,7 @@ class AIToolsDetector:
                     "rules": []
                 }
                 new_count += 1
-                logger.info(f"  Added new project from MCP config: {project_path} ({num_servers} MCP servers)")
+                detail_logger.info(f"  Added new project from MCP config: {project_path} ({num_servers} MCP servers)")
         
         if mcp_projects:
             logger.info(f"  MCP config merge complete: {len(mcp_projects)} projects processed ({merged_count} merged, {new_count} new), {total_mcp_servers} total MCP servers")
@@ -716,12 +953,17 @@ class AIToolsDetector:
                 additional_mcp_data["disabledMcpjsonServers"] = mcp_project["disabledMcpjsonServers"]
             
             if project_path in projects_dict:
-                # Merge MCP config into existing project
-                projects_dict[project_path]["mcpServers"] = mcp_servers
-                if additional_mcp_data:
+                # Merge (union) MCP config into existing project so a second
+                # source for the same path (e.g. a home-rooted ~/.mcp.json and
+                # ~/.claude.json projects[<home>]) can't overwrite the first's
+                # servers.
+                projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                    projects_dict[project_path].get("mcpServers", []), mcp_servers
+                )
+                if additional_mcp_data and "additionalMcpData" not in projects_dict[project_path]:
                     projects_dict[project_path]["additionalMcpData"] = additional_mcp_data
                 merged_count += 1
-                logger.info(f"  Merged Claude MCP config into existing project: {project_path} ({num_servers} MCP servers)")
+                detail_logger.info(f"  Merged Claude MCP config into existing project: {project_path} ({num_servers} MCP servers)")
                 # Ensure rules field exists
                 if "rules" not in projects_dict[project_path]:
                     projects_dict[project_path]["rules"] = []
@@ -736,7 +978,7 @@ class AIToolsDetector:
                     new_project["additionalMcpData"] = additional_mcp_data
                 projects_dict[project_path] = new_project
                 new_count += 1
-                logger.info(f"  Added new project from Claude MCP config: {project_path} ({num_servers} MCP servers)")
+                detail_logger.info(f"  Added new project from Claude MCP config: {project_path} ({num_servers} MCP servers)")
         
         if mcp_projects:
             logger.info(f"  Claude MCP config merge complete: {len(mcp_projects)} projects processed ({merged_count} merged, {new_count} new), {total_mcp_servers} total MCP servers")
@@ -777,7 +1019,7 @@ class AIToolsDetector:
                     projects_dict[project_path]["skills"] = []
                 projects_dict[project_path]["skills"].extend(skills)
                 merged_count += 1
-                logger.info(f"  Merged skills into project: {project_path} ({num_skills} skills)")
+                detail_logger.info(f"  Merged skills into project: {project_path} ({num_skills} skills)")
             else:
                 # Create new project entry with skills array
                 projects_dict[project_path] = {
@@ -787,7 +1029,7 @@ class AIToolsDetector:
                     "mcpServers": []
                 }
                 new_count += 1
-                logger.info(f"  Added new project from skills: {project_path} ({num_skills} skills)")
+                detail_logger.info(f"  Added new project from skills: {project_path} ({num_skills} skills)")
 
         if skills_projects:
             logger.info(f"  Skills merge complete: {len(skills_projects)} projects processed ({merged_count} merged, {new_count} new), {total_skills} total skills")
@@ -824,7 +1066,7 @@ class AIToolsDetector:
                     projects_dict[project_path]["rules"] = []
                 projects_dict[project_path]["rules"].extend(rules)
                 merged_count += 1
-                logger.info(f"  Merged rules into existing project: {project_path} ({num_rules} rules)")
+                detail_logger.info(f"  Merged rules into existing project: {project_path} ({num_rules} rules)")
             else:
                 # Create new project entry with rules
                 projects_dict[project_path] = {
@@ -834,7 +1076,7 @@ class AIToolsDetector:
                     "mcpServers": []
                 }
                 new_count += 1
-                logger.info(f"  Added new project from rules: {project_path} ({num_rules} rules)")
+                detail_logger.info(f"  Added new project from rules: {project_path} ({num_rules} rules)")
 
         if rules_projects:
             logger.info(f"  Rules merge complete: {len(rules_projects)} projects processed ({merged_count} merged, {new_count} new), {total_rules} total rules")
@@ -900,6 +1142,11 @@ class AIToolsDetector:
                             win_users_dir = Path(Path.home().anchor) / "Users"
                             for username in get_all_users_windows():
                                 user_homes.add(str(win_users_dir / username))
+                        elif self.system == "Linux":
+                            for username in get_all_users_linux():
+                                # `root` user's home is /root, not /home/root.
+                                home = linux_home_for_user(username)
+                                user_homes.add(str(home))
                     if not user_homes:
                         user_homes.add(str(Path.home()))
                     for user_home in user_homes:
@@ -927,14 +1174,68 @@ class AIToolsDetector:
                     logger.info("  ℹ No rules found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} rules: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
+
+        # Extract plugins (Claude Code specific) — must come before MCP and skills
+        # so plugin_lookup is available for provenance tagging.
+        # When running as root (MDM agents), scan all users' plugin dirs.
+        logger.info(f"  Extracting {tool_name} plugins...")
+        try:
+            plugins = []
+            plugins_dirs_to_scan = [Path.home() / ".claude" / "plugins"]
+
+            # When running as root, also scan all real users' plugin dirs
+            if self.system == "Darwin":
+                try:
+                    for username in get_all_users_macos():
+                        user_plugins = Path(f"/Users/{username}") / ".claude" / "plugins"
+                        if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
+                            plugins_dirs_to_scan.append(user_plugins)
+                except Exception:
+                    pass
+            elif self.system == "Windows":
+                try:
+                    for username in get_all_users_windows():
+                        user_plugins = Path(Path.home().anchor) / "Users" / username / ".claude" / "plugins"
+                        if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
+                            plugins_dirs_to_scan.append(user_plugins)
+                except Exception:
+                    pass
+            elif self.system == "Linux":
+                try:
+                    for username in get_all_users_linux():
+                        # `root` user's home is /root, not /home/root — same
+                        # special-case used elsewhere for Linux multi-user scans.
+                        user_home = linux_home_for_user(username)
+                        user_plugins = user_home / ".claude" / "plugins"
+                        if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
+                            plugins_dirs_to_scan.append(user_plugins)
+                except Exception:
+                    pass
+
+            for plugins_dir in plugins_dirs_to_scan:
+                user_plugins = extract_claude_code_plugins(plugins_dir)
+                plugins.extend(user_plugins)
+
+            plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
+            if plugins:
+                tool["plugins"] = plugins
+                logger.info(f"  ✓ Found {len(plugins)} plugin(s)")
+            else:
+                logger.info("  ℹ No plugins found")
+        except Exception as e:
+            logger.debug(f"Error extracting {tool_name} plugins: {e}")
+            report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
+            plugins = []
+            plugin_lookup = {}
 
         # Extract and merge MCP configs
         logger.info(f"  Extracting {tool_name} MCP configs...")
         if self._claude_mcp_extractor:
             try:
-                mcp_config = self._claude_mcp_extractor.extract_mcp_config()
+                mcp_config = self._claude_mcp_extractor.extract_mcp_config(plugin_lookup=plugin_lookup)
                 if mcp_config and "projects" in mcp_config:
                     num_mcp_projects = len(mcp_config["projects"])
                     logger.info(f"  ✓ Found {num_mcp_projects} project(s) with MCP config(s)")
@@ -945,6 +1246,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No MCP configs found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} MCP configs: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
 
@@ -953,17 +1255,18 @@ class AIToolsDetector:
         if self._claude_settings_extractor:
             try:
                 settings = self._claude_settings_extractor.extract_settings()
-                logger.info(f"  Settings extraction returned: {settings is not None}, count: {len(settings) if settings else 0}")
+                detail_logger.info(f"  Settings extraction returned: {settings is not None}, count: {len(settings) if settings else 0}")
                 if settings:
                     num_settings = len(settings)
                     logger.info(f"  ✓ Found {num_settings} settings file(s)")
                     tool["_settings"] = settings
-                    logger.info(f"  ✓ Stored _settings in tool dict (keys: {list(tool.keys())})")
+                    detail_logger.info(f"  ✓ Stored _settings in tool dict (keys: {list(tool.keys())})")
                     log_settings_details(settings, tool_name)
                 else:
                     logger.warning("  ⚠ No settings found - extract_settings() returned None or empty list")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} settings: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.warning(f"  ⚠ {tool_name} settings extractor not available for this OS")
 
@@ -971,7 +1274,7 @@ class AIToolsDetector:
         logger.info(f"  Extracting {tool_name} skills...")
         if self._claude_skills_extractor:
             try:
-                skills_result = self.extract_all_claude_skills()
+                skills_result = self.extract_all_claude_skills(plugin_lookup=plugin_lookup)
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -1013,8 +1316,25 @@ class AIToolsDetector:
                     logger.info("  ℹ No skills found")
             except Exception as e:
                 logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+        # Extract skills bundled inside plugins (separate from standalone skills walker)
+        if plugins:
+            try:
+                plugin_skills = extract_plugin_skills(plugins)
+                if plugin_skills:
+                    logger.info(f"  ✓ Found {len(plugin_skills)} plugin-bundled skill(s)")
+                    user_home = str(Path.home())
+                    if user_home not in projects_dict:
+                        projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
+                    if "skills" not in projects_dict[user_home]:
+                        projects_dict[user_home]["skills"] = []
+                    projects_dict[user_home]["skills"].extend(plugin_skills)
+            except Exception as e:
+                logger.debug(f"Error extracting plugin-bundled skills: {e}")
+                report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
 
         return projects_dict
 
@@ -1110,21 +1430,11 @@ class AIToolsDetector:
         Returns:
             Tool dict with filtered projects and permissions
         """
-        # Normalise to forward slashes + lowercase drive on Windows
-        def _normalise(p: str) -> str:
-            if not p:
-                return p
-            n = p.replace('\\', '/')
-            if len(n) >= 2 and n[1] == ':':
-                n = n[0].upper() + n[1:]
-            n = n.rstrip('/')
-            return n
-
-        user_home_norm = _normalise(str(user_home))
+        user_home_norm = _normalise_path(str(user_home))
         filtered_projects = []
-        
+
         for project in tool.get('projects', []):
-            project_path_norm = _normalise(project.get('path', ''))
+            project_path_norm = _normalise_path(project.get('path', ''))
             # Checking if project path is under the user's home directory
             if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/'):
                 filtered_projects.append(project)
@@ -1135,7 +1445,7 @@ class AIToolsDetector:
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
-            settings_path_norm = _normalise(perms.get('settings_path', ''))
+            settings_path_norm = _normalise_path(perms.get('settings_path', ''))
             if (settings_source != 'managed'
                     and settings_path_norm
                     and not (settings_path_norm == user_home_norm
@@ -1144,13 +1454,518 @@ class AIToolsDetector:
         
         return filtered_tool
 
+    def _get_copilot_cli_skills(self) -> Dict:
+        """Return the shared Copilot skills, memoized per scan.
+
+        The result (``{"user_skills": [...], "project_skills": [...]}``) is
+        tool-identity-independent, so the CLI branch and the VS Code IDE branch
+        both reuse it. The underlying ``extract_all_skills()`` walk runs at most
+        once per scan. On Linux / unsupported OS the extractor is ``None`` and
+        this returns ``{}``. Never raises — extraction failures degrade to ``{}``.
+        """
+        if self._copilot_cli_skills_cache is not None:
+            return self._copilot_cli_skills_cache
+        if self._copilot_cli_skills_extractor:
+            try:
+                self._copilot_cli_skills_cache = self._copilot_cli_skills_extractor.extract_all_skills() or {}
+            except Exception as e:
+                # Memoized accessor swallows the failure (callers can't see it),
+                # so surface it at WARNING — matching the sibling skills-extraction
+                # error log — rather than DEBUG, which is silent at the prod floor.
+                logger.warning(f"  Copilot skills extraction failed: {e}")
+                self._copilot_cli_skills_cache = {}
+        else:
+            self._copilot_cli_skills_cache = {}
+        return self._copilot_cli_skills_cache
+
+    @staticmethod
+    def _copilot_skill_owner_home(skill: Dict) -> str:
+        """Derive the owning user's home dir from a user-scope skill's file_path.
+
+        User skills live at ``<home>/.copilot/skills/...`` or
+        ``<home>/.agents/skills/...``; the home is the parent of that marker dir.
+        Keying user skills under the owner's home (not this row's install_path)
+        lets the per-user project filter scope them correctly under root scans.
+        Falls back to the file's parent dir if no marker is found. Never raises.
+
+        Operates on the raw path string (not ``pathlib``) to preserve the
+        original separator style — ``pathlib`` rewrites separators per running
+        OS (``str(WindowsPath('/Users/a'))`` -> ``'\\Users\\a'``), which would
+        break key matching when a POSIX-style path is processed on Windows.
+        """
+        file_path = skill.get("file_path", "")
+        try:
+            for marker in ("/.copilot/", "\\.copilot\\", "/.agents/", "\\.agents\\"):
+                idx = file_path.find(marker)
+                if idx != -1:
+                    return file_path[:idx]
+            sep_idx = max(file_path.rfind("/"), file_path.rfind("\\"))
+            return file_path[:sep_idx] if sep_idx != -1 else file_path
+        except Exception:
+            return file_path
+
+    @staticmethod
+    def _augment_skill_project_root(skill: Dict) -> Optional[str]:
+        """Derive the project_root for a user-scope Augment skill/command.
+
+        Augment reads user skills/commands from ``<home>/.augment``,
+        ``<home>/.claude`` and ``<home>/.agents`` (each with ``skills/`` and
+        ``commands/``). The project_root is the CONFIG DIR the item lives in — the
+        path prefix up to and including that marker (e.g. ``<home>/.augment``),
+        NOT the bare home. This (a) coalesces ``~/.augment`` skills with the same
+        row's ``~/.augment`` rules/MCP into ONE project (the backend keys an
+        AIToolProject per path, so a bare-home root would surface a spurious
+        project), while ``~/.claude`` / ``~/.agents`` skills group honestly under
+        their own dir; and (b) keeps each item owner-scoped (the home is in the
+        path) so the per-user project filter attributes it correctly under root
+        scans — preventing cross-user skill-content leakage.
+
+        Operates on the raw path string (not ``pathlib``) to preserve the
+        original separator; handles the Windows ``\\`` variant. Returns None when
+        the file_path is missing/unparseable so the caller falls back to install_key.
+        """
+        file_path = skill.get("file_path", "")
+        if not file_path:
+            return None
+        try:
+            for marker in (".augment", ".claude", ".agents"):
+                for sep in ("/", "\\"):
+                    idx = file_path.find(f"{sep}{marker}{sep}")
+                    if idx != -1:
+                        # up to and including the marker dir (drop the trailing sep)
+                        return file_path[: idx + 1 + len(marker)]
+            return None
+        except Exception:
+            return None
+
+    def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
+        """
+        Process the GitHub Copilot CLI: extract its MCP config + rules and return
+        the standard tool dict.
+
+        The CLI is its own product (distinct from the IDE Copilot extension), so
+        it gets a dedicated branch. Because this branch returns early — before
+        the shared empty-project filter in ``process_single_tool`` — it filters
+        empty projects itself: a project with neither servers nor rules (e.g. a
+        parseable-but-serverless ``mcp-config.json``) must not emit a phantom
+        row (review P1-2).
+
+        Args:
+            tool: Tool info dict from detection.
+
+        Returns:
+            Tool dict with ``name``, ``version``, ``install_path`` and ``projects``.
+        """
+        tool_name = tool.get("name", "")
+        projects_dict: Dict[str, Dict] = {}
+
+        logger.info(f"  Extracting {tool_name} MCP configs...")
+        if self._copilot_cli_mcp_extractor:
+            try:
+                mcp_config = self._copilot_cli_mcp_extractor.extract_mcp_config()
+                if mcp_config and "projects" in mcp_config:
+                    for project in mcp_config["projects"]:
+                        project_path = project.get("path", "")
+                        if project_path:
+                            if project_path not in projects_dict:
+                                projects_dict[project_path] = {
+                                    "mcpServers": [],
+                                    "rules": [],
+                                    "skills": [],
+                                }
+                            # Union so User-scope and Workspace .mcp.json sources
+                            # sharing a path don't overwrite each other.
+                            projects_dict[project_path]["mcpServers"] = self._union_mcp_servers(
+                                projects_dict[project_path].get("mcpServers", []),
+                                project.get("mcpServers", []),
+                            )
+                    log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info("  No GitHub Copilot CLI MCP configs found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
+
+        logger.info(f"  Extracting {tool_name} rules...")
+        if self._copilot_cli_rules_extractor:
+            try:
+                rules_projects = self._copilot_cli_rules_extractor.extract_all_copilot_cli_rules()
+                for rules_project in rules_projects:
+                    project_root = rules_project.get("project_root", "")
+                    rules = rules_project.get("rules", [])
+                    if project_root:
+                        if project_root not in projects_dict:
+                            projects_dict[project_root] = {
+                                "mcpServers": [],
+                                "rules": [],
+                                "skills": [],
+                            }
+                        projects_dict[project_root]["rules"] = self._deduplicate_project_items(rules)
+                if rules_projects:
+                    logger.info(f"  ✓ Found {len(rules_projects)} project(s) with {tool_name} rules")
+                    log_rules_details(projects_dict, tool_name)
+                else:
+                    logger.info(f"  No {tool_name} rules found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} rules: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} rules extractor not available for this OS")
+
+        # Skills ride projects[].skills[] (per-project), like rules. This branch
+        # returns early and bypasses the generic skills merge, so handle it here.
+        logger.info(f"  Extracting {tool_name} skills...")
+        if self._copilot_cli_skills_extractor:
+            try:
+                skills_result = self._get_copilot_cli_skills()
+                user_skills = skills_result.get("user_skills", [])
+                project_skills = skills_result.get("project_skills", [])
+
+                # Coalesce user-scope skills under the config dir (~/.copilot) so they
+                # share one row with the global rules + MCP servers. Keys on
+                # _config_path since install_path is now the binary, not the config dir.
+                install_key = tool.get("_config_path") or tool.get("install_path") or str(Path.home())
+                for skill in user_skills:
+                    if install_key not in projects_dict:
+                        projects_dict[install_key] = {"mcpServers": [], "rules": [], "skills": []}
+                    projects_dict[install_key].setdefault("skills", []).append(skill)
+
+                # Project-scope skills: merge into projects_dict[root]["skills"], deduped.
+                for skills_project in project_skills:
+                    project_root = skills_project.get("project_root", "")
+                    skills = skills_project.get("skills", [])
+                    if not project_root:
+                        continue
+                    if project_root not in projects_dict:
+                        projects_dict[project_root] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[project_root].setdefault("skills", [])
+                    existing.extend(skills)
+                    projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
+
+                total_skills = len(user_skills) + sum(len(p.get("skills", [])) for p in project_skills)
+                if total_skills:
+                    logger.info(f"  ✓ Found {total_skills} {tool_name} skill(s)")
+                else:
+                    logger.info(f"  No {tool_name} skills found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} skills: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+        # Tool-level permissions: durable Copilot CLI settings (trusted folders,
+        # URL allow/deny) -> backend `permissions` dict via the shared transformer.
+        logger.info(f"  Extracting {tool_name} permissions...")
+        permissions_payload = None
+        if self._copilot_cli_settings_extractor:
+            try:
+                all_settings = self._copilot_cli_settings_extractor.extract_settings() or []
+                # extract_settings() returns every user's record under a root scan;
+                # keep only this install's by matching the parent dir against the
+                # config dir (boundary-safe — a bare prefix would also match a sibling
+                # like ".copilot-old"), so an all-users scan can't leak another user's
+                # permissions onto this row. Config dir, not install_path (the binary).
+                config_dir = tool.get("_config_path") or tool.get("install_path", "")
+                own = [
+                    s for s in all_settings
+                    if config_dir and s.get("settings_path")
+                    and Path(str(s["settings_path"])).parent == Path(config_dir)
+                ]
+                permissions_payload = transform_settings_to_backend_format(own) if own else None
+                if permissions_payload:
+                    logger.info(f"  ✓ Found {tool_name} permissions")
+                else:
+                    logger.info(f"  No {tool_name} permissions found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} permissions: {e}")
+        else:
+            logger.info(f"  ⚠ {tool_name} permissions extractor not available for this OS")
+
+        # Drop empty projects so a serverless config doesn't surface a phantom row.
+        projects_list = [
+            {
+                "path": path,
+                "mcpServers": data.get("mcpServers", []),
+                "rules": data.get("rules", []),
+                "skills": data.get("skills", []),
+            }
+            for path, data in projects_dict.items()
+            if not self._is_project_empty(data)
+        ]
+
+        logger.info(f"  ✓ Final project count: {len(projects_list)} project(s)")
+        logger.info("=" * 70)
+
+        result = {
+            "name": tool.get("name"),
+            "version": tool.get("version"),
+            "install_path": tool.get("install_path"),
+            # Config dir (~/.copilot); the downstream ownership gate keys on this to
+            # attribute the row, since install_path is now the binary (outside any
+            # home for a machine-global install).
+            "_config_path": tool.get("_config_path"),
+            "projects": projects_list,
+        }
+        if permissions_payload:
+            result["permissions"] = permissions_payload
+        return result
+
+    def _set_canonical_vscode_copilot(self, tools: List[Dict]) -> None:
+        """Pick the single VS Code Copilot row that should carry the shared
+        skills. Prefer the Chat surface; fall back to the plain extension.
+        Computed once from the full detected list so exactly ONE row is
+        enriched (the IDE branch in process_single_tool reads this). None when
+        neither is present."""
+        detected_lower = {t.get("name", "").lower() for t in tools}
+        if "github copilot chat (vs code)" in detected_lower:
+            self._canonical_vscode_copilot = "github copilot chat (vs code)"
+        elif "github copilot (vs code)" in detected_lower:
+            self._canonical_vscode_copilot = "github copilot (vs code)"
+        else:
+            self._canonical_vscode_copilot = None
+
+    # -- Augment Code: memoized shared-config accessors -----------------------
+
+    def _get_augment_rules(self) -> List[Dict]:
+        """Return the shared Augment rules, memoized per scan ([] on failure)."""
+        if self._augment_rules_cache is not _AUGMENT_CACHE_UNSET:
+            return self._augment_rules_cache
+        if self._augment_rules_extractor:
+            try:
+                self._augment_rules_cache = self._augment_rules_extractor.extract_all_augment_rules() or []
+            except Exception as e:
+                logger.warning(f"  Augment rules extraction failed: {e}")
+                self._augment_rules_cache = []
+        else:
+            self._augment_rules_cache = []
+        return self._augment_rules_cache
+
+    def _get_augment_skills(self) -> Dict:
+        """Return the shared Augment skills, memoized per scan ({} on failure)."""
+        if self._augment_skills_cache is not _AUGMENT_CACHE_UNSET:
+            return self._augment_skills_cache
+        if self._augment_skills_extractor:
+            try:
+                self._augment_skills_cache = self._augment_skills_extractor.extract_all_skills() or {}
+            except Exception as e:
+                logger.warning(f"  Augment skills extraction failed: {e}")
+                self._augment_skills_cache = {}
+        else:
+            self._augment_skills_cache = {}
+        return self._augment_skills_cache
+
+    def _get_augment_mcp(self) -> Optional[Dict]:
+        """Return the shared Augment MCP config, memoized per scan (None on failure).
+
+        ``None`` is a legitimate result (no MCP configured), so the guard checks
+        the distinct UNSET sentinel — otherwise a cached ``None`` would re-trigger
+        the full MCP walk on every call, defeating the once-per-scan memoization.
+        """
+        if self._augment_mcp_cache is not _AUGMENT_CACHE_UNSET:
+            return self._augment_mcp_cache
+        if self._augment_mcp_extractor:
+            try:
+                self._augment_mcp_cache = self._augment_mcp_extractor.extract_mcp_config()
+            except Exception as e:
+                logger.warning(f"  Augment MCP extraction failed: {e}")
+                self._augment_mcp_cache = None
+        else:
+            self._augment_mcp_cache = None
+        return self._augment_mcp_cache
+
+    def _get_augment_settings(self) -> List[Dict]:
+        """Return the shared Augment settings, memoized per scan ([] on failure)."""
+        if self._augment_settings_cache is not _AUGMENT_CACHE_UNSET:
+            return self._augment_settings_cache
+        if self._augment_settings_extractor:
+            try:
+                self._augment_settings_cache = self._augment_settings_extractor.extract_settings() or []
+            except Exception as e:
+                logger.warning(f"  Augment settings extraction failed: {e}")
+                self._augment_settings_cache = []
+        else:
+            self._augment_settings_cache = []
+        return self._augment_settings_cache
+
+    @staticmethod
+    def _is_augment_surface(name_lower: str) -> bool:
+        """True for an Augment surface name (Auggie CLI or an ``Augment (...)`` row)."""
+        return name_lower == "auggie cli" or name_lower.startswith("augment (")
+
+    @staticmethod
+    def _pick_canonical_augment_name(names_lower: List[str]) -> Optional[str]:
+        """Pick the canonical surface among ``names_lower`` (all sharing one config).
+
+        Preference: Auggie CLI > Augment (VS Code) > first JetBrains row. None when
+        the group is empty.
+        """
+        if "auggie cli" in names_lower:
+            return "auggie cli"
+        if "augment (vs code)" in names_lower:
+            return "augment (vs code)"
+        return next((n for n in names_lower if n.startswith("augment (")), None)
+
+    def _set_canonical_augment_surface(self, tools: List[Dict]) -> None:
+        """Pick the canonical Augment surface PER USER (keyed by ``_config_path``).
+
+        Augment surfaces share one ``~/.augment`` config dir PER USER. Under a root
+        multi-user scan, each user's surfaces carry that user's ``_config_path``, so
+        the canonical pick must be computed per-config — otherwise a single global
+        winner (e.g. user A's CLI) would leave a different user (B, VS Code only)
+        with a bare row that drops B's config.
+
+        Groups the Augment surfaces by ``_config_path`` and stores, per group, the
+        best surface name (Auggie CLI > Augment (VS Code) > first JetBrains) in
+        ``_canonical_augment_surface_by_config``. Missing/empty ``_config_path``
+        groups under ``""``. Computed once per scan from the full detected list.
+        """
+        names_by_config: Dict[str, List[str]] = {}
+        for tool in tools:
+            name_lower = tool.get("name", "").lower()
+            if not self._is_augment_surface(name_lower):
+                continue
+            cfg = tool.get("_config_path") or ""
+            names_by_config.setdefault(cfg, []).append(name_lower)
+
+        self._canonical_augment_surface_by_config = {
+            cfg: chosen
+            for cfg, names_lower in names_by_config.items()
+            if (chosen := self._pick_canonical_augment_name(names_lower)) is not None
+        }
+
+    def _process_augment_tool(self, tool: Dict) -> Dict:
+        """
+        Process an Augment Code surface row.
+
+        Augment ships three surfaces sharing one ``~/.augment`` config PER USER.
+        Only the canonical surface for that user's ``_config_path``
+        (``_canonical_augment_surface_by_config``) carries the shared
+        MCP/rules/skills/permissions; the non-canonical surfaces emit a bare
+        detection row (``projects=[]``, no permissions) so the surface still shows
+        in inventory without duplicating config. Keying canonical status per
+        ``_config_path`` means a root multi-user scan picks a winner for EACH user
+        independently (so a VS Code-only user still carries their config).
+
+        Returns a tool dict with ``name``, ``version``, ``install_path``,
+        ``_config_path`` and ``projects``.
+        """
+        tool_name = tool.get("name", "").lower()
+        cfg = tool.get("_config_path") or ""
+
+        result = {
+            "name": tool.get("name"),
+            "version": tool.get("version"),
+            "install_path": tool.get("install_path"),
+            "_config_path": tool.get("_config_path"),
+        }
+        if "ide" in tool:
+            result["ide"] = tool["ide"]
+
+        if tool_name != self._canonical_augment_surface_by_config.get(cfg):
+            logger.info(f"  {tool.get('name')} is a non-canonical Augment surface; emitting bare row")
+            result["projects"] = []
+            return result
+
+        projects_dict: Dict[str, Dict] = {}
+
+        logger.info(f"  Extracting {tool.get('name')} MCP configs...")
+        mcp_config = self._get_augment_mcp()
+        if mcp_config and "projects" in mcp_config:
+            for project in mcp_config["projects"]:
+                project_path = project.get("path", "")
+                if project_path:
+                    bucket = projects_dict.setdefault(
+                        project_path, {"mcpServers": [], "rules": [], "skills": []}
+                    )
+                    bucket["mcpServers"] = self._union_mcp_servers(
+                        bucket.get("mcpServers", []), project.get("mcpServers", [])
+                    )
+            log_mcp_details(projects_dict, tool_name)
+
+        logger.info(f"  Extracting {tool.get('name')} rules...")
+        for rules_project in self._get_augment_rules():
+            project_root = rules_project.get("project_root", "")
+            rules = rules_project.get("rules", [])
+            if project_root:
+                bucket = projects_dict.setdefault(
+                    project_root, {"mcpServers": [], "rules": [], "skills": []}
+                )
+                bucket["rules"] = self._deduplicate_project_items(rules)
+
+        logger.info(f"  Extracting {tool.get('name')} skills...")
+        skills_result = self._get_augment_skills()
+        user_skills = skills_result.get("user_skills", [])
+        project_skills = skills_result.get("project_skills", [])
+
+        install_key = tool.get("_config_path") or tool.get("install_path") or str(Path.home())
+        # User-scope skills key under the OWNING user's home (derived from each
+        # skill's file_path), NOT this row's single install_key — so under a
+        # root/all-users scan filter_tool_projects_by_user scopes each user's
+        # skills to their own home (no cross-user leak). Falls back to
+        # install_key when file_path is missing/unparseable (matches copilot).
+        for skill in user_skills:
+            skill_key = self._augment_skill_project_root(skill) or install_key
+            bucket = projects_dict.setdefault(
+                skill_key, {"mcpServers": [], "rules": [], "skills": []}
+            )
+            bucket.setdefault("skills", []).append(skill)
+
+        for skills_project in project_skills:
+            project_root = skills_project.get("project_root", "")
+            skills = skills_project.get("skills", [])
+            if not project_root:
+                continue
+            bucket = projects_dict.setdefault(
+                project_root, {"mcpServers": [], "rules": [], "skills": []}
+            )
+            existing = bucket.setdefault("skills", [])
+            existing.extend(skills)
+            bucket["skills"] = self._deduplicate_project_items(existing)
+
+        logger.info(f"  Extracting {tool.get('name')} permissions...")
+        all_settings = self._get_augment_settings()
+        config_dir = tool.get("_config_path") or tool.get("install_path", "")
+        # Keep this row's USER-scope record (settings file directly under the
+        # canonical ~/.augment) AND the MANAGED-scope record (fixed machine path
+        # /etc/augment, attached to the canonical row — filter_tool_projects_by_user
+        # preserves managed). The transform then selects highest precedence
+        # (managed > user) for the effective policy. The extractor no longer emits
+        # project/local scopes (they can't be surfaced in the tool-level blob).
+        own = [
+            s for s in all_settings
+            if s.get("scope") == "managed"
+            or (
+                config_dir and s.get("settings_path")
+                and Path(str(s["settings_path"])).parent == Path(config_dir)
+            )
+        ]
+        permissions_payload = transform_settings_to_backend_format(own) if own else None
+
+        projects_list = [
+            {
+                "path": path,
+                "mcpServers": data.get("mcpServers", []),
+                "rules": data.get("rules", []),
+                "skills": data.get("skills", []),
+            }
+            for path, data in projects_dict.items()
+            if not self._is_project_empty(data)
+        ]
+
+        logger.info(f"  ✓ Final project count: {len(projects_list)} project(s)")
+        logger.info("=" * 70)
+
+        result["projects"] = projects_list
+        if permissions_payload:
+            result["permissions"] = permissions_payload
+        return result
+
     def process_single_tool(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
-        
+
         Args:
             tool: Tool info dict from detection
-            
+
         Returns:
             Tool dict with projects populated
         """
@@ -1171,7 +1986,20 @@ class AIToolsDetector:
                     tool_dict[key] = tool[key]
 
             return tool_dict
-        
+
+        # Exact-match BEFORE the "github copilot" substring branch below —
+        # otherwise the substring check would swallow the CLI and route it
+        # through the IDE Copilot path (rules + VS Code/JetBrains MCP).
+        if tool_name == "github copilot cli":
+            return self._process_copilot_cli_tool(tool)
+
+        # Augment Code surfaces (Auggie CLI / Augment (VS Code) / Augment (<IDE>)).
+        # MUST come before the generic JetBrains ``_config_path`` fallback below —
+        # Augment JetBrains rows carry ``_config_path`` and would otherwise route
+        # to the JetBrains handler.
+        if tool_name == "auggie cli" or tool_name.startswith("augment ("):
+            return self._process_augment_tool(tool)
+
         if "github copilot" in tool_name:
             logger.info(f"  Extracting {tool_name} rules...")
             projects_dict = {}
@@ -1192,7 +2020,8 @@ class AIToolsDetector:
                             if project_root not in projects_dict:
                                 projects_dict[project_root] = {
                                     "mcpServers": [],
-                                    "rules": []
+                                    "rules": [],
+                                    "skills": []
                                 }
                             projects_dict[project_root]["rules"] = rules
 
@@ -1208,7 +2037,9 @@ class AIToolsDetector:
             logger.info(f"  Extracting {tool_name} MCP configs...")
             if self._github_copilot_mcp_extractor:
                 try:
-                    mcp_config = self._github_copilot_mcp_extractor.extract_mcp_config()
+                    mcp_config = self._github_copilot_mcp_extractor.extract_mcp_config(
+                        tool_name=original_tool_name
+                    )
                     if mcp_config and "projects" in mcp_config:
                         # Merge MCP configs into projects_dict
                         for project in mcp_config["projects"]:
@@ -1217,7 +2048,8 @@ class AIToolsDetector:
                                 if project_path not in projects_dict:
                                     projects_dict[project_path] = {
                                         "mcpServers": [],
-                                        "rules": []
+                                        "rules": [],
+                                        "skills": []
                                     }
                                 projects_dict[project_path]["mcpServers"] = project.get("mcpServers", [])
 
@@ -1228,12 +2060,56 @@ class AIToolsDetector:
                 except Exception as e:
                     logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
 
+            # SKILLS-ONLY enrichment for the canonical VS Code Copilot surface.
+            # VS Code GitHub Copilot reads the SHARED ~/.copilot (+ project
+            # .github/.claude/.agents) skills — the same set the CLI reports.
+            # Attach them to exactly ONE VS Code row (the Chat row when present)
+            # so a single surface carries skills with full sibling visibility.
+            # Exclude JetBrains (carries an "ide" key) and the non-canonical VS
+            # Code row. This is extraction-only: it cannot re-introduce the #164
+            # CLI false positive (detection is untouched; skills only ride here
+            # when a VS Code Copilot surface was ALREADY detected).
+            is_canonical_vscode = (
+                "ide" not in tool
+                and tool_name.endswith("(vs code)")
+                and tool_name == self._canonical_vscode_copilot
+            )
+            if is_canonical_vscode:
+                logger.info(f"  Attaching shared Copilot skills to {tool_name}...")
+                skills_result = self._get_copilot_cli_skills()
+
+                # Project-scope skills land under their absolute repo root, so
+                # the per-user project filter scopes them correctly.
+                for skills_project in skills_result.get("project_skills", []):
+                    project_root = skills_project.get("project_root", "")
+                    skills = skills_project.get("skills", [])
+                    if not project_root:
+                        continue
+                    if project_root not in projects_dict:
+                        projects_dict[project_root] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[project_root].setdefault("skills", [])
+                    existing.extend(skills)
+                    projects_dict[project_root]["skills"] = self._deduplicate_project_items(existing)
+
+                # User-scope skills key under the OWNING user's home (derived from
+                # each skill's file_path), NOT this row's install_path — so under
+                # a root/all-users scan filter_tool_projects_by_user scopes each
+                # user's skills to their own home (no cross-user leak).
+                for skill in skills_result.get("user_skills", []):
+                    owner_home = self._copilot_skill_owner_home(skill)
+                    if owner_home not in projects_dict:
+                        projects_dict[owner_home] = {"mcpServers": [], "rules": [], "skills": []}
+                    existing = projects_dict[owner_home].setdefault("skills", [])
+                    existing.append(skill)
+                    projects_dict[owner_home]["skills"] = self._deduplicate_project_items(existing)
+
             # Convert projects_dict back to list format for tool_dict
             projects_list = [
                 {
                     "path": path,
                     "mcpServers": data.get("mcpServers", []),
-                    "rules": data.get("rules", [])
+                    "rules": data.get("rules", []),
+                    "skills": data.get("skills", [])
                 }
                 for path, data in projects_dict.items()
             ]
@@ -1256,6 +2132,56 @@ class AIToolsDetector:
                 self.extract_all_cursor_rules
             )
 
+            # Extract Cursor plugins — after rules/MCP but before skills,
+            # so cursor_plugin_lookup is available for skill provenance tagging.
+            # When running as root (MDM agents), scan all users' plugin dirs.
+            logger.info(f"  Extracting {tool_name} plugins...")
+            try:
+                cursor_plugins = []
+                cursor_plugins_dirs = [Path.home() / ".cursor" / "plugins"]
+
+                if self.system == "Darwin":
+                    try:
+                        for username in get_all_users_macos():
+                            user_plugins = Path(f"/Users/{username}") / ".cursor" / "plugins"
+                            if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
+                                cursor_plugins_dirs.append(user_plugins)
+                    except Exception:
+                        pass
+                elif self.system == "Linux":
+                    try:
+                        for username in get_all_users_linux():
+                            # `root` user's home is /root, not /home/root.
+                            user_home = linux_home_for_user(username)
+                            user_plugins = user_home / ".cursor" / "plugins"
+                            if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
+                                cursor_plugins_dirs.append(user_plugins)
+                    except Exception:
+                        pass
+                elif self.system == "Windows":
+                    try:
+                        for username in get_all_users_windows():
+                            user_plugins = Path(Path.home().anchor) / "Users" / username / ".cursor" / "plugins"
+                            if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
+                                cursor_plugins_dirs.append(user_plugins)
+                    except Exception:
+                        pass
+
+                for cursor_plugins_dir in cursor_plugins_dirs:
+                    user_plugins = extract_cursor_plugins(cursor_plugins_dir)
+                    cursor_plugins.extend(user_plugins)
+
+                cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
+                if cursor_plugins:
+                    tool["plugins"] = cursor_plugins
+                    logger.info(f"  ✓ Found {len(cursor_plugins)} Cursor plugin(s)")
+                else:
+                    logger.info("  ℹ No Cursor plugins found")
+            except Exception as e:
+                logger.debug(f"Error extracting {tool_name} plugins: {e}")
+                cursor_plugins = []
+                cursor_plugin_lookup = {}
+
             logger.info(f"  Extracting {tool_name} settings...")
             if self._cursor_settings_extractor:
                 try:
@@ -1274,7 +2200,7 @@ class AIToolsDetector:
             logger.info(f"  Extracting {tool_name} skills...")
             if self._cursor_skills_extractor:
                 try:
-                    skills_result = self.extract_all_cursor_skills()
+                    skills_result = self.extract_all_cursor_skills(plugin_lookup=cursor_plugin_lookup)
                     user_skills = skills_result.get("user_skills", []) if skills_result else []
                     project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -1307,6 +2233,21 @@ class AIToolsDetector:
                     logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
             else:
                 logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+            # Extract skills bundled inside Cursor plugins
+            if cursor_plugins:
+                try:
+                    plugin_skills = extract_plugin_skills(cursor_plugins)
+                    if plugin_skills:
+                        logger.info(f"  ✓ Found {len(plugin_skills)} Cursor plugin-bundled skill(s)")
+                        user_home = str(Path.home())
+                        if user_home not in projects_dict:
+                            projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
+                        if "skills" not in projects_dict[user_home]:
+                            projects_dict[user_home]["skills"] = []
+                        projects_dict[user_home]["skills"].extend(plugin_skills)
+                except Exception as e:
+                    logger.debug(f"Error extracting Cursor plugin-bundled skills: {e}")
 
         elif tool_name == "claude code":
             projects_dict = self._process_claude_code_tool(tool)
@@ -1357,7 +2298,43 @@ class AIToolsDetector:
                 self._cline_mcp_extractor,
                 lambda: self._cline_rules_extractor.extract_all_cline_rules() if self._cline_rules_extractor else []
             )
-        
+
+            # Extract Cline skills
+            logger.info(f"  Extracting {tool_name} skills...")
+            if self._cline_skills_extractor:
+                try:
+                    skills_result = self.extract_all_cline_skills()
+                    user_skills = skills_result.get("user_skills", []) if skills_result else []
+                    project_skills = skills_result.get("project_skills", []) if skills_result else []
+
+                    if user_skills:
+                        logger.info(f"  ✓ Found {len(user_skills)} user-level Cline skill(s)")
+                        for skill in user_skills:
+                            user_home = skill.get("project_path") or str(Path.home())
+                            if user_home not in projects_dict:
+                                projects_dict[user_home] = {
+                                    "path": user_home,
+                                    "rules": [],
+                                    "skills": [],
+                                    "mcpServers": []
+                                }
+                            if "skills" not in projects_dict[user_home]:
+                                projects_dict[user_home]["skills"] = []
+                            projects_dict[user_home]["skills"].append(skill)
+
+                    if project_skills:
+                        num_skills_projects = len(project_skills)
+                        total_skills = sum(len(project.get("skills", [])) for project in project_skills)
+                        logger.info(f"  ✓ Found {num_skills_projects} project(s) with {total_skills} project-level Cline skill(s)")
+                        self._merge_skills_into_projects(project_skills, projects_dict)
+
+                    if not user_skills and not project_skills:
+                        logger.info("  ℹ No Cline skills found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+            else:
+                logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
@@ -1471,8 +2448,8 @@ class AIToolsDetector:
         if "_config_path" in tool:
             tool_dict["_config_path"] = tool["_config_path"]
 
-        logger.info(f"  Checking for settings in tool dict for {tool_name}...")
-        logger.info(f"  Tool dict keys: {list(tool.keys())}")
+        detail_logger.info(f"  Checking for settings in tool dict for {tool_name}...")
+        detail_logger.info(f"  Tool dict keys: {list(tool.keys())}")
 
         if "_settings" in tool:
             try:
@@ -1490,13 +2467,13 @@ class AIToolsDetector:
                         permissions = None
                 else:
                     settings_list = tool["_settings"]
-                    logger.info(f"  ✓ Found _settings in tool dict, count: {len(settings_list) if settings_list else 0}")
+                    detail_logger.info(f"  ✓ Found _settings in tool dict, count: {len(settings_list) if settings_list else 0}")
                     permissions = transform_settings_to_backend_format(settings_list)
 
                 if permissions:
                     tool_dict["permissions"] = permissions
                     logger.info(f"  ✓ Added permissions to {tool_name} report")
-                    logger.info(f"  Permissions keys: {list(permissions.keys())}")
+                    detail_logger.info(f"  Permissions keys: {list(permissions.keys())}")
                 else:
                     logger.warning(f"  ⚠ Permissions transformation returned None for {tool_name}")
                     logger.warning(f"  Settings that were passed: {tool['_settings']}")
@@ -1528,6 +2505,7 @@ class AIToolsDetector:
             "home_user": home_user,
             "system_user": system_user or home_user,
             "device_id": device_id,
+            "is_container": in_container(),
             "tools": [tool_for_report]
         }
 
@@ -1547,7 +2525,9 @@ class AIToolsDetector:
         device_id = self.get_device_id()
         user_info = get_user_info()
         tools = self.detect_all_tools()
-        
+        self._set_canonical_vscode_copilot(tools)
+        self._set_canonical_augment_surface(tools)
+
         tools_with_projects = []
         for tool in tools:
             tool_with_projects = self.process_single_tool(tool)
@@ -1563,15 +2543,70 @@ class AIToolsDetector:
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
-    parser.add_argument('--api-key', type=str, help='API key for authentication and report submission')
+    parser.add_argument('--api-key', type=str, help='API key for authentication and report submission (or set UNBOUND_API_KEY env)')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
+    parser.add_argument(
+        '--timeout', type=int, default=DEFAULT_RUN_TIMEOUT_SECONDS,
+        help='Self-imposed run timeout in seconds (default: %(default)s). On '
+             'expiry the run is reported as failed, the lock is released, and the '
+             'process exits non-zero so a parent never has to force-kill it. '
+             'Pass <=0 to disable.',
+    )
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        '--dump',
+        action='store_true',
+        help='Show ALL detail logs: per-file rule/MCP/settings boxes, '
+             'per-project merge/add lines, internal diagnostics, the per-tool '
+             'Report Summary box, and transport lines (Sending / ✓ sent). '
+             'Default output is concise (headlines, per-tool totals, warnings, '
+             'errors). For the JSON sent to the backend, use --payload.',
+    )
+    verbosity.add_argument(
+        '--payload',
+        action='store_true',
+        help='Print only the per-tool JSON payload(s) as raw output; mute every '
+             'other INFO log (errors/warnings still pass through).',
+    )
     args = parser.parse_args()
 
+    if args.payload:
+        logging.getLogger().setLevel(logging.WARNING)
+        payload_logger.setLevel(logging.INFO)
+    elif not args.dump:
+        # Concise is the DEFAULT; --dump restores full detail. Quiet the
+        # per-file rule/MCP/settings sub-boxes (logging_helpers)...
+        try:
+            from scripts.coding_discovery_tools import logging_helpers as _lh
+        except ImportError:
+            from . import logging_helpers as _lh
+        logging.getLogger(_lh.__name__).setLevel(logging.WARNING)
+        # ...plus the per-item merge/add lines and internal dict diagnostics.
+        # Roll-up totals and headlines stay on `logger`.
+        detail_logger.setLevel(logging.WARNING)
+    # Hook-triggered invocations pass the api_key via env so it never appears
+    # in argv / /proc/<pid>/cmdline. CLI --api-key remains supported for MDM
+    # and direct-script usage.
+    if not args.api_key:
+        args.api_key = os.environ.get("UNBOUND_API_KEY") or ""
+
     if not args.api_key or not args.domain:
-        print("Error: --api-key and --domain arguments are required")
+        print("Error: --api-key (or UNBOUND_API_KEY env) and --domain are required")
         print("Please provide an API key and domain: python ai_tools_discovery.py --api-key YOUR_API_KEY --domain YOUR_DOMAIN")
         sys.exit(1)
+
+    # Discovery supports macOS, Windows, and Linux. Exit cleanly on any other
+    # platform (e.g. *BSD, AIX) before detector init, which would otherwise
+    # raise and page Sentry on every run.
+    current_platform = platform.system()
+    if current_platform not in ("Darwin", "Windows", "Linux"):
+        print(
+            f"AI tool discovery is not supported on {current_platform}. "
+            "The Unbound CLI works normally; skipping the discovery scan.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
 
     # Build Sentry context that persists for the whole run
     sentry_ctx = {
@@ -1584,12 +2619,17 @@ def main():
     run_id = None
 
     # Client-side timing metrics, forwarded to backend once at end of run.
-    # Step names must match webapp.services.discovery_metrics_service.ALLOWED_STEP_NAMES.
+    # Backend (webapp.services.discovery_metrics_service) emits each step as a
+    # `discovery.step.<name>` distribution; there is no name allowlist, but the
+    # name must match Sentry's metric-key pattern [a-zA-Z_][a-zA-Z0-9_.\-]*.
+    # Each step is tagged with a phase (detect|process|send|queue) so Sentry can
+    # group leaves into broader buckets via the `phase` attribute.
     t_start = time.monotonic()
     step_durations_ms: Dict[str, float] = {}
+    step_phases: Dict[str, str] = {}
 
     @contextmanager
-    def time_step(name: str) -> Iterator[None]:
+    def time_step(name: str, phase: str) -> Iterator[None]:
         _t = time.monotonic()
         try:
             yield
@@ -1597,12 +2637,163 @@ def main():
             step_durations_ms[name] = (
                 step_durations_ms.get(name, 0.0) + (time.monotonic() - _t) * 1000.0
             )
+            step_phases[name] = phase
+
+    # Acquire single-flight lock. Another discovery process running means we exit
+    # quietly — hook fire was redundant. Heartbeat thread keeps the lock mtime fresh
+    # so other hooks can detect a zombie (>STALE_LOCK_SECONDS without a tick).
+    _lock_status = discovery_cache.acquire_lock()
+    if _lock_status == "contended":
+        logger.info("Another discovery process is running (lock held); exiting.")
+        sys.exit(0)
+    _have_lock = (_lock_status == "acquired")
+    # Lock is best-effort: if the state dir is unwritable, run lock-less rather than skip the scan.
+    if _lock_status == "setup_failed":
+        logger.error(
+            "Discovery preflight failed: cannot create lock/cache dir "
+            f"({discovery_cache.UNBOUND_DIR}); continuing without lock."
+        )
+        try:
+            _ctx = dict(sentry_ctx)
+            _ctx.update({
+                "phase": "acquire_lock",
+                "home": os.environ.get("HOME") or os.path.expanduser("~"),
+                "unbound_dir": str(discovery_cache.UNBOUND_DIR),
+                "lock_error": discovery_cache.last_lock_error or "",
+            })
+            if hasattr(os, "getuid"):
+                _ctx["uid"] = os.getuid()
+            report_to_sentry(
+                OSError("discovery lock setup failed (continuing lock-less)"),
+                context=_ctx,
+                level="warning",
+            )
+        except Exception:
+            pass
+    _heartbeat_stop = None
+
+    # --- Self-timeout + termination cleanup (WEB-4755) ---
+    # Discovery owns its deadline so it can release its lock and report the run
+    # as failed BEFORE the parent onboard/setup force-kills it. Without this, a
+    # SIGKILL on the parent's timeout left a fresh-mtime lock that blocked the
+    # next run for the full stale-lock window and never reported the failure.
+    # These run from a watchdog THREAD (timeout) AND the main thread (signal /
+    # normal except), so they use plain list flags rather than a Lock: a Lock
+    # acquired on the main thread would deadlock if a signal re-entered it on the
+    # same thread, and the only downside of a flag race is a harmless double-send
+    # of one idempotent "failed" event.
+    _cleanup_done = [False]
+    _finished = [False]
+    # The real-human-or-None audit identity, captured once below via
+    # get_audit_user(). Initialized here so the failure closures can pass it
+    # safely even if they fire before capture (in which case it is still None).
+    system_user = None
+
+    def _mark_run_failed(error_type: str, message: str) -> None:
+        """Best-effort: tell the backend this run failed. Idempotent (a flag race
+        at worst double-sends one idempotent event). No-ops until run_id exists
+        (nothing to correlate)."""
+        if _cleanup_done[0]:
+            return
+        _cleanup_done[0] = True
+        if not (device_id and run_id):
+            return
+        try:
+            send_scan_event(
+                args.domain, args.api_key, device_id, run_id, "failed",
+                args.app_name,
+                scan_error={
+                    "error_type": error_type,
+                    "message": message,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                },
+                sentry_context=sentry_ctx,
+                system_user=system_user,
+            )
+        except Exception:
+            pass
+
+    def _release_lock_and_heartbeat() -> None:
+        try:
+            if _heartbeat_stop is not None:
+                _heartbeat_stop.set()
+        except Exception:
+            pass
+        if _have_lock:
+            try:
+                discovery_cache.release_lock()
+            except Exception:
+                pass
+
+    def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15) -> None:
+        """Run the best-effort failure report on a daemon thread bounded by
+        join_timeout, so a slow/retrying backend can't block exit. Used by both
+        the abort path and the normal except path (which were asymmetric)."""
+        t = threading.Thread(
+            target=_mark_run_failed, args=(error_type, message), daemon=True,
+        )
+        t.start()
+        t.join(timeout=join_timeout)
+
+    def _abort(error_type: str, message: str) -> None:
+        # No-op if the run already finished cleanly — guards the sliver between
+        # the try-body completing and finally cancelling the watchdog, where a
+        # late Timer fire would otherwise os._exit(1) over a successful exit 0.
+        if _finished[0]:
+            return
+        logger.error(message)
+        # Release the lock FIRST so a follow-up run is never blocked even if the
+        # reports below stall. Surface the abort to Sentry (the observability path
+        # an endpoint scanner actually has — no Prometheus here), on top of the
+        # "failed" scan event whose error_type already lets the backend graph
+        # timeout vs signal vs crash.
+        _release_lock_and_heartbeat()
+        try:
+            report_to_sentry(
+                RuntimeError(message),
+                {**sentry_ctx, "phase": "abort", "abort_reason": error_type},
+                level="warning",
+            )
+        except Exception:
+            pass
+        _report_failed_bounded(error_type, message)
+        os._exit(1)
+
+    def _on_watchdog_timeout() -> None:
+        # Runs in the watchdog thread — can't safely raise into main, so it
+        # cleans up and exits the process itself.
+        _abort("Timeout", f"Discovery exceeded its {args.timeout}s timeout; aborting and cleaning up.")
+
+    def _on_term_signal(signum, _frame) -> None:
+        # Delivered to the main thread (e.g. the parent's graceful SIGTERM, or
+        # Ctrl-C). Clean up then exit non-zero.
+        _abort("Terminated", f"Discovery received signal {signum}; cleaning up and exiting.")
+
+    _watchdog = None
+    if args.timeout and args.timeout > 0:
+        _watchdog = threading.Timer(args.timeout, _on_watchdog_timeout)
+        _watchdog.daemon = True
+        _watchdog.start()
+    # Save + restore prior handlers so importing/calling main() (tests) doesn't
+    # leave process-wide handlers installed. signal.signal only works on the main
+    # thread, so guard against ValueError/OSError elsewhere.
+    _prev_signal_handlers = {}
+    for _signame in ("SIGTERM", "SIGINT"):
+        _sig = getattr(signal, _signame, None)
+        if _sig is not None:
+            try:
+                _prev_signal_handlers[_sig] = signal.signal(_sig, _on_term_signal)
+            except (ValueError, OSError):
+                pass
 
     try:
+        if _have_lock:
+            _heartbeat_stop = discovery_cache.heartbeat_start()
         detector = AIToolsDetector()
 
         # Get device ID once (shared across all user reports)
-        device_id = detector.get_device_id()
+        with time_step("get_device_id", "detect"):
+            device_id = detector.get_device_id()
         sentry_ctx["device_id"] = device_id
 
         # Generate run_id for this scan (client-side UUID generation)
@@ -1614,33 +2805,40 @@ def main():
         failed_reports = []
 
         # --- Drain pending reports from previous run ---
-        pending = load_pending_reports()
-        if pending:
-            logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
-            for queued_report in pending:
-                success, retryable = send_report_to_backend(
-                    args.domain, args.api_key, queued_report, args.app_name,
-                    sentry_context=sentry_ctx,
-                )
-                if success:
-                    logger.info("  ✓ Queued report sent successfully")
-                elif retryable:
-                    failed_reports.append(queued_report)
-                else:
-                    logger.warning("  ✗ Queued report discarded (non-retryable error)")
-            logger.info("")
+        with time_step("drain_pending_queue", "queue"):
+            pending = load_pending_reports()
+            if pending:
+                logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
+                for queued_report in pending:
+                    success, retryable = send_report_to_backend(
+                        args.domain, args.api_key, queued_report, args.app_name,
+                        sentry_context=sentry_ctx,
+                    )
+                    if success:
+                        logger.info("  ✓ Queued report sent successfully")
+                    elif retryable:
+                        failed_reports.append(queued_report)
+                    else:
+                        logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                logger.info("")
 
-        # Get all users for macOS/Windows, or use current user for other platforms
-        if platform.system() == "Darwin":
-            all_users = get_all_users_macos()
-        elif platform.system() == "Windows":
-            all_users = get_all_users_windows()
-        else:
-            all_users = []
+        with time_step("enumerate_users", "detect"):
+            if platform.system() == "Darwin":
+                all_users = get_all_users_macos()
+            elif platform.system() == "Windows":
+                all_users = get_all_users_windows()
+            elif platform.system() == "Linux":
+                all_users = get_all_users_linux()
+            else:
+                all_users = []
 
-        # If no users found, fall back to current user
-        if not all_users:
-            all_users = [get_user_info()]
+            # Pre-fallback count is the key no-tools discriminator: 0 here means the
+            # macOS/AD enumeration missed every account (the fallback below masks 0->1).
+            homes_enumerated = len(all_users)
+
+            # If no users found, fall back to current user
+            if not all_users:
+                all_users = [get_user_info()]
 
         logger.info("=" * 60)
         logger.info("AI Tools Discovery Report")
@@ -1659,16 +2857,29 @@ def main():
             logger.info(f"  - {user}")
         logger.info("")
 
-        # Get system_user once (who is running the script) for audit purposes
-        system_user = get_user_info()
+        # Get the real human running the script (or None) once, for audit
+        # attribution. This must be a real human OR None — never root /
+        # _service / SYSTEM / a Windows machine account / "unknown" — so the
+        # backend never attributes an empty machine to a service identity. The
+        # data-report path (generate_single_tool_report) falls back to
+        # home_user when this is None.
+        with time_step("get_system_user", "detect"):
+            system_user = get_audit_user()
+        if system_user is None:
+            logger.debug(
+                "Audit system_user resolved to None (non-human or undetectable "
+                "context); tool reports fall back to home_user and lifecycle "
+                "events omit system_user"
+            )
         sentry_ctx["system_user"] = system_user
 
         # Send scan in_progress event BEFORE scanning
         logger.info("Sending scan in_progress event...")
-        success, _ = send_scan_event(
-            args.domain, args.api_key, device_id, run_id, "in_progress",
-            args.app_name, sentry_context=sentry_ctx
-        )
+        with time_step("send_in_progress", "send"):
+            success, _ = send_scan_event(
+                args.domain, args.api_key, device_id, run_id, "in_progress",
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user
+            )
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
         else:
@@ -1685,10 +2896,12 @@ def main():
                 user_home = Path(f"/Users/{user}")
             elif platform.system() == "Windows":
                 user_home = Path(Path.home().anchor) / "Users" / user
+            elif platform.system() == "Linux":
+                user_home = linux_home_for_user(user)
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
-            with time_step("detect_tools"):
+            with time_step("detect_tools", "detect"):
                 user_tools = detector.detect_all_tools(user_home=user_home)
 
             if user_tools:
@@ -1712,6 +2925,11 @@ def main():
         logger.info(f"Detection complete: {len(tools)} unique tool(s) found across all users")
         logger.info("")
 
+        # Pick the single VS Code Copilot row that should carry the shared skills.
+        detector._set_canonical_vscode_copilot(tools)
+        # Pick the single Augment surface that should carry the shared config.
+        detector._set_canonical_augment_surface(tools)
+
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
@@ -1726,7 +2944,8 @@ def main():
             try:
                 # Process this tool once (extract all rules and MCP configs for all users)
                 logger.info(f"  Extracting rules and MCP configs for {tool_name}...")
-                tool_with_projects = detector.process_single_tool(tool)
+                with time_step("process_single_tool", "process"):
+                    tool_with_projects = detector.process_single_tool(tool)
                 logger.info(f"  ✓ Processing complete for {tool_name}")
                 logger.info("")
 
@@ -1740,37 +2959,82 @@ def main():
                         user_home = Path(f"/Users/{user_name}")
                     elif platform.system() == "Windows":
                         user_home = Path(Path.home().anchor) / "Users" / user_name
+                    elif platform.system() == "Linux":
+                        user_home = linux_home_for_user(user_name)
                     else:
                         user_home = Path.home()
 
                     try:
                         # Filter projects to only include this user's projects
-                        with time_step("filter_projects"):
+                        with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+
+                        # Ownership gate (Copilot CLI only): suppress a phantom install
+                        # row for a user who neither owns the detected ~/.copilot config
+                        # dir nor has per-user data. filter_tool_projects_by_user scopes
+                        # projects/permissions but never rewrites the paths, so the gate
+                        # is needed.
+                        if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping Copilot CLI for {user_name}: config dir "
+                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+                                f"not owned by this user and no per-user data"
+                            )
+                            continue
+
+                        # Ownership gate (Augment surfaces): same ~/.augment-keyed
+                        # logic so a non-owner under a root scan doesn't get a
+                        # phantom surface row.
+                        if (tool_name == "Auggie CLI" or tool_name.lower().startswith("augment (")) \
+                                and not _augment_owned_by_user(tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping {tool_name} for {user_name}: config dir "
+                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+                                f"not owned by this user and no per-user data"
+                            )
+                            continue
 
                         # Detect subscription plan for Claude Code
                         if tool_name.lower() == "claude code":
                             try:
-                                with time_step("detect_subscriptions"):
+                                with time_step("find_subscription_binary", "detect"):
                                     claude_bin = find_claude_binary_for_user(user_home)
-                                    subscription = (
-                                        get_claude_subscription_type(user_name, claude_bin)
-                                        if claude_bin else None
-                                    )
                                 if claude_bin is None:
-                                    logger.debug(f"    Claude binary not found for {user_name}")
-                                elif subscription:
+                                    logger.debug(f"    Claude binary not found for {user_name}, using shell resolution")
+                                plan_diagnostics = []
+                                with time_step("detect_subscriptions", "process"):
+                                    subscription = get_claude_subscription_type(user_name, claude_bin, diagnostics=plan_diagnostics)
+                                if subscription:
                                     tool_filtered["plan"] = subscription
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
+                                    # Only alert when the CLI actually succeeded (ok=True) at
+                                    # some stage but returned no plan.  If every stage failed
+                                    # (ok=False), the user never authenticated — not actionable.
+                                    cli_succeeded = any(
+                                        d.get("data", {}).get("ok") is True
+                                        for d in plan_diagnostics
+                                    )
+                                    if tool_filtered.get("projects") and cli_succeeded:
+                                        report_to_sentry(
+                                            RuntimeError("Claude Code plan detection failed"),
+                                            context={
+                                                **sentry_ctx,
+                                                "phase": "plan_detection",
+                                                "user": user_name,
+                                                "claude_binary": str(claude_bin) if claude_bin else "None",
+                                                "diagnostics": plan_diagnostics,
+                                            },
+                                            level="warning",
+                                        )
                             except (PermissionError, OSError) as e:
                                 logger.warning(f"    Could not detect plan for {user_name}: {e}")
 
                         # Detect subscription plan for Cursor / Cursor CLI
                         if tool_name.lower() in ("cursor", "cursor cli"):
                             try:
-                                with time_step("detect_subscriptions"):
+                                with time_step("detect_subscriptions", "process"):
                                     subscription = get_cursor_subscription_type(user_home)
                                 if subscription:
                                     tool_filtered["plan"] = subscription
@@ -1782,7 +3046,7 @@ def main():
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
-                        with time_step("prepare_payload"):
+                        with time_step("prepare_payload", "process"):
                             single_tool_report = detector.generate_single_tool_report(
                                 tool_filtered, device_id, user_name, system_user, run_id
                             )
@@ -1804,65 +3068,99 @@ def main():
                             'rules': num_rules
                         })
 
-                        # Log detailed summary of what's being sent
-                        logger.info("")
-                        logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
-                        logger.info(f"  │ User: {user_name}")
-                        logger.info(f"  │ Tool: {tool_name}")
-                        logger.info(f"  │ Version: {tool_filtered.get('version', 'Unknown')}")
-                        logger.info(f"  │ Install Path: {tool_filtered.get('install_path', 'Unknown')}")
-                        logger.info(f"  │ Projects: {len(projects)}")
-                        logger.info(f"  │ Total Rules: {num_rules}")
-                        logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
+                        if args.dump:
+                            logger.info("")
+                            logger.info("  ┌─ Report Summary ────────────────────────────────────────────────")
+                            logger.info(f"  │ User: {user_name}")
+                            logger.info(f"  │ Tool: {tool_name}")
+                            logger.info(f"  │ Version: {tool_filtered.get('version', 'Unknown')}")
+                            logger.info(f"  │ Install Path: {tool_filtered.get('install_path', 'Unknown')}")
+                            logger.info(f"  │ Projects: {len(projects)}")
+                            logger.info(f"  │ Total Rules: {num_rules}")
+                            logger.info(f"  │ Total MCP Servers: {num_mcp_servers}")
 
-                        # Log permissions details if present
-                        if "permissions" in tool_filtered:
-                            perms = tool_filtered.get("permissions", {})
-                            logger.info(f"  │ Permissions: ✓ Present")
-                            logger.info(f"  │   Scope: {perms.get('scope', 'unknown')}")
-                            logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
-                            logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
-                            logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
-                            logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
-                            logger.info(f"  │   Ask Rules: {len(perms.get('ask_rules', []))}")
-                            if perms.get('mcp_servers'):
-                                logger.info(f"  │   MCP Servers: {len(perms.get('mcp_servers', []))}")
-                            if perms.get('mcp_policies'):
-                                policies = perms.get('mcp_policies', {})
-                                if policies.get('allowedMcpServers') or policies.get('deniedMcpServers'):
-                                    logger.info(f"  │   MCP Policies: allowed={len(policies.get('allowedMcpServers', []))}, denied={len(policies.get('deniedMcpServers', []))}")
-                            logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
-                        else:
-                            logger.info(f"  │ Permissions: ✗ Not present")
+                            if "permissions" in tool_filtered:
+                                perms = tool_filtered.get("permissions", {})
+                                logger.info(f"  │ Permissions: ✓ Present")
+                                logger.info(f"  │   Scope: {perms.get('scope', 'unknown')}")
+                                logger.info(f"  │   Path: {perms.get('settings_path', 'unknown')}")
+                                logger.info(f"  │   Permission Mode: {perms.get('permission_mode', 'not set')}")
+                                logger.info(f"  │   Allow Rules: {len(perms.get('allow_rules', []))}")
+                                logger.info(f"  │   Deny Rules: {len(perms.get('deny_rules', []))}")
+                                logger.info(f"  │   Ask Rules: {len(perms.get('ask_rules', []))}")
+                                if perms.get('mcp_servers'):
+                                    logger.info(f"  │   MCP Servers: {len(perms.get('mcp_servers', []))}")
+                                if perms.get('mcp_policies'):
+                                    policies = perms.get('mcp_policies', {})
+                                    if policies.get('allowedMcpServers') or policies.get('deniedMcpServers'):
+                                        logger.info(f"  │   MCP Policies: allowed={len(policies.get('allowedMcpServers', []))}, denied={len(policies.get('deniedMcpServers', []))}")
+                                logger.info(f"  │   Sandbox Enabled: {perms.get('sandbox_enabled', 'not set')}")
+                            else:
+                                logger.info(f"  │ Permissions: ✗ Not present")
 
-                        logger.info("  └──────────────────────────────────────────────────────────────────")
-                        logger.info("")
+                            logger.info("  └──────────────────────────────────────────────────────────────────")
+                            logger.info("")
 
-                        # Log the complete JSON being sent to backend
-                        logger.info("  Complete JSON payload being sent to backend:")
-                        logger.info("  " + "=" * 70)
+                        if args.payload:
+                            payload_logger.info("  Complete JSON payload being sent to backend:")
+                            payload_logger.info("  " + "=" * 70)
+                            try:
+                                log_report = copy.deepcopy(single_tool_report)
+                                for t in log_report.get("tools") or []:
+                                    for p in t.get("projects") or []:
+                                        for r in p.get("rules") or []:
+                                            if "content" in r:
+                                                r["content"] = f"<{len(r['content'])} chars>"
+                                        for s in p.get("skills") or []:
+                                            if "content" in s:
+                                                s["content"] = f"<{len(s['content'])} chars>"
+                                        for mcp in p.get("mcpServers") or []:
+                                            for tool in (mcp.get("scan") or {}).get("tools") or []:
+                                                tool.pop("inputSchema", None)
+                                                tool.pop("outputSchema", None)
+                                                desc = tool.get("description") or ""
+                                                if len(desc) > 80:
+                                                    tool["description"] = desc[:80] + "..."
+                                report_json = json.dumps(log_report, indent=2)
+                                for line in report_json.split('\n'):
+                                    payload_logger.info(f"  {line}")
+                            except Exception as e:
+                                logger.warning(f"  Could not serialize report to JSON for logging: {e}")
+                                payload_logger.info(f"  Report structure: {single_tool_report}")
+                            payload_logger.info("  " + "=" * 70)
+                            payload_logger.info("")
+
+                        # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.
+                        # Backend already dedups on payload_hash; this short-circuits the upload
+                        # itself when local cache shows no change since last successful upload.
                         try:
-                            report_json = json.dumps(single_tool_report, indent=2)
-                            for line in report_json.split('\n'):
-                                logger.info(f"  {line}")
-                        except Exception as e:
-                            logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                            logger.info(f"  Report structure: {single_tool_report}")
-                        logger.info("  " + "=" * 70)
-                        logger.info("")
+                            local_payload_hash = compute_payload_hash(single_tool_report["tools"][0])
+                        except Exception as hash_err:
+                            local_payload_hash = None
+                            logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        # Send report to backend
-                        logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
-
-                        success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
-                        if success:
-                            logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                        cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        if local_payload_hash and cached_hash == local_payload_hash:
+                            if args.dump:
+                                logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
-                            logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
-                            if retryable:
-                                failed_reports.append(single_tool_report)
+                            if args.dump:
+                                logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
-                        logger.info("")
+                            with time_step("send_report_per_tool_user", "send"):
+                                success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                            if success:
+                                if args.dump:
+                                    logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
+                                if local_payload_hash:
+                                    discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
+                            else:
+                                logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
+                                if retryable:
+                                    failed_reports.append(single_tool_report)
+
+                        if args.dump:
+                            logger.info("")
 
                     except PermissionError as e:
                         # User-specific permission error - send scan_event=failed with home_user
@@ -1879,7 +3177,7 @@ def main():
                         success, _ = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
-                            sentry_context=sentry_ctx
+                            sentry_context=sentry_ctx, system_user=system_user
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
@@ -1909,17 +3207,20 @@ def main():
                 logger.info("")
 
         # --- Persist any failed reports for the next run ---
-        if failed_reports:
-            save_failed_reports(failed_reports)
-        elif QUEUE_FILE.exists():
-            # All queued reports succeeded and no new failures — clean up
-            try:
-                QUEUE_FILE.unlink(missing_ok=True)
-            except PermissionError:
-                logger.warning(
-                    f"Could not remove queue file {QUEUE_FILE}"
-                    f" (owned by another user)"
-                )
+        with time_step("persist_failed_reports", "queue"):
+            if failed_reports:
+                save_failed_reports(failed_reports)
+            else:
+                queue_file = _get_queue_file_path()
+                if queue_file.exists():
+                    # All queued reports succeeded and no new failures — clean up
+                    try:
+                        queue_file.unlink(missing_ok=True)
+                    except PermissionError:
+                        logger.warning(
+                            f"Could not remove queue file {queue_file}"
+                            f" (owned by another user)"
+                        )
 
         # Forward client-side timing metrics to backend (best-effort, success path only).
         # Backend emits these as Sentry distributions via emit_discovery_metrics.
@@ -1927,7 +3228,11 @@ def main():
             sentry_metrics_payload = {
                 "total_duration_ms": round((time.monotonic() - t_start) * 1000),
                 "steps": [
-                    {"name": name, "duration_ms": round(duration)}
+                    {
+                        "name": name,
+                        "duration_ms": round(duration),
+                        "phase": step_phases.get(name),
+                    }
                     for name, duration in step_durations_ms.items()
                 ],
                 "metadata": {
@@ -1945,11 +3250,37 @@ def main():
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 
+        # No-tools telemetry: a zero-tool scan is otherwise silent — we cannot tell
+        # an enumeration miss from a timing race from a genuinely empty device.
+        # Emit ONE enriched warning with the discriminators. Fire-and-forget:
+        # telemetry must never raise into / slow the scan.
+        if not tools:
+            try:
+                no_tools_ctx = {
+                    **sentry_ctx,
+                    "phase": "no_tools_found",
+                    "homes_enumerated": homes_enumerated,
+                    "users_scanned": len(all_users),
+                    "used_fallback_user": homes_enumerated == 0,
+                    "os": platform.system(),
+                    "duration_ms": round((time.monotonic() - t_start) * 1000),
+                }
+                if hasattr(os, "getuid"):
+                    no_tools_ctx["is_root"] = os.getuid() == 0
+                report_to_sentry(
+                    RuntimeError("Discovery found no tools"),
+                    context=no_tools_ctx,
+                    level="warning",
+                    priority=True,
+                )
+            except Exception:
+                pass
+
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
-            args.app_name, sentry_context=sentry_ctx
+            args.app_name, sentry_context=sentry_ctx, system_user=system_user
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")
@@ -1957,28 +3288,46 @@ def main():
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
 
-    except Exception as e:
-        # Send scan failed event on script crash
+        # Resolve any bare Claude connector UUIDs the backend still needs: read
+        # this device's local session files and report real names + tools. Runs
+        # as part of every discovery so it self-heals over time. Best-effort —
+        # never let it affect the discovery run's outcome.
         try:
-            if device_id and run_id:
-                logger.error("Sending scan failed event due to error...")
-                scan_error = {
-                    "error_type": type(e).__name__,
-                    "message": str(e),
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }
-                send_scan_event(
-                    args.domain, args.api_key, device_id, run_id, "failed",
-                    args.app_name, scan_error=scan_error, sentry_context=sentry_ctx
-                )
-            else:
-                logger.warning("Skipping scan failed event - device_id or run_id not initialized")
-        except Exception:
-            pass  # Don't let error reporting crash the error handler
+            sent, failed, matched = run_sweep(args.domain, args.api_key)
+            logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
+        except Exception as sweep_err:
+            logger.debug(f"Connector UUID sweep failed: {sweep_err}")
+
+    except Exception as e:
+        # Report the crash as a failed run (idempotent — the watchdog/signal
+        # paths may have already reported, in which case this is a no-op).
+        if device_id and run_id:
+            logger.error("Sending scan failed event due to error...")
+            _report_failed_bounded(type(e).__name__, str(e))
+        else:
+            logger.warning("Skipping scan failed event - device_id or run_id not initialized")
 
         report_to_sentry(e, {**sentry_ctx, "phase": "main"})
         logger.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        # Set FIRST so a watchdog Timer that fires in this teardown window
+        # (cancel() doesn't stop an already-dispatched callback) no-ops in _abort
+        # instead of os._exit(1)-ing over a clean finish.
+        _finished[0] = True
+        if _watchdog is not None:
+            _watchdog.cancel()
+        for _sig, _prev in _prev_signal_handlers.items():
+            try:
+                signal.signal(_sig, _prev)
+            except (ValueError, OSError):
+                pass
+        try:
+            _heartbeat_stop.set()
+        except Exception:
+            pass
+        if _have_lock:
+            discovery_cache.release_lock()
 
 
 if __name__ == "__main__":

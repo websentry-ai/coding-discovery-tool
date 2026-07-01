@@ -467,6 +467,50 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_api_key_auth_returns_api_key_when_no_subscription_type(self, _mock_root, mock_run):
+        """Returns 'api_key' when subscriptionType is absent but authMethod is 'api_key'."""
+        mock_run.return_value = self._mock_result(
+            stdout=json.dumps({
+                "loggedIn": True,
+                "authMethod": "api_key",
+                "apiProvider": "firstParty",
+                "apiKeySource": "ANTHROPIC_API_KEY",
+            })
+        )
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "api_key")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_api_key_helper_auth_returns_api_key(self, _mock_root, mock_run):
+        """Returns 'api_key' when authMethod is 'api_key_helper' (contains 'api_key')."""
+        mock_run.return_value = self._mock_result(
+            stdout=json.dumps({
+                "loggedIn": True,
+                "authMethod": "api_key_helper",
+                "apiProvider": "firstParty",
+                "apiKeySource": "apiKeyHelper",
+            })
+        )
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "api_key")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    def test_subscription_type_takes_priority_over_api_key_auth(self, _mock_root, mock_run):
+        """When both subscriptionType and authMethod are present, subscriptionType wins."""
+        mock_run.return_value = self._mock_result(
+            stdout=json.dumps({
+                "loggedIn": True,
+                "subscriptionType": "max",
+                "authMethod": "api_key",
+            })
+        )
+        result = get_claude_subscription_type(self.username, self.claude_binary)
+        self.assertEqual(result, "max")
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
     def test_returns_none_on_missing_subscription_key(self, _mock_root, mock_run):
         """Returns None when JSON response lacks subscriptionType key."""
         mock_run.return_value = self._mock_result(

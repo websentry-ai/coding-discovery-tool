@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseCopilotDetector
+from ...vscode_extension_helpers import find_extension_in_editor
 from ...windows_extraction_helpers import is_running_as_admin
 from ..jetbrains.jetbrains import WindowsJetBrainsDetector
 
@@ -36,6 +37,25 @@ def _load_jsonc(file_path: Path) -> Optional[Dict]:
     except (json.JSONDecodeError, OSError) as e:
         logger.debug(f"Error loading JSONC file {file_path}: {e}")
         return None
+
+
+# Recent VS Code ships GitHub Copilot / Copilot Chat as BUILT-IN extensions in
+# the install tree, so they never appear in the per-user .vscode\extensions
+# folder the marketplace glob scans. The bundled folder name + system-wide
+# install roots (per-user user-install roots are derived from user_home).
+_VSCODE_BUILTIN_COPILOT_DIRS = ("copilot", "copilot-chat")
+_VSCODE_SYSTEM_APP_EXTENSION_ROOTS = [
+    Path(r"C:\Program Files\Microsoft VS Code\resources\app\extensions"),
+    Path(r"C:\Program Files\Microsoft VS Code Insiders\resources\app\extensions"),
+    Path(r"C:\Program Files (x86)\Microsoft VS Code\resources\app\extensions"),
+]
+# Per-user VS Code data dirs (relative to user_home) — presence means the user
+# actually uses VS Code, so a system-wide built-in install can be attributed to
+# them and not to every user during an admin all-users scan.
+_VSCODE_USER_DATA_DIRS = [
+    Path("AppData/Roaming/Code/User"),
+    Path("AppData/Roaming/Code - Insiders/User"),
+]
 
 
 class WindowsGitHubCopilotDetector(BaseCopilotDetector):
@@ -91,53 +111,100 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         """
         Detect VS Code Copilot for a specific user.
 
-        Scans %USERPROFILE%\\.vscode\\extensions for folders starting with github.copilot*.
+        Reads the LIVE ``.vscode\\extensions\\extensions.json`` registry rather
+        than globbing for ``github.copilot*`` folders. VS Code rewrites this
+        registry on uninstall, but the extension FOLDER survives
+        (microsoft/vscode#81046), so the old folder glob produced phantom rows
+        for uninstalled Copilot. This matches the SAFE macOS/Linux path.
         """
         results = []
         vscode_ext_dir = user_home / ".vscode" / "extensions"
 
-        if not vscode_ext_dir.exists():
-            logger.debug(f"VS Code extensions directory not found: {vscode_ext_dir}")
-            return results
+        for ext_id, name in (
+            ("github.copilot", "GitHub Copilot (VS Code)"),
+            ("github.copilot-chat", "GitHub Copilot Chat (VS Code)"),
+        ):
+            entry = find_extension_in_editor(user_home, "Code", ext_id)
+            if entry is None:
+                continue
+            _location, version = entry
+            results.append({
+                "name": name,
+                "version": version or "unknown",
+                "publisher": "GitHub",
+                "install_path": str(vscode_ext_dir),
+            })
+            logger.info(f"Detected: {name} v{version or 'unknown'} at {vscode_ext_dir}")
 
-        try:
-            # Look for github.copilot* directories
-            copilot_dirs = list(vscode_ext_dir.glob("github.copilot*"))
-
-            for copilot_dir in copilot_dirs:
-                if not copilot_dir.is_dir():
-                    continue
-
-                version = "unknown"
-                pkg_json = copilot_dir / "package.json"
-
-                if pkg_json.exists():
-                    data = _load_jsonc(pkg_json)
-                    if data:
-                        version = data.get('version', 'unknown')
-
-                if version == "unknown" and "-" in copilot_dir.name:
-                    try:
-                        version = copilot_dir.name.rsplit('-', 1)[1]
-                    except IndexError:
-                        pass
-
-                ext_name = "GitHub Copilot (VS Code)"
-                if "copilot-chat" in copilot_dir.name.lower():
-                    ext_name = "GitHub Copilot Chat (VS Code)"
-
-                results.append({
-                    "name": ext_name,
-                    "version": version,
-                    "publisher": "GitHub",
-                    "install_path": str(copilot_dir)
-                })
-                logger.info(f"Detected: {ext_name} v{version} at {copilot_dir}")
-
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Error scanning VS Code extensions: {e}")
+        # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
+        # marketplace Copilot extension is present, so built-in users — and their
+        # VS Code MCP servers (%APPDATA%\Code\User\mcp.json) — aren't missed.
+        if not results:
+            results.extend(self._detect_vscode_builtin_copilot(user_home))
 
         return results
+
+    def _vscode_app_extension_roots(self, user_home: Path) -> List[Path]:
+        """VS Code install extension roots to probe for built-in Copilot: the
+        per-user user-install location (under the user's LocalAppData) plus the
+        system-wide install locations."""
+        roots = []
+        local_programs = user_home / "AppData" / "Local" / "Programs"
+        for app in ("Microsoft VS Code", "Microsoft VS Code Insiders"):
+            roots.append(local_programs / app / "resources" / "app" / "extensions")
+        roots.extend(_VSCODE_SYSTEM_APP_EXTENSION_ROOTS)
+        return roots
+
+    def _detect_vscode_builtin_copilot(self, user_home: Path) -> List[Dict]:
+        """Detect Copilot shipped built-in with the VS Code install on Windows.
+
+        Reported only when this user actually uses VS Code (has a ``Code\\User``
+        data dir). Returns at most one entry by design — a single detection is
+        enough to trigger downstream rules/MCP extraction, and built-in Copilot
+        bundles chat inside the same ``copilot`` extension, so a second row would
+        only duplicate the same MCP servers.
+        """
+        uses_vscode = False
+        for rel in _VSCODE_USER_DATA_DIRS:
+            try:
+                if (user_home / rel).exists():
+                    uses_vscode = True
+                    break
+            except OSError:
+                continue
+        if not uses_vscode:
+            logger.debug(f"No VS Code user data dir under {user_home}; skipping built-in Copilot")
+            return []
+
+        for ext_root in self._vscode_app_extension_roots(user_home):
+            for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
+                copilot_dir = ext_root / dir_name
+                try:
+                    if not copilot_dir.is_dir():
+                        continue
+                except OSError:
+                    continue
+                # The consolidated built-in "copilot" folder is actually the
+                # Copilot Chat extension (name="copilot-chat") — the MCP consumer
+                # — so label it accordingly (matches the marketplace
+                # github.copilot-chat mapping); a plain "copilot" stays generic.
+                version, name_label = "unknown", "GitHub Copilot (VS Code)"
+                data = _load_jsonc(copilot_dir / "package.json")
+                if isinstance(data, dict):
+                    version = data.get("version", "unknown")
+                    ext_name = str(data.get("name") or "").lower()
+                    display = str(data.get("displayName") or "").lower()
+                    if "copilot-chat" in ext_name or "copilot chat" in display:
+                        name_label = "GitHub Copilot Chat (VS Code)"
+                logger.debug(f"Detected built-in VS Code {name_label} {version} at {copilot_dir}")
+                return [{
+                    "name": name_label,
+                    "version": version,
+                    "publisher": "GitHub",
+                    "install_path": str(copilot_dir),
+                }]
+        logger.debug(f"VS Code in use under {user_home} but no built-in Copilot extension found")
+        return []
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """

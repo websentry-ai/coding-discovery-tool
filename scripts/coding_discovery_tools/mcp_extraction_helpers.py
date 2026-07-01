@@ -6,10 +6,12 @@ on Windows and macOS to avoid code duplication.
 """
 
 import datetime
+import hashlib
 import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,6 +21,43 @@ from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 from .constants import MAX_SEARCH_DEPTH
 
 logger = logging.getLogger(__name__)
+
+# Directory names used by plugin metadata inside cache dirs
+_PLUGIN_METADATA_DIRS = frozenset({".claude-plugin", ".cursor-plugin"})
+
+
+def is_claude_plugins_path(path: Path) -> bool:
+    """Check if a path is inside a .claude/plugins/ directory.
+
+    Plugin catalog entries are already handled by _scan_plugin_cache_dir
+    and must not be picked up again by the project-scope walker.
+    """
+    parts = path.parts
+    return (".claude", "plugins") in zip(parts, parts[1:])
+
+
+def is_home_dotdir_descendant(path: Path) -> bool:
+    """True if `path` lives under a top-level hidden home dir of any user
+    (e.g. ``/Users/alice/.codex/...``, ``/home/bob/.cursor/...``,
+    ``C:\\Users\\carol\\.copilot\\...``).
+
+    Only matches the canonical OS layouts (``Users``/``home`` immediately
+    below the filesystem root) so non-standard mounts like
+    ``/srv/home/<u>/.config`` aren't falsely treated as tool dirs.
+
+    NOTE: this returns True whenever the home-level segment (the 4th path part,
+    directly under ``/Users/<u>`` or ``/home/<u>``) is a hidden name — a hidden
+    *dir* or a hidden *file*. So for a leaf FILE that may sit directly in a home
+    dir — e.g. a project-scope ``~/.mcp.json`` whose project root is the home
+    dir — pass its parent directory instead, otherwise the leaf dotfile is
+    misclassified as a hidden tool dir and wrongly skipped.
+    """
+    parts = path.parts
+    return (
+        len(parts) >= 4
+        and parts[1] in ("Users", "home")
+        and parts[3].startswith(".")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +376,102 @@ def _check_expired_token(cfg: Dict[str, Any], now_ms: int) -> Optional[Dict[str,
     }
 
 
+_MCP_REMOTE_HEADER_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+def _mcp_remote_server_url_hash(cfg: Dict[str, Any]) -> Optional[str]:
+    """If cfg is a stdio config that launches `mcp-remote`, return the hash
+    mcp-remote uses to key that server's cached credentials. Else None.
+
+    Mirrors mcp-remote's getServerUrlHash: md5 over the server URL, then the
+    `--resource` value (if given), then a compact JSON dump of `--header` pairs
+    sorted by key (if any), joined with '|'. Header values are hashed verbatim
+    because mcp-remote expands `${ENV}` only after computing the hash.
+    """
+    if cfg.get("url"):
+        return None
+    command = cfg.get("command")
+    args = cfg.get("args")
+    if not command or not isinstance(args, list):
+        return None
+    str_args = [a for a in args if isinstance(a, str)]
+    launches_mcp_remote = (
+        os.path.basename(str(command)).split("@", 1)[0] == "mcp-remote"
+        or any(a == "mcp-remote" or a.startswith("mcp-remote@") for a in str_args)
+    )
+    if not launches_mcp_remote:
+        return None
+
+    server_url = next((a for a in str_args if a.startswith(("http://", "https://"))), None)
+    if not server_url:
+        return None
+
+    headers: Dict[str, str] = {}
+    resource = ""
+    i = 0
+    while i < len(str_args) - 1:
+        if str_args[i] == "--header":
+            match = _MCP_REMOTE_HEADER_RE.match(str_args[i + 1])
+            if match:
+                headers[match.group(1)] = match.group(2)
+            i += 2
+            continue
+        if str_args[i] == "--resource":
+            resource = str_args[i + 1]
+            i += 2
+            continue
+        i += 1
+
+    parts = [server_url]
+    if resource:
+        parts.append(resource)
+    if headers:
+        ordered = {k: headers[k] for k in sorted(headers)}
+        parts.append(json.dumps(ordered, separators=(",", ":"), ensure_ascii=False))
+    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _mcp_remote_has_cached_token(server_url_hash: str) -> bool:
+    """True if mcp-remote already has a cached token for this server hash under
+    any installed version dir. Honors mcp-remote's $MCP_REMOTE_CONFIG_DIR."""
+    base = os.environ.get("MCP_REMOTE_CONFIG_DIR") or str(Path.home() / ".mcp-auth")
+    try:
+        return any(
+            p.is_file() and p.stat().st_size > 0
+            for p in Path(base).glob(f"mcp-remote-*/{server_url_hash}_tokens.json")
+        )
+    except OSError:
+        return False
+
+
+def _mcp_remote_unauthed_result(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return an auth_required scan result if this config launches `mcp-remote`
+    for a server it has no cached token for. Else None.
+
+    mcp-remote opens an OAuth browser tab whenever it's spawned without a usable
+    token. A discovery scan must never do that, so when no token is cached we skip
+    spawning entirely and report auth_required — the browser flow can only occur
+    if the process runs, and here it never does. When a token IS cached, we fall
+    through and scan normally (mcp-remote uses the token non-interactively)."""
+    server_url_hash = _mcp_remote_server_url_hash(cfg)
+    if server_url_hash is None or _mcp_remote_has_cached_token(server_url_hash):
+        return None
+
+    scanned_at = (
+        datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+    )
+    return {
+        "scanned_at": scanned_at,
+        "tools": None,
+        "tool_count": None,
+        "server_info": None,
+        "error": {
+            "code": "auth_required",
+            "details": {"reason": "mcp_remote_no_cached_token"},
+        },
+    }
+
+
 def _scan_servers_in_mapping(
     mcp_servers: Dict[str, Any],
 ) -> Dict[str, Dict[str, Any]]:
@@ -360,6 +495,13 @@ def _scan_servers_in_mapping(
         if expired is not None:
             _SCAN_CACHE[key] = expired
             results[name] = expired
+            continue
+        # Skip spawning mcp-remote when it has no cached token: spawning it
+        # unauthenticated opens an OAuth browser tab. Report auth_required instead.
+        unauthed = _mcp_remote_unauthed_result(cfg)
+        if unauthed is not None:
+            _SCAN_CACHE[key] = unauthed
+            results[name] = unauthed
             continue
         pending.append((name, _maybe_inject_bearer(cfg, now_ms), key))
 
@@ -396,6 +538,79 @@ MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json"]
 
 # VS Code, Cursor, others
 MCP_JSON_FILENAMES = ["mcp.json"]
+
+
+def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
+    """Enumerate the ``mcp.json`` files for ONE VS Code data dir (a
+    ``.../Code/User`` or ``.../Code - Insiders/User`` base).
+
+    Returns existing FILE paths in deterministic order:
+      1. the default ``code_user_base / "mcp.json"`` (only if it exists), then
+      2. each existing ``code_user_base / "profiles" / <id> / "mcp.json"``,
+         in sorted order.
+
+    Bounded: a single-level glob under ``profiles/`` only — never a recursive
+    or full-filesystem walk. If ``profiles/`` doesn't exist it contributes
+    nothing. If ``code_user_base`` itself doesn't exist, returns ``[]`` (the
+    default file's ``.exists()`` is False and the profiles glob yields
+    nothing), so callers need no extra guard — this is what makes the VS Code
+    Insiders base free.
+
+    NEVER raises: all filesystem probes are wrapped; whatever was collected so
+    far is returned. Callers derive attribution as ``mcp_file.parent``.
+    """
+    files: List[Path] = []
+
+    try:
+        default_file = code_user_base / "mcp.json"
+        if default_file.exists():
+            files.append(default_file)
+    except Exception as exc:
+        logger.debug("enumerate_vscode_mcp_files: skipping default in %s: %s", code_user_base, exc)
+
+    try:
+        profiles_dir = code_user_base / "profiles"
+        if profiles_dir.exists():
+            for profile_mcp in sorted(profiles_dir.glob("*/mcp.json")):
+                if profile_mcp.is_file():
+                    files.append(profile_mcp)
+    except Exception as exc:
+        logger.debug("enumerate_vscode_mcp_files: skipping profiles in %s: %s", code_user_base, exc)
+
+    return files
+
+
+# Shared JSONC strippers for hand-edited MCP config files (// and /* */ comments,
+# trailing commas) that are invalid for json.loads. Group 1 captures full quoted
+# strings so comment-like / comma sequences inside string values are preserved.
+# re.MULTILINE (not re.DOTALL) so the //-comment branch stops at end-of-line.
+_JSONC_PATTERN = re.compile(
+    r'("(?:\\.|[^"\\])*")|(/\*[\s\S]*?\*/)|(//[^\n]*)',
+    re.MULTILINE,
+)
+_TRAILING_COMMA_PATTERN = re.compile(
+    r'("(?:\\.|[^"\\])*")|,(\s*[}\]])'
+)
+
+
+def _strip_jsonc_comments(raw: str) -> str:
+    """Remove // and /* */ comments from JSONC text, preserving string literals."""
+    def _replace(match: "re.Match") -> str:
+        if match.group(1) is not None:
+            return match.group(1)
+        return ""
+
+    return _JSONC_PATTERN.sub(_replace, raw)
+
+
+def _strip_trailing_commas(raw: str) -> str:
+    """Remove trailing commas before } or ], preserving commas inside strings."""
+    def _replace(match: "re.Match") -> str:
+        if match.group(1) is not None:
+            return match.group(1)
+        return match.group(2)
+
+    return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
 def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
@@ -560,9 +775,9 @@ def walk_for_mcp_configs_generic(
         for item in current_dir.iterdir():
             try:
                 # Check if we should skip this path
-                if should_skip_func(item):
+                if should_skip_func(item) or is_home_dotdir_descendant(item):
                     continue
-                
+
                 # Check depth
                 try:
                     depth = len(item.relative_to(root_path).parts)
@@ -822,6 +1037,53 @@ def walk_for_kilocode_mcp_configs(
     )
 
 
+def _iter_admin_user_homes(is_admin: bool, users_dir: Optional[Path]) -> List[Path]:
+    """Return all user home directories for an admin/root-level scan.
+
+    On Linux, delegates to get_linux_user_homes() which already includes
+    /root alongside /home/* entries — fixing the gap where users_dir=/home
+    would silently miss root's own configs. On Darwin/Windows, iterates
+    users_dir and filters to real (non-hidden) directories.
+    """
+    import platform
+    if not is_admin:
+        return []
+    if platform.system() == "Linux":
+        try:
+            from .linux_extraction_helpers import get_linux_user_homes
+            return get_linux_user_homes()
+        except ImportError:
+            pass
+    if users_dir and users_dir.exists():
+        return [d for d in users_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
+    return []
+
+
+def _own_home_already_scanned(admin_homes: List[Path]) -> bool:
+    """True when the current process's home is already among ``admin_homes``.
+
+    The admin/root branches scan every dir under the users root and then
+    separately re-process ``Path.home()`` to cover root's own home. That extra
+    step is correct on macOS/Linux, where the privileged account's home
+    (``/var/root`` / ``/root``) lives *outside* the users root. On Windows the
+    admin is a normal ``C:\\Users\\<name>`` profile already covered by the
+    ``C:\\Users`` scan, so re-processing ``Path.home()`` double-counts its
+    configs (WEB-4673). This guard lets callers skip the re-add only in that
+    case (case-insensitive path match, since Windows paths are not case-sensitive).
+    """
+    def _norm(p: Path) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(str(p.resolve())))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(p)))
+
+    try:
+        home_n = _norm(Path.home())
+    except Exception:
+        return False
+    return any(_norm(d) == home_n for d in admin_homes)
+
+
 def read_global_mcp_config(
     config_path: Path,
     tool_name: str = "MCP",
@@ -871,28 +1133,113 @@ def read_global_mcp_config(
         logger.warning(f"Permission denied reading global {tool_name} MCP config {config_path}: {e}")
     except Exception as e:
         logger.warning(f"Error reading global {tool_name} MCP config {config_path}: {e}")
-    
+
     return None
+
+
+def _accumulate_per_user_with_fallback(
+    user_homes: List[Path],
+    global_config_path: Path,
+    reader_fn: Callable[[Path, str, int], Optional[Dict]],
+    tool_name: str,
+    parent_levels: int,
+) -> List[Dict]:
+    """Accumulate every user's global MCP config, with admin's own as fallback.
+
+    This is the single home of the accumulate + de-dup + fallback-only inner
+    loop that was previously copy-pasted across the JSON, Codex (TOML), and the
+    two OpenCode extractors. It has exactly two seams: ``user_homes`` (the
+    already-resolved list of user home dirs — empty when not admin, so the
+    caller owns all admin/platform detection) and ``reader_fn`` (the tool's
+    config reader).
+
+    Detection deliberately stays at each call site. In particular this helper
+    must NEVER grow a Linux branch: Linux uses a separate per-user extractor
+    class, and a multi-user walk that returns accumulated-or-first-match here
+    would silently drop users on Linux.
+
+    Behavior contract (byte-identical to the four prior inline loops):
+      - admin (``user_homes`` non-empty): collect each user's config, de-dup by
+        the config's ``path`` key; if and only if NO per-user config was found,
+        fall back to the admin's own ``global_config_path``.
+      - non-admin (``user_homes`` empty): return a 0-or-1 element list from the
+        admin's own ``global_config_path``.
+
+    Args:
+        user_homes: Resolved user home directories ([] when not admin).
+        global_config_path: Path to the global MCP config file (relative to home).
+        reader_fn: Reader taking (config_path, tool_name, parent_levels) -> Optional[Dict].
+        tool_name: Name of the tool (for logging, passed through to reader_fn).
+        parent_levels: Number of parent directories to go up for the path.
+
+    Returns:
+        List of config dicts with 'path' and 'mcpServers' keys (empty if none found).
+    """
+    if user_homes:
+        configs: List[Dict] = []
+        seen_paths = set()
+        for user_dir in user_homes:
+            # Build the user-specific config path by swapping ~ for user_dir.
+            # relative_to() AND exists() both stay inside the try so a single
+            # user's path or filesystem error skips only that user — matching
+            # the four prior inline loops exactly. Note Path.exists() re-raises
+            # on Python 3.9 for an OSError that isn't ENOENT/ENOTDIR/EBADF/ELOOP
+            # (e.g. EACCES on a permission-locked or NFS-mounted home), so
+            # pulling exists() out of the guard would let one user's error
+            # propagate and drop the whole tool's config.
+            try:
+                user_config_path = user_dir / global_config_path.relative_to(Path.home())
+                if user_config_path.exists():
+                    config = reader_fn(user_config_path, tool_name, parent_levels)
+                    # Accumulate each user's config (de-dup by path). On Windows
+                    # the admin's own home is itself under C:\Users, so dedup
+                    # prevents a double-count when the fallback below would also
+                    # pick it up.
+                    if config and config["path"] not in seen_paths:
+                        seen_paths.add(config["path"])
+                        configs.append(config)
+            except (ValueError, OSError):
+                # Path not relative to home, or a per-user filesystem error; skip.
+                continue
+
+        # Fallback to admin's own global config ONLY if no user config was found.
+        # This preserves the original single-user-root behavior exactly.
+        if not configs and global_config_path.exists():
+            config = reader_fn(global_config_path, tool_name, parent_levels)
+            if config:
+                configs.append(config)
+        return configs
+
+    # For regular users, check their own home directory (0-or-1 element list).
+    if global_config_path.exists():
+        config = reader_fn(global_config_path, tool_name, parent_levels)
+        if config:
+            return [config]
+    return []
 
 
 def extract_global_mcp_config_with_root_support(
     global_config_path: Path,
     tool_name: str = "MCP",
     parent_levels: int = 2
-) -> Optional[Dict]:
+) -> List[Dict]:
     """
     Extract global MCP config with support for root/admin user (checks all users).
-    
-    When running as root/admin, this function checks all user directories
-    and returns the first non-empty config found.
-    
+
+    When running as root/admin, this function checks every user directory and
+    accumulates each user's global config (de-duplicated by config path). This
+    fixes a multi-user data loss where only the first user's config was returned.
+
+    Single-user and non-root machines are unaffected: the result is a 0-or-1
+    element list, identical to the single dict (or None) returned previously.
+
     Args:
         global_config_path: Path to the global MCP config file (relative to home)
         tool_name: Name of the tool (for logging)
         parent_levels: Number of parent directories to go up for the path
-    
+
     Returns:
-        Dict with 'path' and 'mcpServers' keys, or None if no config found
+        List of config dicts with 'path' and 'mcpServers' keys (empty if none found)
     """
     import platform
     
@@ -921,33 +1268,22 @@ def extract_global_mcp_config_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
-    
-    # When running as admin/root, prioritize checking user directories first
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                # Build user-specific config path
-                # global_config_path is like ~/.cursor/mcp.json
-                # We need to replace ~ with user_dir
-                try:
-                    user_config_path = user_dir / global_config_path.relative_to(Path.home())
-                    if user_config_path.exists():
-                        config = read_global_mcp_config(user_config_path, tool_name, parent_levels)
-                        if config:
-                            return config
-                except (ValueError, OSError):
-                    # Path might not be relative to home, try direct construction
-                    continue
-        
-        # Fallback to admin's own global config if no user config found
-        if global_config_path.exists():
-            return read_global_mcp_config(global_config_path, tool_name, parent_levels)
-    else:
-        # For regular users, check their own home directory
-        if global_config_path.exists():
-            return read_global_mcp_config(global_config_path, tool_name, parent_levels)
-    
-    return None
+    # No Linux branch by design: Linux MCP extractors do not call this helper.
+    # The Linux pattern is per-user accumulation across get_linux_user_homes()
+    # (see linux/cursor/mcp_config_extractor.py for the canonical shape).
+    # Returning the first match from a multi-user walk — what this function
+    # does — would silently drop the other users' configs on Linux.
+
+    # When running as admin/root, prioritize checking user directories first.
+    # The accumulate + de-dup + fallback-only inner loop lives in the shared
+    # helper; detection (above) stays here per call site.
+    return _accumulate_per_user_with_fallback(
+        _iter_admin_user_homes(is_admin, users_dir),
+        global_config_path,
+        read_global_mcp_config,
+        tool_name,
+        parent_levels,
+    )
 
 
 def extract_ide_global_configs_with_root_support(
@@ -999,24 +1335,34 @@ def extract_ide_global_configs_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
-    
-    # When running as admin/root, check all users
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                try:
-                    user_configs = extract_configs_for_user_func(user_dir)
-                    all_configs.extend(user_configs)
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
-                    continue
-        
-        # Also check root/admin's own configs
+    elif platform.system() == "Linux":
         try:
-            root_configs = extract_configs_for_user_func(Path.home())
-            all_configs.extend(root_configs)
-        except Exception as e:
-            logger.debug(f"Error extracting root configs for {tool_name}: {e}")
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+        except ImportError:
+            pass
+
+    # When running as admin/root, check all users
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            try:
+                user_configs = extract_configs_for_user_func(user_dir)
+                all_configs.extend(user_configs)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping user directory {user_dir} for {tool_name}: {e}")
+                continue
+
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
+        import platform as _platform
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
+            try:
+                root_configs = extract_configs_for_user_func(Path.home())
+                all_configs.extend(root_configs)
+            except Exception as e:
+                logger.debug(f"Error extracting root configs for {tool_name}: {e}")
     else:
         # For regular users, check their own home directory
         try:
@@ -1078,7 +1424,7 @@ def extract_project_level_mcp_configs_with_fallback_windows(
     walk_for_configs_func: Callable,
     should_skip_func: Callable[[Path], bool]
 ) -> List[Dict]:
-    """
+    r"""
     Windows-specific helper for extracting project-level MCP configs with root path handling.
     
     This function handles the common pattern for Windows:
@@ -1198,7 +1544,7 @@ def walk_for_claude_project_mcp_configs(
         for entry in current_dir.iterdir():
             try:
                 if entry.is_dir():
-                    if should_skip_func(entry):
+                    if should_skip_func(entry) or is_home_dotdir_descendant(entry):
                         continue
                     if entry.is_symlink():
                         continue
@@ -1214,7 +1560,13 @@ def walk_for_claude_project_mcp_configs(
                     except ValueError:
                         continue
 
-                    if should_skip_func(entry):
+                    # File branch: test the PARENT dir, not the file itself. A
+                    # home-rooted project config (``~/.mcp.json``, i.e. project
+                    # root == home) is valid and must be read; only skip it when
+                    # it lives *inside* a hidden home tool dir (e.g.
+                    # ``~/.cursor/.mcp.json``). Passing ``entry`` here would
+                    # misclassify the leaf dotfile as a hidden tool dir.
+                    if should_skip_func(entry) or is_home_dotdir_descendant(entry.parent):
                         continue
 
                     extract_claude_project_mcp_from_file(entry, projects)
@@ -1283,41 +1635,51 @@ def extract_dual_path_configs_with_root_support(
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
-    
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+        except ImportError:
+            pass
+
     # When running as admin/root, check all users
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                # Try preferred location for this user
-                try:
-                    user_preferred = user_dir / preferred_path.relative_to(Path.home())
-                    if user_preferred.exists():
-                        user_projects = extract_from_file_func(user_preferred)
-                        if user_projects:
-                            all_projects.extend(user_projects)
-                            continue
-                except (ValueError, OSError):
-                    pass
-                
-                # Try fallback location for this user
-                try:
-                    user_fallback = user_dir / fallback_path.relative_to(Path.home())
-                    if user_fallback.exists():
-                        user_projects = extract_from_file_func(user_fallback)
-                        if user_projects:
-                            all_projects.extend(user_projects)
-                except (ValueError, OSError):
-                    pass
-        
-        # Also check root/admin's configs
-        if preferred_path.exists():
-            root_projects = extract_from_file_func(preferred_path)
-            if root_projects:
-                all_projects.extend(root_projects)
-        elif fallback_path.exists():
-            root_projects = extract_from_file_func(fallback_path)
-            if root_projects:
-                all_projects.extend(root_projects)
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            # Try preferred location for this user
+            try:
+                user_preferred = user_dir / preferred_path.relative_to(Path.home())
+                if user_preferred.exists():
+                    user_projects = extract_from_file_func(user_preferred)
+                    if user_projects:
+                        all_projects.extend(user_projects)
+                        continue
+            except (ValueError, OSError):
+                pass
+
+            # Try fallback location for this user
+            try:
+                user_fallback = user_dir / fallback_path.relative_to(Path.home())
+                if user_fallback.exists():
+                    user_projects = extract_from_file_func(user_fallback)
+                    if user_projects:
+                        all_projects.extend(user_projects)
+            except (ValueError, OSError):
+                pass
+
+        # On Darwin also check root's own home (/var/root, not under /Users).
+        # On Windows the admin is a normal C:\Users\<name> profile already in
+        # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
+        import platform as _platform
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
+            if preferred_path.exists():
+                root_projects = extract_from_file_func(preferred_path)
+                if root_projects:
+                    all_projects.extend(root_projects)
+            elif fallback_path.exists():
+                root_projects = extract_from_file_func(fallback_path)
+                if root_projects:
+                    all_projects.extend(root_projects)
     else:
         # For regular users, check their own home directory
         if preferred_path.exists():
@@ -1343,6 +1705,9 @@ def get_managed_mcp_path() -> Optional[Path]:
         return Path("/Library/Application Support/ClaudeCode/managed-mcp.json")
     elif system == "Windows":
         return Path("C:/Program Files/ClaudeCode/managed-mcp.json")
+    elif system == "Linux":
+        # System-wide managed MCP location on Linux (MDM/system-config convention).
+        return Path("/etc/ClaudeCode/managed-mcp.json")
     return None
 
 
@@ -1451,25 +1816,46 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+        except ImportError:
+            pass
 
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                claude_dir = user_dir / ".claude"
-                if claude_dir.exists() and claude_dir.is_dir():
-                    try:
-                        extract_claudeai_mcp_servers(claude_dir, projects)
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            claude_dir = user_dir / ".claude"
+            if claude_dir.exists() and claude_dir.is_dir():
+                try:
+                    extract_claudeai_mcp_servers(claude_dir, projects)
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
-        extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
+        # On Darwin also scan the admin's own home (/var/root, not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its claude.ai MCP servers (WEB-4673).
+        import platform as _platform
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
+            extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
     else:
         extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
 
 
+def _lookup_plugin_provenance(
+    path_str: str,
+    plugin_lookup: Dict[str, Dict],
+) -> Optional[Dict]:
+    """Find plugin provenance for a path using longest-prefix match."""
+    from .plugin_extraction_helpers import find_plugin_provenance_by_path
+    return find_plugin_provenance_by_path(path_str, plugin_lookup)
+
+
 def extract_plugin_mcp_from_plugin_json(
     plugin_json_path: Path,
-    projects: List[Dict]
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
     Extract MCP config from a plugin's plugin.json file.
@@ -1478,7 +1864,10 @@ def extract_plugin_mcp_from_plugin_json(
         return
 
     try:
-        plugin_root = plugin_json_path.parent
+        parent_dir = plugin_json_path.parent
+        # Cache layout: cache/<mkt>/<plugin>/<ver>/.claude-plugin/plugin.json → go up one level
+        # Non-cache layout: plugins/<plugin>/plugin.json → parent IS the plugin root
+        plugin_root = parent_dir.parent if parent_dir.name in _PLUGIN_METADATA_DIRS else parent_dir
         content = plugin_json_path.read_text(encoding='utf-8', errors='replace')
         config_data = json.loads(content)
 
@@ -1490,12 +1879,18 @@ def extract_plugin_mcp_from_plugin_json(
 
         if mcp_servers_array:
             plugin_name = config_data.get("name", plugin_root.name)
-            projects.append({
+            project_entry = {
                 "path": str(plugin_root),
                 "mcpServers": mcp_servers_array,
                 "scope": "plugin",
-                "pluginName": plugin_name
-            })
+                "pluginName": plugin_name,
+            }
+            if plugin_lookup:
+                provenance = _lookup_plugin_provenance(str(plugin_root), plugin_lookup)
+                if provenance:
+                    provenance["source"] = "plugin"
+                    project_entry.update(provenance)
+            projects.append(project_entry)
     except json.JSONDecodeError as e:
         logger.debug(f"Invalid JSON in plugin.json {plugin_json_path}: {e}")
     except PermissionError as e:
@@ -1504,7 +1899,11 @@ def extract_plugin_mcp_from_plugin_json(
         logger.debug(f"Error reading plugin.json {plugin_json_path}: {e}")
 
 
-def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
+def _scan_plugin_cache_dir(
+    cache_dir: Path,
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
+) -> None:
     """
     Scan the plugin cache directory for MCP configs.
 
@@ -1515,6 +1914,7 @@ def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
     Args:
         cache_dir: Path to ~/.claude/plugins/cache
         projects: List to append results to
+        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
     if not cache_dir.exists() or not cache_dir.is_dir():
         return
@@ -1535,12 +1935,16 @@ def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
                             mcp_file = version_dir / ".mcp.json"
                             if mcp_file.exists() and mcp_file.is_file():
                                 _extract_plugin_mcp_from_dot_mcp_json(
-                                    mcp_file, plugin_dir.name, projects
+                                    mcp_file, plugin_dir.name, projects,
+                                    plugin_lookup=plugin_lookup,
                                 )
 
                             claude_plugin_json = version_dir / ".claude-plugin" / "plugin.json"
                             if claude_plugin_json.exists():
-                                extract_plugin_mcp_from_plugin_json(claude_plugin_json, projects)
+                                extract_plugin_mcp_from_plugin_json(
+                                    claude_plugin_json, projects,
+                                    plugin_lookup=plugin_lookup,
+                                )
                     except (PermissionError, OSError):
                         continue
             except (PermissionError, OSError):
@@ -1554,7 +1958,8 @@ def _scan_plugin_cache_dir(cache_dir: Path, projects: List[Dict]) -> None:
 def _extract_plugin_mcp_from_dot_mcp_json(
     mcp_json_path: Path,
     plugin_name: str,
-    projects: List[Dict]
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
     Extract MCP config from a plugin's .mcp.json file in the cache directory.
@@ -1563,6 +1968,7 @@ def _extract_plugin_mcp_from_dot_mcp_json(
         mcp_json_path: Path to the .mcp.json file
         plugin_name: Name of the plugin (directory name)
         projects: List to append results to
+        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
     try:
         content = mcp_json_path.read_text(encoding='utf-8', errors='replace')
@@ -1577,12 +1983,19 @@ def _extract_plugin_mcp_from_dot_mcp_json(
         mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
 
         if mcp_servers_array:
-            projects.append({
-                "path": str(mcp_json_path.parent),
+            parent_path = str(mcp_json_path.parent)
+            project_entry = {
+                "path": parent_path,
                 "mcpServers": mcp_servers_array,
                 "scope": "plugin",
-                "pluginName": plugin_name
-            })
+                "pluginName": plugin_name,
+            }
+            if plugin_lookup:
+                provenance = _lookup_plugin_provenance(parent_path, plugin_lookup)
+                if provenance:
+                    provenance["source"] = "plugin"
+                    project_entry.update(provenance)
+            projects.append(project_entry)
     except json.JSONDecodeError as e:
         logger.debug(f"Invalid JSON in plugin .mcp.json {mcp_json_path}: {e}")
     except PermissionError as e:
@@ -1591,7 +2004,10 @@ def _extract_plugin_mcp_from_dot_mcp_json(
         logger.debug(f"Error reading plugin .mcp.json {mcp_json_path}: {e}")
 
 
-def extract_claude_plugin_mcp_configs(projects: List[Dict]) -> None:
+def extract_claude_plugin_mcp_configs(
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
+) -> None:
     """
     Extract MCP configs from Claude Code plugins.
     """
@@ -1606,16 +2022,19 @@ def extract_claude_plugin_mcp_configs(projects: List[Dict]) -> None:
 
             plugin_json = plugin_dir / "plugin.json"
             if plugin_json.exists():
-                extract_plugin_mcp_from_plugin_json(plugin_json, projects)
+                extract_plugin_mcp_from_plugin_json(plugin_json, projects, plugin_lookup=plugin_lookup)
     except (PermissionError, OSError) as e:
         logger.debug(f"Error scanning plugins directory {plugins_dir}: {e}")
     except Exception as e:
         logger.debug(f"Error extracting plugin MCP configs: {e}")
 
-    _scan_plugin_cache_dir(plugins_dir / "cache", projects)
+    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
 
-def extract_claude_plugin_mcp_configs_with_root_support(projects: List[Dict]) -> None:
+def extract_claude_plugin_mcp_configs_with_root_support(
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
+) -> None:
     """
     Extract MCP configs from Claude Code plugins with root user support.
     """
@@ -1644,25 +2063,38 @@ def extract_claude_plugin_mcp_configs_with_root_support(projects: List[Dict]) ->
                 users_dir = Path("C:\\Users")
             except Exception:
                 pass
+    elif platform.system() == "Linux":
+        try:
+            from .macos_extraction_helpers import is_running_as_root
+            is_admin = is_running_as_root()
+        except ImportError:
+            pass
 
-    if is_admin and users_dir and users_dir.exists():
-        for user_dir in users_dir.iterdir():
-            if user_dir.is_dir() and not user_dir.name.startswith('.'):
-                plugins_dir = user_dir / ".claude" / "plugins"
-                if plugins_dir.exists() and plugins_dir.is_dir():
-                    try:
-                        for plugin_dir in plugins_dir.iterdir():
-                            if not plugin_dir.is_dir():
-                                continue
-                            plugin_json = plugin_dir / "plugin.json"
-                            if plugin_json.exists():
-                                extract_plugin_mcp_from_plugin_json(plugin_json, projects)
-                    except (PermissionError, OSError) as e:
-                        logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
+    admin_homes = _iter_admin_user_homes(is_admin, users_dir)
+    if admin_homes:
+        for user_dir in admin_homes:
+            plugins_dir = user_dir / ".claude" / "plugins"
+            if plugins_dir.exists() and plugins_dir.is_dir():
+                try:
+                    for plugin_dir in plugins_dir.iterdir():
+                        if not plugin_dir.is_dir():
+                            continue
+                        plugin_json = plugin_dir / "plugin.json"
+                        if plugin_json.exists():
+                            extract_plugin_mcp_from_plugin_json(
+                                plugin_json, projects, plugin_lookup=plugin_lookup
+                            )
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
 
-                    _scan_plugin_cache_dir(plugins_dir / "cache", projects)
+                _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
-        extract_claude_plugin_mcp_configs(projects)
+        # On Darwin also scan the admin's own home plugins (not under /Users).
+        # On Windows the admin's home is already in admin_homes — skip to avoid
+        # double-counting its plugin MCP configs (WEB-4673).
+        import platform as _platform
+        if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
+            extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
     else:
-        extract_claude_plugin_mcp_configs(projects)
+        extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
 

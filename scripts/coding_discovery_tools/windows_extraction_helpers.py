@@ -6,6 +6,8 @@ on Windows and macOS to avoid code duplication.
 """
 
 import logging
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
@@ -15,6 +17,89 @@ from scripts.coding_discovery_tools.macos_extraction_helpers import SKIP_PATTERN
 from .constants import MAX_CONFIG_FILE_SIZE
 
 logger = logging.getLogger(__name__)
+
+
+# Maps the globalStorage IDE-folder key (as used by Cline/Roo ``SUPPORTED_IDES``)
+# to the host editor's Windows ``Programs``/``Program Files`` install-dir names
+# and the executable names it puts on PATH. Used to gate Cline/Roo rows on the
+# host editor actually being installed (the ``globalStorage/<ext-id>`` dir
+# survives an editor uninstall, so it alone is not proof of install).
+_WINDOWS_IDE_INSTALL_INFO: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "Code": {
+        "dir_names": ("Microsoft VS Code",),
+        "exe_names": ("code", "code.cmd", "code.exe"),
+    },
+    "Cursor": {
+        "dir_names": ("Cursor",),
+        "exe_names": ("cursor", "cursor.cmd", "cursor.exe"),
+    },
+    "Windsurf": {
+        "dir_names": ("Windsurf",),
+        "exe_names": ("windsurf", "windsurf.cmd", "windsurf.exe"),
+    },
+}
+
+
+def is_windows_ide_installed(ide_folder: str, user_home: Path) -> Tuple[bool, Optional[str]]:
+    """Return ``(installed, path)`` for a host editor (VS Code / Cursor /
+    Windsurf) on Windows, scanning every documented install location:
+
+    * the user's per-user ``%LOCALAPPDATA%\\Programs\\<IDE>`` install,
+    * machine-wide ``C:\\Program Files\\<IDE>`` and
+      ``C:\\Program Files (x86)\\<IDE>``,
+    * the editor's launcher on PATH (``shutil.which``).
+
+    The thorough probe is deliberate: a too-narrow host check would HIDE a real
+    Cline/Roo user whose editor lives somewhere the check forgot, trading the
+    residue false-positive for a false-negative. ANY hit counts as installed.
+    Never raises — every filesystem/PATH probe is wrapped.
+
+    Args:
+        ide_folder: The ``SUPPORTED_IDES`` key (``Code`` / ``Cursor`` /
+            ``Windsurf``).
+        user_home: The home dir of the user being scanned (so a SYSTEM/admin
+            scan checks THAT user's per-user install, not the scanner's).
+
+    Returns:
+        Tuple of (is_installed, install_path_or_exe_path) — path is None when
+        not installed.
+    """
+    info = _WINDOWS_IDE_INSTALL_INFO.get(ide_folder)
+    if not info:
+        return False, None
+
+    install_bases = [
+        user_home / "AppData" / "Local" / "Programs",
+        Path("C:\\Program Files"),
+        Path("C:\\Program Files (x86)"),
+    ]
+    for base in install_bases:
+        for dir_name in info["dir_names"]:
+            app_dir = base / dir_name
+            try:
+                if app_dir.exists() and app_dir.is_dir():
+                    return True, str(app_dir)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not check IDE dir {app_dir}: {e}")
+                continue
+
+    # ``shutil.which`` resolves the SCANNER's PATH, not ``user_home``'s. Under an
+    # elevated admin scan the admin's own VS Code/Cursor on PATH would be
+    # attributed to every user with extension residue (the cross-user FP this PR
+    # fixes everywhere else). Skip it when admin; the user_home-scoped and
+    # machine-wide dir checks above already cover real installs. Mirrors the
+    # Linux guard and ``find_claude_binary_for_user``'s ``which`` guard.
+    if not is_running_as_admin():
+        for exe_name in info["exe_names"]:
+            try:
+                found = shutil.which(exe_name)
+                if found:
+                    return True, found
+            except (OSError, Exception) as e:  # noqa: BLE001 - which must never crash
+                logger.debug(f"PATH lookup for {exe_name} failed: {e}")
+                continue
+
+    return False, None
 
 
 def add_rule_to_project(
@@ -216,7 +301,7 @@ def _detect_rule_scope(rule_file: Path) -> str:
     Path.home() so that scope detection works correctly when running
     as admin via MDM (where Path.home() may not match the actual user).
     """
-    config_dir_names = {".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini"}
+    config_dir_names = {".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline", ".clinerules", ".kilocode", ".gemini", ".junie"}
     try:
         parts = rule_file.resolve().parts
         # On Windows: ('C:\\', 'Users', '<username>', '.<config_dir>', ...)
@@ -380,6 +465,49 @@ def is_running_as_admin() -> bool:
             return current_user in ["administrator", "system"]
         except Exception:
             return False
+
+
+def _other_user_appdata_local_dirs() -> List[Path]:
+    """Enumerate ``C:\\Users\\<user>\\AppData\\Local`` for every real user (the
+    shared base for the Programs subdir and for Squirrel direct installs that
+    live directly under ``AppData\\Local\\<name>``). Skips well-known service /
+    template accounts. Never raises — directory enumeration is wrapped."""
+    local_roots: List[Path] = []
+    users_dir = Path("C:\\Users")
+    try:
+        if not users_dir.exists():
+            return local_roots
+        for user_dir in users_dir.iterdir():
+            try:
+                if not user_dir.is_dir() or user_dir.name.startswith("."):
+                    continue
+                if user_dir.name.lower() in (
+                    "public", "default", "default user", "all users",
+                ):
+                    continue
+                local_roots.append(user_dir / "AppData" / "Local")
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not inspect user dir {user_dir}: {e}")
+                continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate C:\\Users: {e}")
+    return local_roots
+
+
+def other_user_program_dirs() -> List[Path]:
+    """Enumerate ``C:\\Users\\<user>\\AppData\\Local\\Programs`` for every real
+    user, so a SYSTEM/admin (MDM) scan reaches per-user squirrel installs that
+    belong to other users. Skips the well-known service / template accounts.
+    Never raises — directory enumeration is wrapped."""
+    return [local / "Programs" for local in _other_user_appdata_local_dirs()]
+
+
+def other_user_local_appdata_dirs() -> List[Path]:
+    """Enumerate ``C:\\Users\\<user>\\AppData\\Local`` for every real user, so a
+    SYSTEM/admin (MDM) scan reaches Squirrel direct installs that land directly
+    under ``AppData\\Local\\<name>`` (e.g. Electron Forge apps like Replit) for
+    OTHER users. Skips well-known service / template accounts. Never raises."""
+    return _other_user_appdata_local_dirs()
 
 
 def get_windows_system_directories() -> set:

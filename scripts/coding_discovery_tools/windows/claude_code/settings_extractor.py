@@ -75,7 +75,7 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
         return all_settings if all_settings else None
 
     def _extract_user_settings(self) -> List[Dict]:
-        """
+        r"""
         Extract user settings from %USERPROFILE%\.claude\settings.json.
         
         When running as admin, scans all user directories.
@@ -118,7 +118,7 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
         return settings_list
 
     def _extract_project_settings(self) -> List[Dict]:
-        """
+        r"""
         Extract project settings from **\.claude\settings.json and **\.claude\settings.local.json.
         
         Skips the global user .claude directory (%USERPROFILE%\.claude) to avoid duplicates.

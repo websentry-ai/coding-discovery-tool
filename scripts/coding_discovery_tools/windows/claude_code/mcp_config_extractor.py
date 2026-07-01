@@ -16,6 +16,7 @@ from ...mcp_extraction_helpers import (
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
     extract_claudeai_mcp_servers_with_root_support,
+    is_claude_plugins_path,
 )
 from ...windows_extraction_helpers import should_skip_path
 
@@ -29,7 +30,7 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
     MCP_CONFIG_PATH_PREFERRED = Path.home() / ".claude.json"
     MCP_CONFIG_PATH_FALLBACK = Path.home() / ".claude" / "mcp.json"
 
-    def extract_mcp_config(self) -> Optional[Dict]:
+    def extract_mcp_config(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract Claude Code MCP configuration on Windows.
 
@@ -41,6 +42,11 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         5. Cloud-synced MCP server names from ~/.claude/mcp-needs-auth-cache.json
 
         Uses parallel processing for filesystem scanning.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, MCP servers from plugins are tagged with
+                provenance fields.
 
         Returns:
             Dict with MCP config info (projects array) or None if not found
@@ -64,7 +70,7 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         all_projects.extend(project_scope_configs)
 
         # Extract plugin MCP configs from ~/.claude/plugins/
-        extract_claude_plugin_mcp_configs_with_root_support(all_projects)
+        extract_claude_plugin_mcp_configs_with_root_support(all_projects, plugin_lookup=plugin_lookup)
 
         # Extract cloud-synced MCP server names from claude.ai
         extract_claudeai_mcp_servers_with_root_support(all_projects)
@@ -88,7 +94,8 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         system_dirs = self._get_system_directories()
 
         def should_skip(item: Path) -> bool:
-            return should_skip_path(item, system_dirs)
+            return (should_skip_path(item, system_dirs)
+                    or is_claude_plugins_path(item))
 
         try:
             top_level_dirs = [

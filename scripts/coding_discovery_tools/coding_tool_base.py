@@ -12,7 +12,9 @@ import sqlite3
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, Iterable, List, Tuple, Union
+
+from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +291,157 @@ class BaseGitHubCopilotRulesExtractor(ABC):
         pass
 
 
+class BaseCopilotCliRulesExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI rules.
+
+    This is for the standalone ``@github/copilot`` CLI (config under
+    ``~/.copilot/``), a distinct product from the GitHub Copilot IDE
+    extension/plugin. It mirrors the single-product rules bases
+    (``BaseCodexRulesExtractor`` / ``BaseGeminiCliRulesExtractor``) and takes no
+    ``tool_name`` argument — the CLI is one tool, not a family of IDE-coupled
+    variants, so ``BaseGitHubCopilotRulesExtractor`` is intentionally not reused.
+    """
+
+    @abstractmethod
+    def extract_all_copilot_cli_rules(self) -> List[Dict]:
+        """
+        Extract all GitHub Copilot CLI rules from all projects on the machine.
+
+        Searches for (all paths docs-verified):
+        - Global (scope "user"): ``<config_dir>/copilot-instructions.md``
+        - Global (scope "user"): ``<config_dir>/instructions/**/*.instructions.md``
+        - Project (scope "project"): repo-root ``.github/copilot-instructions.md``
+        - Project (scope "project"): ``.github/instructions/**/*.instructions.md``
+        - Project (scope "project"): repo-root ``AGENTS.md`` / ``CLAUDE.md`` /
+          ``GEMINI.md`` (root only, not recursive)
+        - Env (scope "user", current user only): each dir in
+          ``COPILOT_CUSTOM_INSTRUCTIONS_DIRS`` contributes ``AGENTS.md`` and
+          ``.github/instructions/**/*.instructions.md``
+
+        ``<config_dir>`` honors ``COPILOT_HOME`` for the running user, else
+        ``<user_home>/.copilot``.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root directory
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated, scope)
+        """
+        pass
+
+
+class BaseCopilotCliSettingsExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI settings/permissions.
+
+    For the standalone ``@github/copilot`` CLI (config under ``~/.copilot/``).
+    Mirrors ``BaseClaudeSettingsExtractor`` — returns a list of per-scope settings
+    dicts that the orchestrator routes through
+    ``transform_settings_to_backend_format`` into the tool-level ``permissions``.
+    """
+
+    @abstractmethod
+    def extract_settings(self) -> Optional[List[Dict]]:
+        """
+        Extract GitHub Copilot CLI durable permission settings.
+
+        Reads the user-scope config (``<config_dir>/config.json`` and, during the
+        settings migration, ``<config_dir>/settings.json``) for the keys the CLI
+        actually persists: ``trusted_folders``, ``allowed_urls``, ``denied_urls``
+        (snake_case on disk; camelCase tolerated). ``<config_dir>`` honors
+        ``COPILOT_HOME`` for the running user, else ``<user_home>/.copilot``. When
+        running as root, scans every user's home.
+
+        Returns:
+            List of per-user settings dicts (scope "user"), each with
+            ``tool_name``, ``scope``, ``settings_path``, ``raw_settings`` and a
+            nested ``permissions`` dict; ``None``/empty if nothing is found.
+        """
+        pass
+
+
+class BaseAugmentRulesExtractor(ABC):
+    """Abstract base class for extracting Augment Code rules from all projects.
+
+    For Augment Code (config under ``~/.augment/``), distinct from the IDE
+    Copilot/Claude surfaces. Mirrors ``BaseCopilotCliRulesExtractor`` — a single
+    product, no ``tool_name`` argument.
+    """
+
+    @abstractmethod
+    def extract_all_augment_rules(self) -> List[Dict]:
+        """
+        Extract all Augment Code rules from all projects on the machine.
+
+        Searches for:
+        - User (scope "user"): ``~/.augment/user-guidelines.md`` and
+          ``~/.augment/rules/**/*.{md,mdx}``
+        - Project (scope "project"): repo-root ``.augment-guidelines``,
+          ``<ws>/.augment/rules/**/*.{md,mdx}``, and ``AGENTS.md`` / ``CLAUDE.md``
+          discovered hierarchically (depth-bounded).
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root directory
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated, scope)
+        """
+        pass
+
+
+class BaseAugmentSettingsExtractor(ABC):
+    """Abstract base class for extracting Augment Code settings/permissions.
+
+    For Augment Code (config under ``~/.augment/``). Mirrors
+    ``BaseClaudeSettingsExtractor`` — returns a list of per-scope settings dicts
+    routed through ``transform_settings_to_backend_format``.
+    """
+
+    @abstractmethod
+    def extract_settings(self) -> Optional[List[Dict]]:
+        """
+        Extract Augment Code settings (permissions + full settings JSON).
+
+        Searches for:
+        - User: ``~/.augment/settings.json``
+        - Managed: ``/etc/augment/settings.json``
+        - Project: ``<ws>/.augment/settings.json`` and
+          ``<ws>/.augment/settings.local.json`` (local scope)
+
+        ``toolPermissions`` is parsed into ``permissions.{allow,deny,ask}`` and the
+        full settings JSON (including ``hooks``) is preserved in ``raw_settings``.
+
+        Returns:
+            List of per-scope settings dicts, or ``None``/empty if nothing found.
+        """
+        pass
+
+
+class BaseAugmentSkillsExtractor(ABC):
+    """Abstract base class for extracting Augment Code skills.
+
+    For Augment Code. Augment has no plugin system, so skills carry
+    ``source="standalone"``.
+    """
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all Augment Code skills from all projects on the machine.
+
+        Searches:
+        - User-level: ~/.augment/skills/<name>/SKILL.md, ~/.augment/commands/*.md
+        - Project-level: **/.augment/commands/*.md, **/.augment/skills/<name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope "user")
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
 class BaseJunieRulesExtractor(ABC):
     """Abstract base class for extracting Junie rules from all projects."""
 
@@ -323,9 +476,14 @@ class BaseMCPConfigExtractor(ABC):
     """Abstract base class for extracting MCP configuration."""
 
     @abstractmethod
-    def extract_mcp_config(self) -> Optional[Dict]:
+    def extract_mcp_config(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract MCP configuration for the tool.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, MCP servers originating from plugins are
+                tagged with provenance fields.
         """
         pass
 
@@ -334,7 +492,7 @@ class BaseClaudeSkillsExtractor(ABC):
     """Abstract base class for extracting Claude Code skills from all projects."""
 
     @abstractmethod
-    def extract_all_skills(self) -> Dict:
+    def extract_all_skills(self, plugin_lookup: Optional[Dict] = None) -> Dict:
         """
         Extract all Claude Code skills and commands from all projects on the machine.
 
@@ -345,6 +503,11 @@ class BaseClaudeSkillsExtractor(ABC):
         - Project-level commands: **/.claude/commands/<name>.md
 
         The `type` field distinguishes entries: "skill" for skills, "command" for commands.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
 
         Returns:
             Dict with:
@@ -389,7 +552,7 @@ class BaseCursorSkillsExtractor(ABC):
     """Abstract base class for extracting Cursor skills from all projects."""
 
     @abstractmethod
-    def extract_all_skills(self) -> Dict:
+    def extract_all_skills(self, plugin_lookup: Optional[Dict] = None) -> Dict:
         """
         Extract all Cursor skills from all projects on the machine.
 
@@ -399,10 +562,69 @@ class BaseCursorSkillsExtractor(ABC):
 
         The `type` field distinguishes entries: "skill" for skills.
 
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, skills under a plugin path are tagged with
+                source="plugin" and provenance fields.
+
         Returns:
             Dict with:
             - user_skills: List of user-level skill dicts (global, scope: "user")
               Each entry has: skill_name, file_path, content, size, last_modified, truncated, scope, type
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
+class BaseClineSkillsExtractor(ABC):
+    """Abstract base class for extracting Cline skills from all projects."""
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all Cline skills from all projects on the machine.
+
+        Searches for:
+        - User-level skills: ~/.cline/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.cline/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.clinerules/skills/<skill-name>/SKILL.md
+        - Project-level skills: **/.claude/skills/<skill-name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (global, scope: "user")
+              Each entry has: skill_name, file_path, content, size, last_modified, truncated, scope, type
+            - project_skills: List of project dicts, each containing:
+              - project_root: Path to the project root
+              - skills: List of skill dicts with metadata
+        """
+        pass
+
+
+class BaseCopilotCliSkillsExtractor(ABC):
+    """Abstract base class for extracting GitHub Copilot CLI skills.
+
+    For the standalone ``@github/copilot`` CLI. Copilot CLI has no plugin system,
+    so skills carry ``source="standalone"``.
+    """
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """
+        Extract all GitHub Copilot CLI skills from all projects on the machine.
+
+        Each skill is a subdirectory containing a ``SKILL.md``. Searches:
+        - User-level: ~/.copilot/skills/<name>/SKILL.md, ~/.agents/skills/<name>/SKILL.md
+        - Project-level: **/.github/skills/<name>/SKILL.md,
+          **/.claude/skills/<name>/SKILL.md, **/.agents/skills/<name>/SKILL.md
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope "user")
+              Each entry has: skill_name, file_path, file_name, content, size,
+              last_modified, truncated, scope, type, source, project_path
             - project_skills: List of project dicts, each containing:
               - project_root: Path to the project root
               - skills: List of skill dicts with metadata
@@ -474,6 +696,25 @@ class BaseCursorSettingsExtractor(ABC):
         """Scan user directories and call callback for each user home."""
         pass
 
+    @abstractmethod
+    def _get_user_permissions_path(self, user_home) -> "Path":
+        """Return the global per-user Cursor permissions file: ~/.cursor/permissions.json."""
+        pass
+
+    @abstractmethod
+    def _iter_workspace_permissions_files(self, user_home) -> Iterable["Path"]:
+        """Yield every <workspace>/.cursor/permissions.json under this user.
+
+        Excludes the global ~/.cursor/permissions.json (yielded separately by
+        ``_get_user_permissions_path``) so it is never double-counted.
+
+        Note: the team-admin dashboard is the ultimate authority ceiling for
+        Cursor permissions (admin dashboard > permissions.json > IDE/SQLite),
+        but it is cloud-only and unreadable locally, so it is intentionally not
+        represented here.
+        """
+        pass
+
     def extract_settings(self) -> Optional[Dict]:
         """Extract Cursor IDE permission settings from SQLite database."""
         settings_list = []
@@ -485,7 +726,7 @@ class BaseCursorSettingsExtractor(ABC):
                 return
 
             try:
-                settings_dict = self._extract_from_database(db_path)
+                settings_dict = self._extract_from_database(db_path, user_home)
                 if settings_dict:
                     logger.info(f"  ✓ Extracted Cursor settings from {db_path}")
                     settings_list.append(settings_dict)
@@ -570,8 +811,170 @@ class BaseCursorSettingsExtractor(ABC):
 
         return backend_settings
 
-    def _extract_from_database(self, db_path: Path) -> Optional[Dict]:
-        """Extract composerState from SQLite database using a temp copy to avoid locks."""
+    def _read_permissions_json(self, path) -> Optional[Dict]:
+        """Read and parse a Cursor ``permissions.json`` file, JSONC-tolerant.
+
+        Strips // and /* */ comments and trailing commas before parsing. Returns
+        the parsed dict, or ``None`` on any failure (missing file, bad JSON, OS
+        error, non-object root). Never raises.
+        """
+        try:
+            raw = Path(path).read_text(encoding="utf-8")
+            cleaned = _strip_trailing_commas(_strip_jsonc_comments(raw))
+            data = json.loads(cleaned)
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.debug(f"Could not read Cursor permissions file {path}: {e}")
+            return None
+
+    def _collect_permissions_files(self, user_home) -> Tuple[Optional[Dict], List[Dict]]:
+        """Collect parsed permissions dicts for a user.
+
+        Reads the single global ``~/.cursor/permissions.json`` plus every
+        per-workspace file. Each read is independently guarded so one unreadable
+        workspace file cannot poison the others.
+
+        Returns:
+            ``(user_dict_or_None, [workspace_dicts])`` — workspace dicts in walk
+            order, only successfully-parsed objects included.
+        """
+        user_dict = self._read_permissions_json(self._get_user_permissions_path(user_home))
+
+        workspace_dicts: List[Dict] = []
+        try:
+            for ws_path in self._iter_workspace_permissions_files(user_home):
+                parsed = self._read_permissions_json(ws_path)
+                if parsed is not None:
+                    workspace_dicts.append(parsed)
+        except Exception as e:
+            logger.debug(f"Error iterating workspace Cursor permissions for {user_home}: {e}")
+
+        return user_dict, workspace_dicts
+
+    @staticmethod
+    def _dedupe_preserve_order(values: Iterable) -> List:
+        """Return list values with order preserved and duplicates removed."""
+        seen = set()
+        result = []
+        for value in values:
+            try:
+                if value in seen:
+                    continue
+                seen.add(value)
+            except TypeError:
+                if value in result:
+                    continue
+            result.append(value)
+        return result
+
+    def _merge_permissions_fields(self, user_dict, workspace_dicts) -> Dict:
+        """Merge the known permissions fields across user + workspace files.
+
+        For each known field, concatenates the user file first then each
+        workspace in walk order, with order-preserving de-dupe. ``autoRun`` is an
+        object: its documented ``allow_instructions`` / ``block_instructions``
+        arrays are concatenated independently across files, while any other
+        sub-keys are preserved via a shallow merge (last file wins). Unknown
+        top-level keys are ignored.
+
+        Returns ``{"mcpAllowlist": [...]|None, "terminalAllowlist": [...]|None,
+        "autoRun": {...}|None}`` where ``None`` means no file spoke to that field.
+        """
+        sources = []
+        if user_dict is not None:
+            sources.append(user_dict)
+        sources.extend(workspace_dicts)
+
+        def merge_list_field(field_name):
+            saw = False
+            collected = []
+            for src in sources:
+                value = src.get(field_name)
+                if isinstance(value, list):
+                    saw = True
+                    collected.extend(value)
+            return self._dedupe_preserve_order(collected) if saw else None
+
+        merged_auto_run = None
+        collected_instructions = {"allow_instructions": [], "block_instructions": []}
+        for src in sources:
+            auto_run = src.get("autoRun")
+            if not isinstance(auto_run, dict):
+                continue
+            if merged_auto_run is None:
+                merged_auto_run = {}
+            # Shallow-merge to preserve unknown sub-keys (later file wins).
+            merged_auto_run.update(auto_run)
+            for nested_key in ("allow_instructions", "block_instructions"):
+                nested = auto_run.get(nested_key)
+                if isinstance(nested, list):
+                    collected_instructions[nested_key].extend(nested)
+
+        if merged_auto_run is not None:
+            # Overwrite the documented arrays with their concatenated+deduped
+            # values, leaving any other preserved sub-keys untouched.
+            for nested_key in ("allow_instructions", "block_instructions"):
+                merged_auto_run[nested_key] = self._dedupe_preserve_order(
+                    collected_instructions[nested_key]
+                )
+
+        return {
+            "mcpAllowlist": merge_list_field("mcpAllowlist"),
+            "terminalAllowlist": merge_list_field("terminalAllowlist"),
+            "autoRun": merged_auto_run,
+        }
+
+    def _apply_permissions_json_override(self, backend_settings, user_home) -> Dict:
+        """Layer ``permissions.json`` over the SQLite-derived backend record.
+
+        Per-field REPLACE semantics: a field present in any permissions.json wins
+        over the SQLite-derived value for that field; silent fields are untouched.
+        When no permissions.json file speaks to any known field, returns
+        ``backend_settings`` unchanged (byte-identical guarantee).
+        """
+        user_dict, workspace_dicts = self._collect_permissions_files(user_home)
+        merged = self._merge_permissions_fields(user_dict, workspace_dicts)
+
+        merged_mcp = merged["mcpAllowlist"]
+        merged_terminal = merged["terminalAllowlist"]
+        merged_auto_run = merged["autoRun"]
+
+        if merged_mcp is None and merged_terminal is None and merged_auto_run is None:
+            return backend_settings
+
+        if merged_mcp is not None:
+            backend_settings["mcp_tool_allowlist"] = merged_mcp
+
+        if merged_terminal is not None:
+            backend_settings["allow_rules"] = [
+                f"Bash({cmd}*)" for cmd in merged_terminal if cmd and isinstance(cmd, str)
+            ]
+
+        if merged_auto_run is not None:
+            raw_settings = backend_settings.get("raw_settings")
+            if isinstance(raw_settings, dict):
+                raw_settings["autoRun"] = merged_auto_run
+
+        applied_fields = [
+            name
+            for name, value in (
+                ("mcp", merged_mcp),
+                ("terminal", merged_terminal),
+                ("autorun", merged_auto_run),
+            )
+            if value is not None
+        ]
+        logger.info(f"  ✓ Applied permissions.json override for fields: {', '.join(applied_fields)}")
+
+        return backend_settings
+
+    def _extract_from_database(self, db_path: Path, user_home: Path) -> Optional[Dict]:
+        """Extract composerState from SQLite database using a temp copy to avoid locks.
+
+        After parsing the SQLite-derived backend record, layers Cursor's
+        ``permissions.json`` files (global + per-workspace) on top as a per-field
+        override (see ``_apply_permissions_json_override``).
+        """
         temp_db_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".vscdb", delete=False) as temp_db:
@@ -599,7 +1002,8 @@ class BaseCursorSettingsExtractor(ABC):
                 logger.debug("No composerState found in storage data")
                 return None
 
-            return self._parse_composer_state(composer_state, db_path)
+            backend = self._parse_composer_state(composer_state, db_path)
+            return self._apply_permissions_json_override(backend, user_home)
 
         except sqlite3.Error as e:
             logger.warning(f"SQLite error reading {db_path}: {e}")

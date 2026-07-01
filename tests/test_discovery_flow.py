@@ -5,22 +5,26 @@ Tests the outermost entry points: AIToolsDetector, main() CLI, report_to_sentry,
 settings transformation, and project filtering.
 
 Only mocks external environments: HTTP backend (real server on localhost),
-QUEUE_FILE path (tempfile), _SENTRY_DSN (prevent real calls), time.sleep.
+the queue path via AI_DISCOVERY_QUEUE_FILE (tempfile), _SENTRY_DSN (prevent
+real calls), time.sleep.
 Tool detection runs un-mocked on whatever OS is available.
 """
 
+import errno
 import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
@@ -87,6 +91,88 @@ class TestDetector(unittest.TestCase):
             self.assertIn("projects", reported_tool)
 
 
+class TestAugmentInDiscoveryFlow(unittest.TestCase):
+    """Augment Code is wired into the end-to-end discovery flow and is fail-safe."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_augment_detector_registered(self):
+        from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
+        for os_name in ("Darwin", "Windows", "Linux"):
+            names = [d.tool_name for d in ToolDetectorFactory.create_all_tool_detectors(os_name)]
+            self.assertIn("Augment Code", names)
+
+    def test_augment_surfaces_flow_through_generate_report(self):
+        """A detected Augment surface set flows through generate_report e2e: the
+        canonical CLI row carries config, the others are bare."""
+        detector = AIToolsDetector(os_name="Darwin")
+        # Stub the shared extractors (no real disk walk).
+        detector._augment_mcp_extractor = Mock()
+        detector._augment_mcp_extractor.extract_mcp_config.return_value = {
+            "projects": [{"path": "/Users/x/.augment", "mcpServers": [{"name": "s"}], "scope": "user"}],
+        }
+        detector._augment_rules_extractor = Mock()
+        detector._augment_rules_extractor.extract_all_augment_rules.return_value = []
+        detector._augment_skills_extractor = Mock()
+        detector._augment_skills_extractor.extract_all_skills.return_value = {
+            "user_skills": [], "project_skills": [],
+        }
+        detector._augment_settings_extractor = Mock()
+        detector._augment_settings_extractor.extract_settings.return_value = []
+
+        augment_tools = [
+            {"name": "Auggie CLI", "version": "0.30.0",
+             "install_path": "/Users/x/.local/bin/auggie", "_config_path": "/Users/x/.augment"},
+            {"name": "Augment (VS Code)", "version": "1.0",
+             "install_path": "/Users/x/.vscode/extensions", "_config_path": "/Users/x/.augment"},
+        ]
+        with patch.object(detector, "detect_all_tools", return_value=augment_tools), \
+             patch.object(detector, "get_device_id", return_value="DEV-1"):
+            report = detector.generate_report()
+
+        by_name = {t["name"]: t for t in report["tools"]}
+        self.assertIn("Auggie CLI", by_name)
+        self.assertIn("Augment (VS Code)", by_name)
+        # Canonical CLI carries the shared MCP project; the VS Code row is bare.
+        self.assertTrue(by_name["Auggie CLI"]["projects"])
+        self.assertEqual(by_name["Augment (VS Code)"]["projects"], [])
+
+    def test_failing_augment_extractor_does_not_break_scan(self):
+        """A throwing Augment extractor degrades to an empty Augment row WITHOUT
+        breaking the scan or other tools' data (memoized accessors swallow + warn)."""
+        detector = AIToolsDetector(os_name="Darwin")
+        # Augment rules/MCP/skills/settings all explode.
+        detector._augment_mcp_extractor = Mock()
+        detector._augment_mcp_extractor.extract_mcp_config.side_effect = RuntimeError("boom")
+        detector._augment_rules_extractor = Mock()
+        detector._augment_rules_extractor.extract_all_augment_rules.side_effect = RuntimeError("boom")
+        detector._augment_skills_extractor = Mock()
+        detector._augment_skills_extractor.extract_all_skills.side_effect = RuntimeError("boom")
+        detector._augment_settings_extractor = Mock()
+        detector._augment_settings_extractor.extract_settings.side_effect = RuntimeError("boom")
+
+        tools = [
+            {"name": "Auggie CLI", "version": "0.30.0",
+             "install_path": "/Users/x/.local/bin/auggie", "_config_path": "/Users/x/.augment"},
+            # An unrelated tool whose data must survive the Augment failure.
+            {"name": "OpenClaw", "version": "1.0", "install_path": "/opt/openclaw",
+             "is_installed": True},
+        ]
+        with patch.object(detector, "detect_all_tools", return_value=tools), \
+             patch.object(detector, "get_device_id", return_value="DEV-2"):
+            report = detector.generate_report()
+
+        by_name = {t["name"]: t for t in report["tools"]}
+        # Scan completed: both rows present.
+        self.assertIn("Auggie CLI", by_name)
+        self.assertIn("OpenClaw", by_name)
+        # Augment degraded to an empty row (no crash).
+        self.assertEqual(by_name["Auggie CLI"]["projects"], [])
+        # The unrelated tool's row is intact.
+        self.assertTrue(by_name["OpenClaw"]["is_installed"])
+
+
 class TestMainCLI(unittest.TestCase):
     """Integration tests that invoke main() via subprocess."""
 
@@ -108,17 +194,34 @@ class TestMainCLI(unittest.TestCase):
     def setUp(self):
         self.server.requests.clear()
         self.server.default_code = 200
-        self._queue_file = utils_mod.QUEUE_FILE
+        # Redirect the queue to a per-test temp file (subprocess inherits it via os.environ).
+        self._queue_dir = tempfile.mkdtemp()
+        self._orig_queue_env = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(
+            Path(self._queue_dir) / "ai-discovery-queue.json"
+        )
+        self._queue_file = utils_mod._get_queue_file_path()
         # Ensure clean state
         if self._queue_file.exists():
             self._queue_file.unlink()
+        # Isolate the CLI's HOME so its ~/.unbound state (lock/cache) stays off the real home.
+        self._home_dir = tempfile.mkdtemp(prefix="ai-discovery-test-home-")
 
     def tearDown(self):
         if self._queue_file.exists():
             self._queue_file.unlink(missing_ok=True)
+        if self._orig_queue_env is None:
+            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+        else:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._orig_queue_env
+        shutil.rmtree(self._queue_dir, ignore_errors=True)
+        shutil.rmtree(self._home_dir, ignore_errors=True)
 
     def _run_cli(self, extra_env=None, timeout=600):
         env = os.environ.copy()
+        # Send the CLI's ~/.unbound state + lock to the throwaway HOME from setUp.
+        env["HOME"] = self._home_dir
+        env["USERPROFILE"] = self._home_dir
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -141,6 +244,14 @@ class TestMainCLI(unittest.TestCase):
         result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
+    def test_queue_path_honors_env_override(self):
+        # The env override must resolve to the temp file, never the real /var/tmp queue.
+        self.assertEqual(utils_mod._get_queue_file_path(), self._queue_file)
+        if hasattr(os, "getuid"):
+            self.assertNotEqual(
+                utils_mod._get_queue_file_path(),
+                Path(f"/var/tmp/ai-discovery-queue-{os.getuid()}.json"),
+            )
 
     def test_main_cli_with_queue_drain(self):
         # Pre-populate queue with a distinctive report
@@ -195,8 +306,146 @@ class TestMainCLI(unittest.TestCase):
         self.assertGreaterEqual(len(data), 1)
 
 
+class TestSelfTimeoutCleanup(unittest.TestCase):
+    """WEB-4755: discovery self-enforces --timeout. On expiry it exits non-zero
+    (instead of hanging until a parent force-kills it) and removes its lock so
+    the next run isn't blocked."""
+
+    class _SlowHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            time.sleep(4)  # stall every call so the scan can't finish under the timeout
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, *args):
+            pass
+
+    def setUp(self):
+        self.server = HTTPServer(("127.0.0.1", 0), self._SlowHandler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self._home = tempfile.mkdtemp(prefix="ai-discovery-timeout-home-")
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        shutil.rmtree(self._home, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "watchdog timing asserted on POSIX")
+    def test_self_timeout_exits_nonzero_and_cleans_lock(self):
+        env = os.environ.copy()
+        env["HOME"] = self._home
+        env["USERPROFILE"] = self._home
+        start = time.monotonic()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/coding_discovery_tools/ai_tools_discovery.py",
+                "--api-key", "test-key-000000",
+                "--domain", f"http://127.0.0.1:{self.port}",
+                "--timeout", "2",
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=env,
+        )
+        elapsed = time.monotonic() - start
+        # Aborted by its own watchdog (non-zero) rather than completing the scan.
+        self.assertNotEqual(result.returncode, 0, f"stdout={result.stdout}\nstderr={result.stderr}")
+        self.assertLess(elapsed, 60, "self-timeout did not abort promptly")
+        # Lock cleaned up so a subsequent rerun isn't blocked.
+        lock = Path(self._home) / ".unbound" / "discovery.lock"
+        self.assertFalse(lock.exists(), "discovery.lock left behind after self-timeout")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_main_restores_signal_handlers(self):
+        # main() installs SIGTERM/SIGINT handlers but must restore the originals
+        # in its finally so importing/calling it doesn't pollute the process.
+        import signal as _signal
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        prev_term = _signal.getsignal(_signal.SIGTERM)
+        prev_int = _signal.getsignal(_signal.SIGINT)
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        # acquire_lock -> "contended" makes main() exit BEFORE installing handlers,
+        # so use a detector that finishes instantly with the lock acquired.
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev"
+        detector_inst.detect_all_tools.return_value = []
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value={}), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+        self.assertEqual(_signal.getsignal(_signal.SIGTERM), prev_term)
+        self.assertEqual(_signal.getsignal(_signal.SIGINT), prev_int)
+
+
+class TestUnsupportedPlatformGuard(unittest.TestCase):
+    """main() runs on supported platforms (macOS/Windows/Linux) and exits
+    cleanly on anything else instead of crashing in detector init."""
+
+    def test_linux_proceeds_past_os_guard(self):
+        """Linux is supported — it must NOT exit 3 at the OS guard.
+
+        We patch acquire_lock to return "contended" so main() exits 0 at the
+        single-flight lock check (the first exit point after the guard).
+        Linux reaching that exit-0 proves it passed the OS guard rather
+        than hitting the old exit-3.
+        """
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        # 0 (lock-held early exit), NOT 3 (unsupported-OS guard).
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_unsupported_platform_exits_code_3_before_detector_init(self):
+        """A genuinely unsupported platform (e.g. *BSD) still exits 3 cleanly
+        before detector init, so it can't crash + page Sentry."""
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        with patch.object(adm.platform, "system", return_value="FreeBSD"), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 3)
+        mock_detector.assert_not_called()
+
+
 class TestSentryNeverCrashes(unittest.TestCase):
     """report_to_sentry must never raise, regardless of input."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
 
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_with_empty_dsn(self):
@@ -268,6 +517,9 @@ class TestExtractFrames(unittest.TestCase):
 class TestSentryDebugLogging(unittest.TestCase):
     """Sentry helpers log debug messages for missing DSN and curl failures."""
 
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_logs_debug_when_dsn_missing(self):
         with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
@@ -280,6 +532,40 @@ class TestSentryDebugLogging(unittest.TestCase):
         with self.assertLogs("scripts.coding_discovery_tools.utils", level="DEBUG") as cm:
             report_to_sentry(RuntimeError("test"))
         self.assertTrue(any("Sentry reporting failed" in msg for msg in cm.output))
+
+
+class TestSentryRunGuards(unittest.TestCase):
+    """Per-run dedup + circuit breaker keep report_to_sentry cheap when wired into
+    many failure paths against a slow or blocked endpoint."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
+    def tearDown(self):
+        utils_mod.reset_sentry_run_state()
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_dedup_same_signature_sends_once(self, mock_run):
+        for _ in range(5):
+            report_to_sentry(RuntimeError("x"), {"phase": "extract", "tool_name": "Codex rules"})
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=1, stdout=""))
+    def test_circuit_breaker_stops_after_consecutive_failures(self, mock_run):
+        # Distinct signatures so dedup never short-circuits; after 3 transport
+        # failures the breaker must stop issuing curls for the rest of the run.
+        for i in range(6):
+            report_to_sentry(RuntimeError("x"), {"phase": f"p{i}"})
+        self.assertEqual(mock_run.call_count, 3)
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_cap_limits_events_per_run(self, mock_run):
+        for i in range(40):
+            report_to_sentry(RuntimeError("x"), {"phase": f"p{i}"})
+        self.assertEqual(mock_run.call_count, 30)
 
 
 class TestSettingsTransformPrecedence(unittest.TestCase):
@@ -523,6 +809,716 @@ class TestFilterProjectsByUser(unittest.TestCase):
 
         # Permissions block is kept (settings_path is under gowshik_2's home)
         self.assertIn("permissions", filtered_gowshik_2)
+
+
+class TestAcquireLockReasonCodes(unittest.TestCase):
+    """acquire_lock() returns "acquired"/"contended"/"setup_failed" and sets
+    last_lock_error only on setup failure."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        self._patchers = [
+            # _HOME_STATE_DIR is the home candidate _state_dir_candidates() reads;
+            # UNBOUND_DIR/LOCK_PATH/CACHE_PATH are the active paths downstream uses.
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_acquire_lock_setup_failed_on_unwritable_dir(self):
+        with patch.object(
+            Path, "mkdir", side_effect=OSError(errno.EPERM, "Operation not permitted")
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    def test_acquire_lock_contended_on_fresh_lock(self):
+        self.cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        # Use this test process's own (live) PID: the liveness check now steals a
+        # lock whose recorded PID is dead, so a genuine "contended" needs a real
+        # live owner.
+        self.cache.LOCK_PATH.write_text(f"{os.getpid()} now\n")
+        os.utime(self.cache.LOCK_PATH, (time.time(), time.time()))
+
+        self.assertEqual(self.cache.acquire_lock(), "contended")
+        self.assertIsNone(self.cache.last_lock_error)
+
+    def test_acquire_lock_acquired_clean(self):
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertTrue(self.cache.LOCK_PATH.exists())
+
+    def test_acquire_lock_setup_failed_on_steal_stale_unlink_error(self):
+        # Create a STALE lock (mtime older than STALE_LOCK_SECONDS) so
+        # _lock_is_live() is False and acquire_lock takes the steal/unlink path.
+        self.cache.UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        self.cache.LOCK_PATH.write_text("999 then\n")
+        stale = time.time() - (self.cache.STALE_LOCK_SECONDS + 60)
+        os.utime(self.cache.LOCK_PATH, (stale, stale))
+
+        # Start the patch AFTER creating the stale file so setup isn't broken.
+        with patch.object(
+            Path, "unlink", side_effect=OSError(errno.EPERM, "Operation not permitted")
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    def test_acquire_lock_contended_on_open_race(self):
+        # TOCTOU race: LOCK_PATH absent at the exists() checks, but os.open with
+        # O_CREAT|O_EXCL loses the race and raises FileExistsError.
+        with patch.object(self.cache.os, "open", side_effect=FileExistsError()):
+            self.assertEqual(self.cache.acquire_lock(), "contended")
+        self.assertIsNone(self.cache.last_lock_error)
+
+    def test_acquire_lock_setup_failed_on_write_error(self):
+        # mkdir/exists/open succeed on a clean temp dir, but os.write fails.
+        with patch.object(self.cache.os, "write", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+        # The lock file created by os.open must be removed on write failure, so a
+        # ghost lock can't make the next run see false contention.
+        self.assertFalse(self.cache.LOCK_PATH.exists())
+
+
+class TestStaleLockPidLiveness(unittest.TestCase):
+    """WEB-4755: a lock left by a run that was killed without cleanup (dead PID,
+    fresh mtime) is stolen immediately so the NEXT discovery run isn't blocked
+    for the full stale-lock window. A genuinely live owner is still honored."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        unbound_dir.mkdir(parents=True, exist_ok=True)
+        self._patchers = [
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    @staticmethod
+    def _dead_pid() -> int:
+        for pid in (999999, 888888, 777777):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return pid
+            except OSError:
+                continue
+        return 999999
+
+    def _fresh(self):
+        os.utime(self.cache.LOCK_PATH, (time.time(), time.time()))
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_dead_pid_fresh_lock_is_stolen(self):
+        # Simulate a SIGKILLed run: dead PID, fresh mtime (heartbeat just ticked).
+        self.cache.LOCK_PATH.write_text(f"{self._dead_pid()} now\n")
+        self._fresh()
+        self.assertFalse(self.cache._lock_is_live())
+        # acquire_lock steals it so the rerun proceeds instead of seeing contention.
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache._read_lock_pid(), os.getpid())
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_live_pid_fresh_lock_is_contended(self):
+        self.cache.LOCK_PATH.write_text(f"{os.getpid()} now\n")
+        self._fresh()
+        self.assertTrue(self.cache._lock_is_live())
+        self.assertEqual(self.cache.acquire_lock(), "contended")
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_live_pid_stale_mtime_is_not_live(self):
+        # Heartbeat died (stale mtime) even though the PID is alive -> stealable,
+        # matching the original zombie-by-staleness tolerance.
+        self.cache.LOCK_PATH.write_text(f"{os.getpid()} then\n")
+        stale = time.time() - (self.cache.STALE_LOCK_SECONDS + 60)
+        os.utime(self.cache.LOCK_PATH, (stale, stale))
+        self.assertFalse(self.cache._lock_is_live())
+
+    def test_unparseable_pid_falls_back_to_mtime(self):
+        # No PID token (or Windows) -> fall back to mtime freshness.
+        self.cache.LOCK_PATH.write_text("not-a-pid\n")
+        self._fresh()
+        self.assertTrue(self.cache._lock_is_live())
+        stale = time.time() - (self.cache.STALE_LOCK_SECONDS + 60)
+        os.utime(self.cache.LOCK_PATH, (stale, stale))
+        self.assertFalse(self.cache._lock_is_live())
+
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_pid_alive_helper(self):
+        self.assertTrue(self.cache._pid_alive(os.getpid()))
+        self.assertFalse(self.cache._pid_alive(self._dead_pid()))
+        self.assertFalse(self.cache._pid_alive(0))
+
+
+class TestStateDirFallback(unittest.TestCase):
+    """_ensure_state_dir falls back to a deterministic uid-namespaced temp dir
+    when home is unusable, refuses hostile pre-existing temp entries, and the
+    fallback path is fixed (never random)."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        # Stash globals the resolver may reassign so tearDown can restore them.
+        self._orig_unbound_dir = cache.UNBOUND_DIR
+        self._orig_cache_path = cache.CACHE_PATH
+        self._orig_lock_path = cache.LOCK_PATH
+        self._orig_home_state_dir = cache._HOME_STATE_DIR
+        cache.last_lock_error = None
+
+    def tearDown(self):
+        self.cache.UNBOUND_DIR = self._orig_unbound_dir
+        self.cache.CACHE_PATH = self._orig_cache_path
+        self.cache.LOCK_PATH = self._orig_lock_path
+        self.cache._HOME_STATE_DIR = self._orig_home_state_dir
+        self.cache.last_lock_error = None
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _unmkdir_able(self, name):
+        # A candidate under a regular file: mkdir raises NotADirectoryError
+        # deterministically and cross-platform.
+        blocker = Path(self._tmp) / name
+        blocker.write_text("x")
+        return Path(blocker) / ".unbound"
+
+    def test_home_unusable_falls_back_to_temp(self):
+        bad_home = self._unmkdir_able("blocker")
+        good_temp = Path(self._tmp) / "unbound-test"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_home, False), (good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+        self.assertTrue(self.cache.LOCK_PATH.exists())
+
+    def test_both_candidates_fail_returns_setup_failed(self):
+        bad_a = self._unmkdir_able("blocker_a")
+        bad_b = self._unmkdir_able("blocker_b")
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_a, False), (bad_b, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_private_temp_symlink_refused(self):
+        target = Path(self._tmp) / "elsewhere"
+        target.mkdir()
+        link = Path(self._tmp) / "unbound-link"
+        os.symlink(str(target), str(link))
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(link, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertIn("unsafe", self.cache.last_lock_error)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_private_temp_created_0700(self):
+        new_dir = Path(self._tmp) / "unbound-fresh"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(new_dir, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertTrue(new_dir.exists())
+        self.assertEqual(stat.S_IMODE(os.lstat(str(new_dir)).st_mode), 0o700)
+
+    def test_temp_candidate_is_deterministic_not_random(self):
+        # Regression guard against swapping in mkdtemp(): the temp candidate
+        # must be the fixed path. On POSIX it is /var/tmp/unbound-{uid}
+        # (cross-session + reboot-stable, NOT the per-session launchd $TMPDIR
+        # that gettempdir() would return on macOS); on Windows it is
+        # gettempdir()/unbound (already per-user there).
+        candidates = self.cache._state_dir_candidates()
+        if hasattr(os, "getuid"):
+            expected = Path(f"/var/tmp/unbound-{os.getuid()}")
+        else:
+            expected = Path(tempfile.gettempdir()) / "unbound"
+        self.assertEqual(candidates[-1][0], expected)
+        self.assertTrue(candidates[-1][1])  # flagged private
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_symlinked_home_state_dir_still_writes_cache(self):
+        # A user may legitimately symlink ~/.unbound to a writable target. The
+        # symlink guard must NOT apply to the trusted home dir, or every cache
+        # write is silently skipped (cold cache, re-upload every run).
+        target = Path(self._tmp) / "real_unbound"
+        target.mkdir()
+        link = Path(self._tmp) / ".unbound-link"
+        os.symlink(str(target), str(link))
+        self.cache._HOME_STATE_DIR = link
+        self.cache.UNBOUND_DIR = link
+        self.cache.CACHE_PATH = link / "discovery-cache.json"
+        self.cache.atomic_write_cache({"tools": {"x": {"u": {"payload_hash": "h"}}}})
+        self.assertTrue((target / "discovery-cache.json").exists())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_symlinked_fallback_dir_write_skipped(self):
+        # The guard still protects the temp fallback: if the resolved (non-home)
+        # dir is a symlink, refuse to write the cache through it.
+        target = Path(self._tmp) / "evil"
+        target.mkdir()
+        link = Path(self._tmp) / "fallback-link"
+        os.symlink(str(target), str(link))
+        self.cache._HOME_STATE_DIR = Path(self._tmp) / ".unbound"  # != link
+        self.cache.UNBOUND_DIR = link
+        self.cache.CACHE_PATH = link / "discovery-cache.json"
+        self.cache.atomic_write_cache({"tools": {}})
+        self.assertFalse((target / "discovery-cache.json").exists())
+
+    def test_last_lock_error_cleared_on_successful_fallback(self):
+        # Home candidate fails (sets last_lock_error) but the temp fallback
+        # succeeds -> a successful acquire must not leave a stale error string.
+        bad_home = self._unmkdir_able("blk")
+        good_temp = Path(self._tmp) / "unbound-ok"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(bad_home, False), (good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertIsNone(self.cache.last_lock_error)
+
+    def test_home_candidate_uses_immutable_anchor_after_fallback(self):
+        # P1 regression: after a fallback reassigns UNBOUND_DIR to a temp dir,
+        # the next resolution must still offer the real HOME as candidate[0]
+        # (the is_private=False trust is only safe for the user's own home),
+        # so the temp-dir hardening can't be bypassed on a re-entrant call.
+        self.cache.UNBOUND_DIR = Path("/var/tmp/unbound-already-fallen-back")
+        candidates = self.cache._state_dir_candidates()
+        self.assertEqual(candidates[0][0], self.cache._HOME_STATE_DIR)
+        self.assertFalse(candidates[0][1])  # home anchor, not private-temp
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses W_OK")
+    def test_home_exists_but_unwritable_falls_back(self):
+        # mkdir succeeds on a pre-existing dir even when it isn't writable;
+        # the os.access probe must still force the fallback (and reassign all
+        # three path globals), not fail later at lock creation.
+        bad_home = Path(self._tmp) / "ro_home"
+        bad_home.mkdir()
+        os.chmod(str(bad_home), 0o500)
+        good_temp = Path(self._tmp) / "unbound-rw"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(bad_home, False), (good_temp, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+            self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+            self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
+        finally:
+            os.chmod(str(bad_home), 0o700)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root bypasses R_OK")
+    def test_home_with_unreadable_cache_file_falls_back(self):
+        # Writable home holding an unreadable (foreign-owned 0600) cache must fall back, not raise EACCES.
+        poisoned_home = Path(self._tmp) / "poisoned_home"
+        poisoned_home.mkdir()
+        foreign_cache = poisoned_home / "discovery-cache.json"
+        foreign_cache.write_text('{"tools": {}}')
+        os.chmod(str(foreign_cache), 0o000)  # unreadable by this (non-root) uid
+        good_temp = Path(self._tmp) / "unbound-rw"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(poisoned_home, False), (good_temp, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.assertEqual(self.cache.UNBOUND_DIR, good_temp)
+            self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+            self.assertEqual(self.cache.LOCK_PATH, good_temp / "discovery.lock")
+            self.assertEqual(self.cache.read_cache(), {})
+        finally:
+            os.chmod(str(foreign_cache), 0o600)
+
+    def test_foreign_owned_temp_dir_refused(self):
+        # A pre-existing private candidate owned by someone else (ownership
+        # mismatch) must be refused, not trusted. Simulate via _is_unsafe_existing.
+        foreign = Path(self._tmp) / "unbound-foreign"
+        with patch.object(self.cache, "_is_unsafe_existing", return_value=True), \
+             patch.object(
+                 self.cache, "_state_dir_candidates",
+                 return_value=[(foreign, True)],
+             ):
+            self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+        self.assertTrue(self.cache.last_lock_error)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_world_readable_temp_dir_refused(self):
+        # A pre-existing 0755 dir whose chmod-to-0700 fails (simulated no-op)
+        # leaks discovery state to other users; the post-create mode recheck
+        # must refuse it.
+        loose = Path(self._tmp) / "unbound-loose"
+        loose.mkdir()
+        os.chmod(str(loose), 0o755)
+        try:
+            with patch.object(self.cache.os, "chmod", lambda *a, **k: None), \
+                 patch.object(
+                     self.cache, "_state_dir_candidates",
+                     return_value=[(loose, True)],
+                 ):
+                self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+            self.assertIn("not private", self.cache.last_lock_error)
+        finally:
+            os.chmod(str(loose), 0o700)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_non_sticky_world_writable_parent_refused(self):
+        # The symlink/ownership hardening only holds if the parent is sticky.
+        # A world-writable, NON-sticky parent lets anyone swap our fixed-name
+        # entry, so the candidate must be refused.
+        parent = Path(self._tmp) / "open_parent"
+        parent.mkdir()
+        os.chmod(str(parent), 0o777)  # world-writable, NOT sticky
+        candidate = parent / "unbound-x"
+        try:
+            with patch.object(
+                self.cache, "_state_dir_candidates",
+                return_value=[(candidate, True)],
+            ):
+                self.assertEqual(self.cache.acquire_lock(), "setup_failed")
+            self.assertTrue(self.cache.last_lock_error)
+        finally:
+            os.chmod(str(parent), 0o700)
+
+    def test_fallback_cache_writes_land_in_fallback_dir(self):
+        # End-to-end coherence of the global reassignment: after falling back to
+        # the injected private candidate, cache writes must land UNDER it (via
+        # the reassigned CACHE_PATH), not under the original home dir.
+        good_temp = Path(self._tmp) / "unbound-fallback"
+        with patch.object(
+            self.cache, "_state_dir_candidates",
+            return_value=[(good_temp, True)],
+        ):
+            self.assertEqual(self.cache.acquire_lock(), "acquired")
+            self.cache.update_tool("claude-code", "u", "hash123")
+        self.assertEqual(self.cache.CACHE_PATH, good_temp / "discovery-cache.json")
+        self.assertTrue(self.cache.CACHE_PATH.exists())
+        # The write must round-trip through the reassigned fallback path, not
+        # the original home dir.
+        self.assertEqual(
+            self.cache.get_cached_hash("claude-code", "u"), "hash123"
+        )
+
+
+class TestMainLockSetupSentry(unittest.TestCase):
+    """WEB-4662: lock setup failure reports to Sentry at warning level and the
+    scan CONTINUES lock-less (no exit). Genuine contention stays quiet and
+    exits 0. Sentry reporting can never crash the run."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        self.adm = adm
+        self.argv = [
+            "ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"
+        ]
+
+    def _run_main_setup_failed(self, mock_sentry):
+        """Run main() with acquire_lock -> setup_failed and every scan IO stubbed
+        so the lock-less path executes to completion deterministically."""
+        adm = self.adm
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev-123"
+        detector_inst.detect_all_tools.return_value = []
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
+             patch.object(adm.discovery_cache, "last_lock_error", "EPERM Operation not permitted"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock()), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst) as mock_detector, \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value={}), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+        return mock_detector
+
+    def test_main_reports_sentry_on_lock_setup_failure(self):
+        mock_sentry = Mock()
+        mock_detector = self._run_main_setup_failed(mock_sentry)
+
+        # Continued lock-less: the detector was constructed despite setup_failed.
+        mock_detector.assert_called_once()
+        # The lock-setup failure is the first thing reported, at warning level.
+        mock_sentry.assert_called()
+        _, kwargs = mock_sentry.call_args_list[0]
+        self.assertEqual(kwargs["level"], "warning")
+        ctx = kwargs["context"]
+        self.assertEqual(ctx["phase"], "acquire_lock")
+        self.assertIn("unbound_dir", ctx)
+        self.assertTrue(ctx["lock_error"])
+
+    def test_main_no_sentry_on_genuine_contention(self):
+        adm = self.adm
+        mock_sentry = Mock()
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        mock_sentry.assert_not_called()
+
+    def test_main_sentry_failure_does_not_crash_exit(self):
+        # A raising report_to_sentry at the lock block must be swallowed so the
+        # scan still continues lock-less rather than aborting the run.
+        mock_sentry = Mock(side_effect=RuntimeError("boom"))
+        mock_detector = self._run_main_setup_failed(mock_sentry)
+
+        mock_sentry.assert_called()
+        mock_detector.assert_called_once()
+
+
+class TestLockBestEffort(unittest.TestCase):
+    """WEB-4662: the single-flight lock is best-effort.
+
+    - "contended" -> exit 0 immediately, no scan.
+    - "setup_failed" -> run lock-less: scan still happens, no heartbeat, no release.
+    - "acquired" -> heartbeat starts and the lock is released in the finally block.
+    """
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        self.adm = adm
+        self.argv = [
+            "ai_tools_discovery.py", "--api-key", "X", "--domain", "http://127.0.0.1:1"
+        ]
+
+    def test_setup_failed_continues_lockless(self):
+        adm = self.adm
+        heartbeat = Mock()
+        release = Mock()
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="setup_failed"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", heartbeat), \
+             patch.object(adm.discovery_cache, "release_lock", release), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        # The scan ran lock-less: detector was constructed despite setup_failed.
+        mock_detector.assert_called_once()
+        # No lock was held, so neither heartbeat nor release should fire.
+        heartbeat.assert_not_called()
+        release.assert_not_called()
+
+    def test_contended_still_exits_zero(self):
+        adm = self.adm
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="contended"), \
+             patch.object(adm, "AIToolsDetector") as mock_detector, \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            with self.assertRaises(SystemExit) as cm:
+                adm.main()
+
+        self.assertEqual(cm.exception.code, 0)
+        mock_detector.assert_not_called()
+
+    def test_acquired_starts_heartbeat_and_releases(self):
+        adm = self.adm
+        heartbeat = Mock()
+        release = Mock()
+        with patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", heartbeat), \
+             patch.object(adm.discovery_cache, "release_lock", release), \
+             patch.object(adm, "AIToolsDetector"), \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(sys, "argv", self.argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        heartbeat.assert_called_once()
+        release.assert_called_once()
+
+
+class TestCodexProjectRulesNoArgError(unittest.TestCase):
+    """Regression: _extract_project_level_rules(Path("/"), ...) must pass
+    root_path to should_process_directory(). The old call omitted it and
+    raised TypeError: should_process_directory() missing 1 required
+    positional argument: 'root_path'."""
+
+    def test_extract_project_level_rules_root_no_typeerror(self):
+        import scripts.coding_discovery_tools.macos.codex.codex_rules_extractor as codex_mod
+        from scripts.coding_discovery_tools.macos.codex.codex_rules_extractor import (
+            MacOSCodexRulesExtractor,
+        )
+
+        extractor = MacOSCodexRulesExtractor()
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(tmp_dir), True)
+
+        # One real top-level candidate; let should_process_directory run for real
+        # against the tmp path. _walk_for_agents_files is a no-op so we don't
+        # recurse the filesystem.
+        with patch.object(codex_mod, "get_top_level_directories", return_value=[tmp_dir]), \
+             patch.object(MacOSCodexRulesExtractor, "_walk_for_agents_files", Mock()):
+            try:
+                extractor._extract_project_level_rules(Path("/"), {})
+            except TypeError as exc:
+                self.fail(f"should_process_directory call regressed: {exc}")
+
+
+class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
+    """A swallowed extraction error must report to Sentry at warning level
+    (with phase 'extract') and still return [] so the scan continues."""
+
+    def test_extract_failure_reports_warning_and_returns_empty(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        detector = AIToolsDetector()
+        failing = Mock()
+        failing.extract_all_codex_rules.side_effect = RuntimeError("boom")
+        detector._codex_rules_extractor = failing
+
+        mock_sentry = Mock()
+        with patch.object(adm, "report_to_sentry", mock_sentry):
+            result = detector.extract_all_codex_rules()
+
+        self.assertEqual(result, [])
+        mock_sentry.assert_called_once()
+        args, kwargs = mock_sentry.call_args
+        self.assertEqual(kwargs.get("level"), "warning")
+        # context is passed positionally as the 2nd argument.
+        context = args[1]
+        self.assertEqual(context.get("phase"), "extract")
+
+
+class TestNoToolsSentryEvent(unittest.TestCase):
+    """main() emits exactly one enriched 'no_tools_found' warning on a zero-tool
+    scan (the only signal that distinguishes an enumeration miss from a genuinely
+    empty device) and stays silent when any tool is detected."""
+
+    @staticmethod
+    def _context_of(call):
+        # report_to_sentry is invoked two ways in the codebase: context as the
+        # keyword `context=` (the no-tools path) and context positionally as the
+        # 2nd arg (extraction/process paths). Read whichever is present.
+        args, kwargs = call
+        if "context" in kwargs:
+            return kwargs["context"]
+        return args[1] if len(args) > 1 else {}
+
+    def _run_main(self, detect_return, mock_sentry):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev"
+        detector_inst.detect_all_tools.return_value = detect_return
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value="runner"), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", argv):
+            detector_inst._set_canonical_vscode_copilot = Mock()
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_fires_on_zero_tool_scan(self):
+        mock_sentry = Mock()
+        self._run_main([], mock_sentry)
+
+        no_tools_calls = [
+            c for c in mock_sentry.call_args_list
+            if self._context_of(c).get("phase") == "no_tools_found"
+        ]
+        self.assertEqual(len(no_tools_calls), 1, "expected exactly one no_tools_found event")
+
+        call = no_tools_calls[0]
+        args, kwargs = call
+        # Exception is positional, RuntimeError with the fixed message.
+        self.assertIsInstance(args[0], RuntimeError)
+        self.assertEqual(str(args[0]), "Discovery found no tools")
+        self.assertEqual(kwargs.get("level"), "warning")
+
+        ctx = self._context_of(call)
+        # get_all_users_linux -> [] means enumeration missed every account, so the
+        # current-user fallback supplies the single scanned home.
+        self.assertEqual(ctx.get("homes_enumerated"), 0)
+        self.assertEqual(ctx.get("users_scanned"), 1)
+        self.assertIs(ctx.get("used_fallback_user"), True)
+        self.assertIn("device_id", ctx)
+        self.assertIn("run_id", ctx)
+        self.assertIn("duration_ms", ctx)
+        # PII guard: no list-valued context (e.g. the raw user list) may leak.
+        for key, value in ctx.items():
+            self.assertNotIsInstance(value, list, f"context key {key!r} is a list")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_does_not_fire_when_tools_found(self):
+        mock_sentry = Mock()
+        self._run_main(
+            [{"name": "Claude Code", "version": "1.0", "install_path": "/home/runner/.claude"}],
+            mock_sentry,
+        )
+
+        no_tools_calls = [
+            c for c in mock_sentry.call_args_list
+            if self._context_of(c).get("phase") == "no_tools_found"
+        ]
+        self.assertEqual(no_tools_calls, [], "no_tools_found must not fire when a tool is detected")
 
 
 if __name__ == "__main__":

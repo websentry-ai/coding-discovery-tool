@@ -1,11 +1,11 @@
 """
 Shared helper functions for Cursor skills and commands extraction.
 
-This module mirrors the config-driven design from claude_code_skills_helpers,
-but handles Cursor's dual parent directories (.cursor and .agents).
-Each item type (skill, command) is described by an ItemTypeConfig,
-and generic functions handle finding project roots, extracting info, and
-iterating directories for any item type.
+This module delegates to the generic functions in claude_code_skills_helpers,
+passing Cursor's dual parent directories (.cursor and .agents) via the
+parent_dir_names parameter. Each item type (skill, command) is described by
+an ItemTypeConfig, and the generic functions handle finding project roots,
+extracting info, and iterating directories for any item type.
 """
 
 import logging
@@ -16,9 +16,10 @@ from .claude_code_skills_helpers import (
     ItemTypeConfig,
     is_skill_md_file,
     is_command_md_file,
-    build_skills_project_list,
-    add_skill_to_project,
-    is_user_level_claude_subdir,
+    find_item_project_root,
+    extract_item_info,
+    extract_items_from_directory,
+    extract_user_level_items,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,56 +60,13 @@ CURSOR_COMMAND_CONFIG = ItemTypeConfig(
 CURSOR_ITEM_CONFIGS = [CURSOR_SKILL_CONFIG, CURSOR_COMMAND_CONFIG]
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Generic config-driven functions (Cursor-specific: checks .cursor AND .agents)
+# Cursor-specific thin delegations to generic functions
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def find_cursor_item_project_root(item_file: Path, config: ItemTypeConfig) -> Path:
-    """
-    Find the project root directory for a Cursor item file.
-
-    Same logic as find_item_project_root in claude_code_skills_helpers, but
-    checks tool_dir.name in (CURSOR_DIR_NAME, AGENTS_DIR_NAME) instead of
-    == CLAUDE_DIR_NAME.
-
-    For nested layout (skills):
-        item_file lives at <project>/.cursor/skills/<name>/SKILL.md
-        Navigate: parent (name dir) -> parent (skills/) -> parent (.cursor/) -> verify -> parent (project root)
-
-    For flat layout (commands):
-        item_file lives at <project>/.cursor/commands/<name>.md
-        Navigate: parent (commands/) -> parent (.cursor/) -> verify -> parent (project root)
-
-    Falls back to walking up parents to find a .cursor or .agents directory,
-    and as a last resort returns item_file.parent.
-
-    Args:
-        item_file: Path to the item file (e.g. SKILL.md or a command .md)
-        config: ItemTypeConfig describing this item type
-
-    Returns:
-        Project root path
-    """
-    if config.layout == "nested":
-        item_name_dir = item_file.parent       # <skill-name>
-        type_dir = item_name_dir.parent        # skills/
-        tool_dir = type_dir.parent             # .cursor/ or .agents/
-
-        if type_dir.name == config.dir_name and tool_dir.name in CURSOR_PARENT_DIR_NAMES:
-            return tool_dir.parent
-    else:
-        type_dir = item_file.parent            # commands/
-        tool_dir = type_dir.parent             # .cursor/ or .agents/
-
-        if type_dir.name == config.dir_name and tool_dir.name in CURSOR_PARENT_DIR_NAMES:
-            return tool_dir.parent
-
-    # Fallback: walk up parents to find .cursor or .agents
-    for parent in item_file.parents:
-        if parent.name in CURSOR_PARENT_DIR_NAMES:
-            return parent.parent
-
-    # Last resort
-    return item_file.parent
+    """Find the project root for a Cursor item file. Delegates to generic."""
+    return find_item_project_root(item_file, config, parent_dir_names=CURSOR_PARENT_DIR_NAMES)
 
 
 def extract_cursor_item_info(
@@ -116,32 +74,14 @@ def extract_cursor_item_info(
     extract_single_rule_file_func: Callable,
     scope: str,
     config: ItemTypeConfig,
+    plugin_lookup: Optional[Dict] = None,
 ) -> Optional[Dict]:
-    """
-    Extract information from a Cursor item file using the given extraction function.
-
-    Creates a closure that binds config to find_cursor_item_project_root, then
-    delegates to extract_single_rule_file_func. On success, annotates the
-    result with skill_name (derived via config.name_extractor) and type.
-
-    Args:
-        item_file: Path to the item file
-        extract_single_rule_file_func: OS-specific function to extract rule file info.
-            Expected signature: (file_path, find_root_func, scope=...) -> Optional[Dict]
-        scope: Scope of the item ("user" or "project")
-        config: ItemTypeConfig describing this item type
-
-    Returns:
-        Dict with item info in unified rules format, or None if extraction fails
-    """
-    find_root = lambda f: find_cursor_item_project_root(f, config)
-    rule_info = extract_single_rule_file_func(item_file, find_root, scope=scope)
-
-    if rule_info:
-        rule_info["skill_name"] = config.name_extractor(item_file)
-        rule_info["type"] = config.type_name
-
-    return rule_info
+    """Extract information from a Cursor item file. Delegates to generic."""
+    return extract_item_info(
+        item_file, extract_single_rule_file_func, scope, config,
+        parent_dir_names=CURSOR_PARENT_DIR_NAMES,
+        plugin_lookup=plugin_lookup,
+    )
 
 
 def extract_cursor_items_from_directory(
@@ -150,55 +90,14 @@ def extract_cursor_items_from_directory(
     extract_single_rule_file_func: Callable,
     add_skill_func: Callable,
     config: ItemTypeConfig,
+    plugin_lookup: Optional[Dict] = None,
 ) -> None:
-    """
-    Extract all items of a given type from a .cursor/<type> or .agents/<type> directory.
-
-    For nested layout (skills): iterates subdirectories, finds the first
-    matching file in each, extracts info, and adds to projects_by_root.
-
-    For flat layout (commands): iterates files directly, extracts
-    info for each matching file, and adds to projects_by_root.
-
-    Args:
-        type_dir: Path to the type directory (e.g. .cursor/skills/)
-        projects_by_root: Dictionary to populate with items
-        extract_single_rule_file_func: OS-specific function to extract rule file info
-        add_skill_func: Function to add item to project dict (handles thread safety)
-        config: ItemTypeConfig describing this item type
-    """
-    try:
-        if config.layout == "nested":
-            for subdir in type_dir.iterdir():
-                if subdir.is_dir():
-                    for item in subdir.iterdir():
-                        if item.is_file() and config.file_filter(item.name):
-                            item_info = extract_cursor_item_info(
-                                item,
-                                extract_single_rule_file_func,
-                                scope="project",
-                                config=config,
-                            )
-                            if item_info:
-                                project_root = item_info.get("project_root")
-                                if project_root:
-                                    add_skill_func(item_info, project_root, projects_by_root)
-                            break  # Only one marker file per subdirectory
-        else:
-            for item in type_dir.iterdir():
-                if item.is_file() and config.file_filter(item.name):
-                    item_info = extract_cursor_item_info(
-                        item,
-                        extract_single_rule_file_func,
-                        scope="project",
-                        config=config,
-                    )
-                    if item_info:
-                        project_root = item_info.get("project_root")
-                        if project_root:
-                            add_skill_func(item_info, project_root, projects_by_root)
-    except Exception as e:
-        logger.debug(f"Error extracting {config.type_name}s from {type_dir}: {e}")
+    """Extract all items of a given type from a Cursor directory. Delegates to generic."""
+    extract_items_from_directory(
+        type_dir, projects_by_root, extract_single_rule_file_func, add_skill_func, config,
+        parent_dir_names=CURSOR_PARENT_DIR_NAMES,
+        plugin_lookup=plugin_lookup,
+    )
 
 
 def extract_cursor_user_level_items(
@@ -206,57 +105,15 @@ def extract_cursor_user_level_items(
     user_skills: List[Dict],
     extract_single_rule_file_func: Callable,
     configs: List[ItemTypeConfig],
+    plugin_lookup: Optional[Dict] = None,
 ) -> None:
-    """
-    Extract user-level items (skills, commands) from a user's home directory.
-
-    Iterates over both .cursor and .agents parent directories, and for each
-    config locates the corresponding subdirectory and extracts items with
-    scope="user". Each extracted item's project_root key is renamed to
-    project_path before appending to user_skills.
-
-    Args:
-        user_home: Path to the user's home directory
-        user_skills: List to populate with user-level item dicts
-        extract_single_rule_file_func: OS-specific function to extract rule file info
-        configs: List of ItemTypeConfig instances to process
-    """
-    for tool_dir_name in CURSOR_PARENT_DIR_NAMES:
-        for config in configs:
-            type_dir = user_home / tool_dir_name / config.dir_name
-            if not type_dir.exists() or not type_dir.is_dir():
-                continue
-
-            try:
-                if config.layout == "nested":
-                    for subdir in type_dir.iterdir():
-                        if subdir.is_dir():
-                            for item in subdir.iterdir():
-                                if item.is_file() and config.file_filter(item.name):
-                                    item_info = extract_cursor_item_info(
-                                        item,
-                                        extract_single_rule_file_func,
-                                        scope="user",
-                                        config=config,
-                                    )
-                                    if item_info:
-                                        item_info["project_path"] = item_info.pop("project_root", None)
-                                        user_skills.append(item_info)
-                                    break  # Only one marker file per subdirectory
-                else:
-                    for item in type_dir.iterdir():
-                        if item.is_file() and config.file_filter(item.name):
-                            item_info = extract_cursor_item_info(
-                                item,
-                                extract_single_rule_file_func,
-                                scope="user",
-                                config=config,
-                            )
-                            if item_info:
-                                item_info["project_path"] = item_info.pop("project_root", None)
-                                user_skills.append(item_info)
-            except Exception as e:
-                logger.debug(f"Error extracting user-level {config.type_name}s from {type_dir}: {e}")
+    """Extract user-level Cursor items from a user's home directory. Delegates to generic."""
+    extract_user_level_items(
+        user_home, user_skills, extract_single_rule_file_func, configs,
+        user_dir_names=CURSOR_PARENT_DIR_NAMES,
+        parent_dir_names=CURSOR_PARENT_DIR_NAMES,
+        plugin_lookup=plugin_lookup,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

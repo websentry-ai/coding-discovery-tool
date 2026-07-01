@@ -20,6 +20,7 @@ from ...mcp_extraction_helpers import (
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
     extract_claudeai_mcp_servers_with_root_support,
+    is_claude_plugins_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
     MCP_CONFIG_PATH_PREFERRED = Path.home() / ".claude.json"
     MCP_CONFIG_PATH_FALLBACK = Path.home() / ".claude" / "mcp.json"
 
-    def extract_mcp_config(self) -> Optional[Dict]:
+    def extract_mcp_config(self, plugin_lookup: Optional[Dict] = None) -> Optional[Dict]:
         """
         Extract Claude Code MCP configuration on macOS.
 
@@ -48,6 +49,11 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
 
         Extracts only MCP-related fields (mcpServers, mcpContextUris,
         enabledMcpjsonServers, disabledMcpjsonServers) from the config file.
+
+        Args:
+            plugin_lookup: Optional dict mapping plugin install paths to provenance
+                metadata. When provided, MCP servers from plugins are tagged with
+                provenance fields.
 
         Returns:
             Dict with MCP config info (projects array) or None if not found
@@ -70,7 +76,7 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         all_projects.extend(project_scope_configs)
 
         # Extract plugin MCP configs from ~/.claude/plugins/
-        extract_claude_plugin_mcp_configs_with_root_support(all_projects)
+        extract_claude_plugin_mcp_configs_with_root_support(all_projects, plugin_lookup=plugin_lookup)
 
         # Extract cloud-synced MCP server names from claude.ai
         extract_claudeai_mcp_servers_with_root_support(all_projects)
@@ -91,7 +97,9 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         root_path = Path("/")
 
         def should_skip(item: Path) -> bool:
-            return should_skip_path(item) or should_skip_system_path(item)
+            return (should_skip_path(item)
+                    or should_skip_system_path(item)
+                    or is_claude_plugins_path(item))
 
         try:
             top_level_dirs = get_top_level_directories(root_path)

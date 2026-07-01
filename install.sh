@@ -210,21 +210,41 @@ main() {
     # Check dependencies (silently)
     check_python
     download_repo
-    
+
     # Change to repository root directory
     cd "$TEMP_DIR"
-    
-    # Execute the discovery script with all provided arguments
-    # (The Python script will handle its own output)
-    $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "$@"
+
+    # Accept --api-key via UNBOUND_API_KEY env var so the scheduled wrapper can
+    # avoid putting the key value in /proc/pid/cmdline or ps output. Only prepend
+    # the flag if --api-key is not already present in the explicit arguments.
+    _extra_args=()
+    case " $* " in
+        *" --api-key "*) ;;
+        *) [ -n "${UNBOUND_API_KEY:-}" ] && _extra_args+=(--api-key "$UNBOUND_API_KEY") ;;
+    esac
+
+    # NOTE: the Python subprocess still receives --api-key as a CLI argument, so the
+    # key appears in /proc/pid/cmdline and ps for the duration of the Python process.
+    # This is a pre-existing limitation of the Python entry point (not introduced by
+    # this PR); the scheduled wrapper already avoids exposing the key at the shell level.
+    #
+    # Routing: a leading "mcp-scan" runs the on-demand single-server scan (used by
+    # the agent hooks when the gateway reports an MCP server it has no record of);
+    # anything else runs the full daily discovery sweep.
+    if [ "${1:-}" = "mcp-scan" ]; then
+        shift
+        $PYTHON_CMD -m scripts.coding_discovery_tools.scan_single_mcp_server "${_extra_args[@]}" "$@"
+    else
+        $PYTHON_CMD -m scripts.coding_discovery_tools.ai_tools_discovery "${_extra_args[@]}" "$@"
+    fi
 }
 
 # ==============================================================================
 # ARGUMENT PARSING AND SCRIPT ENTRY POINT
 # ==============================================================================
 
-# Check if arguments were provided
-if [ $# -eq 0 ]; then
+# Check if arguments were provided (allow skipping --api-key when env var is set)
+if [ $# -eq 0 ] && [ -z "${UNBOUND_API_KEY:-}" ]; then
     echo ""
     print_error "Missing required arguments"
     echo ""

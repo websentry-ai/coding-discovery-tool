@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import functools
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -96,9 +98,154 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     return None
 
 
+def resolve_npm_global_tool_bin(
+    tool: str, user_home: Path, is_root: bool
+) -> Optional[str]:
+    """Resolve the install path of an npm-global Node CLI (e.g. ``gemini``,
+    ``openclaw``) whose real binary lives at ``<npm global prefix>/bin/<tool>``.
+
+    The npm global prefix varies (Homebrew node, nvm, pnpm), so we resolve it
+    dynamically with ``npm prefix -g`` AND probe a set of static fallbacks.
+
+    GUARD (cross-user FP class fixed in commit 93b5fc2): ``npm prefix -g``
+    resolves the SCANNER's npm config — under a root/MDM multi-user scan that is
+    NOT the target user's prefix, so honouring it would attribute the scanner's
+    install to a user who has only residue. The ``npm prefix -g`` probe and the
+    machine-global ``/opt/homebrew/bin`` fallback are therefore gated behind
+    ``not is_root``. The ``user_home``-relative fallbacks (``~/.npm-global/bin``,
+    nvm under ``user_home``, pnpm under ``user_home``) are correctly scoped to
+    the user and stay unconditional. Never raises.
+
+    Args:
+        tool: The CLI/binary name (e.g. ``"gemini"`` / ``"openclaw"``).
+        user_home: Home dir of the user being scanned.
+        is_root: Whether the scan is running as root/SYSTEM.
+
+    Returns:
+        Absolute path to the resolved executable as a string, or None.
+    """
+    candidates: List[Path] = []
+
+    # 1. Dynamic npm global prefix — SCANNER-scoped, so non-root only.
+    if not is_root:
+        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        if prefix:
+            prefix = prefix.strip()
+            if prefix:
+                candidates.append(Path(prefix) / "bin" / tool)
+
+    # 2. Machine-global Homebrew prefix — non-root only (shared install).
+    if not is_root:
+        candidates.append(Path("/opt/homebrew/bin") / tool)
+
+    # 3. user_home-relative fallbacks — always safe (scoped to this user).
+    candidates.append(user_home / ".npm-global" / "bin" / tool)
+    candidates.append(user_home / ".local" / "share" / "pnpm" / tool)  # pnpm global
+    try:
+        nvm_node = user_home / ".nvm" / "versions" / "node"
+        if nvm_node.exists():
+            for version_dir in sorted(nvm_node.iterdir()):
+                try:
+                    if version_dir.is_dir():
+                        candidates.append(version_dir / "bin" / tool)
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
+
+    for candidate in candidates:
+        try:
+            if candidate.exists() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except (PermissionError, OSError):
+            continue
+
+    return None
+
+
+def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
+    """Under a root/MDM multi-user scan, decide whether a MACHINE-GLOBAL binary
+    (Homebrew / /usr/local / /usr/bin) should be attributed to ``user_home``.
+
+    - Owned by a REGULAR user (Homebrew on macOS and manual /usr/local installs
+      are owned by the installing user): attribute to that owner ONLY — this is
+      what prevents one user's install fanning out to every user (the 93b5fc2
+      cross-user FP).
+    - Owned by ROOT/system (uid 0, e.g. /usr/bin/claude from apt/dnf): genuinely
+      system-wide and available to every user, so attribute to whoever is being
+      scanned.
+
+    Never raises: any stat/pwd failure returns False (do not attribute).
+
+    Args:
+        candidate: Absolute path to a machine-global binary.
+        user_home: Home dir of the user currently being scanned.
+
+    Returns:
+        True if the binary should be attributed to ``user_home``, else False.
+    """
+    try:
+        uid = os.stat(str(candidate)).st_uid
+    except (OSError, PermissionError):
+        return False
+    if uid == 0:
+        return True  # system-wide -> available to every scanned user
+    if pwd is None:
+        return False  # POSIX-only; should never be hit on Windows
+    try:
+        owner_home = Path(pwd.getpwuid(uid).pw_dir)
+    except (KeyError, OSError, AttributeError):
+        return False
+    try:
+        return owner_home.resolve() == user_home.resolve()
+    except (OSError, RuntimeError):
+        return owner_home == user_home
+
+
 def get_hostname() -> str:
     """Get the system hostname."""
     return platform.node()
+
+
+@functools.lru_cache(maxsize=1)
+def in_container() -> bool:
+    """Best-effort detection of whether we're running inside a container.
+
+    Combines several signals because no single one is reliable across runtimes
+    and kernels:
+      - ``/.dockerenv`` / ``/run/.containerenv`` — Docker / Podman runtime markers.
+      - root filesystem mounted as ``overlay`` — cgroup-version-agnostic.
+      - ``/proc/1/cgroup`` docker/lxc/kube markers — cgroup v1 ONLY (v2 shows
+        ``0::/`` from inside, so this is a fallback, not the primary check).
+
+    This is for honest behavioural branching, not security — every marker here
+    is forgeable by whoever controls the container. Result is cached for the
+    process lifetime.
+    """
+    try:
+        if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+            return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "/" and parts[2] == "overlay":
+                    return True
+    except OSError:
+        pass
+
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8") as f:
+            blob = f.read()
+        if any(marker in blob for marker in ("/docker", "/lxc", "kubepods", "/containerd")):
+            return True
+    except OSError:
+        pass
+
+    return False
 
 
 class DsclBatchData(NamedTuple):
@@ -259,31 +406,228 @@ def get_all_users_windows() -> List[str]:
         return []
 
 
+def get_all_users_linux() -> List[str]:
+    """
+    Get all human user directory names from /home on Linux.
+
+    Parses /etc/passwd to filter out system accounts (UID < 1000) and
+    accounts with non-interactive shells (nologin, false, etc.).
+    Falls back to listing /home subdirectories when /etc/passwd is unreadable.
+
+    Returns:
+        List of usernames (directory names under /home), or an empty list
+        if not running on Linux or /home does not exist.
+    """
+    if platform.system() != "Linux":
+        return []
+
+    home_dir = Path("/home")
+    if not home_dir.exists():
+        # Docker/CI root-only containers may have no /home at all
+        if _is_root():
+            return ["root"]
+        return []
+
+    # Build a set of usernames with UID >= 1000 and interactive shells
+    # from /etc/passwd so we filter out service accounts.
+    human_users: set = set()
+    try:
+        with open("/etc/passwd", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(":")
+                if len(parts) < 7:
+                    continue
+                username, _, uid_str, _, _, home_path, shell = (
+                    parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+                )
+                try:
+                    uid = int(uid_str)
+                except ValueError:
+                    continue
+                if uid < 1000:
+                    continue
+                if shell in NON_INTERACTIVE_SHELLS:
+                    continue
+                # Only include users whose home is under /home
+                if home_path.startswith("/home/"):
+                    human_users.add(username)
+    except Exception as e:
+        logger.debug(f"Could not parse /etc/passwd: {e}")
+
+    users: List[str] = []
+    try:
+        for user_dir in home_dir.iterdir():
+            if not user_dir.is_dir() or user_dir.name.startswith("."):
+                continue
+            # If we got passwd data, require UID >= 1000 filter; otherwise allow all
+            if human_users and user_dir.name not in human_users:
+                continue
+            users.append(user_dir.name)
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Could not list users from /home: {e}")
+
+    # Always include root's own account when running as root, regardless of /home contents
+    if _is_root():
+        root_name = Path("/root").name  # "root"
+        if root_name not in users:
+            users.append(root_name)
+
+    return users
+
+
+# Identities that are never a real human end-user. We map these to None for the
+# audit/payload value so the backend never attributes a machine to a service
+# account. Matching is case-insensitive against the whole, trimmed name.
+# Trade-off: a rare human whose login literally equals one of these (e.g. an
+# admin named "administrator", or a person named "daemon"/"nginx") is also
+# rejected. We accept that — for audit attribution a false None is safer than
+# mislabelling a machine with a service identity (the FE shows "No AI tools
+# detected" rather than a wrong owner).
+_NON_HUMAN_USERS: FrozenSet[str] = frozenset(
+    {
+        "root",
+        "system",
+        "unknown",
+        # Windows built-in / service identities (may also appear bare, without a
+        # DOMAIN prefix, depending on how whoami resolves them).
+        "administrator",
+        "localsystem",
+        "local service",
+        "network service",
+        # Common Linux service accounts.
+        "www-data",
+        "postgres",
+        "nobody",
+        "daemon",
+        "nginx",
+        "mysql",
+    }
+)
+
+# Windows domains that only ever own service principals (e.g.
+# ``NT AUTHORITY\LOCAL SERVICE``, ``NT SERVICE\MSSQLSERVER``). Any user under
+# these is a service account, never a human end-user.
+_NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
+
+
+def _strip_windows_domain(name: str) -> str:
+    """Return the bare username from a Windows ``DOMAIN\\username`` string.
+
+    ``whoami`` on Windows returns ``DOMAIN\\username`` (or ``MACHINE\\username``);
+    we only want the trailing username component. Names without a backslash are
+    returned unchanged.
+
+    Args:
+        name: Raw whoami output (possibly ``DOMAIN\\username``).
+
+    Returns:
+        The bare username with any domain prefix stripped.
+    """
+    if name and "\\" in name:
+        return name.split("\\")[-1]
+    return name
+
+
+def _real_user_or_none(name: Optional[str]) -> Optional[str]:
+    """Return the trimmed username if it is a real human, otherwise None.
+
+    Maps junk / service / machine identities to None so scan-lifecycle audit
+    payloads never attribute a machine to a non-human account. This is the
+    canonical filter and is self-contained: it strips any Windows ``DOMAIN\\``
+    prefix itself, so it is safe regardless of the caller's path. Rejected
+    (case-insensitive, after trimming + domain-stripping):
+      - empty / whitespace-only
+      - anything under the ``NT AUTHORITY`` / ``NT SERVICE`` Windows domains
+        (e.g. ``NT AUTHORITY\\LOCAL SERVICE``, ``NT SERVICE\\MSSQLSERVER``)
+      - the literal ``"unknown"``
+      - ``"root"``, ``"system"``, and Windows built-ins (administrator,
+        localsystem, local service, network service)
+      - anything starting with ``"_"`` (macOS daemon accounts)
+      - anything ending with ``"$"`` (Windows machine accounts)
+      - common Linux service accounts (www-data, postgres, nobody, daemon,
+        nginx, mysql)
+
+    Args:
+        name: Candidate username (may be None, may be ``DOMAIN\\username``).
+
+    Returns:
+        The trimmed, domain-stripped username if it is a real human, else None.
+    """
+    if not name:
+        return None
+    raw = name.strip()
+    # Reject service principals by their Windows domain before stripping it.
+    if "\\" in raw and raw.split("\\")[0].strip().lower() in _NON_HUMAN_WINDOWS_DOMAINS:
+        return None
+    stripped = _strip_windows_domain(raw).strip()
+    if not stripped:
+        return None
+    if stripped.startswith("_"):
+        return None
+    if stripped.endswith("$"):
+        return None
+    if stripped.lower() in _NON_HUMAN_USERS:
+        return None
+    return stripped
+
+
+def get_audit_user() -> Optional[str]:
+    """Return the real human user running the scan, or None.
+
+    This is the value to attach to scan-lifecycle audit payloads: it is the
+    real human OR None, never a junk/service/machine identity. For
+    container/daemon/root scans where no human can be resolved, returns None
+    rather than a synthesized owner.
+
+    Returns:
+        The real human username, or None when no human user can be resolved.
+    """
+    # On Windows, resolve the RAW, domain-qualified identity (``whoami`` →
+    # ``DOMAIN\\user``) so _real_user_or_none can apply its NT AUTHORITY /
+    # NT SERVICE domain rejection. get_user_info() pre-strips the ``DOMAIN\\``
+    # prefix (path-building needs the bare name), which would otherwise hide a
+    # service principal like ``NT SERVICE\\MSSQLSERVER`` behind its bare,
+    # non-denylisted name. Fall back to get_user_info() if whoami yields nothing.
+    if platform.system() == "Windows":
+        raw = run_command(["whoami"], COMMAND_TIMEOUT)
+        if raw:
+            return _real_user_or_none(raw)
+    return _real_user_or_none(get_user_info())
+
+
 def get_user_info() -> str:
     """
     Get current user information (whoami equivalent).
     Cross-platform function that returns username.
     Gets username directly from system information, not environment variables.
-    
+
     On macOS, when running as root, finds the user with the most storage space
     in /Users directory to get the actual user instead of "root".
-    
-    On Windows, when running as administrator, finds the actual logged-in user
-    by querying explorer.exe process owner, Win32_ComputerSystem, or active console
-    session instead of returning "Administrator" or "admin".
-    
+
+    On Windows, returns ``whoami`` with any ``DOMAIN\\`` prefix stripped, falling
+    back to ``getpass.getuser()``. (It does NOT currently resolve the real
+    interactive user when running as a service/SYSTEM — get_audit_user() maps
+    such non-human identities to None.)
+
+    NOTE: This ALWAYS returns a usable, non-None string (falling back to
+    "unknown"). Callers that build filesystem paths like ``/Users/<user>`` rely
+    on that guarantee. For an audit/payload value that is the real human OR
+    None, use ``get_audit_user()`` instead.
+
     Returns:
-        Current username as string
+        Current username as string (never None)
     """
     try:
         username = None
-        
+
         if platform.system() == "Windows":
             # Use whoami command on Windows (works reliably)
             whoami_output = run_command(["whoami"], COMMAND_TIMEOUT)
             # Extract just the username if whoami returns DOMAIN\username format
-            if username and "\\" in username:
-                username = username.split("\\")[-1]
+            username = _strip_windows_domain(whoami_output) if whoami_output else None
         else:
             # On macOS/Linux, check if running as root first
             current_user = run_command(["whoami"], COMMAND_TIMEOUT)
@@ -371,7 +715,8 @@ def send_scan_event(
     app_name: Optional[str] = None,
     home_user: Optional[str] = None,
     scan_error: Optional[Dict] = None,
-    sentry_context: Optional[Dict] = None
+    sentry_context: Optional[Dict] = None,
+    system_user: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -386,6 +731,9 @@ def send_scan_event(
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
         sentry_context: Optional context dict forwarded to Sentry on failure
+        system_user: Optional real human user running the scan (or None). Used by
+            the backend to attribute empty machines. MUST be a real human or
+            None (see ``get_audit_user``), never a junk/service identity.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -398,6 +746,9 @@ def send_scan_event(
 
     if app_name:
         payload["app_name"] = app_name
+
+    if system_user:
+        payload["system_user"] = system_user
 
     if home_user:
         payload["home_user"] = home_user
@@ -421,6 +772,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     Uses curl subprocess to avoid Zscaler certificate issues with urllib.
     Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
     Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
+
+    For data reports (payloads carrying a non-empty ``tools`` list), tries the
+    S3 presigned-upload path first (3-step: upload-url → S3 PUT → from-s3). On
+    any failure, falls through to this legacy direct-POST endpoint, which has
+    its own retry/queue logic. Scan-lifecycle events bypass S3 and use the
+    legacy endpoint directly — they are tiny.
 
     Args:
         backend_url: Backend URL to send the report to
@@ -446,6 +803,28 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     payload = dict(report)
     if app_name:
         payload["app_name"] = app_name
+
+    # Stamp tool_name + hash atomically; backend uses both to dedup unchanged re-scans.
+    from .s3_uploader import compute_payload_hash, should_use_s3, try_s3_upload
+    tools = payload.get("tools")
+    if isinstance(tools, list) and len(tools) == 1 and isinstance(tools[0], dict):
+        raw_name = tools[0].get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            try:
+                payload_hash = compute_payload_hash(tools[0])
+                payload["tool_name"] = raw_name.strip()
+                payload["payload_hash"] = payload_hash
+            except Exception as e:
+                # Hash failure should never block the upload — log and proceed.
+                logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
+
+    if should_use_s3(payload):
+        s3_success, _ = try_s3_upload(
+            backend_url, api_key, payload, sentry_context=ctx,
+        )
+        if s3_success:
+            return (True, False)
+        logger.info("S3 upload path failed; falling back to legacy /api/v1/ai-tools/report/")
 
     payload_json = json.dumps(payload)
     ctx = {
@@ -592,19 +971,27 @@ def _backoff(attempt: int, delays: List[int]) -> None:
 def _get_queue_file_path() -> Path:
     """Return platform-appropriate queue file path.
 
+    If AI_DISCOVERY_QUEUE_FILE is set (and non-empty) in the environment,
+    that path is used verbatim. This lets the test harness redirect the
+    queue away from the real per-UID /var/tmp file so an interrupted test
+    can never leave a fixture that a later real agent run would drain and
+    POST to production.
+
     On Unix, /var/tmp persists across reboots (unlike /tmp).
     The filename includes the current UID so that different users
     (e.g. root via MDM vs. a regular login user) each get their own
     queue file, avoiding PermissionError on files created with 0600.
     On Windows, fall back to the standard temp directory (already per-user).
     """
+    override = (os.environ.get("AI_DISCOVERY_QUEUE_FILE") or "").strip()
+    if override:
+        return Path(os.path.expanduser(os.path.expandvars(override)))
     if platform.system() == "Windows":
         return Path(tempfile.gettempdir()) / "ai-discovery-queue.json"
     uid = os.getuid()
     return Path(f"/var/tmp/ai-discovery-queue-{uid}.json")
 
 
-QUEUE_FILE = _get_queue_file_path()
 QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
@@ -619,10 +1006,12 @@ def save_failed_reports(reports: List[Dict]) -> None:
         ]
         # Keep only the most recent entries to prevent unbounded growth
         envelopes = envelopes[-MAX_QUEUE_SIZE:]
-        _write_file_secure(QUEUE_FILE, json.dumps(envelopes).encode())
-        logger.info(f"Saved {len(reports)} failed report(s) to {QUEUE_FILE}")
+        queue_file = _get_queue_file_path()
+        _write_file_secure(queue_file, json.dumps(envelopes).encode())
+        logger.info(f"Saved {len(reports)} failed report(s) to {queue_file}")
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
 
 
 def load_pending_reports() -> List[Dict]:
@@ -637,13 +1026,15 @@ def load_pending_reports() -> List[Dict]:
             f" -- can be removed with: sudo rm {old_shared}"
         )
 
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
 
     try:
-        envelopes = json.loads(QUEUE_FILE.read_text())
+        envelopes = json.loads(queue_file.read_text())
     except Exception as e:
         logger.warning(f"Could not load pending reports: {e}")
+        report_to_sentry(e, {"phase": "queue"}, level="warning")
         return []
 
     now = datetime.now(timezone.utc)
@@ -666,16 +1057,20 @@ def load_pending_reports() -> List[Dict]:
 
 def _load_queue_file_safe() -> List[Dict]:
     """Load existing queue file contents, returning an empty list on any error."""
-    if not QUEUE_FILE.exists():
+    queue_file = _get_queue_file_path()
+    if not queue_file.exists():
         return []
     try:
-        return json.loads(QUEUE_FILE.read_text())
+        return json.loads(queue_file.read_text())
     except Exception:
         return []
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
     """Write data to a file with restricted permissions (0600 on Unix)."""
+    # Ensure the parent exists so a queue-path override with a missing parent
+    # doesn't silently drop the write (and lose the failed reports).
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     # Restrict permissions to owner-only (rw-------) on Unix systems
     try:
@@ -767,13 +1162,15 @@ def _run_auth_status(
     username: str,
     method: str = "direct",
     env: Optional[dict] = None,
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
     """Execute an auth-status command and parse the subscription type.
 
-    Returns a tuple of (success, subscription_type):
-    - (True, "max")  — command ran successfully, user has a plan
-    - (True, None)   — command ran successfully, user is not logged in
-    - (False, None)  — command failed (non-zero exit, timeout, OS error)
+    Returns a tuple of (success, subscription_type, auth_method, api_key_source):
+    - (True, "max", "claude.ai", None)           — user has a personal plan
+    - (True, "api_key", "api_key", "ANTHROPIC_API_KEY") — API key auth
+    - (True, None, "claude.ai", "/login managed key")   — org-managed login
+    - (True, None, None, None)                   — user is not logged in
+    - (False, None, None, None)                  — command failed
     """
     try:
         result = subprocess.run(
@@ -790,20 +1187,25 @@ def _run_auth_status(
                 f"{username}: rc={result.returncode}, "
                 f"stderr={result.stderr.strip()}"
             )
-            return (False, None)
+            return (False, None, None, None)
 
         parsed = json.loads(result.stdout.strip())
-        return (True, parsed.get("subscriptionType"))
+        auth_method = parsed.get("authMethod")
+        api_key_source = parsed.get("apiKeySource")
+        plan = parsed.get("subscriptionType")
+        if plan is None and "api_key" in str(auth_method or "").lower():
+            plan = "api_key"
+        return (True, plan, auth_method, api_key_source)
 
     except subprocess.TimeoutExpired:
         logger.debug(f"claude auth status ({method}) timed out for {username}")
-        return (False, None)
+        return (False, None, None, None)
     except json.JSONDecodeError:
         logger.warning(f"claude auth status ({method}) returned non-JSON for {username}")
-        return (False, None)
+        return (False, None, None, None)
     except OSError as e:
         logger.debug(f"Could not run claude auth status ({method}) for {username}: {e}")
-        return (False, None)
+        return (False, None, None, None)
 
 
 def _get_plan_from_keychain(username: str) -> Optional[str]:
@@ -874,7 +1276,8 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
 
 def get_claude_subscription_type(
     username: str,
-    claude_binary: str,
+    claude_binary: Optional[str] = None,
+    diagnostics: Optional[List[Dict]] = None,
 ) -> Optional[str]:
     """
     Get the Claude Code subscription type for a specific user.
@@ -882,6 +1285,12 @@ def get_claude_subscription_type(
     On macOS, first attempts a fast-path read directly from the macOS
     Keychain (~15ms).  Falls back to running 'claude auth status --json'
     as the specified user if the keychain read fails.
+
+    When ``claude_binary`` is ``None``, the command is passed through the
+    user's login shell (``shell -lc "claude auth status --json"``) so that
+    the shell's PATH resolves the binary.  This covers installations via
+    non-standard package managers (volta, pnpm, fnm, asdf, mise, etc.)
+    without needing to know the exact install path.
 
     On macOS when running as root, uses 'launchctl asuser <uid>' to execute
     in the user's Mach bootstrap namespace (required for Keychain access).
@@ -894,21 +1303,54 @@ def get_claude_subscription_type(
 
     Args:
         username: System username to run the command as
-        claude_binary: Absolute path to the claude binary
+        claude_binary: Absolute path to the claude binary, or None to
+            let the user's login shell resolve ``claude`` via PATH.
+        diagnostics: Optional list to collect breadcrumb dicts for
+            diagnostic reporting.  When ``None`` (the default), no
+            breadcrumbs are recorded and behaviour is identical to
+            previous versions.
 
     Returns:
-        Subscription type string (e.g., "max", "pro", "team", "enterprise")
-        or None if detection fails or user is not logged in
+        Subscription type string (e.g., "max", "pro", "team", "enterprise",
+        "api_key") or None if detection fails or user is not logged in
     """
     try:
+        is_root = _is_root()
+        binary_status = "provided" if claude_binary else "shell_resolution"
+
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "plan_detection",
+                "message": "Starting plan detection",
+                "level": "info",
+                "data": {
+                    "os": platform.system(),
+                    "is_root": is_root,
+                    "binary_status": binary_status,
+                    "username": username,
+                },
+            })
+
         # Fast path: read directly from macOS Keychain (no CLI needed)
         if platform.system() == "Darwin":
             plan = _get_plan_from_keychain(username)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "keychain",
+                    "message": f"Keychain result: {plan}" if plan else "Keychain returned None",
+                    "level": "info" if plan else "warning",
+                    "data": {"plan": plan},
+                })
             if plan:
                 return plan
 
+        # Build the auth command — full path when known, bare name otherwise
+        if claude_binary:
+            auth_cmd = f"{shlex.quote(claude_binary)} auth status --json"
+        else:
+            auth_cmd = "claude auth status --json"
+
         # CLI fallback: spawn 'claude auth status --json'
-        is_root = _is_root()
         is_darwin = platform.system() == "Darwin"
         is_container = is_darwin and _is_daemon_container()
         use_launchctl = is_darwin and (is_root or is_container)
@@ -920,9 +1362,16 @@ def get_claude_subscription_type(
                 cmd = [
                     "launchctl", "asuser", str(uid),
                     shell, "-lc",
-                    f"{shlex.quote(claude_binary)} auth status --json",
+                    auth_cmd,
                 ]
-                ok, plan = _run_auth_status(cmd, username, method="launchctl asuser")
+                ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="launchctl asuser")
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "category": "launchctl_asuser",
+                        "message": f"ok={ok}, plan={plan}",
+                        "level": "info" if ok else "warning",
+                        "data": {"ok": ok, "plan": plan, "auth_method": auth_method, "key_source": key_source, "uid": uid, "shell": shell},
+                    })
                 if ok:
                     return plan
                 logger.debug(
@@ -934,19 +1383,40 @@ def get_claude_subscription_type(
                     f"Could not resolve UID for {username}, "
                     f"skipping launchctl asuser"
                 )
+                if diagnostics is not None:
+                    diagnostics.append({
+                        "category": "launchctl_asuser",
+                        "message": "UID resolution failed, skipping launchctl",
+                        "level": "warning",
+                        "data": {"uid": None},
+                    })
 
         # Fallback for root on macOS: su - username
         if is_darwin and is_root:
             cmd = [
                 "su", "-", username, "-c",
-                f"{shlex.quote(claude_binary)} auth status --json",
+                auth_cmd,
             ]
-            ok, plan = _run_auth_status(cmd, username, method="su")
+            ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="su")
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "su_fallback",
+                    "message": f"ok={ok}, plan={plan}",
+                    "level": "info" if ok else "warning",
+                    "data": {"ok": ok, "plan": plan, "auth_method": auth_method, "key_source": key_source},
+                })
             if ok:
                 return plan
 
         # Direct execution — final fallback for all platforms
-        cmd = [claude_binary, "auth", "status", "--json"]
+        shell_fallback = False
+        if claude_binary:
+            cmd = [claude_binary, "auth", "status", "--json"]
+        else:
+            # No binary path known — use login shell to resolve via PATH
+            shell_fallback = True
+            shell = _get_compatible_shell(username)
+            cmd = [shell, "-lc", auth_cmd]
         env = None
         if is_container:
             real_home = _get_real_home(username)
@@ -957,11 +1427,33 @@ def get_claude_subscription_type(
                     f"Overriding HOME to {real_home} for {username} "
                     f"(daemon container detected)"
                 )
-        ok, plan = _run_auth_status(cmd, username, method="direct", env=env)
+        ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="direct", env=env)
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "direct_exec",
+                "message": f"ok={ok}, plan={plan}",
+                "level": "info" if ok else "warning",
+                "data": {
+                    "ok": ok,
+                    "plan": plan,
+                    "auth_method": auth_method,
+                    "key_source": key_source,
+                    "binary": claude_binary,
+                    "shell_fallback": shell_fallback,
+                    "daemon_container": is_container if is_darwin else False,
+                },
+            })
         return plan
 
     except Exception as e:
         logger.debug(f"Unexpected error getting subscription for {username}: {e}")
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "unexpected_error",
+                "message": f"{type(e).__name__}: {e}",
+                "level": "error",
+                "data": {"error_type": type(e).__name__, "error_message": str(e)},
+            })
         return None
 
 
@@ -987,6 +1479,8 @@ def _get_cursor_db_path(user_home: Path) -> Optional[Path]:
         db_path = user_home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
     elif system == "Windows":
         db_path = user_home / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    elif system == "Linux":
+        db_path = user_home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
     else:
         return None
 
@@ -1084,11 +1578,85 @@ _SENTRY_TAG_KEYS = (
     "tool_name", "domain", "phase", "http_code",
 )
 
+# Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
+# (including the detect_all_tools loop) and shells out to curl synchronously. On a
+# machine where the Sentry endpoint is slow or blocked (the corporate-proxy / Zscaler
+# fleets this tool targets), an unguarded fan-out of failures would add the curl
+# timeout to every failing step and stretch a fast scan into minutes. These bound it:
+#   - dedup by signature + a hard cap, since Sentry dedups server-side anyway, so N
+#     identical curls buy nothing;
+#   - a circuit breaker that stops calling Sentry for the rest of the run once the
+#     transport looks dead.
+# Single-threaded by design: only the main scan thread calls report_to_sentry() (the
+# heartbeat thread never does), so no locking is needed. A discovery run is a
+# short-lived process, so "per run" == process lifetime; reset_sentry_run_state()
+# restores the clean starting point for long-lived test processes.
+_SENTRY_MAX_EVENTS_PER_RUN = 30
+_SENTRY_BREAKER_THRESHOLD = 3
+_sentry_sent_signatures = set()
+_sentry_event_count = 0
+_sentry_consecutive_fails = 0
+_sentry_dead_this_run = False
+
+
+def reset_sentry_run_state() -> None:
+    """Reset the per-run Sentry dedup / circuit-breaker state."""
+    global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
+    _sentry_sent_signatures.clear()
+    _sentry_event_count = 0
+    _sentry_consecutive_fails = 0
+    _sentry_dead_this_run = False
+
+
+def _ip_is_loopback(host: str) -> bool:
+    """True when ``host`` is a loopback IP literal (IPv4 incl. shorthand, ::1, IPv4-mapped)."""
+    try:
+        return socket.inet_aton(host)[0] == 127
+    except OSError:
+        pass
+    try:
+        packed = socket.inet_pton(socket.AF_INET6, host)
+    except (OSError, AttributeError):
+        return False
+    if packed == b"\x00" * 15 + b"\x01":
+        return True
+    if packed[:12] == b"\x00" * 10 + b"\xff\xff":
+        return packed[12] == 127
+    return False
+
+
+def _event_domain_is_loopback(domain: str) -> bool:
+    """True when ``domain``'s host is loopback. Plain string parsing, no urllib (Zscaler)."""
+    if not domain:
+        return False
+    host = domain.strip().lower()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") <= 1:
+        host = host.split(":", 1)[0]
+    if host == "localhost" or host.endswith(".localhost") or host == "0.0.0.0":
+        return True
+    return _ip_is_loopback(host)
+
+
+def _is_ci_or_local_event(ctx: Dict) -> bool:
+    """True for CI/local-run events (loopback report domain). Never raises; defaults False."""
+    try:
+        return _event_domain_is_loopback(str(ctx.get("domain") or ""))
+    except Exception:
+        return False
+
 
 def report_to_sentry(
     exception: Exception,
     context: Optional[Dict] = None,
     level: str = "error",
+    priority: bool = False,
 ) -> None:
     """Send an event to Sentry using the raw HTTP store endpoint.
 
@@ -1096,6 +1664,12 @@ def report_to_sentry(
         exception: The exception to report.
         context: Extra tags/context (e.g. phase, tool_name, http_code).
         level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+        priority: Best-effort guarantee a terminal once-per-run diagnostic
+            (e.g. the no_tools_found summary) is delivered. Bypasses both the
+            per-run event cap AND the circuit breaker so earlier transient
+            per-tool send failures can't silently skip it -- it still gets ONE
+            attempt at the end of the run (bounded: at most one ~4s curl). Dedup
+            is still honored (no spam). Reserve for a single terminal event/run.
     """
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
@@ -1104,6 +1678,28 @@ def report_to_sentry(
             return
 
         ctx = context or {}
+
+        if _is_ci_or_local_event(ctx):
+            logger.debug("Sentry reporting skipped (CI/local run)")
+            return
+
+        global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
+        # Circuit breaker: once the transport looks dead, stop calling Sentry for the
+        # rest of the run so a blocked endpoint can't add its timeout to every failure.
+        # priority events bypass it for ONE bounded attempt so a transient mid-scan
+        # outage doesn't silently drop the terminal diagnostic.
+        if _sentry_dead_this_run and not priority:
+            return
+        # Collapse duplicate events and hard-cap the synchronous curls per run.
+        # priority events skip the count cap + breaker (but never dedup) so a
+        # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
+        signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
+        if signature in _sentry_sent_signatures:
+            return
+        if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
+            return
+        _sentry_sent_signatures.add(signature)
+        _sentry_event_count += 1
 
         tags = {
             "os": platform.system(),
@@ -1133,6 +1729,7 @@ def report_to_sentry(
 
         sentry_auth = f"Sentry sentry_version=7, sentry_key={dsn['key']}, sentry_client=ai-tools-discovery/1.0.0"
         fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-sentry-", suffix=".json")
+        sent_ok = False
         try:
             try:
                 os.write(fd, json.dumps(payload).encode("utf-8"))
@@ -1146,20 +1743,30 @@ def report_to_sentry(
                     "-H", "Content-Type: application/json",
                     "-H", f"X-Sentry-Auth: {sentry_auth}",
                     "-d", f"@{tmp_path}",
-                    "--max-time", "5",
+                    "--max-time", "3",
                     dsn["store_url"],
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=4,
             )
-            if result.returncode == 0:
+            sent_ok = (result.returncode == 0)
+            if sent_ok:
                 logger.debug(f"Sentry event sent ({result.stdout.strip()})")
         finally:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+            # Trip the breaker on any transport failure (non-zero curl, timeout, or a
+            # raised exception that is about to propagate to the outer handler) so a
+            # blackholed endpoint stops being retried after a few attempts.
+            if sent_ok:
+                _sentry_consecutive_fails = 0
+            else:
+                _sentry_consecutive_fails += 1
+                if _sentry_consecutive_fails >= _SENTRY_BREAKER_THRESHOLD:
+                    _sentry_dead_this_run = True
     except Exception as sentry_err:
         # Sentry failures must never crash the script
         logger.debug(f"Sentry reporting failed: {sentry_err}")

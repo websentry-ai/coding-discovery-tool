@@ -31,10 +31,12 @@ class MacOSAntigravityDetector(BaseToolDetector):
     def detect(self) -> Optional[Dict]:
         """
         Detect Antigravity installation on macOS.
-        
-        Checks for .antigravity directories in common locations and also
-        checks for installed applications.
-        
+
+        Gate purely on the presence of the ``.app`` bundle. The bundle is
+        removed on uninstall, so it is an accurate "installed" signal. The
+        former ``~/.antigravity`` fallback was a residue config/data dir that
+        survives uninstall and produced false positives.
+
         Returns:
             Dict with tool info or None if not found
         """
@@ -46,17 +48,7 @@ class MacOSAntigravityDetector(BaseToolDetector):
                 "version": self.get_version(app_path),
                 "install_path": str(app_path)
             }
-        
-        # Also check if .antigravity directories exist (indicates tool usage)
-        # This is similar to how cursor and windsurf work
-        home_path = Path.home()
-        if (home_path / ".antigravity").exists():
-            return {
-                "name": self.tool_name,
-                "version": None,
-                "install_path": None
-            }
-        
+
         return None
 
     def _find_app_path(self) -> Optional[Path]:

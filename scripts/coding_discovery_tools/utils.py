@@ -716,6 +716,8 @@ def send_scan_event(
     scan_error: Optional[Dict] = None,
     sentry_context: Optional[Dict] = None,
     system_user: Optional[str] = None,
+    manifest: Optional[List[Dict]] = None,
+    covered_home_users: Optional[List[str]] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -733,6 +735,10 @@ def send_scan_event(
         system_user: Optional real human user running the scan (or None). Used by
             the backend to attribute empty machines. MUST be a real human or
             None (see ``get_audit_user``), never a junk/service identity.
+        manifest: Optional [{"home_user", "tool_name"}] seen this run; sent only on
+            "completed" so the backend set-diffs it to prune the rest.
+        covered_home_users: Optional home users covered; sent only on "completed" to
+            bound the prune scope.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -754,6 +760,12 @@ def send_scan_event(
 
     if scan_error:
         payload["scan_error"] = scan_error
+
+    if manifest is not None:
+        payload["manifest"] = manifest
+
+    if covered_home_users is not None:
+        payload["covered_home_users"] = covered_home_users
 
     return send_report_to_backend(
         backend_url,

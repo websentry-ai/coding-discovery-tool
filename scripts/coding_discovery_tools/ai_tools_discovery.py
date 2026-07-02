@@ -372,7 +372,7 @@ class AIToolsDetector:
         """
         return self._device_id_extractor.extract_device_id()
 
-    def detect_all_tools(self, user_home: Optional[Path] = None) -> List[Dict]:
+    def detect_all_tools(self, user_home: Optional[Path] = None, failures: Optional[set] = None) -> List[Dict]:
         """
         Detect all supported AI tools.
         
@@ -403,6 +403,9 @@ class AIToolsDetector:
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
                 report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
+                # Detection errored: record the tool so the caller can keep it (presence unknown != uninstalled).
+                if failures is not None:
+                    failures.add(detector.tool_name)
 
         return tools
 
@@ -2804,6 +2807,11 @@ def main():
         # Track failed reports for persistence
         failed_reports = []
 
+        # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
+        scanned_manifest = set()
+        # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
+        incomplete_reasons = []
+
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
@@ -2898,7 +2906,18 @@ def main():
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             with time_step("detect_tools", "detect"):
-                user_tools = detector.detect_all_tools(user_home=user_home)
+                user_detect_failures = set()
+                user_tools = detector.detect_all_tools(
+                    user_home=user_home, failures=user_detect_failures
+                )
+            # Per-user presence: a detected tool stays in the manifest even if reading it later
+            # errors (a read failure isn't an uninstall).
+            for detected in user_tools:
+                scanned_manifest.add((user, detected.get('name', 'Unknown')))
+            # A detector error means presence is unknown for this user -> mark the scan incomplete
+            # so it doesn't prune (detector.tool_name is an umbrella label, not the real row name).
+            if user_detect_failures:
+                incomplete_reasons.append(f"detector error for user {user}")
 
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
@@ -2961,6 +2980,11 @@ def main():
                         user_home = Path.home()
 
                     try:
+                        # all_tools is deduped globally; only report a tool for users who actually
+                        # detected it (i.e. it's in their manifest) to avoid phantom installs.
+                        if (user_name, tool_name) not in scanned_manifest:
+                            continue
+
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
@@ -2976,6 +3000,8 @@ def main():
                                 f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
                                 f"not owned by this user and no per-user data"
                             )
+                            # Detected globally but not owned by this user -> drop the presence entry.
+                            scanned_manifest.discard((user_name, tool_name))
                             continue
 
                         # Ownership gate (Augment surfaces): same ~/.augment-keyed
@@ -2988,6 +3014,8 @@ def main():
                                 f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
                                 f"not owned by this user and no per-user data"
                             )
+                            # Detected globally but not owned by this user -> drop the presence entry.
+                            scanned_manifest.discard((user_name, tool_name))
                             continue
 
                         # Detect subscription plan for Claude Code
@@ -3199,6 +3227,8 @@ def main():
 
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
+                # Detected tools are already in the manifest from the detection phase, so this
+                # extraction failure can't drop a live tool.
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
@@ -3235,6 +3265,8 @@ def main():
                     "os": platform.system(),
                     "tool_count": len(tools),
                     "user_count": len(all_users),
+                    "manifest_size": len(scanned_manifest),
+                    "scan_incomplete": bool(incomplete_reasons),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
                 },
@@ -3246,11 +3278,18 @@ def main():
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 
-        # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")
+        # An incomplete scan sends neither manifest nor covered scope, so the backend has no
+        # partial inventory to prune from (atomic on this event — no separate signal to lose).
+        if incomplete_reasons:
+            manifest, covered = None, None
+        else:
+            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+            covered = all_users
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
-            args.app_name, sentry_context=sentry_ctx, system_user=system_user
+            args.app_name, sentry_context=sentry_ctx, system_user=system_user,
+            manifest=manifest, covered_home_users=covered,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

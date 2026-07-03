@@ -1573,9 +1573,11 @@ def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
         return None
 
 
+# Low-cardinality no_tools_found discriminators (bools + small ints); duration_ms stays in extra.
 _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
+    "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

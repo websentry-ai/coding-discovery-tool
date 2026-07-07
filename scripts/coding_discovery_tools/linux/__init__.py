@@ -3,23 +3,23 @@
 from .device_id import LinuxDeviceIdExtractor
 from .claude_code import LinuxClaudeDetector, LinuxClaudeSettingsExtractor, LinuxClaudeSkillsExtractor
 from .cursor import LinuxCursorDetector, LinuxCursorSettingsExtractor, LinuxCursorSkillsExtractor
-from .windsurf import LinuxWindsurfDetector
-from .roo_code import LinuxRooDetector, LinuxRooRulesExtractor, LinuxRooMCPConfigExtractor
+from .windsurf import LinuxWindsurfDetector, LinuxWindsurfSkillsExtractor
+from .roo_code import LinuxRooDetector, LinuxRooRulesExtractor, LinuxRooMCPConfigExtractor, LinuxRooSkillsExtractor
 from .cline import LinuxClineDetector, LinuxClineRulesExtractor, LinuxClineMCPConfigExtractor, LinuxClineSkillsExtractor
 from .antigravity import LinuxAntigravityDetector, LinuxAntigravityRulesExtractor, LinuxAntigravityMCPConfigExtractor
-from .kilocode import LinuxKiloCodeDetector, LinuxKiloCodeRulesExtractor, LinuxKiloCodeMCPConfigExtractor
-from .gemini_cli import LinuxGeminiCliDetector, LinuxGeminiCliRulesExtractor, LinuxGeminiCliMCPConfigExtractor
+from .kilocode import LinuxKiloCodeDetector, LinuxKiloCodeRulesExtractor, LinuxKiloCodeMCPConfigExtractor, LinuxKiloCodeSkillsExtractor
+from .gemini_cli import LinuxGeminiCliDetector, LinuxGeminiCliRulesExtractor, LinuxGeminiCliMCPConfigExtractor, LinuxGeminiCliSkillsExtractor
 from .cursor_cli import LinuxCursorCliDetector, LinuxCursorCliRulesExtractor, LinuxCursorCliMCPConfigExtractor, LinuxCursorCliSettingsExtractor
 from .copilot_cli import LinuxCopilotCliDetector, LinuxCopilotCliMCPConfigExtractor, LinuxCopilotCliRulesExtractor, LinuxCopilotCliSettingsExtractor, LinuxCopilotCliSkillsExtractor
 from .augment import LinuxAugmentDetector, LinuxAugmentMCPConfigExtractor, LinuxAugmentRulesExtractor, LinuxAugmentSettingsExtractor, LinuxAugmentSkillsExtractor
 from .codex import LinuxCodexDetector, LinuxCodexRulesExtractor, LinuxCodexMCPConfigExtractor, LinuxCodexSkillsExtractor
-from .opencode import LinuxOpenCodeDetector, LinuxOpenCodeRulesExtractor, LinuxOpenCodeMCPConfigExtractor
+from .opencode import LinuxOpenCodeDetector, LinuxOpenCodeRulesExtractor, LinuxOpenCodeMCPConfigExtractor, LinuxOpenCodeSkillsExtractor
 from .openclaw import LinuxOpenClawDetector
-from .replit import LinuxReplitDetector
+from .replit import LinuxReplitDetector, LinuxReplitSkillsExtractor
 from .jetbrains import LinuxJetBrainsDetector, LinuxJetBrainsMCPConfigExtractor
 from .github_copilot import LinuxCopilotDetector, LinuxGitHubCopilotRulesExtractor, LinuxGitHubCopilotMCPConfigExtractor
 from .claude_cowork import LinuxClaudeCoworkDetector, LinuxClaudeCoworkSkillsExtractor
-from .junie import LinuxJunieDetector, LinuxJunieRulesExtractor, LinuxJunieMCPConfigExtractor
+from .junie import LinuxJunieDetector, LinuxJunieRulesExtractor, LinuxJunieMCPConfigExtractor, LinuxJunieSkillsExtractor
 
 __all__ = [
     "LinuxDeviceIdExtractor",
@@ -30,9 +30,11 @@ __all__ = [
     "LinuxCursorSettingsExtractor",
     "LinuxCursorSkillsExtractor",
     "LinuxWindsurfDetector",
+    "LinuxWindsurfSkillsExtractor",
     "LinuxRooDetector",
     "LinuxRooRulesExtractor",
     "LinuxRooMCPConfigExtractor",
+    "LinuxRooSkillsExtractor",
     "LinuxClineDetector",
     "LinuxClineRulesExtractor",
     "LinuxClineMCPConfigExtractor",
@@ -43,9 +45,11 @@ __all__ = [
     "LinuxKiloCodeDetector",
     "LinuxKiloCodeRulesExtractor",
     "LinuxKiloCodeMCPConfigExtractor",
+    "LinuxKiloCodeSkillsExtractor",
     "LinuxGeminiCliDetector",
     "LinuxGeminiCliRulesExtractor",
     "LinuxGeminiCliMCPConfigExtractor",
+    "LinuxGeminiCliSkillsExtractor",
     "LinuxCursorCliDetector",
     "LinuxCursorCliRulesExtractor",
     "LinuxCursorCliMCPConfigExtractor",
@@ -67,8 +71,10 @@ __all__ = [
     "LinuxOpenCodeDetector",
     "LinuxOpenCodeRulesExtractor",
     "LinuxOpenCodeMCPConfigExtractor",
+    "LinuxOpenCodeSkillsExtractor",
     "LinuxOpenClawDetector",
     "LinuxReplitDetector",
+    "LinuxReplitSkillsExtractor",
     "LinuxJetBrainsDetector",
     "LinuxJetBrainsMCPConfigExtractor",
     "LinuxCopilotDetector",
@@ -79,4 +85,5 @@ __all__ = [
     "LinuxJunieDetector",
     "LinuxJunieRulesExtractor",
     "LinuxJunieMCPConfigExtractor",
+    "LinuxJunieSkillsExtractor",
 ]

@@ -40,6 +40,13 @@ from .coding_tool_base import (
     BaseCursorSkillsExtractor,
     BaseClineSkillsExtractor,
     BaseCodexSkillsExtractor,
+    BaseGeminiCliSkillsExtractor,
+    BaseJunieSkillsExtractor,
+    BaseKiloCodeSkillsExtractor,
+    BaseOpenCodeSkillsExtractor,
+    BaseRooSkillsExtractor,
+    BaseReplitSkillsExtractor,
+    BaseWindsurfSkillsExtractor,
 )
 
 # macOS - Shared
@@ -62,15 +69,18 @@ from .macos.cursor.skills_extractor import MacOSCursorSkillsExtractor
 from .macos.windsurf.windsurf import MacOSWindsurfDetector
 from .macos.windsurf.windsurf_rules_extractor import MacOSWindsurfRulesExtractor
 from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
+from .macos.windsurf.skills_extractor import MacOSWindsurfSkillsExtractor
 
 # macOS - Roo Code
 from .macos.roo_code.roo_code import MacOSRooDetector
 from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
+from .macos.roo_code.skills_extractor import MacOSRooSkillsExtractor
 from .macos.roo_code.roo_code_rules_extractor import MacOSRooRulesExtractor
 
 # Windows - Roo Code
 from .windows.roo_code.roo_code import WindowsRooDetector
 from .windows.roo_code.mcp_config_extractor import WindowsRooMCPConfigExtractor
+from .windows.roo_code.skills_extractor import WindowsRooSkillsExtractor
 from .windows.roo_code.roo_code_rules_extractor import WindowsRooRulesExtractor
 
 # macOS - Cline
@@ -88,11 +98,13 @@ from .macos.antigravity.mcp_config_extractor import MacOSAntigravityMCPConfigExt
 from .macos.kilocode.kilocode import MacOSKiloCodeDetector
 from .macos.kilocode.kilocode_rules_extractor import MacOSKiloCodeRulesExtractor
 from .macos.kilocode.mcp_config_extractor import MacOSKiloCodeMCPConfigExtractor
+from .macos.kilocode.skills_extractor import MacOSKiloCodeSkillsExtractor
 
 # macOS - Gemini CLI
 from .macos.gemini_cli.gemini_cli import MacOSGeminiCliDetector
 from .macos.gemini_cli.gemini_cli_rules_extractor import MacOSGeminiCliRulesExtractor
 from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtractor
+from .macos.gemini_cli.skills_extractor import MacOSGeminiCliSkillsExtractor
 
 # macOS - Cursor CLI
 from .macos.cursor_cli.cursor_cli import MacOSCursorCliDetector
@@ -108,6 +120,7 @@ from .macos.codex.skills_extractor import MacOSCodexSkillsExtractor
 
 # macOS - Replit
 from .macos.replit.replit import MacOSReplitDetector
+from .macos.replit.skills_extractor import MacOSReplitSkillsExtractor
 
 # macOS - OpenClaw
 from .macos.openclaw.detect_openclaw import MacOSOpenClawDetector
@@ -155,6 +168,7 @@ from .windows.augment.augment_skills_extractor import WindowsAugmentSkillsExtrac
 
 # Windows - Replit
 from .windows.replit.replit import WindowsReplitDetector
+from .windows.replit.skills_extractor import WindowsReplitSkillsExtractor
 # Windows - Codex
 from .windows.codex.codex import WindowsCodexDetector
 from .windows.codex.codex_rules_extractor import WindowsCodexRulesExtractor
@@ -165,6 +179,7 @@ from .windows.codex.skills_extractor import WindowsCodexSkillsExtractor
 from .macos.opencode.opencode import MacOSOpenCodeDetector
 from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
 from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
+from .macos.opencode.skills_extractor import MacOSOpenCodeSkillsExtractor
 
 # macOS - JetBrains
 from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
@@ -173,11 +188,13 @@ from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtract
 # macOS - Junie
 from .macos.junie.junie import MacOSJunieDetector
 from .macos.junie.mcp_config_extractor import MacOSJunieMCPConfigExtractor
+from .macos.junie.skills_extractor import MacOSJunieSkillsExtractor
 from .macos.junie.junie_rules_extractor import MacOSJunieRulesExtractor
 
 # Windows - Junie
 from .windows.junie.junie import WindowsJunieDetector
 from .windows.junie.mcp_config_extractor import WindowsJunieMCPConfigExtractor
+from .windows.junie.skills_extractor import WindowsJunieSkillsExtractor
 from .windows.junie.junie_rules_extractor import WindowsJunieRulesExtractor
 
 # Windows - JetBrains
@@ -188,11 +205,13 @@ from .windows.jetbrains.mcp_config_extractor import WindowsJetBrainsMCPConfigExt
 from .windows.opencode.opencode import WindowsOpenCodeDetector
 from .windows.opencode.opencode_rules_extractor import WindowsOpenCodeRulesExtractor
 from .windows.opencode.mcp_config_extractor import WindowsOpenCodeMCPConfigExtractor
+from .windows.opencode.skills_extractor import WindowsOpenCodeSkillsExtractor
 
 # Windows - Gemini CLI
 from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
 from .windows.gemini_cli.gemini_cli_rules_extractor import WindowsGeminiCliRulesExtractor
 from .windows.gemini_cli.mcp_config_extractor import WindowsGeminiCliMCPConfigExtractor
+from .windows.gemini_cli.skills_extractor import WindowsGeminiCliSkillsExtractor
 
 # Windows - Cursor CLI
 from .windows.cursor_cli.cursor_cli import WindowsCursorCliDetector
@@ -251,8 +270,15 @@ from .linux import (
     LinuxOpenCodeDetector,
     LinuxOpenCodeRulesExtractor,
     LinuxOpenCodeMCPConfigExtractor,
+    LinuxOpenCodeSkillsExtractor,
     LinuxOpenClawDetector,
     LinuxReplitDetector,
+    LinuxReplitSkillsExtractor,
+    LinuxGeminiCliSkillsExtractor,
+    LinuxJunieSkillsExtractor,
+    LinuxKiloCodeSkillsExtractor,
+    LinuxRooSkillsExtractor,
+    LinuxWindsurfSkillsExtractor,
     LinuxJetBrainsDetector,
     LinuxJetBrainsMCPConfigExtractor,
     LinuxCopilotDetector,
@@ -293,6 +319,7 @@ from .windows.cursor.skills_extractor import WindowsCursorSkillsExtractor
 from .windows.windsurf.windsurf import WindowsWindsurfDetector
 from .windows.windsurf.windsurf_rules_extractor import WindowsWindsurfRulesExtractor
 from .windows.windsurf.mcp_config_extractor import WindowsWindsurfMCPConfigExtractor
+from .windows.windsurf.skills_extractor import WindowsWindsurfSkillsExtractor
 
 # Windows - Antigravity
 from .windows.antigravity.antigravity import WindowsAntigravityDetector
@@ -309,6 +336,7 @@ from .windows.cline.skills_extractor import WindowsClineSkillsExtractor
 from .windows.kilocode.kilocode import WindowsKiloCodeDetector
 from .windows.kilocode.kilocode_rules_extractor import WindowsKiloCodeRulesExtractor
 from .windows.kilocode.mcp_config_extractor import WindowsKiloCodeMCPConfigExtractor
+from .windows.kilocode.skills_extractor import WindowsKiloCodeSkillsExtractor
 
 
 class DeviceIdExtractorFactory:
@@ -1948,6 +1976,139 @@ class CodexSkillsExtractorFactory:
             return WindowsCodexSkillsExtractor()
         elif os_name == "Linux":
             return LinuxCodexSkillsExtractor()
+        else:
+            return None
+
+
+class GeminiCliSkillsExtractorFactory:
+    """Factory for creating OS-specific Gemini CLI skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseGeminiCliSkillsExtractor]:
+        """Create appropriate Gemini CLI skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSGeminiCliSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsGeminiCliSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxGeminiCliSkillsExtractor()
+        else:
+            return None
+
+
+class JunieSkillsExtractorFactory:
+    """Factory for creating OS-specific Junie skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseJunieSkillsExtractor]:
+        """Create appropriate Junie skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSJunieSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsJunieSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxJunieSkillsExtractor()
+        else:
+            return None
+
+
+class KiloCodeSkillsExtractorFactory:
+    """Factory for creating OS-specific Kilo Code skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseKiloCodeSkillsExtractor]:
+        """Create appropriate Kilo Code skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSKiloCodeSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsKiloCodeSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxKiloCodeSkillsExtractor()
+        else:
+            return None
+
+
+class OpenCodeSkillsExtractorFactory:
+    """Factory for creating OS-specific OpenCode skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseOpenCodeSkillsExtractor]:
+        """Create appropriate OpenCode skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSOpenCodeSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsOpenCodeSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxOpenCodeSkillsExtractor()
+        else:
+            return None
+
+
+class RooSkillsExtractorFactory:
+    """Factory for creating OS-specific Roo Code skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseRooSkillsExtractor]:
+        """Create appropriate Roo Code skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSRooSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsRooSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxRooSkillsExtractor()
+        else:
+            return None
+
+
+class ReplitSkillsExtractorFactory:
+    """Factory for creating OS-specific Replit skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseReplitSkillsExtractor]:
+        """Create appropriate Replit skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSReplitSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsReplitSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxReplitSkillsExtractor()
+        else:
+            return None
+
+
+class WindsurfSkillsExtractorFactory:
+    """Factory for creating OS-specific Windsurf skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseWindsurfSkillsExtractor]:
+        """Create appropriate Windsurf skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSWindsurfSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsWindsurfSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxWindsurfSkillsExtractor()
         else:
             return None
 

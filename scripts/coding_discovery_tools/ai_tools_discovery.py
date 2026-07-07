@@ -53,6 +53,13 @@ try:
         ClaudeSkillsExtractorFactory,
         ClaudeCoworkSkillsExtractorFactory,
         CodexSkillsExtractorFactory,
+        GeminiCliSkillsExtractorFactory,
+        JunieSkillsExtractorFactory,
+        KiloCodeSkillsExtractorFactory,
+        OpenCodeSkillsExtractorFactory,
+        RooSkillsExtractorFactory,
+        ReplitSkillsExtractorFactory,
+        WindsurfSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -113,6 +120,13 @@ except ImportError:
         ClaudeSkillsExtractorFactory,
         ClaudeCoworkSkillsExtractorFactory,
         CodexSkillsExtractorFactory,
+        GeminiCliSkillsExtractorFactory,
+        JunieSkillsExtractorFactory,
+        KiloCodeSkillsExtractorFactory,
+        OpenCodeSkillsExtractorFactory,
+        RooSkillsExtractorFactory,
+        ReplitSkillsExtractorFactory,
+        WindsurfSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -302,6 +316,14 @@ class AIToolsDetector:
             self._codex_rules_extractor = CodexRulesExtractorFactory.create(self.system)
             self._codex_mcp_extractor = CodexMCPConfigExtractorFactory.create(self.system)
             self._codex_skills_extractor = CodexSkillsExtractorFactory.create(self.system)
+            # Agent Skills (SKILL.md) extractors for the remaining SKILL.md-adopting tools
+            self._gemini_cli_skills_extractor = GeminiCliSkillsExtractorFactory.create(self.system)
+            self._junie_skills_extractor = JunieSkillsExtractorFactory.create(self.system)
+            self._kilocode_skills_extractor = KiloCodeSkillsExtractorFactory.create(self.system)
+            self._opencode_skills_extractor = OpenCodeSkillsExtractorFactory.create(self.system)
+            self._roo_skills_extractor = RooSkillsExtractorFactory.create(self.system)
+            self._replit_skills_extractor = ReplitSkillsExtractorFactory.create(self.system)
+            self._windsurf_skills_extractor = WindsurfSkillsExtractorFactory.create(self.system)
             
             # Initialize OpenCode extractors (macOS only, returns None for unsupported OS)
             self._opencode_rules_extractor = OpenCodeRulesExtractorFactory.create(self.system)
@@ -557,6 +579,83 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting Codex skills: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": "Codex skills"}, level="warning")
+            return None
+
+    def extract_all_gemini_cli_skills(self) -> Optional[Dict]:
+        """Extract all Gemini CLI skills (~/.gemini/skills + .agents compat)."""
+        try:
+            if self._gemini_cli_skills_extractor:
+                return self._gemini_cli_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Gemini CLI skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Gemini CLI skills"}, level="warning")
+            return None
+
+    def extract_all_junie_skills(self) -> Optional[Dict]:
+        """Extract all Junie skills (~/.junie/skills, project .junie/skills)."""
+        try:
+            if self._junie_skills_extractor:
+                return self._junie_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Junie skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Junie skills"}, level="warning")
+            return None
+
+    def extract_all_kilocode_skills(self) -> Optional[Dict]:
+        """Extract all Kilo Code skills (~/.kilo/skills + .agents/.claude compat)."""
+        try:
+            if self._kilocode_skills_extractor:
+                return self._kilocode_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Kilo Code skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Kilo Code skills"}, level="warning")
+            return None
+
+    def extract_all_opencode_skills(self) -> Optional[Dict]:
+        """Extract all OpenCode skills (~/.config/opencode/skills + .claude/.agents compat)."""
+        try:
+            if self._opencode_skills_extractor:
+                return self._opencode_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting OpenCode skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "OpenCode skills"}, level="warning")
+            return None
+
+    def extract_all_roo_skills(self) -> Optional[Dict]:
+        """Extract all Roo Code skills (~/.roo/skills + skills-{mode} + .agents compat)."""
+        try:
+            if self._roo_skills_extractor:
+                return self._roo_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Roo Code skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Roo Code skills"}, level="warning")
+            return None
+
+    def extract_all_replit_skills(self) -> Optional[Dict]:
+        """Extract all Replit skills (project-scope .agents/skills only)."""
+        try:
+            if self._replit_skills_extractor:
+                return self._replit_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Replit skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Replit skills"}, level="warning")
+            return None
+
+    def extract_all_windsurf_skills(self) -> Optional[Dict]:
+        """Extract all Windsurf skills (~/.codeium/windsurf/skills + project compat dirs)."""
+        try:
+            if self._windsurf_skills_extractor:
+                return self._windsurf_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Windsurf skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Windsurf skills"}, level="warning")
             return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
@@ -2375,15 +2474,25 @@ class AIToolsDetector:
                 tool,
                 self._windsurf_rules_extractor,
                 self._windsurf_mcp_extractor,
-                self.extract_all_windsurf_rules
+                self.extract_all_windsurf_rules,
+                skills_extractor=self._windsurf_skills_extractor,
+                extract_skills_func=self.extract_all_windsurf_skills,
             )
-        
+
+        elif tool_name == "replit":
+            # Replit exposes only Agent Skills (project-scope .agents/skills); no rules/MCP.
+            self._extract_and_merge_tool_skills(
+                "Replit", self._replit_skills_extractor, self.extract_all_replit_skills, projects_dict
+            )
+
         elif tool_name.startswith("roo code"):
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
                 self._roo_rules_extractor,
                 self._roo_mcp_extractor,
-                self.extract_all_roo_rules
+                self.extract_all_roo_rules,
+                skills_extractor=self._roo_skills_extractor,
+                extract_skills_func=self.extract_all_roo_skills,
             )
         
         elif tool_name.startswith("cline"):
@@ -2443,7 +2552,9 @@ class AIToolsDetector:
                 tool,
                 self._kilocode_rules_extractor,
                 self._kilocode_mcp_extractor,
-                self.extract_all_kilocode_rules
+                self.extract_all_kilocode_rules,
+                skills_extractor=self._kilocode_skills_extractor,
+                extract_skills_func=self.extract_all_kilocode_skills,
             )
         
         elif tool_name.replace(" ", "").lower() == "geminicli":
@@ -2451,7 +2562,9 @@ class AIToolsDetector:
                 tool,
                 self._gemini_cli_rules_extractor,
                 self._gemini_cli_mcp_extractor,
-                self.extract_all_gemini_cli_rules
+                self.extract_all_gemini_cli_rules,
+                skills_extractor=self._gemini_cli_skills_extractor,
+                extract_skills_func=self.extract_all_gemini_cli_skills,
             )
         
         elif tool_name.replace(" ", "").lower() == "codex":
@@ -2469,7 +2582,9 @@ class AIToolsDetector:
                 tool,
                 self._opencode_rules_extractor,
                 self._opencode_mcp_extractor,
-                self.extract_all_opencode_rules
+                self.extract_all_opencode_rules,
+                skills_extractor=self._opencode_skills_extractor,
+                extract_skills_func=self.extract_all_opencode_skills,
             )
 
         elif tool_name.lower() == "junie":
@@ -2477,7 +2592,9 @@ class AIToolsDetector:
                 tool,
                 self._junie_rules_extractor,
                 self._junie_mcp_extractor,
-                self.extract_all_junie_rules
+                self.extract_all_junie_rules,
+                skills_extractor=self._junie_skills_extractor,
+                extract_skills_func=self.extract_all_junie_skills,
             )
 
         elif tool_name.lower() == "cursor cli":

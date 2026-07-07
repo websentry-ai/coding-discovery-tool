@@ -632,6 +632,76 @@ class BaseCopilotCliSkillsExtractor(ABC):
         pass
 
 
+class _BaseAgentSkillsExtractor(ABC):
+    """Shared base for standalone SKILL.md (Agent Skills) extractors.
+
+    Covers the tools that adopted the cross-vendor ``SKILL.md`` standard
+    (agentskills.io) without a plugin system, so their skills always carry
+    ``source="standalone"``. Every subclass returns the same shape as the Claude
+    Code / Cline extractors so ``_extract_and_merge_tool_skills`` can drive them
+    all through one code path. Concrete per-tool subclasses exist (rather than a
+    single shared class) so each factory keeps a meaningful return type and each
+    tool documents its own discovery paths.
+    """
+
+    @abstractmethod
+    def extract_all_skills(self) -> Dict:
+        """Extract all skills for this tool from every user + project on the machine.
+
+        Returns:
+            Dict with:
+            - user_skills: List of user-level skill dicts (scope "user"), each with
+              a ``project_path`` naming the owning user's home.
+            - project_skills: List of ``{project_root, skills}`` dicts.
+        """
+        pass
+
+
+class BaseCodexSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract OpenAI Codex skills. Paths (docs-verified): user
+    ``~/.agents/skills/<name>/SKILL.md``; project ``.agents/skills/<name>/SKILL.md``
+    (Codex standardizes on ``.agents``; ``~/.codex`` holds only ``config.toml``)."""
+
+
+class BaseGeminiCliSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract Gemini CLI skills. Paths: user ``~/.gemini/skills/`` (+ ``~/.agents/skills/``
+    alias); project ``.gemini/skills/`` (+ ``.agents/skills/`` alias)."""
+
+
+class BaseOpenCodeSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract OpenCode skills. Paths: user ``~/.config/opencode/skills/``,
+    ``~/.claude/skills/``, ``~/.agents/skills/``; project ``.opencode/skills/``,
+    ``.claude/skills/``, ``.agents/skills/``."""
+
+
+class BaseJunieSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract Junie skills. Paths: user ``~/.junie/skills/<name>/``; project
+    ``<root>/.junie/skills/<name>/``."""
+
+
+class BaseKiloCodeSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract Kilo Code skills. Paths: user ``~/.kilo/skills/``; project
+    ``.kilo/skills/`` and ``.agents/skills`` (default) + ``.claude/skills`` (compat)."""
+
+
+class BaseReplitSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract Replit skills. Project-scope only: ``.agents/skills/<name>/SKILL.md``
+    (no local user/global path — global skills live server-side in Workspace Settings)."""
+
+
+class BaseRooSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract Roo Code skills. Paths: user ``~/.roo/skills/`` + ``~/.agents/skills/``;
+    project ``.roo/skills/`` + ``.agents/skills/``. Also mode-specific ``skills-{mode}/``
+    dirs alongside ``skills/`` (mirrors Roo's ``rules-{mode}/`` convention)."""
+
+
+class BaseWindsurfSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract Windsurf (Cascade) skills. Paths: user ``~/.codeium/windsurf/skills/``
+    + ``~/.agents/skills/``; project ``.windsurf/skills/`` plus the documented compat
+    dirs ``.agents``, ``.github``, ``.cursor``, ``.codex`` (and ``.claude`` when Claude
+    Code config reading is enabled)."""
+
+
 class BaseClaudeSettingsExtractor(ABC):
     """Abstract base class for extracting Claude Code settings (permissions)."""
 

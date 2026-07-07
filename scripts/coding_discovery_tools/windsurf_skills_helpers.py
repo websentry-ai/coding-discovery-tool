@@ -1,0 +1,142 @@
+"""
+Shared helper functions for Windsurf (Cascade) skills extraction.
+
+Delegates to the generic config-driven functions in claude_code_skills_helpers.
+Windsurf adopted the ``SKILL.md`` (Agent Skills) standard. Its user/global tool
+dir is the NESTED ``~/.codeium/windsurf``, while at project scope Cascade scans
+``.windsurf`` plus a documented set of cross-agent compat dirs (docs-verified):
+
+    User/global:  ~/.codeium/windsurf/skills/<name>/SKILL.md
+                  ~/.agents/skills/<name>/SKILL.md   (compat)
+    Project:      <repo>/.windsurf/skills/<name>/SKILL.md
+                  <repo>/{.agents,.claude,.github,.cursor,.codex}/skills/<name>/SKILL.md (compat)
+
+Like OpenCode, two parent-name sets are used because the user tool dir
+(``.codeium/windsurf``) is nested and non-dotted at its leaf:
+
+- ``WINDSURF_PARENT_DIR_NAMES`` (dot-form) drives the project WALK + project root
+  resolution. It deliberately omits ``codeium``/``windsurf`` so the project walk
+  never matches ``~/.codeium/windsurf`` and double-counts a user skill.
+- ``WINDSURF_USER_PARENT_DIR_NAMES`` (with ``.codeium``) resolves user-level
+  skills back to the owning home.
+
+Windsurf has no plugin system, so skills carry ``source="standalone"``.
+"""
+
+import logging
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+from .claude_code_skills_helpers import (
+    ItemTypeConfig,
+    is_skill_md_file,
+    find_item_project_root,
+    extract_item_info,
+    extract_items_from_directory,
+    extract_user_level_items,
+)
+
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Constants
+# ──────────────────────────────────────────────────────────────────────────────
+
+WINDSURF_DIR_NAME = ".windsurf"
+CODEIUM_WINDSURF_USER_DIR = ".codeium/windsurf"
+AGENTS_DIR_NAME = ".agents"
+CLAUDE_DIR_NAME = ".claude"
+GITHUB_DIR_NAME = ".github"
+CURSOR_DIR_NAME = ".cursor"
+CODEX_DIR_NAME = ".codex"
+SKILLS_DIR_NAME = "skills"
+SKILL_FILE_NAME = "SKILL.md"
+
+# Project-level parent dirs (dot-form) — the documented Cascade scan set. Drives
+# the project walk + project root resolution. ``codeium``/``windsurf`` are NOT
+# here so the walk never matches ``~/.codeium/windsurf`` (see module docstring).
+WINDSURF_PARENT_DIR_NAMES = (
+    WINDSURF_DIR_NAME,
+    AGENTS_DIR_NAME,
+    CLAUDE_DIR_NAME,
+    GITHUB_DIR_NAME,
+    CURSOR_DIR_NAME,
+    CODEX_DIR_NAME,
+)
+
+# User-level dirs searched under each home. ``.codeium/windsurf`` is a nested path
+# (pathlib joins it correctly); ``.agents`` is the universal compat alias.
+WINDSURF_USER_DIR_NAMES = (CODEIUM_WINDSURF_USER_DIR, AGENTS_DIR_NAME)
+
+# Parent-name set used ONLY to resolve user-level skills back to the owning home.
+# ``.codeium`` lets the generic fallback map ``~/.codeium/windsurf/skills/x`` -> home.
+WINDSURF_USER_PARENT_DIR_NAMES = (".codeium", AGENTS_DIR_NAME)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Config-driven item type definitions
+# ──────────────────────────────────────────────────────────────────────────────
+
+WINDSURF_SKILL_CONFIG = ItemTypeConfig(
+    type_name="skill",
+    dir_name=SKILLS_DIR_NAME,
+    layout="nested",
+    file_filter=is_skill_md_file,
+    name_extractor=lambda f: f.parent.name,
+)
+
+WINDSURF_ITEM_CONFIGS = [WINDSURF_SKILL_CONFIG]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Windsurf-specific thin delegations to generic functions
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def find_windsurf_item_project_root(item_file: Path, config: ItemTypeConfig) -> Path:
+    """Find the project root for a Windsurf project item file. Delegates to generic."""
+    return find_item_project_root(item_file, config, parent_dir_names=WINDSURF_PARENT_DIR_NAMES)
+
+
+def extract_windsurf_item_info(
+    item_file: Path,
+    extract_single_rule_file_func: Callable,
+    scope: str,
+    config: ItemTypeConfig,
+) -> Optional[Dict]:
+    """Extract information from a Windsurf project item file. Delegates to generic."""
+    return extract_item_info(
+        item_file, extract_single_rule_file_func, scope, config,
+        parent_dir_names=WINDSURF_PARENT_DIR_NAMES,
+    )
+
+
+def extract_windsurf_items_from_directory(
+    type_dir: Path,
+    projects_by_root: Dict[str, List[Dict]],
+    extract_single_rule_file_func: Callable,
+    add_skill_func: Callable,
+    config: ItemTypeConfig,
+) -> None:
+    """Extract all items of a given type from a Windsurf directory. Delegates to generic."""
+    extract_items_from_directory(
+        type_dir, projects_by_root, extract_single_rule_file_func, add_skill_func, config,
+        parent_dir_names=WINDSURF_PARENT_DIR_NAMES,
+    )
+
+
+def extract_windsurf_user_level_items(
+    user_home: Path,
+    user_skills: List[Dict],
+    extract_single_rule_file_func: Callable,
+    configs: List[ItemTypeConfig],
+) -> None:
+    """Extract user-level Windsurf items from a user's home directory.
+
+    Uses the ``.codeium/windsurf`` + ``.agents`` user dirs, and the
+    ``.codeium``-aware parent set so ``~/.codeium/windsurf/skills`` resolves back
+    to the home.
+    """
+    extract_user_level_items(
+        user_home, user_skills, extract_single_rule_file_func, configs,
+        user_dir_names=WINDSURF_USER_DIR_NAMES,
+        parent_dir_names=WINDSURF_USER_PARENT_DIR_NAMES,
+    )

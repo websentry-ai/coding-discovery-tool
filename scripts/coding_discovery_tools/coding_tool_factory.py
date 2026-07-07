@@ -39,6 +39,7 @@ from .coding_tool_base import (
     BaseClaudeCoworkSkillsExtractor,
     BaseCursorSkillsExtractor,
     BaseClineSkillsExtractor,
+    BaseCodexSkillsExtractor,
 )
 
 # macOS - Shared
@@ -103,6 +104,7 @@ from .macos.cursor_cli.mcp_config_extractor import MacOSCursorCliMCPConfigExtrac
 from .macos.codex.codex import MacOSCodexDetector
 from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
 from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
+from .macos.codex.skills_extractor import MacOSCodexSkillsExtractor
 
 # macOS - Replit
 from .macos.replit.replit import MacOSReplitDetector
@@ -157,6 +159,7 @@ from .windows.replit.replit import WindowsReplitDetector
 from .windows.codex.codex import WindowsCodexDetector
 from .windows.codex.codex_rules_extractor import WindowsCodexRulesExtractor
 from .windows.codex.mcp_config_extractor import WindowsCodexMCPConfigExtractor
+from .windows.codex.skills_extractor import WindowsCodexSkillsExtractor
 
 # macOS - OpenCode
 from .macos.opencode.opencode import MacOSOpenCodeDetector
@@ -218,6 +221,7 @@ from .linux import (
     LinuxClineRulesExtractor,
     LinuxClineMCPConfigExtractor,
     LinuxClineSkillsExtractor,
+    LinuxCodexSkillsExtractor,
     LinuxAntigravityDetector,
     LinuxAntigravityRulesExtractor,
     LinuxAntigravityMCPConfigExtractor,
@@ -1925,6 +1929,25 @@ class ClineSkillsExtractorFactory:
             return WindowsClineSkillsExtractor()
         elif os_name == "Linux":
             return LinuxClineSkillsExtractor()
+        else:
+            return None
+
+
+class CodexSkillsExtractorFactory:
+    """Factory for creating OS-specific OpenAI Codex skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseCodexSkillsExtractor]:
+        """Create appropriate Codex skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            return MacOSCodexSkillsExtractor()
+        elif os_name == "Windows":
+            return WindowsCodexSkillsExtractor()
+        elif os_name == "Linux":
+            return LinuxCodexSkillsExtractor()
         else:
             return None
 

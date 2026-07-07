@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseKiloCodeSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir
 from ...linux_extraction_helpers import (
     extract_single_rule_file,
     get_linux_user_homes,
@@ -72,7 +72,11 @@ class LinuxKiloCodeSkillsExtractor(BaseKiloCodeSkillsExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item) or should_skip_system_path(item):
+                    if (
+                        should_skip_path(item)
+                        or should_skip_system_path(item)
+                        or traverses_other_tool_config_dir(item, allow=SHARED_SKILL_DIRS | set(KILOCODE_PARENT_DIR_NAMES))
+                    ):
                         continue
 
                     try:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseRooSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir
 from ...macos_extraction_helpers import (
     extract_single_rule_file,
     get_top_level_directories,
@@ -90,7 +90,11 @@ class MacOSRooSkillsExtractor(BaseRooSkillsExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item) or should_skip_system_path(item):
+                    if (
+                        should_skip_path(item)
+                        or should_skip_system_path(item)
+                        or traverses_other_tool_config_dir(item, allow=SHARED_SKILL_DIRS | set(ROO_PARENT_DIR_NAMES))
+                    ):
                         continue
 
                     try:

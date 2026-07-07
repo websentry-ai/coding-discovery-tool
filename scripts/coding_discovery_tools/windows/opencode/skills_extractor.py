@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseOpenCodeSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
     get_windows_system_directories,
@@ -97,7 +97,10 @@ class WindowsOpenCodeSkillsExtractor(BaseOpenCodeSkillsExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item, get_windows_system_directories()):
+                    if (
+                        should_skip_path(item, get_windows_system_directories())
+                        or traverses_other_tool_config_dir(item, allow=SHARED_SKILL_DIRS | set(OPENCODE_PARENT_DIR_NAMES))
+                    ):
                         continue
 
                     try:

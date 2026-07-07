@@ -2801,6 +2801,21 @@ def main():
         sentry_ctx["run_id"] = run_id
         logger.info(f"Scan run_id: {run_id}")
 
+        # Auto-resume (perf only): if a recent run was interrupted (checkpoint
+        # still "in_progress" within RESUME_WINDOW_SECONDS), carry its done-set
+        # forward and skip re-PROCESSING those already-reported tools. Data-safe
+        # with a fresh run_id — the backend replaces installations per (device,
+        # tool, home_user), never per scan, so skipped tools keep their prior
+        # upload. Detection still runs below, so tools/skills installed since the
+        # interruption are still found and reported.
+        resume_done = discovery_cache.resumable_done()
+        if resume_done:
+            logger.info(
+                f"Resuming recent interrupted scan: {len(resume_done)} tool/user "
+                f"already reported; skipping their re-processing."
+            )
+        discovery_cache.start_run(run_id, done=resume_done)
+
         # Track failed reports for persistence
         failed_reports = []
 
@@ -2930,6 +2945,16 @@ def main():
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
             sentry_ctx["tool_name"] = tool_name
+            # Resume identity matches the upload granularity (name + install
+            # path) so two same-named tools at different paths never alias.
+            tool_key = f"{tool_name}:{tool.get('install_path', '')}"
+
+            # Skip a tool entirely when every user was already reported by the
+            # resumed run — this is where re-processing (filesystem walk + CLI
+            # subprocesses) is actually saved.
+            if resume_done and all((tool_key, u) in resume_done for u in all_users):
+                logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
+                continue
 
             logger.info("")
             logger.info("=" * 60)
@@ -2951,6 +2976,9 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
+                    # Already reported by the resumed run -> skip its re-upload.
+                    if (tool_key, user_name) in resume_done:
+                        continue
                     if platform.system() == "Darwin":
                         user_home = Path(f"/Users/{user_name}")
                     elif platform.system() == "Windows":
@@ -3136,7 +3164,9 @@ def main():
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
                         cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        reported_ok = False
                         if local_payload_hash and cached_hash == local_payload_hash:
+                            reported_ok = True  # unchanged -> already current on the backend
                             if args.dump:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
@@ -3146,6 +3176,7 @@ def main():
                             with time_step("send_report_per_tool_user", "send"):
                                 success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                             if success:
+                                reported_ok = True
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
                                 if local_payload_hash:
@@ -3154,6 +3185,11 @@ def main():
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                                 if retryable:
                                     failed_reports.append(single_tool_report)
+
+                        # Checkpoint progress so a kill after this point lets the
+                        # next quick re-run skip re-processing this (tool, user).
+                        if reported_ok:
+                            discovery_cache.mark_run_uploaded(tool_key, user_name)
 
                         if args.dump:
                             logger.info("")
@@ -3257,6 +3293,11 @@ def main():
         else:
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
+
+        # Local scan finished cleanly -> flip the checkpoint to "completed" so the
+        # next run starts fresh (won't resume), independent of the completed-event
+        # send result above.
+        discovery_cache.mark_run_completed()
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs

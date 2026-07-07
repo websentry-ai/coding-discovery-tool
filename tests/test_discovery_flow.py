@@ -973,6 +973,149 @@ class TestStaleLockPidLiveness(unittest.TestCase):
         self.assertFalse(self.cache._pid_alive(0))
 
 
+class TestWindowsPidLiveness(unittest.TestCase):
+    """WEB-4774 (B1-Win): Windows process-liveness so a lock left by a killed
+    Windows scan is stolen immediately instead of waiting out the stale window.
+    The ctypes/kernel32 calls are mocked so these run on any platform."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+
+    @staticmethod
+    def _fake_windll(open_handle, last_error=0):
+        fake = Mock()
+        fake.kernel32.OpenProcess.return_value = open_handle
+        fake.kernel32.GetLastError.return_value = last_error
+        return fake
+
+    def test_windows_probe_alive_when_handle_opens(self):
+        fake = self._fake_windll(open_handle=1234)
+        with patch("ctypes.windll", fake, create=True):
+            self.assertTrue(self.cache._pid_alive_windows(4321))
+        fake.kernel32.CloseHandle.assert_called_once()  # handle must be closed
+
+    def test_windows_probe_dead_on_invalid_parameter(self):
+        # OpenProcess -> NULL with ERROR_INVALID_PARAMETER means the PID does not exist.
+        fake = self._fake_windll(open_handle=0, last_error=87)
+        with patch("ctypes.windll", fake, create=True):
+            self.assertFalse(self.cache._pid_alive_windows(4321))
+
+    def test_windows_probe_alive_on_access_denied(self):
+        # NULL with ERROR_ACCESS_DENIED means the process exists but isn't openable.
+        fake = self._fake_windll(open_handle=0, last_error=5)
+        with patch("ctypes.windll", fake, create=True):
+            self.assertTrue(self.cache._pid_alive_windows(4321))
+
+    def test_windows_probe_conservative_on_ctypes_failure(self):
+        with patch("ctypes.windll", None, create=True):
+            self.assertTrue(self.cache._pid_alive_windows(4321))
+
+    def test_windows_probe_nonpositive_pid_is_dead(self):
+        self.assertFalse(self.cache._pid_alive_windows(0))
+        self.assertFalse(self.cache._pid_alive_windows(-1))
+
+    def test_owner_alive_dispatches_to_windows(self):
+        with patch.object(self.cache.os, "name", "nt"), \
+             patch.object(self.cache, "_pid_alive_windows", return_value=False) as win:
+            self.assertIs(self.cache._owner_alive(4321), False)
+            win.assert_called_once_with(4321)
+
+    def test_owner_alive_none_for_unknown_platform(self):
+        with patch.object(self.cache.os, "name", "java"):
+            self.assertIsNone(self.cache._owner_alive(4321))
+
+    def test_owner_alive_none_for_missing_pid(self):
+        self.assertIsNone(self.cache._owner_alive(None))
+
+
+class TestResumeCheckpoint(unittest.TestCase):
+    """WEB-4774 (resume): the run checkpoint lets a quick re-run skip
+    re-processing tools a recent interrupted run already reported. Fresh run_id
+    stays data-safe because the backend replaces installations per-tool."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        unbound_dir.mkdir(parents=True, exist_ok=True)
+        self._patchers = [
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _age_updated_at(self, seconds_ago):
+        """Rewrite the checkpoint's updated_at to `seconds_ago` in the past
+        (negative => future, to exercise the clock-skew guard)."""
+        from datetime import datetime, timezone, timedelta
+        cache = self.cache.read_cache()
+        old = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cache["run"]["updated_at"] = old
+        self.cache.atomic_write_cache(cache)
+
+    def test_fresh_run_has_no_resumable_done(self):
+        self.cache.start_run("rid-1")
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_uploaded_entries_are_resumable_within_window(self):
+        self.cache.start_run("rid-1")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.cache.mark_run_uploaded("Claude Code:/b", "alice")
+        self.assertEqual(
+            self.cache.resumable_done(),
+            {("Cursor:/a", "alice"), ("Claude Code:/b", "alice")},
+        )
+
+    def test_completed_run_is_not_resumable(self):
+        self.cache.start_run("rid-1")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.cache.mark_run_completed()
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_stale_run_outside_window_is_not_resumable(self):
+        self.cache.start_run("rid-1")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self._age_updated_at(self.cache.RESUME_WINDOW_SECONDS + 60)
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_future_updated_at_is_not_resumable(self):
+        self.cache.start_run("rid-1")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self._age_updated_at(-120)  # 2 min in the future (clock skew)
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_mark_uploaded_dedups(self):
+        self.cache.start_run("rid-1")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.assertEqual(self.cache.read_run()["done"], [["Cursor:/a", "alice"]])
+
+    def test_start_run_carries_forward_done(self):
+        seed = {("Cursor:/a", "alice"), ("Codex:/c", "bob")}
+        self.cache.start_run("rid-2", done=seed)
+        self.assertEqual(self.cache.resumable_done(), seed)
+
+    def test_mark_uploaded_is_noop_without_active_run(self):
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.assertEqual(self.cache.read_run(), {})
+
+    def test_start_run_preserves_hash_cache(self):
+        # The checkpoint must not clobber the existing per-tool hash cache.
+        self.cache.update_tool("Cursor", "alice", "hash-xyz")
+        self.cache.start_run("rid-1")
+        self.assertEqual(self.cache.get_cached_hash("Cursor", "alice"), "hash-xyz")
+
+
 class TestStateDirFallback(unittest.TestCase):
     """_ensure_state_dir falls back to a deterministic uid-namespaced temp dir
     when home is unusable, refuses hostile pre-existing temp entries, and the

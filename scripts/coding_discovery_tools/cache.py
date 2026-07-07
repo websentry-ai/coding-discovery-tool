@@ -38,6 +38,16 @@ LOCK_PATH = UNBOUND_DIR / _LOCK_FILENAME
 STALE_LOCK_SECONDS = 15 * 60
 HEARTBEAT_INTERVAL_SECONDS = 60
 
+# Auto-resume window: a run left "in_progress" (interrupted without a clean
+# completion) is resumable only if its checkpoint was touched within this many
+# seconds. Kept well below the backend's 10-min stale-scan sweep so a resumed
+# run finishes before the interrupted run would be marked failed, and short
+# enough that a tool changing between the interruption and the retry is
+# implausible — so already-reported tools can be skipped without a freshness
+# re-check. Detection still runs every time, so newly-installed tools are never
+# missed; only re-PROCESSING of already-reported tools is skipped.
+RESUME_WINDOW_SECONDS = 150
+
 # Never open the lock through a swapped symlink; 0 on platforms lacking it.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -256,6 +266,88 @@ def get_cached_hash(tool_name: str, home_user: str, cache: Optional[dict] = None
     return None
 
 
+def _age_seconds(iso_ts: Optional[str]) -> Optional[float]:
+    """Seconds since an ISO-8601 (``_now_iso``) timestamp, or None if unparseable."""
+    if not isinstance(iso_ts, str):
+        return None
+    try:
+        t = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - t).total_seconds()
+
+
+def read_run() -> dict:
+    """The current run checkpoint (``{run_id, status, updated_at, done}``) or {}."""
+    run = read_cache().get("run")
+    return run if isinstance(run, dict) else {}
+
+
+def start_run(run_id: str, done=None) -> None:
+    """Begin the run checkpoint as ``in_progress``. ``done`` (an iterable of
+    ``(tool_key, home_user)``) is carried forward from a resumed run so repeated
+    interruptions still make monotonic progress."""
+    cache = read_cache()
+    seed = sorted({(str(t), str(u)) for t, u in (done or [])})
+    cache["run"] = {
+        "run_id": run_id,
+        "status": "in_progress",
+        "updated_at": _now_iso(),
+        "done": [[t, u] for t, u in seed],
+    }
+    atomic_write_cache(cache)
+
+
+def mark_run_uploaded(tool_key: str, home_user: str) -> None:
+    """Record that ``(tool_key, home_user)`` is now current on the backend and
+    refresh the checkpoint's freshness. No-op if there's no active run."""
+    cache = read_cache()
+    run = cache.get("run")
+    if not isinstance(run, dict):
+        return
+    done = run.get("done")
+    if not isinstance(done, list):
+        done = []
+    entry = [tool_key, home_user]
+    if entry not in done:
+        done.append(entry)
+    run["done"] = done
+    run["updated_at"] = _now_iso()
+    cache["run"] = run
+    atomic_write_cache(cache)
+
+
+def mark_run_completed() -> None:
+    """Flip the checkpoint to ``completed`` so the next run starts fresh."""
+    cache = read_cache()
+    run = cache.get("run")
+    if isinstance(run, dict):
+        run["status"] = "completed"
+        run["updated_at"] = _now_iso()
+        cache["run"] = run
+        atomic_write_cache(cache)
+
+
+def resumable_done() -> set:
+    """The ``{(tool_key, home_user)}`` already reported by a recent *interrupted*
+    run (status still ``in_progress`` and touched within RESUME_WINDOW_SECONDS),
+    or an empty set when there's nothing safe to resume."""
+    run = read_run()
+    if run.get("status") != "in_progress":
+        return set()
+    age = _age_seconds(run.get("updated_at"))
+    if age is None or age < 0 or age > RESUME_WINDOW_SECONDS:
+        return set()
+    done = run.get("done")
+    if not isinstance(done, list):
+        return set()
+    out = set()
+    for d in done:
+        if isinstance(d, (list, tuple)) and len(d) == 2:
+            out.add((str(d[0]), str(d[1])))
+    return out
+
+
 def _read_lock_pid() -> Optional[int]:
     """The lock file's first whitespace-delimited token is the owner PID
     (written as ``"{pid} {iso}\\n"``). Returns None if it can't be parsed."""
@@ -281,24 +373,65 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _pid_alive_windows(pid: int) -> bool:
+    """Windows liveness probe. Conservative: returns False ONLY when the PID
+    provably does not exist (OpenProcess fails with ERROR_INVALID_PARAMETER).
+    ERROR_ACCESS_DENIED means the process exists but isn't openable (e.g. owned
+    by another/elevated user) -> treated as alive. Any ctypes failure -> alive,
+    so we never steal a lock from a still-running process."""
+    if pid <= 0:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        ERROR_INVALID_PARAMETER = 87
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return kernel32.GetLastError() != ERROR_INVALID_PARAMETER
+    except Exception:
+        return True
+
+
+def _owner_alive(pid: Optional[int]) -> Optional[bool]:
+    """Cross-platform liveness for the lock's recorded PID. Returns True (alive),
+    False (provably dead), or None (platform can't probe -> fall back to mtime).
+
+    POSIX uses signal 0; Windows uses OpenProcess. Keeping the two probes behind
+    one dispatcher lets acquire_lock()/_lock_is_live() steal a dead owner's lock
+    on BOTH platforms instead of waiting out the full STALE_LOCK_SECONDS window."""
+    if pid is None:
+        return None
+    if os.name == "posix":
+        return _pid_alive(pid)
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
+    return None
+
+
 def _lock_is_live() -> bool:
     """True if the lock is held by a still-running process.
 
-    On POSIX a lock whose recorded PID is dead is NOT live, so a discovery run
-    killed without a chance to clean up (e.g. SIGKILL when the parent
-    onboard/setup subprocess timeout fires) does not block the next run for the
-    full STALE_LOCK_SECONDS window. A live owner still needs a fresh heartbeat to
+    A lock whose recorded PID is dead is NOT live, so a discovery run killed
+    without a chance to clean up (e.g. SIGKILL when the parent onboard/setup
+    subprocess timeout fires) does not block the next run for the full
+    STALE_LOCK_SECONDS window. A live owner still needs a fresh heartbeat to
     count as live, matching the original zombie tolerance and guarding against
-    PID reuse. Falls back to mtime freshness when the PID can't be read or
-    checked (e.g. Windows)."""
+    PID reuse. Falls back to mtime freshness only when the PID can't be read or
+    the platform can't probe process liveness."""
     try:
         age = time.time() - LOCK_PATH.stat().st_mtime
     except OSError:
         return False
     fresh = age < STALE_LOCK_SECONDS
-    pid = _read_lock_pid()
-    if pid is not None and os.name == "posix":
-        return _pid_alive(pid) and fresh
+    alive = _owner_alive(_read_lock_pid())
+    if alive is not None:
+        return alive and fresh
     return fresh
 
 
@@ -319,7 +452,7 @@ def acquire_lock() -> str:
         # from a predecessor killed without cleanup (dead PID) vs a plain stale
         # (heartbeat-died) lock.
         _stale_pid = _read_lock_pid()
-        if _stale_pid is not None and os.name == "posix" and not _pid_alive(_stale_pid):
+        if _stale_pid is not None and _owner_alive(_stale_pid) is False:
             logger.info(f"stealing discovery lock from dead PID {_stale_pid} (predecessor killed without cleanup)")
         else:
             logger.info("stealing stale discovery lock (heartbeat older than the stale window)")

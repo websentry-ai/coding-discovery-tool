@@ -43,9 +43,15 @@ class TestWindsurfConstants(unittest.TestCase):
         self.assertEqual(CODEIUM_WINDSURF_USER_DIR, ".codeium/windsurf")
         self.assertIn(".codeium/windsurf", WINDSURF_USER_DIR_NAMES)
 
-    def test_project_parents_include_windsurf_and_compat(self):
-        for d in (".windsurf", ".agents", ".claude", ".github", ".cursor", ".codex"):
-            self.assertIn(d, WINDSURF_PARENT_DIR_NAMES)
+    def test_project_parents_are_documented_set_only(self):
+        # Docs (docs.devin.ai/desktop/cascade/skills) list ONLY .windsurf, .agents,
+        # .claude — NOT .github/.cursor/.codex/.devin/.cognition.
+        self.assertEqual(WINDSURF_PARENT_DIR_NAMES, (".windsurf", ".agents", ".claude"))
+        for d in (".github", ".cursor", ".codex", ".devin", ".cognition"):
+            self.assertNotIn(d, WINDSURF_PARENT_DIR_NAMES)
+
+    def test_user_dirs_include_codeium_agents_claude(self):
+        self.assertEqual(WINDSURF_USER_DIR_NAMES, (".codeium/windsurf", ".agents", ".claude"))
 
     def test_user_parents_use_codeium_for_home_resolution(self):
         self.assertIn(".codeium", WINDSURF_USER_PARENT_DIR_NAMES)
@@ -67,8 +73,8 @@ class TestFindWindsurfProjectRoot(unittest.TestCase):
         rule = Path("/Users/t/proj/.windsurf/skills/x/SKILL.md")
         self.assertEqual(find_windsurf_item_project_root(rule, WINDSURF_SKILL_CONFIG), Path("/Users/t/proj"))
 
-    def test_project_codex_compat(self):
-        rule = Path("/Users/t/proj/.codex/skills/x/SKILL.md")
+    def test_project_claude_compat(self):
+        rule = Path("/Users/t/proj/.claude/skills/x/SKILL.md")
         self.assertEqual(find_windsurf_item_project_root(rule, WINDSURF_SKILL_CONFIG), Path("/Users/t/proj"))
 
 

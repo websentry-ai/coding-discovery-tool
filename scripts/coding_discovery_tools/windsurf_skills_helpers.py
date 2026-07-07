@@ -3,13 +3,25 @@ Shared helper functions for Windsurf (Cascade) skills extraction.
 
 Delegates to the generic config-driven functions in claude_code_skills_helpers.
 Windsurf adopted the ``SKILL.md`` (Agent Skills) standard. Its user/global tool
-dir is the NESTED ``~/.codeium/windsurf``, while at project scope Cascade scans
-``.windsurf`` plus a documented set of cross-agent compat dirs (docs-verified):
+dir is the NESTED ``~/.codeium/windsurf``; at project scope Cascade scans
+``.windsurf`` plus the ``.agents`` cross-agent alias and (when Claude Code config
+reading is enabled) ``.claude`` (docs-verified, docs.devin.ai/desktop/cascade/skills):
 
     User/global:  ~/.codeium/windsurf/skills/<name>/SKILL.md
-                  ~/.agents/skills/<name>/SKILL.md   (compat)
+                  ~/.agents/skills/<name>/SKILL.md    (compat)
+                  ~/.claude/skills/<name>/SKILL.md    (compat, Claude-config-reading)
     Project:      <repo>/.windsurf/skills/<name>/SKILL.md
-                  <repo>/{.agents,.claude,.github,.cursor,.codex}/skills/<name>/SKILL.md (compat)
+                  <repo>/.agents/skills/<name>/SKILL.md   (compat)
+                  <repo>/.claude/skills/<name>/SKILL.md   (compat, Claude-config-reading)
+
+The docs do NOT list ``.github``/``.cursor``/``.codex``/``.devin``/``.cognition``
+as Windsurf skill dirs, so they are intentionally excluded. Windsurf also reads
+enterprise/system dirs (macOS ``/Library/Application Support/Windsurf/skills``,
+Linux ``/etc/windsurf/skills``, Windows ``C:\\ProgramData\\Windsurf\\skills``);
+these are outside the per-user/project walk and not collected here, matching how
+other tools' system-scope skill dirs are handled. ``.claude`` is collected
+unconditionally (its gating flag is not readable locally), matching the Cline
+extractor precedent — overlap is de-duped downstream.
 
 Like OpenCode, two parent-name sets are used because the user tool dir
 (``.codeium/windsurf``) is nested and non-dotted at its leaf:
@@ -46,31 +58,28 @@ WINDSURF_DIR_NAME = ".windsurf"
 CODEIUM_WINDSURF_USER_DIR = ".codeium/windsurf"
 AGENTS_DIR_NAME = ".agents"
 CLAUDE_DIR_NAME = ".claude"
-GITHUB_DIR_NAME = ".github"
-CURSOR_DIR_NAME = ".cursor"
-CODEX_DIR_NAME = ".codex"
 SKILLS_DIR_NAME = "skills"
 SKILL_FILE_NAME = "SKILL.md"
 
-# Project-level parent dirs (dot-form) — the documented Cascade scan set. Drives
-# the project walk + project root resolution. ``codeium``/``windsurf`` are NOT
-# here so the walk never matches ``~/.codeium/windsurf`` (see module docstring).
+# Project-level parent dirs (dot-form) — the documented Cascade scan set:
+# ``.windsurf`` (primary), ``.agents`` (cross-agent alias), ``.claude`` (Claude
+# Code compat). Drives the project walk + project root resolution. ``codeium``/
+# ``windsurf`` are NOT here so the walk never matches ``~/.codeium/windsurf``
+# (see module docstring).
 WINDSURF_PARENT_DIR_NAMES = (
     WINDSURF_DIR_NAME,
     AGENTS_DIR_NAME,
     CLAUDE_DIR_NAME,
-    GITHUB_DIR_NAME,
-    CURSOR_DIR_NAME,
-    CODEX_DIR_NAME,
 )
 
 # User-level dirs searched under each home. ``.codeium/windsurf`` is a nested path
-# (pathlib joins it correctly); ``.agents`` is the universal compat alias.
-WINDSURF_USER_DIR_NAMES = (CODEIUM_WINDSURF_USER_DIR, AGENTS_DIR_NAME)
+# (pathlib joins it correctly); ``.agents`` + ``.claude`` are the compat aliases.
+WINDSURF_USER_DIR_NAMES = (CODEIUM_WINDSURF_USER_DIR, AGENTS_DIR_NAME, CLAUDE_DIR_NAME)
 
 # Parent-name set used ONLY to resolve user-level skills back to the owning home.
-# ``.codeium`` lets the generic fallback map ``~/.codeium/windsurf/skills/x`` -> home.
-WINDSURF_USER_PARENT_DIR_NAMES = (".codeium", AGENTS_DIR_NAME)
+# ``.codeium`` lets the generic fallback map ``~/.codeium/windsurf/skills/x`` -> home;
+# ``.agents``/``.claude`` resolve their user skills to the home directly.
+WINDSURF_USER_PARENT_DIR_NAMES = (".codeium", AGENTS_DIR_NAME, CLAUDE_DIR_NAME)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Config-driven item type definitions

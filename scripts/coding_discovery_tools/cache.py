@@ -234,8 +234,8 @@ def atomic_write_cache(data: dict) -> None:
         report_to_sentry(e, {"phase": "cache"}, level="warning")
 
 
-def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:
-    cache = read_cache()
+def _set_tool_hash(cache: dict, tool_name: str, home_user: str, payload_hash: str) -> None:
+    """Mutate `cache` in place to record the per-tool payload hash (no write)."""
     tools = cache.setdefault("tools", {})
     if not isinstance(tools, dict):
         tools = {}
@@ -248,6 +248,11 @@ def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:
         "payload_hash": payload_hash,
         "last_uploaded_at": _now_iso(),
     }
+
+
+def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:
+    cache = read_cache()
+    _set_tool_hash(cache, tool_name, home_user, payload_hash)
     atomic_write_cache(cache)
 
 
@@ -298,10 +303,9 @@ def start_run(run_id: str, done=None) -> None:
     atomic_write_cache(cache)
 
 
-def mark_run_uploaded(tool_key: str, home_user: str) -> None:
-    """Record that ``(tool_key, home_user)`` is now current on the backend and
-    refresh the checkpoint's freshness. No-op if there's no active run."""
-    cache = read_cache()
+def _record_run_done(cache: dict, tool_key: str, home_user: str) -> None:
+    """Mutate `cache` in place to append ``(tool_key, home_user)`` to the run
+    checkpoint's done-set and refresh its freshness. No-op if there's no run."""
     run = cache.get("run")
     if not isinstance(run, dict):
         return
@@ -314,6 +318,29 @@ def mark_run_uploaded(tool_key: str, home_user: str) -> None:
     run["done"] = done
     run["updated_at"] = _now_iso()
     cache["run"] = run
+
+
+def mark_run_uploaded(tool_key: str, home_user: str) -> None:
+    """Record that ``(tool_key, home_user)`` is now current on the backend and
+    refresh the checkpoint's freshness. No-op if there's no active run."""
+    cache = read_cache()
+    if not isinstance(cache.get("run"), dict):
+        return
+    _record_run_done(cache, tool_key, home_user)
+    atomic_write_cache(cache)
+
+
+def record_report(tool_name: str, home_user: str, tool_key: str,
+                  payload_hash: Optional[str] = None) -> None:
+    """One atomic cache write recording that a (tool, user) report is current on
+    the backend: persist the payload hash when ``payload_hash`` is given (an
+    actual upload), and always append ``(tool_key, home_user)`` to the run
+    checkpoint's done-set. Folds the former update_tool + mark_run_uploaded pair
+    into a single write on the hot per-report path."""
+    cache = read_cache()
+    if payload_hash is not None:
+        _set_tool_hash(cache, tool_name, home_user, payload_hash)
+    _record_run_done(cache, tool_key, home_user)
     atomic_write_cache(cache)
 
 

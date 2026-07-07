@@ -3165,6 +3165,7 @@ def main():
 
                         cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
                         reported_ok = False
+                        hash_to_store = None
                         if local_payload_hash and cached_hash == local_payload_hash:
                             reported_ok = True  # unchanged -> already current on the backend
                             if args.dump:
@@ -3177,19 +3178,20 @@ def main():
                                 success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                             if success:
                                 reported_ok = True
+                                hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
-                                if local_payload_hash:
-                                    discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
                             else:
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                                 if retryable:
                                     failed_reports.append(single_tool_report)
 
-                        # Checkpoint progress so a kill after this point lets the
-                        # next quick re-run skip re-processing this (tool, user).
+                        # One atomic cache write: persist the payload hash (only when
+                        # we uploaded a changed report) AND checkpoint this (tool,
+                        # user) so a kill afterward lets the next quick re-run skip
+                        # re-processing it.
                         if reported_ok:
-                            discovery_cache.mark_run_uploaded(tool_key, user_name)
+                            discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
                             logger.info("")

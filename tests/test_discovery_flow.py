@@ -1028,6 +1028,16 @@ class TestWindowsPidLiveness(unittest.TestCase):
     def test_owner_alive_none_for_missing_pid(self):
         self.assertIsNone(self.cache._owner_alive(None))
 
+    @unittest.skipUnless(os.name == "nt", "exercises the real Win32 OpenProcess path; runs only on Windows")
+    def test_windows_probe_real_process_smoke(self):
+        # Real OpenProcess (no mocks): this live test process is alive; a very
+        # high, almost-certainly-invalid PID is reported dead. This is the only
+        # test that actually exercises the ctypes/kernel32 path end to end.
+        self.assertTrue(self.cache._pid_alive_windows(os.getpid()))
+        self.assertFalse(self.cache._pid_alive_windows(0x7FFFFFF0))
+        # And the platform dispatcher routes to it on Windows.
+        self.assertTrue(self.cache._owner_alive(os.getpid()))
+
 
 class TestResumeCheckpoint(unittest.TestCase):
     """WEB-4774 (resume): the run checkpoint lets a quick re-run skip
@@ -1114,6 +1124,98 @@ class TestResumeCheckpoint(unittest.TestCase):
         self.cache.update_tool("Cursor", "alice", "hash-xyz")
         self.cache.start_run("rid-1")
         self.assertEqual(self.cache.get_cached_hash("Cursor", "alice"), "hash-xyz")
+
+    def test_record_report_writes_hash_and_done_together(self):
+        # The folded write updates BOTH the per-tool hash and the run done-set.
+        self.cache.start_run("rid-1")
+        self.cache.record_report("Cursor", "alice", "Cursor:/a", payload_hash="h1")
+        self.assertEqual(self.cache.get_cached_hash("Cursor", "alice"), "h1")
+        self.assertEqual(self.cache.resumable_done(), {("Cursor:/a", "alice")})
+
+    def test_record_report_without_hash_records_done_only(self):
+        # Hash-match / hashless path: record progress without touching the hash.
+        self.cache.start_run("rid-1")
+        self.cache.record_report("Cursor", "alice", "Cursor:/a")
+        self.assertIsNone(self.cache.get_cached_hash("Cursor", "alice"))
+        self.assertEqual(self.cache.resumable_done(), {("Cursor:/a", "alice")})
+
+
+class TestResumeSkipsReprocessingInMain(unittest.TestCase):
+    """WEB-4774 integration: a re-run within the resume window skips
+    process_single_tool for tools a recent interrupted run already reported,
+    while still processing (and reporting) the ones it didn't. Drives main()
+    in-process with the detector + backend mocked, over a real temp cache."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        unbound_dir.mkdir(parents=True, exist_ok=True)
+        self._patchers = [
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+        utils_mod._SENTRY_DSN = ""
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_done_tool_is_skipped_pending_tool_is_processed(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        tool_a = {"name": "ToolA", "install_path": "/path/a", "version": "1"}
+        tool_b = {"name": "ToolB", "install_path": "/path/b", "version": "1"}
+
+        # Seed a recent INTERRUPTED run: ToolA already reported for alice and
+        # never flipped to completed -> resumable within the window.
+        self.cache.start_run("prev-run")
+        self.cache.mark_run_uploaded("ToolA:/path/a", "alice")
+
+        detector = Mock()
+        detector.get_device_id.return_value = "dev"
+        detector.detect_all_tools.return_value = [tool_a, tool_b]
+        detector.process_single_tool.return_value = {"projects": []}
+        detector.filter_tool_projects_by_user.return_value = {
+            "projects": [], "version": "1", "install_path": "/path/x",
+        }
+        detector.generate_single_tool_report.return_value = {"tools": [{"name": "T", "projects": []}]}
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "AIToolsDetector", return_value=detector), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_report_to_backend", Mock(return_value=(True, False))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "compute_payload_hash", Mock(return_value="h")), \
+             patch.object(adm, "run_sweep", Mock(return_value=(0, 0, 0))), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=["alice"]), \
+             patch.object(adm, "get_user_info", return_value="alice"), \
+             patch.object(adm, "get_audit_user", return_value="alice"), \
+             patch.object(sys, "argv", argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        processed = [c.args[0]["name"] for c in detector.process_single_tool.call_args_list]
+        self.assertNotIn("ToolA", processed, "already-reported tool must be skipped")
+        self.assertIn("ToolB", processed, "pending tool must be processed")
+        # A report was generated only for the pending tool.
+        self.assertEqual(detector.generate_single_tool_report.call_count, 1)
+        # Clean finish -> checkpoint flipped to completed (next run won't resume).
+        self.assertEqual(self.cache.read_run().get("status"), "completed")
 
 
 class TestStateDirFallback(unittest.TestCase):

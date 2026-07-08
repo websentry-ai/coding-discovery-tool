@@ -86,11 +86,13 @@ class LinuxGeminiCliSkillsExtractor(BaseGeminiCliSkillsExtractor):
                     except ValueError:
                         continue
 
+                    if item.is_symlink():
+                        continue
                     if item.is_dir():
                         if item.name in GEMINI_CLI_PARENT_DIR_NAMES:
                             for config in GEMINI_CLI_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
-                                if type_dir.exists() and type_dir.is_dir():
+                                if type_dir.exists() and type_dir.is_dir() and not type_dir.is_symlink():
                                     if not is_user_level_tool_dir(item):
                                         extract_gemini_cli_items_from_directory(
                                             type_dir,
@@ -99,9 +101,6 @@ class LinuxGeminiCliSkillsExtractor(BaseGeminiCliSkillsExtractor):
                                             add_skill_to_project,
                                             config,
                                         )
-                            continue
-
-                        if item.is_symlink():
                             continue
 
                         self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)

@@ -111,6 +111,8 @@ class WindowsRooSkillsExtractor(BaseRooSkillsExtractor):
                     except ValueError:
                         continue
 
+                    if item.is_symlink():
+                        continue
                     if item.is_dir():
                         if item.name in ROO_PARENT_DIR_NAMES:
                             for type_dir in iter_roo_skill_type_dirs(item):

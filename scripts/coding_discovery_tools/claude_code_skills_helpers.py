@@ -306,9 +306,12 @@ def extract_items_from_directory(
     try:
         if config.layout == "nested":
             for subdir in type_dir.iterdir():
-                if subdir.is_dir():
+                # Skip symlinked skill dirs: during a privileged/all-user walk a
+                # project-planted symlink could redirect extraction into another
+                # user's tree and mis-attribute it (security).
+                if subdir.is_dir() and not subdir.is_symlink():
                     for item in subdir.iterdir():
-                        if item.is_file() and config.file_filter(item.name):
+                        if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
                             item_info = extract_item_info(
                                 item,
                                 extract_single_rule_file_func,
@@ -324,7 +327,7 @@ def extract_items_from_directory(
                             break  # Only one marker file per subdirectory
         else:
             for item in type_dir.iterdir():
-                if item.is_file() and config.file_filter(item.name):
+                if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
                     item_info = extract_item_info(
                         item,
                         extract_single_rule_file_func,
@@ -379,9 +382,12 @@ def extract_user_level_items(
             try:
                 if config.layout == "nested":
                     for subdir in type_dir.iterdir():
-                        if subdir.is_dir():
+                        # Skip symlinked skill dirs / marker files: under a root
+                        # all-user scan a symlink could redirect the read into
+                        # another user's tree (security).
+                        if subdir.is_dir() and not subdir.is_symlink():
                             for item in subdir.iterdir():
-                                if item.is_file() and config.file_filter(item.name):
+                                if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
                                     item_info = extract_item_info(
                                         item,
                                         extract_single_rule_file_func,
@@ -396,7 +402,7 @@ def extract_user_level_items(
                                     break  # Only one marker file per subdirectory
                 else:
                     for item in type_dir.iterdir():
-                        if item.is_file() and config.file_filter(item.name):
+                        if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
                             item_info = extract_item_info(
                                 item,
                                 extract_single_rule_file_func,

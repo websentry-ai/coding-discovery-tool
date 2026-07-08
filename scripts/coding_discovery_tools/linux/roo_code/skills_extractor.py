@@ -86,6 +86,8 @@ class LinuxRooSkillsExtractor(BaseRooSkillsExtractor):
                     except ValueError:
                         continue
 
+                    if item.is_symlink():
+                        continue
                     if item.is_dir():
                         if item.name in ROO_PARENT_DIR_NAMES:
                             for type_dir in iter_roo_skill_type_dirs(item):
@@ -96,9 +98,6 @@ class LinuxRooSkillsExtractor(BaseRooSkillsExtractor):
                                         extract_single_rule_file,
                                         add_skill_to_project,
                                     )
-                            continue
-
-                        if item.is_symlink():
                             continue
 
                         self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)

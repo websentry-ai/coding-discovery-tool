@@ -78,7 +78,9 @@ def iter_roo_skill_type_dirs(tool_dir: Path) -> List[Path]:
     found: List[Path] = []
     try:
         for child in tool_dir.iterdir():
-            if child.is_dir() and is_roo_skill_type_dirname(child.name):
+            # Reject symlinked skill dirs so a planted link can't redirect a
+            # privileged walk into another user's tree (security).
+            if child.is_dir() and not child.is_symlink() and is_roo_skill_type_dirname(child.name):
                 found.append(child)
     except (PermissionError, OSError) as e:
         logger.debug(f"Error listing Roo skill dirs under {tool_dir}: {e}")

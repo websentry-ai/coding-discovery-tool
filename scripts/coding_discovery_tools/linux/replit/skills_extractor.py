@@ -17,7 +17,6 @@ from ...replit_skills_helpers import (
     REPLIT_PARENT_DIR_NAMES,
     REPLIT_ITEM_CONFIGS,
     extract_replit_items_from_directory,
-    extract_replit_user_level_items,
 )
 from ...claude_code_skills_helpers import (
     build_skills_project_list,
@@ -43,14 +42,10 @@ class LinuxReplitSkillsExtractor(BaseReplitSkillsExtractor):
         }
 
     def _extract_user_level_skills(self, user_skills: List[Dict]) -> None:
-        def extract_for_user(user_home: Path) -> None:
-            extract_replit_user_level_items(user_home, user_skills, extract_single_rule_file, REPLIT_ITEM_CONFIGS)
-
-        for user_home in get_linux_user_homes():
-            try:
-                extract_for_user(user_home)
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Skipping {user_home}: {e}")
+        # Replit has no local user/global skills path (global skills live server-side
+        # in Workspace Settings), so there is nothing to collect at user scope. Skip
+        # the (potentially expensive) all-user enumeration entirely.
+        return
 
     def _extract_project_level_skills(self, projects_by_root: Dict) -> None:
         for user_home in get_linux_user_homes():

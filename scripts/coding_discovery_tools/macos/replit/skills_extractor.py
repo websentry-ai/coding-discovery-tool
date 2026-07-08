@@ -19,14 +19,11 @@ from ...macos_extraction_helpers import (
     should_process_directory,
     should_skip_path,
     should_skip_system_path,
-    is_running_as_root,
-    scan_user_directories,
 )
 from ...replit_skills_helpers import (
     REPLIT_PARENT_DIR_NAMES,
     REPLIT_ITEM_CONFIGS,
     extract_replit_items_from_directory,
-    extract_replit_user_level_items,
 )
 from ...claude_code_skills_helpers import (
     build_skills_project_list,
@@ -63,14 +60,10 @@ class MacOSReplitSkillsExtractor(BaseReplitSkillsExtractor):
         }
 
     def _extract_user_level_skills(self, user_skills: List[Dict]) -> None:
-        """Extract user-level skills from ~/.agents/skills/ for each user."""
-        def extract_for_user(user_home: Path) -> None:
-            extract_replit_user_level_items(user_home, user_skills, extract_single_rule_file, REPLIT_ITEM_CONFIGS)
-
-        if is_running_as_root():
-            scan_user_directories(extract_for_user)
-        else:
-            extract_for_user(Path.home())
+        # Replit has no local user/global skills path (global skills live server-side
+        # in Workspace Settings), so there is nothing to collect at user scope. Skip
+        # the (potentially expensive) all-user enumeration entirely.
+        return
 
     def _extract_project_level_skills(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """Extract project-level skills recursively from all projects."""

@@ -696,10 +696,11 @@ class BaseRooSkillsExtractor(_BaseAgentSkillsExtractor):
 
 
 class BaseWindsurfSkillsExtractor(_BaseAgentSkillsExtractor):
-    """Extract Windsurf (Cascade) skills. Paths: user ``~/.codeium/windsurf/skills/``
-    + ``~/.agents/skills/``; project ``.windsurf/skills/`` plus the documented compat
-    dirs ``.agents``, ``.github``, ``.cursor``, ``.codex`` (and ``.claude`` when Claude
-    Code config reading is enabled)."""
+    """Extract Windsurf (Cascade) skills. Paths (docs.devin.ai/desktop/cascade/skills):
+    user ``~/.codeium/windsurf/skills/`` + ``~/.agents/skills/`` + ``~/.claude/skills/``;
+    project ``.windsurf/skills/`` + ``.agents/skills/`` + ``.claude/skills/`` (``.claude``
+    when Claude Code config reading is enabled). The docs do NOT list
+    ``.github``/``.cursor``/``.codex`` as Windsurf skill dirs."""
 
 
 class BaseClaudeSettingsExtractor(ABC):

@@ -18,14 +18,12 @@ from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_to
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
     get_windows_system_directories,
-    scan_windows_user_directories,
     should_skip_path,
 )
 from ...replit_skills_helpers import (
     REPLIT_PARENT_DIR_NAMES,
     REPLIT_ITEM_CONFIGS,
     extract_replit_items_from_directory,
-    extract_replit_user_level_items,
 )
 from ...claude_code_skills_helpers import (
     build_skills_project_list,
@@ -71,11 +69,10 @@ class WindowsReplitSkillsExtractor(BaseReplitSkillsExtractor):
         }
 
     def _extract_user_level_skills(self, user_skills: List[Dict]) -> None:
-        """Extract user-level skills from ~/.agents/skills/ for each user."""
-        def extract_for_user(user_home: Path) -> None:
-            extract_replit_user_level_items(user_home, user_skills, extract_single_rule_file, REPLIT_ITEM_CONFIGS)
-
-        scan_windows_user_directories(extract_for_user)
+        # Replit has no local user/global skills path (global skills live server-side
+        # in Workspace Settings), so there is nothing to collect at user scope. Skip
+        # the (potentially expensive) all-user enumeration entirely.
+        return
 
     def _extract_project_level_skills(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """Extract project-level skills recursively from all projects."""

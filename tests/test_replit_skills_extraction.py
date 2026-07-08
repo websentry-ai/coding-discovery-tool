@@ -99,11 +99,10 @@ class TestMacOSReplitExtractor(unittest.TestCase):
         home = self.tmp / "Users" / "bob"
         _mk(home / "proj" / ".agents", "p1")
         ex = se.MacOSReplitSkillsExtractor()
-        with patch.object(se, "is_running_as_root", return_value=False), \
-             patch.object(se, "should_skip_system_path", return_value=False), \
+        with patch.object(se, "should_skip_system_path", return_value=False), \
              patch("pathlib.Path.home", return_value=home):
             user_skills = []
-            ex._extract_user_level_skills(user_skills)   # project-scope only -> stays empty
+            ex._extract_user_level_skills(user_skills)   # project-scope only -> no-op, stays empty
             pbr = {}
             ex._walk_for_skills(home, home, pbr, 0)
         self.assertEqual(user_skills, [])

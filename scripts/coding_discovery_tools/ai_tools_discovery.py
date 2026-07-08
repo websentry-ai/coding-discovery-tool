@@ -2828,9 +2828,13 @@ def main():
         # interruption are still found and reported.
         resume_done = discovery_cache.resumable_done()
         if resume_done:
+            # Log the interrupted run's id (the join key between the two runs' logs)
+            # alongside this resumed run's id, so "why did resume skip tool X?" can
+            # be traced back to the original run's upload logs.
+            _prev_run_id = discovery_cache.read_run().get("run_id")
             logger.info(
-                f"Resuming recent interrupted scan: {len(resume_done)} tool/user "
-                f"already reported; skipping their re-processing."
+                f"Resuming interrupted run {_prev_run_id} as {run_id}: "
+                f"{len(resume_done)} tool/user already reported; skipping their re-processing."
             )
         discovery_cache.start_run(run_id, done=resume_done)
 
@@ -2995,7 +2999,12 @@ def main():
 
                 for user_name in all_users:
                     # Already reported by the resumed run -> skip its re-upload.
+                    # Log the per-user skip AND record it in the summary so a
+                    # partially-resumed tool's summary reflects every user (resumed
+                    # + freshly processed), not a silently reduced count.
                     if (tool_key, user_name) in resume_done:
+                        logger.info(f"  · {tool_name} for user {user_name} already reported by the resumed run; skipping re-processing")
+                        tool_users_summary.append({'user': user_name, 'resumed': True})
                         continue
                     if platform.system() == "Darwin":
                         user_home = Path(f"/Users/{user_name}")
@@ -3248,7 +3257,10 @@ def main():
                 logger.info(f"Summary for tool: {tool_name}")
                 logger.info("=" * 60)
                 for user_summary in tool_users_summary:
-                    logger.info(f"  - User {user_summary['user']}: {user_summary['projects']} projects, {user_summary['rules']} rule files")
+                    if user_summary.get('resumed'):
+                        logger.info(f"  - User {user_summary['user']}: (already reported by the resumed run; re-processing skipped)")
+                    else:
+                        logger.info(f"  - User {user_summary['user']}: {user_summary['projects']} projects, {user_summary['rules']} rule files")
                 logger.info(f"Total: {tool_total_projects} projects, {tool_total_rules} rule files across {len(tool_users_summary)} user(s)")
                 logger.info("=" * 60)
                 logger.info("")

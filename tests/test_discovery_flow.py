@@ -1000,32 +1000,47 @@ class TestWindowsPidLiveness(unittest.TestCase):
         self.cache = cache
 
     @staticmethod
-    def _fake_windll(open_handle, last_error=0):
-        fake = Mock()
-        fake.kernel32.OpenProcess.return_value = open_handle
-        fake.kernel32.GetLastError.return_value = last_error
-        return fake
+    def _kernel32(open_handle):
+        k = Mock()
+        k.OpenProcess.return_value = open_handle
+        return k
 
     def test_windows_probe_alive_when_handle_opens(self):
-        fake = self._fake_windll(open_handle=1234)
-        with patch("ctypes.windll", fake, create=True):
+        k = self._kernel32(open_handle=1234)
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=0, create=True):
             self.assertTrue(self.cache._pid_alive_windows(4321))
-        fake.kernel32.CloseHandle.assert_called_once()  # handle must be closed
+        k.CloseHandle.assert_called_once()  # handle must be closed
 
     def test_windows_probe_dead_on_invalid_parameter(self):
         # OpenProcess -> NULL with ERROR_INVALID_PARAMETER means the PID does not exist.
-        fake = self._fake_windll(open_handle=0, last_error=87)
-        with patch("ctypes.windll", fake, create=True):
+        k = self._kernel32(open_handle=0)
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=87, create=True):
             self.assertFalse(self.cache._pid_alive_windows(4321))
 
     def test_windows_probe_alive_on_access_denied(self):
         # NULL with ERROR_ACCESS_DENIED means the process exists but isn't openable.
-        fake = self._fake_windll(open_handle=0, last_error=5)
-        with patch("ctypes.windll", fake, create=True):
+        k = self._kernel32(open_handle=0)
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=5, create=True):
             self.assertTrue(self.cache._pid_alive_windows(4321))
 
+    def test_windows_probe_reads_saved_error_not_live_getlasterror(self):
+        # Regression for the use_last_error fix: the verdict must come from the
+        # error ctypes SAVED right after OpenProcess (ctypes.get_last_error), NOT a
+        # late kernel32.GetLastError() that intervening ctypes calls could have
+        # clobbered. Here a live GetLastError would wrongly say "alive" (0), but the
+        # saved error is ERROR_INVALID_PARAMETER -> must be read as dead.
+        k = self._kernel32(open_handle=0)
+        k.GetLastError.return_value = 0  # stale/clobbered live value
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=87, create=True):
+            self.assertFalse(self.cache._pid_alive_windows(4321))
+        k.GetLastError.assert_not_called()  # must not rely on the unreliable live read
+
     def test_windows_probe_conservative_on_ctypes_failure(self):
-        with patch("ctypes.windll", None, create=True):
+        with patch("ctypes.WinDLL", side_effect=OSError("no kernel32"), create=True):
             self.assertTrue(self.cache._pid_alive_windows(4321))
 
     def test_windows_probe_nonpositive_pid_is_dead(self):
@@ -1091,11 +1106,11 @@ class TestResumeCheckpoint(unittest.TestCase):
         self.cache.atomic_write_cache(cache)
 
     def test_fresh_run_has_no_resumable_done(self):
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.assertEqual(self.cache.resumable_done(), set())
 
     def test_uploaded_entries_are_resumable_within_window(self):
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.cache.mark_run_uploaded("Cursor:/a", "alice")
         self.cache.mark_run_uploaded("Claude Code:/b", "alice")
         self.assertEqual(
@@ -1104,32 +1119,43 @@ class TestResumeCheckpoint(unittest.TestCase):
         )
 
     def test_completed_run_is_not_resumable(self):
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.cache.mark_run_uploaded("Cursor:/a", "alice")
         self.cache.mark_run_completed()
         self.assertEqual(self.cache.resumable_done(), set())
 
     def test_stale_run_outside_window_is_not_resumable(self):
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.cache.mark_run_uploaded("Cursor:/a", "alice")
         self._age_updated_at(self.cache.RESUME_WINDOW_SECONDS + 60)
         self.assertEqual(self.cache.resumable_done(), set())
 
     def test_future_updated_at_is_not_resumable(self):
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.cache.mark_run_uploaded("Cursor:/a", "alice")
         self._age_updated_at(-120)  # 2 min in the future (clock skew)
         self.assertEqual(self.cache.resumable_done(), set())
 
+    def test_non_uuid_run_id_is_not_resumable(self):
+        # Fail-safe: a checkpoint whose run_id isn't a real UUID (corrupt state or a
+        # lazy forge) is not trusted -> full scan. Real runs always use uuid4().
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.assertTrue(self.cache.resumable_done())  # valid uuid -> resumable
+        c = self.cache.read_cache()
+        c["run"]["run_id"] = "not-a-uuid"
+        self.cache.atomic_write_cache(c)
+        self.assertEqual(self.cache.resumable_done(), set())
+
     def test_mark_uploaded_dedups(self):
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.cache.mark_run_uploaded("Cursor:/a", "alice")
         self.cache.mark_run_uploaded("Cursor:/a", "alice")
         self.assertEqual(self.cache.read_run()["done"], [["Cursor:/a", "alice"]])
 
     def test_start_run_carries_forward_done(self):
         seed = {("Cursor:/a", "alice"), ("Codex:/c", "bob")}
-        self.cache.start_run("rid-2", done=seed)
+        self.cache.start_run("22222222-2222-2222-2222-222222222222", done=seed)
         self.assertEqual(self.cache.resumable_done(), seed)
 
     def test_mark_uploaded_is_noop_without_active_run(self):
@@ -1139,19 +1165,19 @@ class TestResumeCheckpoint(unittest.TestCase):
     def test_start_run_preserves_hash_cache(self):
         # The checkpoint must not clobber the existing per-tool hash cache.
         self.cache.update_tool("Cursor", "alice", "hash-xyz")
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.assertEqual(self.cache.get_cached_hash("Cursor", "alice"), "hash-xyz")
 
     def test_record_report_writes_hash_and_done_together(self):
         # The folded write updates BOTH the per-tool hash and the run done-set.
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.cache.record_report("Cursor", "alice", "Cursor:/a", payload_hash="h1")
         self.assertEqual(self.cache.get_cached_hash("Cursor", "alice"), "h1")
         self.assertEqual(self.cache.resumable_done(), {("Cursor:/a", "alice")})
 
     def test_record_report_without_hash_records_done_only(self):
         # Hash-match / hashless path: record progress without touching the hash.
-        self.cache.start_run("rid-1")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
         self.cache.record_report("Cursor", "alice", "Cursor:/a")
         self.assertIsNone(self.cache.get_cached_hash("Cursor", "alice"))
         self.assertEqual(self.cache.resumable_done(), {("Cursor:/a", "alice")})
@@ -1192,7 +1218,7 @@ class TestResumeSkipsReprocessingInMain(unittest.TestCase):
 
         # Seed a recent INTERRUPTED run: ToolA already reported for alice and
         # never flipped to completed -> resumable within the window.
-        self.cache.start_run("prev-run")
+        self.cache.start_run("33333333-3333-3333-3333-333333333333")
         self.cache.mark_run_uploaded("ToolA:/path/a", "alice")
 
         detector = Mock()

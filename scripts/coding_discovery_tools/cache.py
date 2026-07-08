@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import stat
+import uuid
 import tempfile
 import threading
 import time
@@ -220,6 +221,14 @@ def atomic_write_cache(data: dict) -> None:
         UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".discovery-cache.", suffix=".tmp", dir=str(UNBOUND_DIR))
         try:
+            # Owner-only: the cache holds the resume checkpoint + tool inventory.
+            # mkstemp is already 0600 and os.replace preserves it, but chmod
+            # explicitly so a cross-user process can never read/forge it (the
+            # same-user boundary is out of scope — see resumable_done).
+            try:
+                os.fchmod(fd, 0o600)
+            except (OSError, AttributeError):
+                pass
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, sort_keys=True)
             os.replace(tmp, CACHE_PATH)
@@ -358,9 +367,26 @@ def mark_run_completed() -> None:
 def resumable_done() -> set:
     """The ``{(tool_key, home_user)}`` already reported by a recent *interrupted*
     run (status still ``in_progress`` and touched within RESUME_WINDOW_SECONDS),
-    or an empty set when there's nothing safe to resume."""
+    or an empty set when there's nothing safe to resume.
+
+    Fail-safe by construction: ANY malformed/anomalous checkpoint returns the
+    empty set, i.e. a full scan. Cross-user forging is blocked upstream (the
+    cache file is 0600 and the state dir is ownership-hardened). A same-user
+    process CAN still plant a checkpoint — but that is out of scope: the same
+    user already controls what discovery reads and can suppress the pre-existing
+    hash cache too, and the blast radius is bounded to a single 150s window
+    because the next non-resumed scan re-processes and re-reports everything."""
     run = read_run()
     if run.get("status") != "in_progress":
+        return set()
+    # A genuine interrupted run always carries a client-generated UUID run_id;
+    # reject anything that doesn't look like one rather than trust arbitrary state.
+    rid = run.get("run_id")
+    if not isinstance(rid, str):
+        return set()
+    try:
+        uuid.UUID(rid)
+    except (ValueError, TypeError, AttributeError):
         return set()
     age = _age_seconds(run.get("updated_at"))
     if age is None or age < 0 or age > RESUME_WINDOW_SECONDS:
@@ -411,7 +437,14 @@ def _pid_alive_windows(pid: int) -> bool:
     try:
         import ctypes
         from ctypes import wintypes
-        kernel32 = ctypes.windll.kernel32
+        # use_last_error=True makes ctypes save the thread error code immediately
+        # after each call and expose it via ctypes.get_last_error(). A bare
+        # kernel32.GetLastError() is unreliable: ctypes' own bookkeeping (or CPython
+        # GC/refcount work) can issue Win32 calls between OpenProcess returning NULL
+        # and the read, clobbering the error — which could misread a dead PID as
+        # alive (steal never happens) or, worse, a live PID as dead (steal a lock
+        # from a running scan). See the ctypes docs' use_last_error note.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         ERROR_INVALID_PARAMETER = 87
         kernel32.OpenProcess.restype = wintypes.HANDLE
@@ -420,7 +453,7 @@ def _pid_alive_windows(pid: int) -> bool:
         if handle:
             kernel32.CloseHandle(handle)
             return True
-        return kernel32.GetLastError() != ERROR_INVALID_PARAMETER
+        return ctypes.get_last_error() != ERROR_INVALID_PARAMETER
     except Exception:
         return True
 

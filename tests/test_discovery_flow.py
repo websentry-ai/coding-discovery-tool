@@ -989,6 +989,19 @@ class TestStaleLockPidLiveness(unittest.TestCase):
         self.assertFalse(self.cache._pid_alive(self._dead_pid()))
         self.assertFalse(self.cache._pid_alive(0))
 
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_lock_outcome_records_dead_pid_steal(self):
+        # Observability: stealing a dead predecessor's lock is recorded so the run
+        # can surface it in discovery metrics (lock_outcome).
+        self.cache.LOCK_PATH.write_text(f"{self._dead_pid()} now\n")
+        self._fresh()
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache.last_lock_outcome, "stolen_dead_pid")
+
+    def test_lock_outcome_records_clean_acquire(self):
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache.last_lock_outcome, "acquired")
+
 
 class TestWindowsPidLiveness(unittest.TestCase):
     """WEB-4774 (B1-Win): Windows process-liveness so a lock left by a killed
@@ -1230,6 +1243,7 @@ class TestResumeSkipsReprocessingInMain(unittest.TestCase):
         }
         detector.generate_single_tool_report.return_value = {"tools": [{"name": "T", "projects": []}]}
 
+        metrics_mock = Mock()
         argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
         with patch.object(adm.platform, "system", return_value="Linux"), \
              patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
@@ -1238,7 +1252,7 @@ class TestResumeSkipsReprocessingInMain(unittest.TestCase):
              patch.object(adm, "AIToolsDetector", return_value=detector), \
              patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
              patch.object(adm, "send_report_to_backend", Mock(return_value=(True, False))), \
-             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "send_discovery_metrics", metrics_mock), \
              patch.object(adm, "compute_payload_hash", Mock(return_value="h")), \
              patch.object(adm, "run_sweep", Mock(return_value=(0, 0, 0))), \
              patch.object(adm, "load_pending_reports", return_value=[]), \
@@ -1259,6 +1273,12 @@ class TestResumeSkipsReprocessingInMain(unittest.TestCase):
         self.assertEqual(detector.generate_single_tool_report.call_count, 1)
         # Clean finish -> checkpoint flipped to completed (next run won't resume).
         self.assertEqual(self.cache.read_run().get("status"), "completed")
+        # Resume observability is surfaced in the discovery metrics payload.
+        self.assertTrue(metrics_mock.called, "discovery metrics were not sent")
+        meta = metrics_mock.call_args.args[3]["metadata"]
+        self.assertTrue(meta["resumed"])
+        self.assertEqual(meta["resume_pairs_skipped"], 1)   # (ToolA, alice)
+        self.assertEqual(meta["resume_tools_skipped"], 1)   # ToolA fully skipped
 
 
 class TestStateDirFallback(unittest.TestCase):

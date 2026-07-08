@@ -2963,6 +2963,8 @@ def main():
         # Pick the single Augment surface that should carry the shared config.
         detector._set_canonical_augment_surface(tools)
 
+        # Resume observability: how many tools had their processing fully skipped.
+        resume_tools_skipped = 0
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
@@ -2976,6 +2978,7 @@ def main():
             # subprocesses) is actually saved.
             if resume_done and all((tool_key, u) in resume_done for u in all_users):
                 logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
+                resume_tools_skipped += 1
                 continue
 
             logger.info("")
@@ -3305,6 +3308,13 @@ def main():
                     "user_count": len(all_users),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
+                    # Observability for the kill/rerun behavior so it's visible in
+                    # dashboards and alertable if the checkpoint logic misbehaves
+                    # (e.g. a spike in resumed runs or in skipped pairs/tools):
+                    "resumed": bool(resume_done),                 # did this run resume an interrupted one
+                    "resume_pairs_skipped": len(resume_done),     # (tool,user) pairs skipped
+                    "resume_tools_skipped": resume_tools_skipped,  # tools whose processing was fully skipped
+                    "lock_outcome": discovery_cache.last_lock_outcome,  # acquired | stolen_dead_pid | stolen_stale
                 },
             }
             send_discovery_metrics(

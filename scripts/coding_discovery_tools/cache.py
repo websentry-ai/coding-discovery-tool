@@ -53,6 +53,10 @@ RESUME_WINDOW_SECONDS = 150
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 last_lock_error: Optional[str] = None
+# Observability: outcome of the most recent acquire_lock() so a run can report
+# whether it stole a dead/stale predecessor's lock. One of: "acquired",
+# "stolen_dead_pid", "stolen_stale", "contended", "setup_failed", or None.
+last_lock_outcome: Optional[str] = None
 
 
 def _state_dir_candidates() -> list:
@@ -497,38 +501,47 @@ def _lock_is_live() -> bool:
 
 def acquire_lock() -> str:
     """Best-effort exclusive lock. Returns "acquired", "contended" (held by a live process), or "setup_failed"."""
-    global last_lock_error
+    global last_lock_error, last_lock_outcome
     last_lock_error = None
+    last_lock_outcome = None
     if not _ensure_state_dir():
         # _ensure_state_dir() already created+verified the dir (or returned
         # False -> setup_failed); no redundant blind mkdir here (TOCTOU).
+        last_lock_outcome = "setup_failed"
         return "setup_failed"
 
     if LOCK_PATH.exists() and _lock_is_live():
+        last_lock_outcome = "contended"
         return "contended"
 
+    _steal_reason = None
     if LOCK_PATH.exists():
         # Log WHY we're stealing so a rerun is distinguishable in logs: recovery
         # from a predecessor killed without cleanup (dead PID) vs a plain stale
         # (heartbeat-died) lock.
         _stale_pid = _read_lock_pid()
         if _stale_pid is not None and _owner_alive(_stale_pid) is False:
+            _steal_reason = "stolen_dead_pid"
             logger.info(f"stealing discovery lock from dead PID {_stale_pid} (predecessor killed without cleanup)")
         else:
+            _steal_reason = "stolen_stale"
             logger.info("stealing stale discovery lock (heartbeat older than the stale window)")
         try:
             LOCK_PATH.unlink()
         except OSError as e:
             last_lock_error = str(e)
+            last_lock_outcome = "setup_failed"
             logger.warning(f"could not steal stale lock: {e}")
             return "setup_failed"
 
     try:
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_NOFOLLOW, 0o600)
     except FileExistsError:
+        last_lock_outcome = "contended"
         return "contended"
     except OSError as e:
         last_lock_error = str(e)
+        last_lock_outcome = "setup_failed"
         logger.warning(f"could not create lock: {e}")
         return "setup_failed"
 
@@ -539,6 +552,7 @@ def acquire_lock() -> str:
             os.close(fd)
     except OSError as e:
         last_lock_error = str(e)
+        last_lock_outcome = "setup_failed"
         logger.warning(f"could not write lock: {e}")
         # Remove the lock file we just created so a write failure can't leave a
         # fresh ghost lock that makes the next run see false contention.
@@ -547,6 +561,7 @@ def acquire_lock() -> str:
         except OSError:
             pass
         return "setup_failed"
+    last_lock_outcome = _steal_reason or "acquired"
     return "acquired"
 
 

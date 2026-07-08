@@ -2777,8 +2777,26 @@ def main():
     # Save + restore prior handlers so importing/calling main() (tests) doesn't
     # leave process-wide handlers installed. signal.signal only works on the main
     # thread, so guard against ValueError/OSError elsewhere.
+    #
+    # Trap every CATCHABLE signal whose default action would terminate us on an
+    # external/environmental request, so the abort path (release lock + report
+    # failed) runs instead of dying dirty and leaving a leaked lock:
+    #   SIGTERM / SIGINT  - polite kill / Ctrl-C
+    #   SIGHUP            - controlling terminal or login session closed
+    #   SIGQUIT           - Ctrl-\
+    #   SIGBREAK          - Windows Ctrl-Break (Windows-only name)
+    #   SIGXCPU / SIGXFSZ - CPU / file-size rlimit exceeded (constrained MDM / containers)
+    #   SIGPWR            - system power-down / UPS low battery (Linux-only name)
+    # Deliberately NOT trapped: SIGKILL / SIGSTOP (uncatchable by design);
+    # SIGPIPE (Python raises BrokenPipeError, it is not a termination request);
+    # SIGTSTP / SIGTTIN / SIGTTOU (suspend, not terminate); and the
+    # program-error / core signals SIGSEGV / SIGBUS / SIGABRT / SIGFPE / SIGILL /
+    # SIGSYS / SIGTRAP (running cleanup from an already-corrupted process is
+    # unsafe — genuine crashes are still reported via the except-Exception path).
+    # Names absent or unsupported on a given platform are skipped by getattr + try.
     _prev_signal_handlers = {}
-    for _signame in ("SIGTERM", "SIGINT"):
+    for _signame in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGBREAK",
+                     "SIGXCPU", "SIGXFSZ", "SIGPWR"):
         _sig = getattr(signal, _signame, None)
         if _sig is not None:
             try:

@@ -365,17 +365,28 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         self.assertFalse(lock.exists(), "discovery.lock left behind after self-timeout")
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
-    def test_main_restores_signal_handlers(self):
-        # main() installs SIGTERM/SIGINT handlers but must restore the originals
-        # in its finally so importing/calling it doesn't pollute the process.
+    def test_main_traps_and_restores_termination_signals(self):
+        # main() must install its abort handler for every catchable termination
+        # signal present on this platform (incl. the newly-added SIGHUP), and
+        # restore the originals in finally so importing/calling it doesn't pollute
+        # the process.
         import signal as _signal
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
 
-        prev_term = _signal.getsignal(_signal.SIGTERM)
-        prev_int = _signal.getsignal(_signal.SIGINT)
+        names = ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGXCPU", "SIGXFSZ", "SIGPWR"]
+        sigs = [getattr(_signal, n) for n in names if getattr(_signal, n, None) is not None]
+        self.assertIn(_signal.SIGHUP, sigs)  # SIGHUP is trapped on POSIX
+
+        prev = {s: _signal.getsignal(s) for s in sigs}
+        installed = {}
+        real_signal = _signal.signal
+
+        def spy(sig, handler):
+            if sig in sigs and sig not in installed:  # record the FIRST (install), not the restore
+                installed[sig] = handler
+            return real_signal(sig, handler)
+
         argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
-        # acquire_lock -> "contended" makes main() exit BEFORE installing handlers,
-        # so use a detector that finishes instantly with the lock acquired.
         detector_inst = Mock()
         detector_inst.get_device_id.return_value = "dev"
         detector_inst.detect_all_tools.return_value = []
@@ -391,13 +402,19 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
              patch.object(adm, "get_all_users_linux", return_value=[]), \
              patch.object(adm, "get_user_info", return_value={}), \
              patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(_signal, "signal", spy), \
              patch.object(sys, "argv", argv):
             try:
                 adm.main()
             except SystemExit:
                 pass
-        self.assertEqual(_signal.getsignal(_signal.SIGTERM), prev_term)
-        self.assertEqual(_signal.getsignal(_signal.SIGINT), prev_int)
+
+        for s in sigs:
+            # A real (non-default) handler was installed during the run...
+            self.assertTrue(callable(installed.get(s)), f"no handler installed for {s}")
+            self.assertNotIn(installed[s], (_signal.SIG_DFL, _signal.SIG_IGN))
+            # ...and the original was restored afterward.
+            self.assertEqual(_signal.getsignal(s), prev[s], f"{s} not restored")
 
 
 class TestUnsupportedPlatformGuard(unittest.TestCase):

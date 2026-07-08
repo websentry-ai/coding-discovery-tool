@@ -55,6 +55,32 @@ class TestCodexOverCollection(unittest.TestCase):
         self.assertNotIn("cached", names)
 
 
+class TestNewerToolConfigDirsGuarded(unittest.TestCase):
+    """Regression for the e2e finding: a skill bundled inside a NEWER tool's config
+    dir (~/.codex, ~/.kilo, ~/.opencode, ~/.copilot) must not be over-collected —
+    these were missing from OTHER_TOOL_CONFIG_DIRS. Concretely, a plugin skill at
+    ~/.codex/.tmp/plugins/.agents/skills/... must not appear under ANY tool."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_agents_skill_bundled_in_codex_config_dir_not_collected(self):
+        # Reproduces exactly what the on-machine e2e surfaced.
+        from scripts.coding_discovery_tools.macos.gemini_cli import skills_extractor as se
+        home = self.tmp / "Users" / "alice"
+        _mk_skill(home / ".codex" / ".tmp" / "plugins" / ".agents" / "skills", "plugin-creator")
+        _mk_skill(home / ".kilo" / "cache" / ".agents" / "skills", "kilobundle")
+        _mk_skill(home / ".opencode" / "x" / ".agents" / "skills", "ocbundle")
+        _mk_skill(home / "proj" / ".agents" / "skills", "legit")
+        names = _walk(se, se.MacOSGeminiCliSkillsExtractor, home)
+        self.assertEqual(names, ["legit"])
+        for bundled in ("plugin-creator", "kilobundle", "ocbundle"):
+            self.assertNotIn(bundled, names)
+
+
 class TestGeminiOverCollectionKeepsOwnDir(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

@@ -48,13 +48,25 @@ SKIP_SYSTEM_DIRS = {
 
 # Per-user AI-tool config directories (``~/.<tool>``). A project-rules/skills
 # walk must not descend into a DIFFERENT tool's config dir: its contents —
-# including installed extension packages like
-# ``~/.antigravity/extensions/<pkg>/.github`` — belong to that tool, not to the
-# scanned user's repositories. (Kept separate from the scope-classification set
-# in ``macos_extraction_helpers._detect_rule_scope`` so scope rules don't change.)
+# including installed extension/plugin packages like
+# ``~/.antigravity/extensions/<pkg>/.github`` or
+# ``~/.codex/.tmp/plugins/<pkg>/.agents/skills`` — belong to that tool, not to
+# the scanned user's repositories. Each SKILL.md-reading tool still collects its
+# OWN dir because the skills walk passes ``allow = SHARED_SKILL_DIRS | <own
+# parent dirs>`` (so e.g. Kilo keeps ``.kilo``, OpenCode keeps ``.opencode``).
+# Must list EVERY tool's per-user config dir — an omission lets other tools'
+# walks over-collect bundled ``.agents``/``.claude`` skills from it. (Kept
+# separate from the scope-classification set in
+# ``macos_extraction_helpers._detect_rule_scope`` so scope rules don't change.)
 OTHER_TOOL_CONFIG_DIRS = frozenset({
     ".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline",
-    ".clinerules", ".kilocode", ".gemini", ".codeium", ".junie",
+    ".clinerules", ".kilocode", ".kilo", ".gemini", ".codeium", ".junie",
+    ".codex", ".opencode", ".copilot",
+    # NOTE: ``.augment`` is intentionally omitted. The Augment extractor consults
+    # this set but passes ``allow=SHARED_SKILL_DIRS`` (not its own ``.augment``),
+    # so adding it here would make Augment skip its OWN dir. Add ``.augment`` only
+    # once the Augment extractor allows its own parent dir (as the newer per-tool
+    # extractors do).
 })
 
 # Shared cross-tool skill dirs the Copilot CLI skills walk legitimately collects

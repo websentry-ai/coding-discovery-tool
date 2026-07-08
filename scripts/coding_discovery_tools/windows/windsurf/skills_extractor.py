@@ -1,9 +1,9 @@
 """
 Windsurf (Cascade) skills extraction for Windows systems.
 
-Global skills:  ~/.codeium/windsurf/skills/<name>/SKILL.md (+ ~/.agents compat)
+Global skills:  ~/.codeium/windsurf/skills/<name>/SKILL.md (+ ~/.agents, ~/.claude compat)
 Project skills: **/.windsurf/skills/<name>/SKILL.md
-                (+ **/{.agents,.claude,.github,.cursor,.codex}/skills compat)
+                (+ **/{.agents,.claude}/skills compat)
 """
 
 import logging

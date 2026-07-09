@@ -14,10 +14,12 @@ from unittest.mock import patch
 
 from scripts.coding_discovery_tools.codex_skills_helpers import (
     AGENTS_DIR_NAME,
+    CODEX_DIR_NAME,
     SKILLS_DIR_NAME,
     SKILL_FILE_NAME,
     CODEX_PARENT_DIR_NAMES,
     CODEX_USER_DIR_NAMES,
+    CODEX_USER_PARENT_DIR_NAMES,
     CODEX_SKILL_CONFIG,
     CODEX_ITEM_CONFIGS,
     find_codex_item_project_root,
@@ -42,11 +44,22 @@ class TestCodexConstants(unittest.TestCase):
     def test_skill_file_name(self):
         self.assertEqual(SKILL_FILE_NAME, "SKILL.md")
 
-    def test_parent_dir_names_is_agents_only(self):
-        self.assertEqual(CODEX_PARENT_DIR_NAMES, (".agents",))
+    def test_codex_dir_name(self):
+        self.assertEqual(CODEX_DIR_NAME, ".codex")
 
-    def test_user_dir_names_is_agents_only(self):
-        self.assertEqual(CODEX_USER_DIR_NAMES, (".agents",))
+    def test_project_parent_dir_names_excludes_codex(self):
+        # The project walk must NOT descend into ~/.codex (vendor plugins +
+        # .system built-ins live there); user scope reads it directly instead.
+        self.assertEqual(CODEX_PARENT_DIR_NAMES, (".agents",))
+        self.assertNotIn(".codex", CODEX_PARENT_DIR_NAMES)
+
+    def test_user_dir_names_include_codex_home(self):
+        # Verified against `codex app-server` skills/list: user skills live at
+        # $CODEX_HOME/skills (default ~/.codex/skills), NOT ~/.agents/skills.
+        self.assertEqual(CODEX_USER_DIR_NAMES, (".codex", ".agents"))
+
+    def test_user_parent_dir_names_resolve_to_home(self):
+        self.assertEqual(CODEX_USER_PARENT_DIR_NAMES, (".codex", ".agents"))
 
 
 class TestCodexItemConfigIntegrity(unittest.TestCase):
@@ -113,7 +126,7 @@ class TestCodexHelperExtraction(unittest.TestCase):
         self.assertEqual(skill["scope"], "project")
         self.assertEqual(skill["source"], "standalone")
 
-    def test_user_extraction(self):
+    def test_user_extraction_from_agents_alias(self):
         home = self.tmp / "Users" / "alice"
         self._write_skill(home / ".agents", "deploy")
         user_skills = []
@@ -122,6 +135,34 @@ class TestCodexHelperExtraction(unittest.TestCase):
         self.assertEqual(user_skills[0]["skill_name"], "deploy")
         self.assertEqual(user_skills[0]["scope"], "user")
         self.assertEqual(user_skills[0]["project_path"], str(home))
+
+    def test_user_extraction_from_codex_home(self):
+        # REGRESSION: verified against `codex app-server` skills/list — Codex's own
+        # skill-creator/skill-installer write to $CODEX_HOME/skills (~/.codex/skills)
+        # and Codex reports them with scope "user". We previously read only
+        # ~/.agents/skills and silently missed every user-installed skill.
+        home = self.tmp / "Users" / "alice"
+        self._write_skill(home / ".codex", "installed-skill")
+        user_skills = []
+        extract_codex_user_level_items(home, user_skills, extract_single_rule_file, CODEX_ITEM_CONFIGS)
+        self.assertEqual([s["skill_name"] for s in user_skills], ["installed-skill"])
+        self.assertEqual(user_skills[0]["scope"], "user")
+        self.assertEqual(user_skills[0]["project_path"], str(home))
+
+    def test_user_extraction_skips_system_builtins(self):
+        # ~/.codex/skills/.system/<name>/SKILL.md are OpenAI-bundled built-ins, one
+        # level deeper than skills/<name>/SKILL.md — vendor defaults, not customer
+        # config, so they must not be reported.
+        home = self.tmp / "Users" / "alice"
+        sysdir = home / ".codex" / "skills" / ".system" / "skill-creator"
+        sysdir.mkdir(parents=True)
+        (sysdir / "SKILL.md").write_text("---\nname: skill-creator\ndescription: d\n---\nb", encoding="utf-8")
+        self._write_skill(home / ".codex", "mine")
+        user_skills = []
+        extract_codex_user_level_items(home, user_skills, extract_single_rule_file, CODEX_ITEM_CONFIGS)
+        names = [s["skill_name"] for s in user_skills]
+        self.assertIn("mine", names)
+        self.assertNotIn("skill-creator", names)
 
     def test_user_extraction_no_agents_dir_is_empty(self):
         home = self.tmp / "Users" / "bob"

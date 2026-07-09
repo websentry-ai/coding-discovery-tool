@@ -658,9 +658,13 @@ class _BaseAgentSkillsExtractor(ABC):
 
 
 class BaseCodexSkillsExtractor(_BaseAgentSkillsExtractor):
-    """Extract OpenAI Codex skills. Paths (docs-verified): user
-    ``~/.agents/skills/<name>/SKILL.md``; project ``.agents/skills/<name>/SKILL.md``
-    (Codex standardizes on ``.agents``; ``~/.codex`` holds only ``config.toml``)."""
+    """Extract OpenAI Codex skills. Paths verified against the CLI itself
+    (``codex app-server`` -> ``skills/list``), not just the docs page: user
+    ``~/.codex/skills/<name>/SKILL.md`` (i.e. ``$CODEX_HOME/skills``, where Codex's
+    own skill-creator/skill-installer write) plus the ``~/.agents/skills`` alias;
+    project ``<repo>/.agents/skills/<name>/SKILL.md``. OpenAI built-ins under
+    ``~/.codex/skills/.system/`` and plugin-bundled skills under
+    ``~/.codex/plugins/cache/`` are vendor content and intentionally excluded."""
 
 
 class BaseGeminiCliSkillsExtractor(_BaseAgentSkillsExtractor):

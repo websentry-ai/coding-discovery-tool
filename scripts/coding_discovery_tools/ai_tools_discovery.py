@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import platform
+import re
 import signal
 import sys
 import threading
@@ -176,6 +177,22 @@ configure_logger()
 # every accessor call whenever the real result is ``None``.
 _AUGMENT_CACHE_UNSET = object()
 
+# Sentry metric keys must match [a-zA-Z_][a-zA-Z0-9_.\-]* — tool names like
+# "Gemini CLI" / "Roo Code" carry spaces, so they cannot be used verbatim.
+_METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
+
+
+def _metric_safe_name(name: str) -> str:
+    """Lowercase a tool name into a valid Sentry metric-key suffix.
+
+    "Gemini CLI" -> "gemini_cli"; "Roo Code" -> "roo_code". Leading characters that
+    are not a letter/underscore are prefixed with ``_`` so the key stays valid.
+    """
+    key = _METRIC_NAME_ILLEGAL.sub("_", (name or "").strip().lower())
+    if not key:
+        return "unknown"
+    return key if (key[0].isalpha() or key[0] == "_") else f"_{key}"
+
 
 def _normalise_path(p: str) -> str:
     """Normalise a path string for cross-platform comparison.
@@ -267,7 +284,12 @@ class AIToolsDetector:
             os_name: Operating system name (defaults to current OS)
         """
         self.system = os_name or platform.system()
-        
+
+        # Per-flow skills counters, keyed by metric-safe tool name. Accumulated by
+        # _record_skills_metric during processing and forwarded once at end of run
+        # in the discovery-metrics payload (see main()).
+        self.skills_metrics: Dict[str, Dict[str, object]] = {}
+
         try:
             # Initialize shared extractors
             self._device_id_extractor = DeviceIdExtractorFactory.create(self.system)
@@ -962,6 +984,7 @@ class AIToolsDetector:
         """
         if not skills_extractor:
             logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+            self._record_skills_metric(tool_name, status="unsupported_os")
             return
 
         logger.info(f"  Extracting {tool_name} skills...")
@@ -969,6 +992,17 @@ class AIToolsDetector:
             skills_result = extract_skills_func()
             user_skills = skills_result.get("user_skills", []) if skills_result else []
             project_skills = skills_result.get("project_skills", []) if skills_result else []
+
+            # Record per-flow counts (including ZERO) so a silently-broken extractor
+            # — e.g. a vendor path change or a permission regression — is visible as a
+            # fleet-wide drop, not just an indistinguishable "no skills found" log line.
+            self._record_skills_metric(
+                tool_name,
+                status="ok",
+                user_skills=len(user_skills),
+                project_skills=sum(len(p.get("skills", [])) for p in project_skills),
+                projects=len(project_skills),
+            )
 
             if user_skills:
                 logger.info(f"  ✓ Found {len(user_skills)} user-level {tool_name} skill(s)")
@@ -997,6 +1031,37 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": f"{tool_name} skills"}, level="warning")
+            self._record_skills_metric(tool_name, status="error")
+
+    def _record_skills_metric(
+        self,
+        tool_name: str,
+        status: str,
+        user_skills: int = 0,
+        project_skills: int = 0,
+        projects: int = 0,
+    ) -> None:
+        """Record one per-flow skills counter for the metrics payload.
+
+        Each of the SKILL.md extraction flows records its result here — including a
+        zero count, which is the whole point: a silently-failing extractor produces
+        no exception and no Sentry event, only a benign "No skills found" log that is
+        indistinguishable from a machine that genuinely has none. Aggregated across a
+        fleet, a per-tool counter makes that regression alertable.
+
+        ``tool`` is sanitised to the backend's Sentry metric-key pattern
+        ``[a-zA-Z_][a-zA-Z0-9_.\\-]*`` (tool names like "Gemini CLI" contain spaces),
+        so it can be used directly as a metric name suffix. Never raises.
+        """
+        try:
+            self.skills_metrics[_metric_safe_name(tool_name)] = {
+                "status": status,
+                "user_skills": user_skills,
+                "project_skills": project_skills,
+                "projects": projects,
+            }
+        except Exception:  # never let telemetry bookkeeping break a scan
+            pass
 
     def _process_tool_with_mcp_only(
         self,
@@ -3453,6 +3518,17 @@ def main():
                     "script_version": SCRIPT_VERSION,
                 },
             }
+            # Per-flow skills counters (one entry per SKILL.md extraction flow that
+            # ran, zero counts included). Lets the backend emit a per-tool
+            # `discovery.skills.<tool>` counter so a silently-failing extractor shows
+            # up as a fleet-wide drop instead of an unalertable "no skills found" log.
+            # Ignored by a backend that doesn't consume it yet; this POST carries
+            # `tools=[]` and is fire-and-forget, so it can never affect tool reports.
+            if detector.skills_metrics:
+                sentry_metrics_payload["skills"] = [
+                    {"tool": tool_key, **counts}
+                    for tool_key, counts in sorted(detector.skills_metrics.items())
+                ]
             send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,

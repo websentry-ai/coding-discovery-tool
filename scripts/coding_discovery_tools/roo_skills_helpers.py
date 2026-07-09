@@ -28,6 +28,7 @@ from .claude_code_skills_helpers import (
     extract_items_from_directory,
     extract_user_level_items,
 )
+from .constants import is_symlink_or_junction
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ def iter_roo_skill_type_dirs(tool_dir: Path) -> List[Path]:
         for child in tool_dir.iterdir():
             # Reject symlinked skill dirs so a planted link can't redirect a
             # privileged walk into another user's tree (security).
-            if child.is_dir() and not child.is_symlink() and is_roo_skill_type_dirname(child.name):
+            if child.is_dir() and not is_symlink_or_junction(child) and is_roo_skill_type_dirname(child.name):
                 found.append(child)
     except (PermissionError, OSError) as e:
         logger.debug(f"Error listing Roo skill dirs under {tool_dir}: {e}")

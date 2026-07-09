@@ -2,6 +2,49 @@
 Constants used across the AI tools discovery system
 """
 
+import os
+import stat
+
+# Reparse tags that REDIRECT to another location. Windows-only concept; the
+# ``stat`` constants are absent on POSIX (and on some builds), so fall back to
+# the documented literals. Cloud placeholders (e.g. OneDrive) are reparse points
+# too but are NOT redirects — they must stay traversable or a OneDrive-redirected
+# Documents folder would silently stop being scanned.
+_IO_REPARSE_TAG_MOUNT_POINT = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+_IO_REPARSE_TAG_SYMLINK = getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C)
+_REDIRECTING_REPARSE_TAGS = frozenset({_IO_REPARSE_TAG_MOUNT_POINT, _IO_REPARSE_TAG_SYMLINK})
+
+
+def is_symlink_or_junction(path) -> bool:
+    """True for POSIX symlinks and Windows symlinks *and directory junctions*.
+
+    ``Path.is_symlink()`` returns False for an NTFS directory junction
+    (``IO_REPARSE_TAG_MOUNT_POINT``) — which any user can create with
+    ``mklink /J``, no admin required — and ``Path.is_junction()`` only exists on
+    Python 3.12+ (this project supports 3.9+). So the reparse tag is inspected
+    directly via ``lstat``. Without this, a planted junction bypasses the symlink
+    guards and can redirect a privileged/all-user scan into another user's tree.
+
+    Uses a SINGLE ``lstat`` (not ``is_symlink()`` + ``lstat``) because this runs
+    once per directory entry of a whole-disk walk — the extra syscall is not free.
+
+    Conservative: any ``lstat`` failure returns True (do not traverse). Never raises.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+
+    # POSIX symlinks (and Windows symlinks, which lstat reports as S_IFLNK).
+    if stat.S_ISLNK(st.st_mode):
+        return True
+
+    # ``st_reparse_tag`` exists only on Windows; 0 elsewhere -> not a redirect.
+    # Junctions come back as S_IFDIR with a MOUNT_POINT tag, so S_ISLNK misses them.
+    tag = getattr(st, "st_reparse_tag", 0)
+    return bool(tag) and tag in _REDIRECTING_REPARSE_TAGS
+
+
 # Invalid serial number values that should be ignored
 INVALID_SERIAL_VALUES = [
     "TO BE FILLED BY O.E.M.",

@@ -15,7 +15,36 @@ import sys
 from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
+from .constants import is_symlink_or_junction
+
 logger = logging.getLogger(__name__)
+
+
+def _resolved_root(type_dir: Path) -> Optional[Path]:
+    """Resolve a skills dir once, for containment checks. None if unresolvable."""
+    try:
+        return type_dir.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _is_contained(candidate: Path, root: Optional[Path]) -> bool:
+    """True if ``candidate`` resolves to a path inside ``root``.
+
+    Defence-in-depth against a TOCTOU swap: the link guards above test the entry
+    at check time, but an attacker who replaces a dir with a link between the
+    check and the read could still redirect us. Re-resolving at extraction time
+    and requiring the result to stay under the skills dir shrinks that window and
+    rejects any path that escaped the boundary. (Fully closing the race would need
+    fd-based no-follow traversal — ``openat``/``O_NOFOLLOW`` — which pathlib does
+    not expose portably.) ``root=None`` means "couldn't resolve" -> reject.
+    """
+    if root is None:
+        return False
+    try:
+        return candidate.resolve().is_relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants (unchanged)
@@ -303,15 +332,17 @@ def extract_items_from_directory(
         parent_dir_names: Tuple of directory names to recognise as the tool root
         plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
+    root = _resolved_root(type_dir)
     try:
         if config.layout == "nested":
             for subdir in type_dir.iterdir():
-                # Skip symlinked skill dirs: during a privileged/all-user walk a
-                # project-planted symlink could redirect extraction into another
+                # Skip symlinked/junctioned skill dirs: during a privileged/all-user
+                # walk a project-planted link could redirect extraction into another
                 # user's tree and mis-attribute it (security).
-                if subdir.is_dir() and not subdir.is_symlink():
+                if subdir.is_dir() and not is_symlink_or_junction(subdir):
                     for item in subdir.iterdir():
-                        if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
+                        if (item.is_file() and not is_symlink_or_junction(item)
+                                and config.file_filter(item.name) and _is_contained(item, root)):
                             item_info = extract_item_info(
                                 item,
                                 extract_single_rule_file_func,
@@ -327,7 +358,8 @@ def extract_items_from_directory(
                             break  # Only one marker file per subdirectory
         else:
             for item in type_dir.iterdir():
-                if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
+                if (item.is_file() and not is_symlink_or_junction(item)
+                        and config.file_filter(item.name) and _is_contained(item, root)):
                     item_info = extract_item_info(
                         item,
                         extract_single_rule_file_func,
@@ -379,15 +411,17 @@ def extract_user_level_items(
             if not type_dir.exists() or not type_dir.is_dir():
                 continue
 
+            root = _resolved_root(type_dir)
             try:
                 if config.layout == "nested":
                     for subdir in type_dir.iterdir():
-                        # Skip symlinked skill dirs / marker files: under a root
-                        # all-user scan a symlink could redirect the read into
+                        # Skip symlinked/junctioned skill dirs / marker files: under a
+                        # root all-user scan a link could redirect the read into
                         # another user's tree (security).
-                        if subdir.is_dir() and not subdir.is_symlink():
+                        if subdir.is_dir() and not is_symlink_or_junction(subdir):
                             for item in subdir.iterdir():
-                                if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
+                                if (item.is_file() and not is_symlink_or_junction(item)
+                                        and config.file_filter(item.name) and _is_contained(item, root)):
                                     item_info = extract_item_info(
                                         item,
                                         extract_single_rule_file_func,
@@ -402,7 +436,8 @@ def extract_user_level_items(
                                     break  # Only one marker file per subdirectory
                 else:
                     for item in type_dir.iterdir():
-                        if item.is_file() and not item.is_symlink() and config.file_filter(item.name):
+                        if (item.is_file() and not is_symlink_or_junction(item)
+                                and config.file_filter(item.name) and _is_contained(item, root)):
                             item_info = extract_item_info(
                                 item,
                                 extract_single_rule_file_func,

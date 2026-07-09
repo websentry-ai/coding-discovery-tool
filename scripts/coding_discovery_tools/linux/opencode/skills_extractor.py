@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseOpenCodeSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir, is_symlink_or_junction
 from ...linux_extraction_helpers import (
     extract_single_rule_file,
     get_linux_user_homes,
@@ -86,13 +86,13 @@ class LinuxOpenCodeSkillsExtractor(BaseOpenCodeSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_symlink():
+                    if is_symlink_or_junction(item):
                         continue
                     if item.is_dir():
                         if item.name in OPENCODE_PARENT_DIR_NAMES:
                             for config in OPENCODE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
-                                if type_dir.exists() and type_dir.is_dir() and not type_dir.is_symlink():
+                                if type_dir.exists() and type_dir.is_dir() and not is_symlink_or_junction(type_dir):
                                     if not is_user_level_tool_dir(item):
                                         extract_opencode_items_from_directory(
                                             type_dir,

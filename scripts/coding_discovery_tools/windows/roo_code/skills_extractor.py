@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseRooSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir, is_symlink_or_junction
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
     get_windows_system_directories,
@@ -111,7 +111,7 @@ class WindowsRooSkillsExtractor(BaseRooSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_symlink():
+                    if is_symlink_or_junction(item):
                         continue
                     if item.is_dir():
                         if item.name in ROO_PARENT_DIR_NAMES:

@@ -88,5 +88,44 @@ class TestSkillsWalkIgnoresSymlinks(unittest.TestCase):
         self.assertEqual(names, ["legit"])
 
 
+class TestContainmentIsIndependentOfLinkGuard(unittest.TestCase):
+    """Defence-in-depth (TOCTOU): even if the link check is bypassed — e.g. an
+    attacker swaps a dir for a link between the guard and the read — the engine
+    re-resolves at extraction time and rejects anything that escaped the skills dir."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.victim = self.tmp / "Users" / "victim"
+        _skill(self.victim / ".agents" / "skills", "secret")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_escaping_skill_md_rejected_even_when_link_guard_says_ok(self):
+        from scripts.coding_discovery_tools import claude_code_skills_helpers as engine
+        from scripts.coding_discovery_tools.claude_code_skills_helpers import (
+            extract_items_from_directory, add_skill_to_project, build_skills_project_list,
+        )
+        from scripts.coding_discovery_tools.codex_skills_helpers import CODEX_SKILL_CONFIG
+        from scripts.coding_discovery_tools.macos_extraction_helpers import extract_single_rule_file
+
+        type_dir = self.tmp / "proj" / ".agents" / "skills"
+        # Escaping skill: real name-dir, but SKILL.md redirects outside type_dir.
+        (type_dir / "x").mkdir(parents=True)
+        os.symlink(self.victim / ".agents" / "skills" / "secret" / "SKILL.md", type_dir / "x" / "SKILL.md")
+        # Control: a fully in-tree skill.
+        _skill(type_dir, "legit")
+
+        pbr = {}
+        # Simulate the TOCTOU window: pretend the link guard passed for everything.
+        with patch.object(engine, "is_symlink_or_junction", return_value=False):
+            extract_items_from_directory(
+                type_dir, pbr, extract_single_rule_file, add_skill_to_project, CODEX_SKILL_CONFIG,
+                parent_dir_names=(".agents",),
+            )
+        names = sorted(s["skill_name"] for p in build_skills_project_list(pbr) for s in p["skills"])
+        self.assertEqual(names, ["legit"])   # "x" (escaping) rejected by containment
+
+
 if __name__ == "__main__":
     unittest.main()

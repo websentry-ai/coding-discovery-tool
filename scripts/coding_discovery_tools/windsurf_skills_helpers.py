@@ -11,11 +11,17 @@ reading is enabled) ``.claude`` (docs-verified, docs.devin.ai/desktop/cascade/sk
                   ~/.agents/skills/<name>/SKILL.md    (compat)
                   ~/.claude/skills/<name>/SKILL.md    (compat, Claude-config-reading)
     Project:      <repo>/.windsurf/skills/<name>/SKILL.md
-                  <repo>/.agents/skills/<name>/SKILL.md   (compat)
-                  <repo>/.claude/skills/<name>/SKILL.md   (compat, Claude-config-reading)
+                  <repo>/.devin/skills/<name>/SKILL.md     (post-rebrand data folder)
+                  <repo>/.agents/skills/<name>/SKILL.md    (compat)
+                  <repo>/.claude/skills/<name>/SKILL.md    (compat, Claude-config-reading)
 
-The docs do NOT list ``.github``/``.cursor``/``.codex``/``.devin``/``.cognition``
-as Windsurf skill dirs, so they are intentionally excluded. Windsurf also reads
+All of the above were verified against the SHIPPED APP, not the docs: the global
+loader joins ``homeDir + codeiumDirPathSegments + "skills"`` and (when Claude
+config reading is on) ``homeDir + ".claude" + "skills"`` and ``homeDir +
+".agents" + "skills"``; the project watcher's predicate is quoted below.
+
+``.github``/``.cursor``/``.codex``/``.cognition`` are NOT skill dirs — the app's
+predicate does not include them — so they are intentionally excluded. Windsurf also reads
 enterprise/system dirs (macOS ``/Library/Application Support/Windsurf/skills``,
 Linux ``/etc/windsurf/skills``, Windows ``C:\\ProgramData\\Windsurf\\skills``);
 these are outside the per-user/project walk and not collected here, matching how
@@ -55,19 +61,27 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 WINDSURF_DIR_NAME = ".windsurf"
+DEVIN_DIR_NAME = ".devin"
 CODEIUM_WINDSURF_USER_DIR = ".codeium/windsurf"
 AGENTS_DIR_NAME = ".agents"
 CLAUDE_DIR_NAME = ".claude"
 SKILLS_DIR_NAME = "skills"
 SKILL_FILE_NAME = "SKILL.md"
 
-# Project-level parent dirs (dot-form) — the documented Cascade scan set:
-# ``.windsurf`` (primary), ``.agents`` (cross-agent alias), ``.claude`` (Claude
-# Code compat). Drives the project walk + project root resolution. ``codeium``/
-# ``windsurf`` are NOT here so the walk never matches ``~/.codeium/windsurf``
-# (see module docstring).
+# Project-level parent dirs (dot-form). Verified against the shipped app's own
+# discovery predicate (Devin.app, sessions.desktop.main.js):
+#
+#     (p.includes("/.devin/skills/") || p.includes("/.windsurf/skills/")
+#      || (claudeCodeConfigReadEnabled && p.includes("/.claude/skills/"))
+#      || p.includes("/.agents/skills/")) && p.endsWith("/SKILL.md")
+#
+# ``.devin`` is the tool's NEW data folder (``dataFolderName: ".devin",
+# oldDataFolderName: ".windsurf"``) after the Windsurf -> Devin rebrand; both are
+# read. Drives the project walk + project root resolution. ``codeium``/``windsurf``
+# (undotted) are NOT here so the walk never matches ``~/.codeium/windsurf``.
 WINDSURF_PARENT_DIR_NAMES = (
     WINDSURF_DIR_NAME,
+    DEVIN_DIR_NAME,
     AGENTS_DIR_NAME,
     CLAUDE_DIR_NAME,
 )

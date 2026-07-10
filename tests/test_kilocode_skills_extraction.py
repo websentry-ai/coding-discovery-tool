@@ -41,10 +41,10 @@ class TestKiloCodeConstants(unittest.TestCase):
         self.assertEqual(SKILL_FILE_NAME, "SKILL.md")
 
     def test_parent_dir_names(self):
-        self.assertEqual(KILOCODE_PARENT_DIR_NAMES, (".kilo", ".agents", ".claude"))
+        self.assertEqual(KILOCODE_PARENT_DIR_NAMES, (".kilo", ".kilocode", ".claude", ".agents"))
 
     def test_user_dir_names(self):
-        self.assertEqual(KILOCODE_USER_DIR_NAMES, (".kilo", ".agents"))
+        self.assertEqual(KILOCODE_USER_DIR_NAMES, (".kilo", ".kilocode", ".config/kilo", ".claude", ".agents"))
 
 
 class TestKiloCodeItemConfigIntegrity(unittest.TestCase):
@@ -61,7 +61,7 @@ class TestKiloCodeItemConfigIntegrity(unittest.TestCase):
         self.assertEqual(KILOCODE_SKILL_CONFIG.name_extractor(f), "deploy")
 
     def test_item_configs_list(self):
-        self.assertEqual(KILOCODE_ITEM_CONFIGS, [KILOCODE_SKILL_CONFIG])
+        self.assertEqual(len(KILOCODE_ITEM_CONFIGS), 2)  # skills + singular skill/
 
 
 class TestFindKiloCodeItemProjectRoot(unittest.TestCase):

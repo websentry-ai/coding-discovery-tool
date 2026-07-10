@@ -2,8 +2,8 @@
 Unit tests for Windsurf (Cascade) skills extraction.
 
 Windsurf's user tool dir is the nested ~/.codeium/windsurf; at project scope
-Cascade scans .windsurf plus documented compat dirs (.agents/.claude/.github/
-.cursor/.codex). Like OpenCode, a user skill must not be double-counted.
+Cascade scans .windsurf, .devin, .agents, .claude (verified against the shipped
+Devin.app predicate). Like OpenCode, a user skill must not be double-counted.
 """
 
 import shutil
@@ -43,11 +43,12 @@ class TestWindsurfConstants(unittest.TestCase):
         self.assertEqual(CODEIUM_WINDSURF_USER_DIR, ".codeium/windsurf")
         self.assertIn(".codeium/windsurf", WINDSURF_USER_DIR_NAMES)
 
-    def test_project_parents_are_documented_set_only(self):
-        # Docs (docs.devin.ai/desktop/cascade/skills) list ONLY .windsurf, .agents,
-        # .claude — NOT .github/.cursor/.codex/.devin/.cognition.
-        self.assertEqual(WINDSURF_PARENT_DIR_NAMES, (".windsurf", ".agents", ".claude"))
-        for d in (".github", ".cursor", ".codex", ".devin", ".cognition"):
+    def test_project_parents_match_app_predicate(self):
+        # Verified against the shipped app's own SKILL.md predicate (Devin.app):
+        # reads .windsurf, .devin (post-rebrand data folder), .agents, .claude.
+        # NOT .github/.cursor/.codex/.cognition.
+        self.assertEqual(WINDSURF_PARENT_DIR_NAMES, (".windsurf", ".devin", ".agents", ".claude"))
+        for d in (".github", ".cursor", ".codex", ".cognition"):
             self.assertNotIn(d, WINDSURF_PARENT_DIR_NAMES)
 
     def test_user_dirs_include_codeium_agents_claude(self):

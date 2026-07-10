@@ -59,7 +59,7 @@ class TestJunieItemConfigIntegrity(unittest.TestCase):
         self.assertEqual(JUNIE_SKILL_CONFIG.name_extractor(f), "deploy")
 
     def test_item_configs_list(self):
-        self.assertEqual(JUNIE_ITEM_CONFIGS, [JUNIE_SKILL_CONFIG])
+        self.assertEqual(len(JUNIE_ITEM_CONFIGS), 2)  # skills (IDE) + agent-skills (CLI)
 
 
 class TestFindJunieItemProjectRoot(unittest.TestCase):

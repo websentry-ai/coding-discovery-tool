@@ -102,7 +102,7 @@ SKIP_SYSTEM_DIRS = {
 # separate from the scope-classification set in
 # ``macos_extraction_helpers._detect_rule_scope`` so scope rules don't change.)
 OTHER_TOOL_CONFIG_DIRS = frozenset({
-    ".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline",
+    ".cursor", ".claude", ".windsurf", ".devin", ".antigravity", ".roo", ".cline",
     ".clinerules", ".kilocode", ".kilo", ".gemini", ".codeium", ".junie",
     ".codex", ".opencode", ".copilot",
     # NOTE: ``.augment`` is intentionally omitted. The Augment extractor consults

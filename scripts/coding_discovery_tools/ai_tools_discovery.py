@@ -1092,6 +1092,28 @@ class AIToolsDetector:
         except Exception:  # never let telemetry bookkeeping break a scan
             pass
 
+    def _record_skills_result_metric(self, tool_name: str, skills_result: Optional[Dict]) -> None:
+        """Record per-flow skills counts for a tool that merges skills INLINE.
+
+        The legacy Claude Code / Cursor / Cline / Augment / Copilot CLI / Copilot
+        (VS Code) / Cowork paths predate ``_extract_and_merge_tool_skills`` and merge
+        skills with bespoke code, so they don't go through the shared recorder. This
+        puts them in the same metrics payload as the 8 newer tools (same
+        ``{user_skills, project_skills, projects}`` shape) so fleet-wide drop
+        alerting has no blind spot. Their inline extractors return ``None`` on
+        failure, which is recorded as zero counts — a crash still surfaces as a
+        fleet-wide drop; only the richer ``status="error"`` signal (available for the
+        newer tools) is absent here. Never raises."""
+        us = skills_result.get("user_skills", []) if skills_result else []
+        ps = skills_result.get("project_skills", []) if skills_result else []
+        self._record_skills_metric(
+            tool_name,
+            status="ok",
+            user_skills=len(us),
+            project_skills=sum(len(p.get("skills", [])) for p in ps),
+            projects=len(ps),
+        )
+
     def _process_tool_with_mcp_only(
         self,
         tool: Dict,
@@ -1563,6 +1585,7 @@ class AIToolsDetector:
         if self._claude_skills_extractor:
             try:
                 skills_result = self.extract_all_claude_skills(plugin_lookup=plugin_lookup)
+                self._record_skills_result_metric("Claude Code", skills_result)
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -1906,6 +1929,7 @@ class AIToolsDetector:
         if self._copilot_cli_skills_extractor:
             try:
                 skills_result = self._get_copilot_cli_skills()
+                self._record_skills_result_metric("GitHub Copilot CLI", skills_result)
                 user_skills = skills_result.get("user_skills", [])
                 project_skills = skills_result.get("project_skills", [])
 
@@ -2181,6 +2205,7 @@ class AIToolsDetector:
 
         logger.info(f"  Extracting {tool.get('name')} skills...")
         skills_result = self._get_augment_skills()
+        self._record_skills_result_metric(tool.get("name") or "Augment", skills_result)
         user_skills = skills_result.get("user_skills", [])
         project_skills = skills_result.get("project_skills", [])
 
@@ -2365,6 +2390,7 @@ class AIToolsDetector:
             if is_canonical_vscode:
                 logger.info(f"  Attaching shared Copilot skills to {tool_name}...")
                 skills_result = self._get_copilot_cli_skills()
+                self._record_skills_result_metric(tool_name, skills_result)
 
                 # Project-scope skills land under their absolute repo root, so
                 # the per-user project filter scopes them correctly.
@@ -2489,6 +2515,7 @@ class AIToolsDetector:
             if self._cursor_skills_extractor:
                 try:
                     skills_result = self.extract_all_cursor_skills(plugin_lookup=cursor_plugin_lookup)
+                    self._record_skills_result_metric("Cursor", skills_result)
                     user_skills = skills_result.get("user_skills", []) if skills_result else []
                     project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -2548,6 +2575,7 @@ class AIToolsDetector:
             logger.info(f"  Extracting Claude Cowork skills...")
             try:
                 skills_result = self.extract_all_cowork_skills()
+                self._record_skills_result_metric("Claude Cowork", skills_result)
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 if user_skills:
                     logger.info(f"  ✓ Found {len(user_skills)} Claude Cowork skill(s)")
@@ -2602,6 +2630,7 @@ class AIToolsDetector:
             if self._cline_skills_extractor:
                 try:
                     skills_result = self.extract_all_cline_skills()
+                    self._record_skills_result_metric("Cline", skills_result)
                     user_skills = skills_result.get("user_skills", []) if skills_result else []
                     project_skills = skills_result.get("project_skills", []) if skills_result else []
 

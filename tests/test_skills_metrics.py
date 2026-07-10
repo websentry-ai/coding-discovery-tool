@@ -131,6 +131,29 @@ class TestSkillsMetricRecording(unittest.TestCase):
         self.assertEqual(m["user_skills"], 1)      # only the attributable one counted
         self.assertEqual(m["dropped_no_home"], 1)
 
+    def test_legacy_inline_tool_recorded(self):
+        # Legacy tools (Claude Code / Cursor / Cline / Augment / Copilot CLI / Cowork)
+        # merge skills inline; _record_skills_result_metric puts them in the payload
+        # too, so drop alerting has no blind spot.
+        self.d._record_skills_result_metric("Claude Code", {
+            "user_skills": [{"skill_name": "a"}, {"skill_name": "b"}],
+            "project_skills": [{"project_root": "/p", "skills": [{"skill_name": "x"}]}],
+        })
+        m = self.d.skills_metrics["claude_code"]
+        self.assertEqual(m["status"], "ok")
+        self.assertEqual(m["user_skills"], 2)
+        self.assertEqual(m["project_skills"], 1)
+        self.assertEqual(m["projects"], 1)
+
+    def test_legacy_inline_tool_none_recorded_as_zero(self):
+        # A crashed inline extractor returns None -> recorded as zero (still a
+        # fleet-wide drop). Legacy tools lack the richer status=error signal.
+        self.d._record_skills_result_metric("Cline", None)
+        m = self.d.skills_metrics["cline"]
+        self.assertEqual(m["status"], "ok")
+        self.assertEqual(m["user_skills"], 0)
+        self.assertEqual(m["project_skills"], 0)
+
     def test_recording_never_raises(self):
         # Telemetry bookkeeping must never break a scan.
         with patch.object(self.d, "skills_metrics", None):

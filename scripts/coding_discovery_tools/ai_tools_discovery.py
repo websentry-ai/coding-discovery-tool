@@ -1005,21 +1005,36 @@ class AIToolsDetector:
             user_skills = skills_result.get("user_skills", [])
             project_skills = skills_result.get("project_skills", [])
 
+            # A user skill's owning home is its ``project_path`` (derived from the
+            # skill file at extraction time). It must ALWAYS be present; if it isn't,
+            # DROP the skill rather than fall back to the scanning process's home —
+            # under a root/all-user scan Path.home() is the scanner's home (e.g.
+            # /root), so the fallback would mis-file another user's SKILL.md content
+            # into the wrong user's report/filter context.
+            attributable = [s for s in user_skills if s.get("project_path")]
+            dropped = len(user_skills) - len(attributable)
+            if dropped:
+                logger.warning(
+                    f"  ⚠ Dropping {dropped} {tool_name} user skill(s) with no owning "
+                    f"home (project_path); not attributing to the scanner's home"
+                )
+
             # Record per-flow counts (including ZERO) so a silently-broken extractor
             # — e.g. a vendor path change or a permission regression — is visible as a
             # fleet-wide drop, not just an indistinguishable "no skills found" log line.
             self._record_skills_metric(
                 tool_name,
                 status="ok",
-                user_skills=len(user_skills),
+                user_skills=len(attributable),
                 project_skills=sum(len(p.get("skills", [])) for p in project_skills),
                 projects=len(project_skills),
+                dropped_no_home=dropped,
             )
 
-            if user_skills:
-                logger.info(f"  ✓ Found {len(user_skills)} user-level {tool_name} skill(s)")
-                for skill in user_skills:
-                    user_home = skill.get("project_path") or str(Path.home())
+            if attributable:
+                logger.info(f"  ✓ Found {len(attributable)} user-level {tool_name} skill(s)")
+                for skill in attributable:
+                    user_home = skill["project_path"]
                     if user_home not in projects_dict:
                         projects_dict[user_home] = {
                             "path": user_home,
@@ -1038,7 +1053,7 @@ class AIToolsDetector:
                 )
                 self._merge_skills_into_projects(project_skills, projects_dict)
 
-            if not user_skills and not project_skills:
+            if not attributable and not project_skills:
                 logger.info(f"  ℹ No {tool_name} skills found")
         except Exception as e:
             logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
@@ -1052,6 +1067,7 @@ class AIToolsDetector:
         user_skills: int = 0,
         project_skills: int = 0,
         projects: int = 0,
+        dropped_no_home: int = 0,
     ) -> None:
         """Record one per-flow skills counter for the metrics payload.
 
@@ -1071,6 +1087,7 @@ class AIToolsDetector:
                 "user_skills": user_skills,
                 "project_skills": project_skills,
                 "projects": projects,
+                "dropped_no_home": dropped_no_home,
             }
         except Exception:  # never let telemetry bookkeeping break a scan
             pass

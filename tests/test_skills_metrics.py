@@ -9,6 +9,7 @@ what makes that regression alertable across a fleet.
 """
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector, _metric_safe_name
@@ -105,6 +106,30 @@ class TestSkillsMetricRecording(unittest.TestCase):
         with patch("scripts.coding_discovery_tools.ai_tools_discovery.report_to_sentry"):
             self.d._extract_and_merge_tool_skills("Gemini CLI", object(), boom, {})
         self.assertEqual(self.d.skills_metrics["gemini_cli"]["status"], "error")
+
+    def test_user_skill_without_home_dropped_not_attributed_to_scanner(self):
+        # A user skill missing project_path must NOT fall back to Path.home()
+        # (== the scanner's home, e.g. /root, under a privileged scan) — it must be
+        # dropped and counted, never mis-filed into the wrong user's report.
+        projects = {}
+        self.d._extract_and_merge_tool_skills(
+            "Gemini CLI", object(),
+            lambda: {
+                "user_skills": [
+                    {"skill_name": "orphan", "project_path": None},        # no home -> dropped
+                    {"skill_name": "ok", "project_path": "/Users/alice"},  # kept
+                ],
+                "project_skills": [],
+            },
+            projects,
+        )
+        # dropped one is NOT bucketed under Path.home()
+        self.assertNotIn(str(Path.home()), projects)
+        self.assertIn("/Users/alice", projects)
+        self.assertEqual([s["skill_name"] for s in projects["/Users/alice"]["skills"]], ["ok"])
+        m = self.d.skills_metrics["gemini_cli"]
+        self.assertEqual(m["user_skills"], 1)      # only the attributable one counted
+        self.assertEqual(m["dropped_no_home"], 1)
 
     def test_recording_never_raises(self):
         # Telemetry bookkeeping must never break a scan.

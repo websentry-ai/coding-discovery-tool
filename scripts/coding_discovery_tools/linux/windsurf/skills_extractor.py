@@ -1,4 +1,10 @@
-"""Windsurf (Cascade) skills extraction for Linux systems."""
+"""
+Windsurf (Cascade) skills extraction for Linux systems.
+
+Global skills:  ~/.codeium/windsurf/skills/<name>/SKILL.md (+ ~/.agents, ~/.claude compat)
+Project skills: **/.windsurf/skills/<name>/SKILL.md
+                (+ **/{.agents,.claude}/skills compat)
+"""
 
 import logging
 from pathlib import Path

@@ -990,8 +990,20 @@ class AIToolsDetector:
         logger.info(f"  Extracting {tool_name} skills...")
         try:
             skills_result = extract_skills_func()
-            user_skills = skills_result.get("user_skills", []) if skills_result else []
-            project_skills = skills_result.get("project_skills", []) if skills_result else []
+
+            # The extract_all_<tool>_skills wrappers catch their own exceptions (log +
+            # Sentry) and return None on failure. We already confirmed the extractor
+            # exists above, so a None result here means the extractor RAISED, not that
+            # the machine genuinely has no skills. Record it as an error so the
+            # fleet-wide failure alert can distinguish a broken extractor (which would
+            # otherwise masquerade as status=ok with zero counts) from a clean zero.
+            if skills_result is None:
+                logger.warning(f"  ⚠ {tool_name} skills extraction returned no result; recording error")
+                self._record_skills_metric(tool_name, status="error")
+                return
+
+            user_skills = skills_result.get("user_skills", [])
+            project_skills = skills_result.get("project_skills", [])
 
             # Record per-flow counts (including ZERO) so a silently-broken extractor
             # — e.g. a vendor path change or a permission regression — is visible as a

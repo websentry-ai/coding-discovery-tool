@@ -11,6 +11,7 @@ their own parent directory names via the ``parent_dir_names`` parameter.
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -26,6 +27,37 @@ def _resolved_root(type_dir: Path) -> Optional[Path]:
         return type_dir.resolve()
     except (OSError, RuntimeError):
         return None
+
+
+def _is_foreign_hardlink(path: Path) -> bool:
+    """True if ``path`` is a hard link to a file owned by a DIFFERENT user.
+
+    A hard link is a second directory entry for an existing inode, so it is
+    indistinguishable from a normal file — it passes ``is_file()``,
+    ``is_symlink_or_junction()`` and ``_is_contained()``. Under a root/all-user
+    scan an attacker could plant ``<repo>/.agents/skills/x/SKILL.md`` as a hard
+    link to another user's file and have its (up to 50 KB) contents read and
+    uploaded. A regular tool-written ``SKILL.md`` has ``st_nlink == 1``.
+
+    We reject a multiply-linked file only when its owner differs from its parent
+    directory's owner (the cross-user case) — so a user hard-linking their OWN
+    skill is still collected. On platforms without meaningful ``st_uid`` (Windows
+    reports 0 for all), any ``st_nlink > 1`` is rejected, since ownership can't be
+    used to clear it. Conservative: any ``lstat`` failure returns True (skip).
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+    if getattr(st, "st_nlink", 1) <= 1:
+        return False
+    if os.name == "nt":
+        return True  # st_uid is unreliable on Windows; a hard link is suspicious
+    try:
+        parent_uid = os.stat(path.parent).st_uid
+    except OSError:
+        return True
+    return st.st_uid != parent_uid
 
 
 def _is_contained(candidate: Path, root: Optional[Path]) -> bool:
@@ -342,7 +374,8 @@ def extract_items_from_directory(
                 if subdir.is_dir() and not is_symlink_or_junction(subdir):
                     for item in subdir.iterdir():
                         if (item.is_file() and not is_symlink_or_junction(item)
-                                and config.file_filter(item.name) and _is_contained(item, root)):
+                                and config.file_filter(item.name) and _is_contained(item, root)
+                                and not _is_foreign_hardlink(item)):
                             item_info = extract_item_info(
                                 item,
                                 extract_single_rule_file_func,
@@ -359,7 +392,8 @@ def extract_items_from_directory(
         else:
             for item in type_dir.iterdir():
                 if (item.is_file() and not is_symlink_or_junction(item)
-                        and config.file_filter(item.name) and _is_contained(item, root)):
+                        and config.file_filter(item.name) and _is_contained(item, root)
+                        and not _is_foreign_hardlink(item)):
                     item_info = extract_item_info(
                         item,
                         extract_single_rule_file_func,
@@ -430,7 +464,8 @@ def extract_user_level_items(
                         if subdir.is_dir() and not is_symlink_or_junction(subdir):
                             for item in subdir.iterdir():
                                 if (item.is_file() and not is_symlink_or_junction(item)
-                                        and config.file_filter(item.name) and _is_contained(item, root)):
+                                        and config.file_filter(item.name) and _is_contained(item, root)
+                                        and not _is_foreign_hardlink(item)):
                                     item_info = extract_item_info(
                                         item,
                                         extract_single_rule_file_func,
@@ -446,7 +481,8 @@ def extract_user_level_items(
                 else:
                     for item in type_dir.iterdir():
                         if (item.is_file() and not is_symlink_or_junction(item)
-                                and config.file_filter(item.name) and _is_contained(item, root)):
+                                and config.file_filter(item.name) and _is_contained(item, root)
+                                and not _is_foreign_hardlink(item)):
                             item_info = extract_item_info(
                                 item,
                                 extract_single_rule_file_func,

@@ -71,7 +71,34 @@ class TestSkillsMetricRecording(unittest.TestCase):
         self.d._extract_and_merge_tool_skills("Gemini CLI", None, lambda: None, {})
         self.assertEqual(self.d.skills_metrics["gemini_cli"]["status"], "unsupported_os")
 
-    def test_extractor_exception_recorded_as_error(self):
+    def test_broken_extractor_via_real_wrapper_records_error(self):
+        # PRODUCTION path: extract_all_<tool>_skills catches the inner exception and
+        # returns None (it does NOT re-raise). The merge helper must still record
+        # status="error" — a None result means the extractor failed, not that the
+        # machine has zero skills. Uses the REAL wrapper so the double try/except
+        # interaction is exercised, not bypassed.
+        class _Boom:
+            def extract_all_skills(self):
+                raise RuntimeError("extractor blew up")
+
+        self.d._gemini_cli_skills_extractor = _Boom()
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery.report_to_sentry"):
+            self.d._extract_and_merge_tool_skills(
+                "Gemini CLI",
+                self.d._gemini_cli_skills_extractor,
+                self.d.extract_all_gemini_cli_skills,   # the real wrapper (swallows -> None)
+                {},
+            )
+        self.assertEqual(self.d.skills_metrics["gemini_cli"]["status"], "error")
+
+    def test_none_result_recorded_as_error(self):
+        # A None result (however produced) is a failure, never a genuine zero.
+        self._run(None)
+        self.assertEqual(self.d.skills_metrics["gemini_cli"]["status"], "error")
+
+    def test_direct_extract_func_exception_still_error(self):
+        # Defensive: if extract_skills_func itself raises (doesn't swallow), the
+        # helper's own except records error too.
         def boom():
             raise RuntimeError("extractor blew up")
 
@@ -83,10 +110,6 @@ class TestSkillsMetricRecording(unittest.TestCase):
         # Telemetry bookkeeping must never break a scan.
         with patch.object(self.d, "skills_metrics", None):
             self.d._record_skills_metric("Codex", status="ok")  # would TypeError internally
-
-    def test_none_result_recorded_as_zero(self):
-        self._run(None)
-        self.assertEqual(self.d.skills_metrics["gemini_cli"]["user_skills"], 0)
 
 
 if __name__ == "__main__":

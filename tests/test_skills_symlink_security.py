@@ -161,6 +161,65 @@ class TestTopLevelDirGuard(unittest.TestCase):
         self.assertEqual(names, ["legit"])   # 'secret' behind the symlinked top dir not reached
 
 
+class TestForeignHardlinkGuard(unittest.TestCase):
+    """A hard link to another user's file is indistinguishable from a normal file
+    (passes is_file/is_symlink/containment). It must be rejected at the read boundary
+    so a root scan can't read + upload another user's content via a planted hard link."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_hardlink_owned_by_other_user_rejected(self):
+        from scripts.coding_discovery_tools import claude_code_skills_helpers as engine
+        from scripts.coding_discovery_tools.claude_code_skills_helpers import (
+            extract_items_from_directory, add_skill_to_project, build_skills_project_list)
+        from scripts.coding_discovery_tools.codex_skills_helpers import CODEX_SKILL_CONFIG
+        from scripts.coding_discovery_tools.macos_extraction_helpers import extract_single_rule_file
+
+        type_dir = self.tmp / "proj" / ".agents" / "skills"
+        # Cross-user hard link: the SKILL.md's owner (uid) differs from its dir's owner.
+        victim = self.tmp / "victim-secret"
+        victim.write_text("---\nname: stolen\ndescription: victim\n---\nsecret", encoding="utf-8")
+        (type_dir / "x").mkdir(parents=True)
+        link = type_dir / "x" / "SKILL.md"
+        os.link(victim, link)   # hard link -> st_nlink == 2
+        # legit control (nlink == 1)
+        good = type_dir / "legit"
+        good.mkdir()
+        (good / "SKILL.md").write_text("---\nname: legit\ndescription: ok\n---\nx", encoding="utf-8")
+
+        real_lstat = os.lstat
+        real_stat = os.stat
+
+        def fake_lstat(p, *a, **k):
+            st = real_lstat(p, *a, **k)
+            if Path(p) == link:  # simulate the hard link being owned by a DIFFERENT uid
+                return type("S", (), {"st_nlink": 2, "st_uid": 99999, "st_mode": st.st_mode})()
+            return st
+
+        pbr = {}
+        with patch.object(engine.os, "lstat", side_effect=fake_lstat), \
+             patch.object(engine.os, "stat", side_effect=real_stat), \
+             patch.object(engine.os, "name", "posix"):
+            extract_items_from_directory(
+                type_dir, pbr, extract_single_rule_file, add_skill_to_project, CODEX_SKILL_CONFIG,
+                parent_dir_names=(".agents",))
+        names = sorted(s["skill_name"] for p in build_skills_project_list(pbr) for s in p["skills"])
+        self.assertEqual(names, ["legit"])   # stolen hard link rejected
+
+    def test_own_hardlink_allowed(self):
+        # A user hard-linking their OWN skill (same owner as its dir) is still collected.
+        from scripts.coding_discovery_tools.claude_code_skills_helpers import _is_foreign_hardlink
+        f = self.tmp / "a.md"
+        f.write_text("x", encoding="utf-8")
+        g = self.tmp / "b.md"
+        os.link(f, g)   # nlink == 2, same owner as parent dir
+        self.assertFalse(_is_foreign_hardlink(g))
+
+
 class TestContainmentIsIndependentOfLinkGuard(unittest.TestCase):
     """Defence-in-depth (TOCTOU): even if the link check is bypassed — e.g. an
     attacker swaps a dir for a link between the guard and the read — the engine

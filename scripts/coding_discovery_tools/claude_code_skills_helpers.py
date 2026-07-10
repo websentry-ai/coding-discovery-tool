@@ -405,10 +405,19 @@ def extract_user_level_items(
                           when resolving project roots
         plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
     """
+    home_root = _resolved_root(user_home)
     for tool_dir_name in user_dir_names:
         for config in configs:
             type_dir = user_home / tool_dir_name / config.dir_name
             if not type_dir.exists() or not type_dir.is_dir():
+                continue
+
+            # SECURITY: user-level dirs are opened DIRECTLY (not via the guarded
+            # project walk), so a planted link here would otherwise redirect a
+            # root/all-user scan into another user's tree. Reject the skills dir if
+            # it is itself a symlink/junction, or if it (or any ancestor such as a
+            # symlinked ``.config``) resolves outside the scanned user's home.
+            if is_symlink_or_junction(type_dir) or not _is_contained(type_dir, home_root):
                 continue
 
             root = _resolved_root(type_dir)

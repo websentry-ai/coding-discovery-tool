@@ -88,6 +88,79 @@ class TestSkillsWalkIgnoresSymlinks(unittest.TestCase):
         self.assertEqual(names, ["legit"])
 
 
+class TestUserLevelDirSymlinkGuard(unittest.TestCase):
+    """User-level dirs (~/.agents/skills, ~/.codex/skills, ~/.roo, ...) are opened
+    DIRECTLY, not via the guarded walk. A symlinked/junctioned user skills dir — or
+    one reached via a symlinked ancestor — must not redirect a root/all-user scan
+    into another user's tree."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.victim = self.tmp / "Users" / "victim"
+        _skill(self.victim / ".agents" / "skills", "secret")
+        self.attacker = self.tmp / "Users" / "attacker"
+        self.attacker.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _extract(self, user_dirs):
+        from scripts.coding_discovery_tools.claude_code_skills_helpers import (
+            extract_user_level_items, ItemTypeConfig, is_skill_md_file)
+        from scripts.coding_discovery_tools.macos_extraction_helpers import extract_single_rule_file
+        cfg = ItemTypeConfig("skill", "skills", "nested", is_skill_md_file, lambda f: f.parent.name)
+        us = []
+        extract_user_level_items(self.attacker, us, extract_single_rule_file, [cfg],
+                                 user_dir_names=user_dirs, parent_dir_names=user_dirs)
+        return sorted(s["skill_name"] for s in us)
+
+    def test_symlinked_user_skills_dir_not_followed(self):
+        (self.attacker / ".agents").mkdir()
+        os.symlink(self.victim / ".agents" / "skills", self.attacker / ".agents" / "skills")
+        _skill(self.attacker / ".claude" / "skills", "mine")   # legit control
+        names = self._extract((".agents", ".claude"))
+        self.assertEqual(names, ["mine"])
+        self.assertNotIn("secret", names)
+
+    def test_symlinked_ancestor_not_followed(self):
+        # ~/.config -> victim's home; ~/.config/x/skills would escape via the ancestor.
+        os.symlink(self.victim, self.attacker / ".config")
+        # our "user dir" here is ".config/.agents" style nesting; escape must be rejected
+        names = self._extract((".config/.agents",))
+        self.assertNotIn("secret", names)
+
+
+class TestTopLevelDirGuard(unittest.TestCase):
+    """The dir that STARTS a walk (drive root child on Windows, top-level dir on
+    macOS, user home on Linux) must itself be rejected if it is a symlink/junction —
+    otherwise it's walked into before the per-item guard runs."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.victim = self.tmp / "Users" / "victim"
+        _skill(self.victim / "repo" / ".agents" / "skills", "secret")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_walk_returns_on_symlinked_current_dir(self):
+        from scripts.coding_discovery_tools.macos.codex import skills_extractor as se
+        home = self.tmp / "Users" / "attacker"
+        home.mkdir(parents=True)
+        # attacker's top-level dir is a symlink into the victim's tree
+        os.symlink(self.victim, home / "linked-top")
+        _skill(home / "realrepo" / ".agents" / "skills", "legit")
+        ex = se.MacOSCodexSkillsExtractor()
+        with patch.object(se, "should_skip_system_path", return_value=False), \
+             patch("pathlib.Path.home", return_value=home):
+            pbr = {}
+            # simulate the top-level loop: walk each child of home
+            for child in home.iterdir():
+                ex._walk_for_skills(home, child, pbr, 1)
+        names = sorted(s["skill_name"] for p in build_skills_project_list(pbr) for s in p["skills"])
+        self.assertEqual(names, ["legit"])   # 'secret' behind the symlinked top dir not reached
+
+
 class TestContainmentIsIndependentOfLinkGuard(unittest.TestCase):
     """Defence-in-depth (TOCTOU): even if the link check is bypassed — e.g. an
     attacker swaps a dir for a link between the guard and the read — the engine

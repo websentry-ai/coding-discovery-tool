@@ -98,6 +98,8 @@ class MacOSCodexSkillsExtractor(BaseCodexSkillsExtractor):
         """Recursively walk the tree collecting Codex skills from .agents/skills/."""
         if current_depth > MAX_SEARCH_DEPTH:
             return
+        if is_symlink_or_junction(current_dir):
+            return
 
         try:
             for item in current_dir.iterdir():

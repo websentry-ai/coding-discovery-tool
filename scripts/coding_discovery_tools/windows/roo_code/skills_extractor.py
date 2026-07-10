@@ -69,7 +69,8 @@ class WindowsRooSkillsExtractor(BaseRooSkillsExtractor):
     def _extract_project_level_skills(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         try:
             top_level_dirs = [item for item in root_path.iterdir()
-                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())]
+                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())
+                              and not is_symlink_or_junction(item)]
 
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {
@@ -93,6 +94,8 @@ class WindowsRooSkillsExtractor(BaseRooSkillsExtractor):
         current_depth: int = 0,
     ) -> None:
         if current_depth > MAX_SEARCH_DEPTH:
+            return
+        if is_symlink_or_junction(current_dir):
             return
 
         try:

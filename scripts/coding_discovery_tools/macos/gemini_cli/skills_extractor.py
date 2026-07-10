@@ -98,6 +98,8 @@ class MacOSGeminiCliSkillsExtractor(BaseGeminiCliSkillsExtractor):
         """Recursively walk the tree collecting Gemini CLI skills from .gemini/skills/."""
         if current_depth > MAX_SEARCH_DEPTH:
             return
+        if is_symlink_or_junction(current_dir):
+            return
 
         try:
             for item in current_dir.iterdir():

@@ -128,7 +128,12 @@ def extract_roo_user_level_items(
     dir_names = set()
     for user_dir in ROO_USER_DIR_NAMES:
         base = user_home / user_dir
-        if base.is_dir():
+        # SECURITY: skip a symlinked/junctioned ``~/.roo`` / ``~/.agents`` so a
+        # planted link can't redirect a root/all-user scan into another user's
+        # tree. (The mode dirs it contains are guarded in iter_roo_skill_type_dirs,
+        # and extract_user_level_items re-verifies each resolved skills dir stays
+        # under user_home.)
+        if base.is_dir() and not is_symlink_or_junction(base):
             for type_dir in iter_roo_skill_type_dirs(base):
                 dir_names.add(type_dir.name)
 

@@ -98,6 +98,8 @@ class MacOSKiloCodeSkillsExtractor(BaseKiloCodeSkillsExtractor):
         """Recursively walk the tree collecting Kilo Code skills from .kilo/skills/."""
         if current_depth > MAX_SEARCH_DEPTH:
             return
+        if is_symlink_or_junction(current_dir):
+            return
 
         try:
             for item in current_dir.iterdir():

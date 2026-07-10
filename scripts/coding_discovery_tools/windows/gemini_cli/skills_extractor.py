@@ -81,7 +81,8 @@ class WindowsGeminiCliSkillsExtractor(BaseGeminiCliSkillsExtractor):
         """Extract project-level skills recursively from all projects."""
         try:
             top_level_dirs = [item for item in root_path.iterdir()
-                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())]
+                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())
+                              and not is_symlink_or_junction(item)]
 
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {
@@ -106,6 +107,8 @@ class WindowsGeminiCliSkillsExtractor(BaseGeminiCliSkillsExtractor):
     ) -> None:
         """Recursively walk the tree collecting Gemini CLI skills from .gemini/skills/."""
         if current_depth > MAX_SEARCH_DEPTH:
+            return
+        if is_symlink_or_junction(current_dir):
             return
 
         try:

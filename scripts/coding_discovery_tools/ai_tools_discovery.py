@@ -3114,8 +3114,26 @@ def main():
     # Save + restore prior handlers so importing/calling main() (tests) doesn't
     # leave process-wide handlers installed. signal.signal only works on the main
     # thread, so guard against ValueError/OSError elsewhere.
+    #
+    # Trap every CATCHABLE signal whose default action would terminate us on an
+    # external/environmental request, so the abort path (release lock + report
+    # failed) runs instead of dying dirty and leaving a leaked lock:
+    #   SIGTERM / SIGINT  - polite kill / Ctrl-C
+    #   SIGHUP            - controlling terminal or login session closed
+    #   SIGQUIT           - Ctrl-\
+    #   SIGBREAK          - Windows Ctrl-Break (Windows-only name)
+    #   SIGXCPU / SIGXFSZ - CPU / file-size rlimit exceeded (constrained MDM / containers)
+    #   SIGPWR            - system power-down / UPS low battery (Linux-only name)
+    # Deliberately NOT trapped: SIGKILL / SIGSTOP (uncatchable by design);
+    # SIGPIPE (Python raises BrokenPipeError, it is not a termination request);
+    # SIGTSTP / SIGTTIN / SIGTTOU (suspend, not terminate); and the
+    # program-error / core signals SIGSEGV / SIGBUS / SIGABRT / SIGFPE / SIGILL /
+    # SIGSYS / SIGTRAP (running cleanup from an already-corrupted process is
+    # unsafe — genuine crashes are still reported via the except-Exception path).
+    # Names absent or unsupported on a given platform are skipped by getattr + try.
     _prev_signal_handlers = {}
-    for _signame in ("SIGTERM", "SIGINT"):
+    for _signame in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGBREAK",
+                     "SIGXCPU", "SIGXFSZ", "SIGPWR"):
         _sig = getattr(signal, _signame, None)
         if _sig is not None:
             try:
@@ -3137,6 +3155,25 @@ def main():
         run_id = str(uuid.uuid4())
         sentry_ctx["run_id"] = run_id
         logger.info(f"Scan run_id: {run_id}")
+
+        # Auto-resume (perf only): if a recent run was interrupted (checkpoint
+        # still "in_progress" within RESUME_WINDOW_SECONDS), carry its done-set
+        # forward and skip re-PROCESSING those already-reported tools. Data-safe
+        # with a fresh run_id — the backend replaces installations per (device,
+        # tool, home_user), never per scan, so skipped tools keep their prior
+        # upload. Detection still runs below, so tools/skills installed since the
+        # interruption are still found and reported.
+        resume_done = discovery_cache.resumable_done()
+        if resume_done:
+            # Log the interrupted run's id (the join key between the two runs' logs)
+            # alongside this resumed run's id, so "why did resume skip tool X?" can
+            # be traced back to the original run's upload logs.
+            _prev_run_id = discovery_cache.read_run().get("run_id")
+            logger.info(
+                f"Resuming interrupted run {_prev_run_id} as {run_id}: "
+                f"{len(resume_done)} tool/user already reported; skipping their re-processing."
+            )
+        discovery_cache.start_run(run_id, done=resume_done)
 
         # Track failed reports for persistence
         failed_reports = []
@@ -3263,10 +3300,23 @@ def main():
         # Pick the single Augment surface that should carry the shared config.
         detector._set_canonical_augment_surface(tools)
 
+        # Resume observability: how many tools had their processing fully skipped.
+        resume_tools_skipped = 0
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
             sentry_ctx["tool_name"] = tool_name
+            # Resume identity matches the upload granularity (name + install
+            # path) so two same-named tools at different paths never alias.
+            tool_key = f"{tool_name}:{tool.get('install_path', '')}"
+
+            # Skip a tool entirely when every user was already reported by the
+            # resumed run — this is where re-processing (filesystem walk + CLI
+            # subprocesses) is actually saved.
+            if resume_done and all((tool_key, u) in resume_done for u in all_users):
+                logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
+                resume_tools_skipped += 1
+                continue
 
             logger.info("")
             logger.info("=" * 60)
@@ -3288,6 +3338,14 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
+                    # Already reported by the resumed run -> skip its re-upload.
+                    # Log the per-user skip AND record it in the summary so a
+                    # partially-resumed tool's summary reflects every user (resumed
+                    # + freshly processed), not a silently reduced count.
+                    if (tool_key, user_name) in resume_done:
+                        logger.info(f"  · {tool_name} for user {user_name} already reported by the resumed run; skipping re-processing")
+                        tool_users_summary.append({'user': user_name, 'resumed': True})
+                        continue
                     if platform.system() == "Darwin":
                         user_home = Path(f"/Users/{user_name}")
                     elif platform.system() == "Windows":
@@ -3473,7 +3531,10 @@ def main():
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
                         cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        reported_ok = False
+                        hash_to_store = None
                         if local_payload_hash and cached_hash == local_payload_hash:
+                            reported_ok = True  # unchanged -> already current on the backend
                             if args.dump:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
@@ -3483,14 +3544,21 @@ def main():
                             with time_step("send_report_per_tool_user", "send"):
                                 success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                             if success:
+                                reported_ok = True
+                                hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
-                                if local_payload_hash:
-                                    discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
                             else:
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                                 if retryable:
                                     failed_reports.append(single_tool_report)
+
+                        # One atomic cache write: persist the payload hash (only when
+                        # we uploaded a changed report) AND checkpoint this (tool,
+                        # user) so a kill afterward lets the next quick re-run skip
+                        # re-processing it.
+                        if reported_ok:
+                            discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
                             logger.info("")
@@ -3529,7 +3597,10 @@ def main():
                 logger.info(f"Summary for tool: {tool_name}")
                 logger.info("=" * 60)
                 for user_summary in tool_users_summary:
-                    logger.info(f"  - User {user_summary['user']}: {user_summary['projects']} projects, {user_summary['rules']} rule files")
+                    if user_summary.get('resumed'):
+                        logger.info(f"  - User {user_summary['user']}: (already reported by the resumed run; re-processing skipped)")
+                    else:
+                        logger.info(f"  - User {user_summary['user']}: {user_summary['projects']} projects, {user_summary['rules']} rule files")
                 logger.info(f"Total: {tool_total_projects} projects, {tool_total_rules} rule files across {len(tool_users_summary)} user(s)")
                 logger.info("=" * 60)
                 logger.info("")
@@ -3574,6 +3645,13 @@ def main():
                     "user_count": len(all_users),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
+                    # Observability for the kill/rerun behavior so it's visible in
+                    # dashboards and alertable if the checkpoint logic misbehaves
+                    # (e.g. a spike in resumed runs or in skipped pairs/tools):
+                    "resumed": bool(resume_done),                 # did this run resume an interrupted one
+                    "resume_pairs_skipped": len(resume_done),     # (tool,user) pairs skipped
+                    "resume_tools_skipped": resume_tools_skipped,  # tools whose processing was fully skipped
+                    "lock_outcome": discovery_cache.last_lock_outcome,  # acquired | stolen_dead_pid | stolen_stale
                 },
             }
             # Per-flow skills counters (one entry per SKILL.md extraction flow that
@@ -3605,6 +3683,11 @@ def main():
         else:
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
+
+        # Local scan finished cleanly -> flip the checkpoint to "completed" so the
+        # next run starts fresh (won't resume), independent of the completed-event
+        # send result above.
+        discovery_cache.mark_run_completed()
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs

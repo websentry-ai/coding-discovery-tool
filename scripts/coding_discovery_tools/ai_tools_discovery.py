@@ -3660,7 +3660,7 @@ def main():
             # up as a fleet-wide drop instead of an unalertable "no skills found" log.
             # Ignored by a backend that doesn't consume it yet; this POST carries
             # `tools=[]` and is fire-and-forget, so it can never affect tool reports.
-            if detector.skills_metrics:
+            if isinstance(detector.skills_metrics, dict) and detector.skills_metrics:
                 sentry_metrics_payload["skills"] = [
                     {"tool": tool_key, **counts}
                     for tool_key, counts in sorted(detector.skills_metrics.items())

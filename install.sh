@@ -44,6 +44,11 @@ resolve_discovery_branch() {
         [ "$prev" = "--domain" ] && domain="$arg"
         prev="$arg"
     done
+    # Lowercase before matching so bash agrees with the case-insensitive
+    # PowerShell / Node / Python callers (a "Staging" URL must resolve the same
+    # on every platform). An Unbound staging backend always carries "staging" in
+    # its host.
+    domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
     case "$domain" in
         *staging*) printf 'staging' ;;
         *)         printf 'main' ;;

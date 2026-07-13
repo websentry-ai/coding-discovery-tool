@@ -294,7 +294,9 @@ case "\$COMMAND" in
         case "\${UNBOUND_DISCOVERY_BRANCH:-}" in
             main|staging) DISCOVERY_BRANCH="\$UNBOUND_DISCOVERY_BRANCH" ;;
             *)
-                case "\$DOMAIN" in
+                # Lowercase so bash agrees with the case-insensitive wrappers.
+                _dom_lc=\$(printf '%s' "\$DOMAIN" | tr '[:upper:]' '[:lower:]')
+                case "\$_dom_lc" in
                     *staging*) DISCOVERY_BRANCH="staging" ;;
                     *)         DISCOVERY_BRANCH="main" ;;
                 esac

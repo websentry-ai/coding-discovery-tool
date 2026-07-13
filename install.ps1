@@ -23,7 +23,7 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 $__discoveryDomain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
 $BRANCH =
     if ($env:UNBOUND_DISCOVERY_BRANCH -in @('main','staging')) { $env:UNBOUND_DISCOVERY_BRANCH }
-    elseif ($__discoveryDomain -match 'staging') { 'staging' }
+    elseif ($__discoveryDomain -match 'staging') { 'staging' }   # -match is case-insensitive
     else                                { 'main' }
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"
 

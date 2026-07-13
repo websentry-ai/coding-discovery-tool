@@ -18,12 +18,34 @@ set -e  # Exit on any error
 # ==============================================================================
 
 REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
-# Which branch of this repo to run. Defaults to main (production). Callers that
-# know which environment they point at (the CLI and the agent hooks) set
-# UNBOUND_DISCOVERY_BRANCH to match their backend — e.g. "staging" for a staging
-# backend — so a staging environment runs staging discovery code instead of main.
-# Same inherited-env convention as UNBOUND_API_KEY below.
-BRANCH="${UNBOUND_DISCOVERY_BRANCH:-main}"
+
+# Which branch of this repo to run. The discovery CODE follows the backend it
+# reports to: a staging backend runs the staging branch, anything else runs main
+# (safe default — production can never pull staging).
+#
+# Derived from the --domain we were invoked with. Every caller already passes it
+# (the CLI, both agent-hook dispatch paths, and the scheduled wrapper), so no
+# caller needs to be taught a new contract, and a bare
+#   curl .../install.sh | bash -s -- --domain <staging-backend>
+# does the right thing too. UNBOUND_DISCOVERY_BRANCH overrides, so any branch can
+# be tested without a release. UNBOUND_DOMAIN is honoured as well, since the
+# scheduled/Windows wrappers pass the domain that way.
+resolve_discovery_branch() {
+    if [ -n "${UNBOUND_DISCOVERY_BRANCH:-}" ]; then
+        printf '%s' "$UNBOUND_DISCOVERY_BRANCH"
+        return
+    fi
+    local domain="${UNBOUND_DOMAIN:-}" prev=""
+    for arg in "$@"; do
+        [ "$prev" = "--domain" ] && domain="$arg"
+        prev="$arg"
+    done
+    case "$domain" in
+        *staging*) printf 'staging' ;;
+        *)         printf 'main' ;;
+    esac
+}
+BRANCH="$(resolve_discovery_branch "$@")"
 TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'coding-discovery-tool')
 
 # ==============================================================================

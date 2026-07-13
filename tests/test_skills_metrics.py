@@ -145,14 +145,25 @@ class TestSkillsMetricRecording(unittest.TestCase):
         self.assertEqual(m["project_skills"], 1)
         self.assertEqual(m["projects"], 1)
 
-    def test_legacy_inline_tool_none_recorded_as_zero(self):
-        # A crashed inline extractor returns None -> recorded as zero (still a
-        # fleet-wide drop). Legacy tools lack the richer status=error signal.
+    def test_legacy_inline_tool_none_recorded_as_error(self):
+        # A crashed inline extractor returns None. Every legacy call site sits inside
+        # `if self._<tool>_skills_extractor:` (unsupported-OS already excluded) and the
+        # wrappers return None ONLY on exception -- a genuine "no skills" returns a dict
+        # with empty lists. So None means FAILED and must be status=error, exactly like
+        # the newer tools. Recording it as a legitimate zero would hide a broken
+        # extractor behind a plausible-looking count.
         self.d._record_skills_result_metric("Cline", None)
+        self.assertEqual(self.d.skills_metrics["cline"]["status"], "error")
+
+    def test_legacy_inline_tool_genuine_zero_is_ok_not_error(self):
+        # The other side of the same coin: a real empty result is status=ok with zero
+        # counts -- a machine with no skills must not look like a broken extractor.
+        self.d._record_skills_result_metric("Cline", {"user_skills": [], "project_skills": []})
         m = self.d.skills_metrics["cline"]
         self.assertEqual(m["status"], "ok")
         self.assertEqual(m["user_skills"], 0)
         self.assertEqual(m["project_skills"], 0)
+        self.assertEqual(m["projects"], 0)
 
     def test_recording_never_raises(self):
         # Telemetry bookkeeping must never break a scan.

@@ -1100,12 +1100,20 @@ class AIToolsDetector:
         skills with bespoke code, so they don't go through the shared recorder. This
         puts them in the same metrics payload as the 8 newer tools (same
         ``{user_skills, project_skills, projects}`` shape) so fleet-wide drop
-        alerting has no blind spot. Their inline extractors return ``None`` on
-        failure, which is recorded as zero counts — a crash still surfaces as a
-        fleet-wide drop; only the richer ``status="error"`` signal (available for the
-        newer tools) is absent here. Never raises."""
-        us = skills_result.get("user_skills", []) if skills_result else []
-        ps = skills_result.get("project_skills", []) if skills_result else []
+        alerting has no blind spot.
+
+        ``skills_result is None`` is recorded as ``status="error"``, exactly as the
+        newer tools do. Every call site sits inside ``if self._<tool>_skills_extractor:``
+        (so "unsupported OS" is already excluded) and the ``extract_all_<tool>_skills``
+        wrappers return ``None`` only when extraction raised — a genuine "no skills"
+        returns a dict with empty lists. So ``None`` here means the extractor FAILED,
+        and reporting it as a legitimate zero would hide a broken extractor behind a
+        plausible count. Never raises."""
+        if skills_result is None:
+            self._record_skills_metric(tool_name, status="error")
+            return
+        us = skills_result.get("user_skills", []) or []
+        ps = skills_result.get("project_skills", []) or []
         self._record_skills_metric(
             tool_name,
             status="ok",

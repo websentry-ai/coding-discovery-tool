@@ -29,7 +29,6 @@ from .claude_code_skills_helpers import (
     ItemTypeConfig,
     is_skill_md_file,
     find_item_project_root,
-    extract_item_info,
     extract_items_from_directory,
     extract_user_level_items,
 )
@@ -82,18 +81,6 @@ def find_junie_item_project_root(item_file: Path, config: ItemTypeConfig) -> Pat
     """Find the project root for a Junie item file. Delegates to generic."""
     return find_item_project_root(item_file, config, parent_dir_names=JUNIE_PARENT_DIR_NAMES)
 
-
-def extract_junie_item_info(
-    item_file: Path,
-    extract_single_rule_file_func: Callable,
-    scope: str,
-    config: ItemTypeConfig,
-) -> Optional[Dict]:
-    """Extract information from a Junie item file. Delegates to generic."""
-    return extract_item_info(
-        item_file, extract_single_rule_file_func, scope, config,
-        parent_dir_names=JUNIE_PARENT_DIR_NAMES,
-    )
 
 
 def extract_junie_items_from_directory(

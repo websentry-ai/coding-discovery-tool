@@ -161,6 +161,13 @@ class TestTopLevelDirGuard(unittest.TestCase):
         self.assertEqual(names, ["legit"])   # 'secret' behind the symlinked top dir not reached
 
 
+@unittest.skipIf(
+    os.name == "nt",
+    "POSIX cross-user hardlink semantics; Windows has no usable st_uid (always 0), so "
+    "_is_foreign_hardlink deliberately rejects ANY st_nlink > 1 there instead of comparing "
+    "owners. These tests assert the uid-comparison behaviour and force os.name='posix'; the "
+    "Windows path is covered by that documented reject-all rule.",
+)
 class TestForeignHardlinkGuard(unittest.TestCase):
     """A hard link to another user's file is indistinguishable from a normal file
     (passes is_file/is_symlink/containment). It must be rejected at the read boundary

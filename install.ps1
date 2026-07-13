@@ -18,9 +18,11 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 # Derived from the -Domain we were invoked with (or UNBOUND_DOMAIN, which the
 # scheduled wrapper sets), so no caller needs a new contract.
 # UNBOUND_DISCOVERY_BRANCH overrides, so any branch can be tested without a release.
+# Only "main" and "staging" are ever selectable — an out-of-allowlist override is
+# ignored (this repo is public; an arbitrary branch must not be runnable via env).
 $__discoveryDomain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
 $BRANCH =
-    if ($env:UNBOUND_DISCOVERY_BRANCH)  { $env:UNBOUND_DISCOVERY_BRANCH }
+    if ($env:UNBOUND_DISCOVERY_BRANCH -in @('main','staging')) { $env:UNBOUND_DISCOVERY_BRANCH }
     elseif ($__discoveryDomain -match 'staging') { 'staging' }
     else                                { 'main' }
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"

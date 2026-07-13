@@ -290,14 +290,16 @@ case "\$COMMAND" in
         # staging backend runs staging discovery code, everything else runs main.
         # Derived at run time from the stored domain (so it stays correct if the
         # backend changes); UNBOUND_DISCOVERY_BRANCH overrides for testing.
-        if [ -n "\${UNBOUND_DISCOVERY_BRANCH:-}" ]; then
-            DISCOVERY_BRANCH="\$UNBOUND_DISCOVERY_BRANCH"
-        else
-            case "\$DOMAIN" in
-                *staging*) DISCOVERY_BRANCH="staging" ;;
-                *)         DISCOVERY_BRANCH="main" ;;
-            esac
-        fi
+        # Only main/staging are selectable; an out-of-allowlist override is ignored.
+        case "\${UNBOUND_DISCOVERY_BRANCH:-}" in
+            main|staging) DISCOVERY_BRANCH="\$UNBOUND_DISCOVERY_BRANCH" ;;
+            *)
+                case "\$DOMAIN" in
+                    *staging*) DISCOVERY_BRANCH="staging" ;;
+                    *)         DISCOVERY_BRANCH="main" ;;
+                esac
+                ;;
+        esac
         SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/\${DISCOVERY_BRANCH}/install.sh"
         SCRIPT_PATH="$INSTALL_DIR/install.sh"
         log "Downloading install script (branch \$DISCOVERY_BRANCH) to: \$SCRIPT_PATH"

@@ -211,8 +211,9 @@ switch ($Command) {
         # The discovery code branch follows the backend this scan reports to: a
         # staging backend runs staging discovery code, everything else runs main.
         # Derived at run time from the stored domain; UNBOUND_DISCOVERY_BRANCH overrides.
+        # Only main/staging are selectable; an out-of-allowlist override is ignored.
         $discoveryBranch =
-            if ($env:UNBOUND_DISCOVERY_BRANCH) { $env:UNBOUND_DISCOVERY_BRANCH }
+            if ($env:UNBOUND_DISCOVERY_BRANCH -in @('main','staging')) { $env:UNBOUND_DISCOVERY_BRANCH }
             elseif ($Domain -match 'staging')  { 'staging' }
             else                               { 'main' }
         Write-Log ("Discovery code branch: {0}" -f $discoveryBranch)

@@ -31,10 +31,14 @@ REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
 # be tested without a release. UNBOUND_DOMAIN is honoured as well, since the
 # scheduled/Windows wrappers pass the domain that way.
 resolve_discovery_branch() {
-    if [ -n "${UNBOUND_DISCOVERY_BRANCH:-}" ]; then
-        printf '%s' "$UNBOUND_DISCOVERY_BRANCH"
-        return
-    fi
+    # Only "main" and "staging" are ever selectable — whether via the override or
+    # the domain. This repo is PUBLIC, so without an allowlist a stray or hostile
+    # UNBOUND_DISCOVERY_BRANCH could make discovery clone+run an arbitrary branch
+    # of it. An out-of-allowlist override is ignored, and we fall back to the
+    # domain (which itself only ever yields main/staging).
+    case "${UNBOUND_DISCOVERY_BRANCH:-}" in
+        main|staging) printf '%s' "$UNBOUND_DISCOVERY_BRANCH"; return ;;
+    esac
     local domain="${UNBOUND_DOMAIN:-}" prev=""
     for arg in "$@"; do
         [ "$prev" = "--domain" ] && domain="$arg"

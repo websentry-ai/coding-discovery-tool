@@ -47,7 +47,8 @@ CRON_TIME="0 9 * * *" # daily at 09:00 (cron fallback only)
 LOG_DIR_MACOS="$HOME/Library/Logs/unbound"
 LOG_DIR_LINUX="$INSTALL_DIR/logs"
 
-SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.sh"
+# NOTE: the install.sh URL is built inside the generated wrapper at run time, from
+# the branch that matches the stored backend domain (see create_wrapper_script).
 
 # -----------------------------------------------------------------------------
 # OS detection
@@ -285,9 +286,22 @@ case "\$COMMAND" in
             log "ERROR: domain missing from stored credentials (required for discover)"
             exit 1
         fi
+        # The discovery code branch follows the backend this scan reports to: a
+        # staging backend runs staging discovery code, everything else runs main.
+        # Derived at run time from the stored domain (so it stays correct if the
+        # backend changes); UNBOUND_DISCOVERY_BRANCH overrides for testing.
+        if [ -n "\${UNBOUND_DISCOVERY_BRANCH:-}" ]; then
+            DISCOVERY_BRANCH="\$UNBOUND_DISCOVERY_BRANCH"
+        else
+            case "\$DOMAIN" in
+                *staging*) DISCOVERY_BRANCH="staging" ;;
+                *)         DISCOVERY_BRANCH="main" ;;
+            esac
+        fi
+        SCAN_SCRIPT_URL="https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/\${DISCOVERY_BRANCH}/install.sh"
         SCRIPT_PATH="$INSTALL_DIR/install.sh"
-        log "Downloading install script to: \$SCRIPT_PATH"
-        if ! curl -fsSL -o "\$SCRIPT_PATH" "$SCAN_SCRIPT_URL"; then
+        log "Downloading install script (branch \$DISCOVERY_BRANCH) to: \$SCRIPT_PATH"
+        if ! curl -fsSL -o "\$SCRIPT_PATH" "\$SCAN_SCRIPT_URL"; then
             log "ERROR: Failed to download install script"
             exit 1
         fi
@@ -299,7 +313,7 @@ case "\$COMMAND" in
         # Pass API key via env var — /proc/pid/cmdline and ps expose CLI args to
         # other local users; env vars require ptrace/elevated access to read.
         log "Executing: \$SCRIPT_PATH --domain \$DOMAIN (api-key via env var)"
-        UNBOUND_API_KEY="\$API_KEY" "\$SCRIPT_PATH" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
+        UNBOUND_API_KEY="\$API_KEY" UNBOUND_DISCOVERY_BRANCH="\$DISCOVERY_BRANCH" "\$SCRIPT_PATH" --domain "\$DOMAIN" >> "\$LOG_DIR/scheduled.log" 2>&1 || EXIT_CODE=\$?
         # If the scan exited non-zero and the log contains an auth error, emit an
         # actionable hint. install.sh logs "HTTP 401" / "Invalid API key" on auth
         # failures; matching those phrases saves the operator from having to grep

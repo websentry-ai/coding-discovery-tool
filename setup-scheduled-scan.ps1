@@ -208,7 +208,15 @@ if ([string]::IsNullOrEmpty($Command) -or [string]::IsNullOrEmpty($ApiKey)) {
 switch ($Command) {
     'discover' {
         if ([string]::IsNullOrEmpty($Domain)) { Write-Log "ERROR: Domain missing for discover"; exit 1 }
-        $installPs1 = 'https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/main/install.ps1'
+        # The discovery code branch follows the backend this scan reports to: a
+        # staging backend runs staging discovery code, everything else runs main.
+        # Derived at run time from the stored domain; UNBOUND_DISCOVERY_BRANCH overrides.
+        $discoveryBranch =
+            if ($env:UNBOUND_DISCOVERY_BRANCH) { $env:UNBOUND_DISCOVERY_BRANCH }
+            elseif ($Domain -match 'staging')  { 'staging' }
+            else                               { 'main' }
+        Write-Log ("Discovery code branch: {0}" -f $discoveryBranch)
+        $installPs1 = "https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/$discoveryBranch/install.ps1"
         # Keep install.ps1 cached on disk under %LOCALAPPDATA%\Unbound rather
         # than downloading to TEMP and deleting after each run. EDR products
         # flag the download-execute-delete pattern as suspicious; a stable
@@ -241,6 +249,8 @@ switch ($Command) {
             # Win32_Process.CommandLine and Event Log 4688 will show only the file path.
             $env:UNBOUND_API_KEY = $ApiKey
             $env:UNBOUND_DOMAIN  = $Domain
+            # install.ps1 clones the branch named here (defaults to main if unset).
+            $env:UNBOUND_DISCOVERY_BRANCH = $discoveryBranch
             & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript *>> $LogFile
             $ec = $LASTEXITCODE
         } catch {
@@ -248,6 +258,7 @@ switch ($Command) {
         } finally {
             Remove-Item Env:UNBOUND_API_KEY -ErrorAction SilentlyContinue
             Remove-Item Env:UNBOUND_DOMAIN  -ErrorAction SilentlyContinue
+            Remove-Item Env:UNBOUND_DISCOVERY_BRANCH -ErrorAction SilentlyContinue
         }
         Write-Log ("Discover exited with code {0}" -f $ec)
     }

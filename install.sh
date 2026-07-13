@@ -18,7 +18,12 @@ set -e  # Exit on any error
 # ==============================================================================
 
 REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
-BRANCH="main"
+# Which branch of this repo to run. Defaults to main (production). Callers that
+# know which environment they point at (the CLI and the agent hooks) set
+# UNBOUND_DISCOVERY_BRANCH to match their backend — e.g. "staging" for a staging
+# backend — so a staging environment runs staging discovery code instead of main.
+# Same inherited-env convention as UNBOUND_API_KEY below.
+BRANCH="${UNBOUND_DISCOVERY_BRANCH:-main}"
 TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'coding-discovery-tool')
 
 # ==============================================================================

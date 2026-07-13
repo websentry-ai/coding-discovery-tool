@@ -10,7 +10,12 @@ param(
 )
 
 $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
-$BRANCH = "main"
+# Which branch of this repo to run. Defaults to main (production). Callers that
+# know which environment they point at (the CLI and the agent hooks) set
+# UNBOUND_DISCOVERY_BRANCH to match their backend — e.g. "staging" for a staging
+# backend — so a staging environment runs staging discovery code instead of main.
+# Same inherited-env convention as UNBOUND_API_KEY / UNBOUND_DOMAIN.
+$BRANCH = if ($env:UNBOUND_DISCOVERY_BRANCH) { $env:UNBOUND_DISCOVERY_BRANCH } else { "main" }
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"
 
 function Write-Info { Write-Host "i " -ForegroundColor Blue -NoNewline; Write-Host $args[0] }

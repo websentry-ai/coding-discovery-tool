@@ -212,10 +212,16 @@ switch ($Command) {
         # staging backend runs staging discovery code, everything else runs main.
         # Derived at run time from the stored domain; UNBOUND_DISCOVERY_BRANCH overrides.
         # Only main/staging are selectable; an out-of-allowlist override is ignored.
+        # Override normalised to lowercase; "staging" matched on the HOST only so a
+        # path/query fragment on a prod URL can't flip the branch.
+        $__ovr = if ($env:UNBOUND_DISCOVERY_BRANCH) { $env:UNBOUND_DISCOVERY_BRANCH.ToLowerInvariant() } else { '' }
+        $__host = ''
+        if ($Domain) { try { $__host = ([uri]$Domain).Host } catch { } }
+        if (-not $__host) { $__host = $Domain }
         $discoveryBranch =
-            if ($env:UNBOUND_DISCOVERY_BRANCH -in @('main','staging')) { $env:UNBOUND_DISCOVERY_BRANCH }
-            elseif ($Domain -match 'staging')  { 'staging' }
-            else                               { 'main' }
+            if ($__ovr -in @('main','staging')) { $__ovr }
+            elseif ($__host -match 'staging')   { 'staging' }
+            else                                { 'main' }
         Write-Log ("Discovery code branch: {0}" -f $discoveryBranch)
         $installPs1 = "https://raw.githubusercontent.com/websentry-ai/coding-discovery-tool/$discoveryBranch/install.ps1"
         # Keep install.ps1 cached on disk under %LOCALAPPDATA%\Unbound rather

@@ -290,13 +290,16 @@ case "\$COMMAND" in
         # staging backend runs staging discovery code, everything else runs main.
         # Derived at run time from the stored domain (so it stays correct if the
         # backend changes); UNBOUND_DISCOVERY_BRANCH overrides for testing.
-        # Only main/staging are selectable; an out-of-allowlist override is ignored.
-        case "\${UNBOUND_DISCOVERY_BRANCH:-}" in
-            main|staging) DISCOVERY_BRANCH="\$UNBOUND_DISCOVERY_BRANCH" ;;
+        # Override normalised to lowercase, then must be exactly main/staging.
+        _ovr=\$(printf '%s' "\${UNBOUND_DISCOVERY_BRANCH:-}" | tr '[:upper:]' '[:lower:]')
+        case "\$_ovr" in
+            main|staging) DISCOVERY_BRANCH="\$_ovr" ;;
             *)
-                # Lowercase so bash agrees with the case-insensitive wrappers.
-                _dom_lc=\$(printf '%s' "\$DOMAIN" | tr '[:upper:]' '[:lower:]')
-                case "\$_dom_lc" in
+                # Match "staging" in the HOST only (strip scheme/path/query/port).
+                _host="\$DOMAIN"
+                _host="\${_host#*://}"; _host="\${_host%%/*}"; _host="\${_host#*@}"; _host="\${_host%%:*}"
+                _host=\$(printf '%s' "\$_host" | tr '[:upper:]' '[:lower:]')
+                case "\$_host" in
                     *staging*) DISCOVERY_BRANCH="staging" ;;
                     *)         DISCOVERY_BRANCH="main" ;;
                 esac

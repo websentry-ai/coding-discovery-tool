@@ -36,20 +36,30 @@ resolve_discovery_branch() {
     # UNBOUND_DISCOVERY_BRANCH could make discovery clone+run an arbitrary branch
     # of it. An out-of-allowlist override is ignored, and we fall back to the
     # domain (which itself only ever yields main/staging).
-    case "${UNBOUND_DISCOVERY_BRANCH:-}" in
-        main|staging) printf '%s' "$UNBOUND_DISCOVERY_BRANCH"; return ;;
+    # Override: normalise to lowercase, then it must be EXACTLY main/staging
+    # (else ignored). Lowercasing keeps bash/PowerShell/Node/Python consistent and
+    # avoids passing e.g. "Staging" straight to `git clone -b` (which would fail).
+    local override
+    override=$(printf '%s' "${UNBOUND_DISCOVERY_BRANCH:-}" | tr '[:upper:]' '[:lower:]')
+    case "$override" in
+        main|staging) printf '%s' "$override"; return ;;
     esac
     local domain="${UNBOUND_DOMAIN:-}" prev=""
     for arg in "$@"; do
         [ "$prev" = "--domain" ] && domain="$arg"
         prev="$arg"
     done
-    # Lowercase before matching so bash agrees with the case-insensitive
-    # PowerShell / Node / Python callers (a "Staging" URL must resolve the same
-    # on every platform). An Unbound staging backend always carries "staging" in
-    # its host.
-    domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
-    case "$domain" in
+    # Match "staging" in the URL HOST only (strip scheme + everything from the
+    # first '/'), lowercased — so a "staging" fragment in a path/query on a
+    # production backend can't flip the branch. An Unbound staging backend always
+    # carries "staging" in its host.
+    local host="$domain"
+    host="${host#*://}"     # strip scheme
+    host="${host%%/*}"      # strip path/query
+    host="${host#*@}"       # strip userinfo
+    host="${host%%:*}"      # strip port
+    host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+    case "$host" in
         *staging*) printf 'staging' ;;
         *)         printf 'main' ;;
     esac

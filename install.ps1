@@ -21,9 +21,15 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 # Only "main" and "staging" are ever selectable — an out-of-allowlist override is
 # ignored (this repo is public; an arbitrary branch must not be runnable via env).
 $__discoveryDomain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
+# Normalise the override to lowercase, then it must be exactly main/staging.
+$__ovr = if ($env:UNBOUND_DISCOVERY_BRANCH) { $env:UNBOUND_DISCOVERY_BRANCH.ToLowerInvariant() } else { '' }
+# Match "staging" in the HOST only, so a path/query fragment can't flip the branch.
+$__host = ''
+if ($__discoveryDomain) { try { $__host = ([uri]$__discoveryDomain).Host } catch { } }
+if (-not $__host) { $__host = $__discoveryDomain }
 $BRANCH =
-    if ($env:UNBOUND_DISCOVERY_BRANCH -in @('main','staging')) { $env:UNBOUND_DISCOVERY_BRANCH }
-    elseif ($__discoveryDomain -match 'staging') { 'staging' }   # -match is case-insensitive
+    if ($__ovr -in @('main','staging')) { $__ovr }
+    elseif ($__host -match 'staging')   { 'staging' }   # -match is case-insensitive
     else                                { 'main' }
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"
 

@@ -215,9 +215,16 @@ switch ($Command) {
         # Override normalised to lowercase; "staging" matched on the HOST only so a
         # path/query fragment on a prod URL can't flip the branch.
         $__ovr = if ($env:UNBOUND_DISCOVERY_BRANCH) { $env:UNBOUND_DISCOVERY_BRANCH.ToLowerInvariant() } else { '' }
+        # [uri] handles absolute URLs; on failure / empty host fall back to manual
+        # extraction, never to the raw string (a "staging" path would match again).
         $__host = ''
         if ($Domain) { try { $__host = ([uri]$Domain).Host } catch { } }
-        if (-not $__host) { $__host = $Domain }
+        if (-not $__host -and $Domain) {
+            $__host = $Domain -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''  # strip scheme
+            $__host = ($__host -split '[/?#]')[0]   # cut at path / query / fragment
+            $__host = ($__host -split '@')[-1]      # strip userinfo
+            $__host = ($__host -split ':')[0]       # strip port
+        }
         $discoveryBranch =
             if ($__ovr -in @('main','staging')) { $__ovr }
             elseif ($__host -match 'staging')   { 'staging' }

@@ -295,9 +295,11 @@ case "\$COMMAND" in
         case "\$_ovr" in
             main|staging) DISCOVERY_BRANCH="\$_ovr" ;;
             *)
-                # Match "staging" in the HOST only (strip scheme/path/query/port).
+                # Match "staging" in the HOST only. Cut at the first of / ? #
+                # (a query can follow the host with no path), then strip
+                # userinfo, then the port.
                 _host="\$DOMAIN"
-                _host="\${_host#*://}"; _host="\${_host%%/*}"; _host="\${_host#*@}"; _host="\${_host%%:*}"
+                _host="\${_host#*://}"; _host="\${_host%%[/?#]*}"; _host="\${_host##*@}"; _host="\${_host%%:*}"
                 _host=\$(printf '%s' "\$_host" | tr '[:upper:]' '[:lower:]')
                 case "\$_host" in
                     *staging*) DISCOVERY_BRANCH="staging" ;;

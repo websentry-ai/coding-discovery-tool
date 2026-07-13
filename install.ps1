@@ -23,10 +23,18 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 $__discoveryDomain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
 # Normalise the override to lowercase, then it must be exactly main/staging.
 $__ovr = if ($env:UNBOUND_DISCOVERY_BRANCH) { $env:UNBOUND_DISCOVERY_BRANCH.ToLowerInvariant() } else { '' }
-# Match "staging" in the HOST only, so a path/query fragment can't flip the branch.
+# Match "staging" in the HOST only, so a path/query/fragment can't flip the branch.
+# [uri] handles absolute URLs; when it fails or yields no host (scheme-less value),
+# fall back to the SAME manual extraction the shell scripts use — never to the raw
+# string, or a "staging" path segment would match again.
 $__host = ''
 if ($__discoveryDomain) { try { $__host = ([uri]$__discoveryDomain).Host } catch { } }
-if (-not $__host) { $__host = $__discoveryDomain }
+if (-not $__host -and $__discoveryDomain) {
+    $__host = $__discoveryDomain -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''  # strip scheme
+    $__host = ($__host -split '[/?#]')[0]   # cut at path / query / fragment
+    $__host = ($__host -split '@')[-1]      # strip userinfo
+    $__host = ($__host -split ':')[0]       # strip port
+}
 $BRANCH =
     if ($__ovr -in @('main','staging')) { $__ovr }
     elseif ($__host -match 'staging')   { 'staging' }   # -match is case-insensitive

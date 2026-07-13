@@ -49,15 +49,17 @@ resolve_discovery_branch() {
         [ "$prev" = "--domain" ] && domain="$arg"
         prev="$arg"
     done
-    # Match "staging" in the URL HOST only (strip scheme + everything from the
-    # first '/'), lowercased — so a "staging" fragment in a path/query on a
-    # production backend can't flip the branch. An Unbound staging backend always
-    # carries "staging" in its host.
+    # Match "staging" in the URL HOST only, lowercased — so a "staging" fragment
+    # in the path, query or fragment of a production backend can't flip the
+    # branch. An Unbound staging backend always carries "staging" in its host.
+    # Cut at the first of / ? # (a query or fragment can follow the host with no
+    # path at all, e.g. https://prod.getunbound.ai?env=staging), and only then
+    # strip userinfo — otherwise an '@' inside a query would eat the host.
     local host="$domain"
-    host="${host#*://}"     # strip scheme
-    host="${host%%/*}"      # strip path/query
-    host="${host#*@}"       # strip userinfo
-    host="${host%%:*}"      # strip port
+    host="${host#*://}"       # strip scheme
+    host="${host%%[/?#]*}"    # cut at path / query / fragment
+    host="${host##*@}"        # strip userinfo
+    host="${host%%:*}"        # strip port
     host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
     case "$host" in
         *staging*) printf 'staging' ;;

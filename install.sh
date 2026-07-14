@@ -27,8 +27,14 @@ REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
 # hooks, and the scheduled wrapper), so no caller needs a new contract.
 # UNBOUND_DOMAIN is honoured too, since the scheduled wrappers pass it that way.
 resolve_branch() {
+    # Accept both "--domain <url>" and "--domain=<url>": argparse accepts either on
+    # the Python side, so parsing only one of them here would let a staging backend
+    # receive results produced by main's code.
     local domain="${UNBOUND_DOMAIN:-}" prev=""
     for arg in "$@"; do
+        case "$arg" in
+            --domain=*) domain="${arg#--domain=}" ;;
+        esac
         [ "$prev" = "--domain" ] && domain="$arg"
         prev="$arg"
     done

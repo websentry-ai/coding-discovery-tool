@@ -10,7 +10,14 @@ param(
 )
 
 $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
-$BRANCH = "main"
+
+# The discovery CODE follows the backend it reports to: a staging backend runs the
+# staging branch, everything else runs main (safe default — prod never pulls staging).
+# Derived from -Domain, which every caller already passes; UNBOUND_DOMAIN is honoured
+# too, since the scheduled wrapper passes the domain that way. -match is case-insensitive.
+$_domain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
+$BRANCH = if ($_domain -match 'staging') { 'staging' } else { 'main' }
+
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"
 
 function Write-Info { Write-Host "i " -ForegroundColor Blue -NoNewline; Write-Host $args[0] }

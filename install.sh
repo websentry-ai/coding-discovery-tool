@@ -18,7 +18,27 @@ set -e  # Exit on any error
 # ==============================================================================
 
 REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
-BRANCH="main"
+
+# The discovery CODE follows the backend it reports to: a staging backend runs the
+# staging branch, everything else runs main. Without this, staging environments
+# silently ran production discovery code.
+#
+# Derived from --domain, which every caller already passes (the CLI, the agent
+# hooks, and the scheduled wrapper), so no caller needs a new contract.
+# UNBOUND_DOMAIN is honoured too, since the scheduled wrappers pass it that way.
+resolve_branch() {
+    local domain="${UNBOUND_DOMAIN:-}" prev=""
+    for arg in "$@"; do
+        [ "$prev" = "--domain" ] && domain="$arg"
+        prev="$arg"
+    done
+    case "$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')" in
+        *staging*) echo "staging" ;;
+        *)         echo "main" ;;   # main is the safe default: prod never pulls staging
+    esac
+}
+BRANCH="$(resolve_branch "$@")"
+
 TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'coding-discovery-tool')
 
 # ==============================================================================

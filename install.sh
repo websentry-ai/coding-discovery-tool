@@ -19,17 +19,23 @@ set -e  # Exit on any error
 
 REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
 
-# The discovery CODE follows the backend it reports to: a staging backend runs the
-# staging branch, everything else runs main. Without this, staging environments
-# silently ran production discovery code.
+# Which branch of THIS repo the discovery code runs from. It must follow the
+# backend it reports to: a staging backend runs the staging branch, everything
+# else runs main. Without this, staging environments silently ran production
+# discovery code.
 #
-# Derived from --domain, which every caller already passes (the CLI, the agent
-# hooks, and the scheduled wrapper), so no caller needs a new contract.
-# UNBOUND_DOMAIN is honoured too, since the scheduled wrappers pass it that way.
+# The BACKEND is authoritative — it reports its own environment, so the mapping
+# survives any domain/subdomain rename (unlike matching the hostname string).
+# We fall back to a domain-string heuristic, and ultimately to main, whenever the
+# backend can't be asked: an older backend without the endpoint, an offline
+# machine, or a network blip. main is always the safe default, so a production
+# backend can never pull staging code.
+#
+# --domain is passed by every caller (the CLI, the agent hooks, the scheduled
+# wrapper); UNBOUND_DOMAIN is honoured too, since the Windows wrapper passes the
+# domain that way. Both "--domain <url>" and "--domain=<url>" are accepted, since
+# argparse accepts either on the Python side.
 resolve_branch() {
-    # Accept both "--domain <url>" and "--domain=<url>": argparse accepts either on
-    # the Python side, so parsing only one of them here would let a staging backend
-    # receive results produced by main's code.
     local domain="${UNBOUND_DOMAIN:-}" prev=""
     for arg in "$@"; do
         case "$arg" in
@@ -38,9 +44,23 @@ resolve_branch() {
         [ "$prev" = "--domain" ] && domain="$arg"
         prev="$arg"
     done
+
+    # 1. Authoritative: ask the backend. Short timeout so a hung endpoint can't
+    #    stall discovery. Only "staging"/"main" are honoured from the reply, so a
+    #    malformed or hostile response can never steer `git clone --branch`.
+    if [ -n "$domain" ] && command -v curl >/dev/null 2>&1; then
+        local resp b
+        resp=$(curl -fsS --connect-timeout 2 -m 5 "${domain%/}/api/v1/ai-tools/discovery-branch/" 2>/dev/null) || resp=""
+        b=$(printf '%s' "$resp" | sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p')
+        case "$b" in
+            staging|main) printf '%s' "$b"; return ;;
+        esac
+    fi
+
+    # 2. Fallback: derive from the domain string.
     case "$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')" in
-        *staging*) echo "staging" ;;
-        *)         echo "main" ;;   # main is the safe default: prod never pulls staging
+        *staging*) printf 'staging' ;;
+        *)         printf 'main' ;;
     esac
 }
 BRANCH="$(resolve_branch "$@")"

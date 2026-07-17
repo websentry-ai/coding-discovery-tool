@@ -249,6 +249,13 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
             "kB": {"t": "h2-new"},
         })
 
+    def test_upsert_skips_when_no_cache_file_exists(self):
+        # Single-server scan must never create the cache — only the full
+        # discovery run owns its existence.
+        self.assertFalse(mcp_tools_cache._cache_path().exists())
+        mcp_tools_cache.upsert_server_entry("Claude Code", "alice", "kB", {"t": "h2"})
+        self.assertFalse(mcp_tools_cache._cache_path().exists())
+
 
 class TestCollectServerEntries(_CacheDirMixin, unittest.TestCase):
 
@@ -395,7 +402,13 @@ class TestSingleServerScanCacheUpsert(_CacheDirMixin, unittest.TestCase):
     }
     _EXPECTED_KEY = "3cd440c1c08386ecbb9c4f47b305d73d3b983ab364ead6eb7f451acdb6c287ce"
 
+    def _seed_existing_cache(self):
+        # A single-server scan only augments an existing cache; seed one first
+        # (as a prior full discovery run would have).
+        mcp_tools_cache.update_user_entries("seed", "seed", {"k": {"t": "h"}}, set())
+
     def test_upserts_scanned_server_under_env_coding_tool(self):
+        self._seed_existing_cache()
         with patch.dict(os.environ, {"UNBOUND_CODING_TOOL": "Codex CLI"}):
             scan_single_mcp_server.update_local_tools_cache(self._SERVER_OBJ)
         data = self._read_file()
@@ -404,6 +417,7 @@ class TestSingleServerScanCacheUpsert(_CacheDirMixin, unittest.TestCase):
         self.assertEqual(list(entry[self._EXPECTED_KEY]), ["t"])
 
     def test_coding_tool_defaults_to_claude_code(self):
+        self._seed_existing_cache()
         env = {k: v for k, v in os.environ.items() if k != "UNBOUND_CODING_TOOL"}
         with patch.dict(os.environ, env, clear=True):
             scan_single_mcp_server.update_local_tools_cache(self._SERVER_OBJ)

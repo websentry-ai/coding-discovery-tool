@@ -255,6 +255,11 @@ def upsert_server_entry(coding_tool: str, home_user: str, cache_key: str,
     left untouched)."""
     if not cache_key or not tool_hashes:
         return
+    # Only augment an existing cache — never create one from a single-server
+    # scan. The full discovery run owns the file's existence; a reactive scan
+    # on a device that never ran discovery leaves no stray cache behind.
+    if not _cache_path().exists():
+        return
     data = read_mcp_tools_cache()
     tools = _get_subtree(data, "tools")
     by_user = _get_subtree(tools, coding_tool)

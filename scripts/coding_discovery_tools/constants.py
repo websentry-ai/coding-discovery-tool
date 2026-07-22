@@ -2,6 +2,49 @@
 Constants used across the AI tools discovery system
 """
 
+import os
+import stat
+
+# Reparse tags that REDIRECT to another location. Windows-only concept; the
+# ``stat`` constants are absent on POSIX (and on some builds), so fall back to
+# the documented literals. Cloud placeholders (e.g. OneDrive) are reparse points
+# too but are NOT redirects — they must stay traversable or a OneDrive-redirected
+# Documents folder would silently stop being scanned.
+_IO_REPARSE_TAG_MOUNT_POINT = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+_IO_REPARSE_TAG_SYMLINK = getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C)
+_REDIRECTING_REPARSE_TAGS = frozenset({_IO_REPARSE_TAG_MOUNT_POINT, _IO_REPARSE_TAG_SYMLINK})
+
+
+def is_symlink_or_junction(path) -> bool:
+    """True for POSIX symlinks and Windows symlinks *and directory junctions*.
+
+    ``Path.is_symlink()`` returns False for an NTFS directory junction
+    (``IO_REPARSE_TAG_MOUNT_POINT``) — which any user can create with
+    ``mklink /J``, no admin required — and ``Path.is_junction()`` only exists on
+    Python 3.12+ (this project supports 3.9+). So the reparse tag is inspected
+    directly via ``lstat``. Without this, a planted junction bypasses the symlink
+    guards and can redirect a privileged/all-user scan into another user's tree.
+
+    Uses a SINGLE ``lstat`` (not ``is_symlink()`` + ``lstat``) because this runs
+    once per directory entry of a whole-disk walk — the extra syscall is not free.
+
+    Conservative: any ``lstat`` failure returns True (do not traverse). Never raises.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+
+    # POSIX symlinks (and Windows symlinks, which lstat reports as S_IFLNK).
+    if stat.S_ISLNK(st.st_mode):
+        return True
+
+    # ``st_reparse_tag`` exists only on Windows; 0 elsewhere -> not a redirect.
+    # Junctions come back as S_IFDIR with a MOUNT_POINT tag, so S_ISLNK misses them.
+    tag = getattr(st, "st_reparse_tag", 0)
+    return bool(tag) and tag in _REDIRECTING_REPARSE_TAGS
+
+
 # Invalid serial number values that should be ignored
 INVALID_SERIAL_VALUES = [
     "TO BE FILLED BY O.E.M.",
@@ -48,13 +91,25 @@ SKIP_SYSTEM_DIRS = {
 
 # Per-user AI-tool config directories (``~/.<tool>``). A project-rules/skills
 # walk must not descend into a DIFFERENT tool's config dir: its contents —
-# including installed extension packages like
-# ``~/.antigravity/extensions/<pkg>/.github`` — belong to that tool, not to the
-# scanned user's repositories. (Kept separate from the scope-classification set
-# in ``macos_extraction_helpers._detect_rule_scope`` so scope rules don't change.)
+# including installed extension/plugin packages like
+# ``~/.antigravity/extensions/<pkg>/.github`` or
+# ``~/.codex/.tmp/plugins/<pkg>/.agents/skills`` — belong to that tool, not to
+# the scanned user's repositories. Each SKILL.md-reading tool still collects its
+# OWN dir because the skills walk passes ``allow = SHARED_SKILL_DIRS | <own
+# parent dirs>`` (so e.g. Kilo keeps ``.kilo``, OpenCode keeps ``.opencode``).
+# Must list EVERY tool's per-user config dir — an omission lets other tools'
+# walks over-collect bundled ``.agents``/``.claude`` skills from it. (Kept
+# separate from the scope-classification set in
+# ``macos_extraction_helpers._detect_rule_scope`` so scope rules don't change.)
 OTHER_TOOL_CONFIG_DIRS = frozenset({
-    ".cursor", ".claude", ".windsurf", ".antigravity", ".roo", ".cline",
-    ".clinerules", ".kilocode", ".gemini", ".codeium", ".junie",
+    ".cursor", ".claude", ".windsurf", ".devin", ".antigravity", ".roo", ".cline",
+    ".clinerules", ".kilocode", ".kilo", ".gemini", ".codeium", ".junie",
+    ".codex", ".opencode", ".copilot",
+    # NOTE: ``.augment`` is intentionally omitted. The Augment extractor consults
+    # this set but passes ``allow=SHARED_SKILL_DIRS`` (not its own ``.augment``),
+    # so adding it here would make Augment skip its OWN dir. Add ``.augment`` only
+    # once the Augment extractor allows its own parent dir (as the newer per-tool
+    # extractors do).
 })
 
 # Shared cross-tool skill dirs the Copilot CLI skills walk legitimately collects

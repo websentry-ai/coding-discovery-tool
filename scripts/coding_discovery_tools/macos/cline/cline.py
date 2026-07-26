@@ -76,8 +76,7 @@ class MacOSClineDetector(BaseToolDetector):
             List of dicts containing tool info for each IDE with Cline installed,
             or None if not found in any IDE
         """
-        # Per-user scan (user_home set by detect_tool_for_user): scope to THIS user only. Without
-        # this, a root scan self-enumerates /Users and attributes every user's extension to the caller.
+        # Scope to this user's home when set, so an elevated scan can't attribute other users' extensions.
         scoped_home = getattr(self, 'user_home', None)
         if scoped_home is not None:
             return self._detect_cline_for_user(Path(scoped_home)) or None

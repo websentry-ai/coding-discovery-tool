@@ -1,4 +1,4 @@
-"""WEB-4679: the "completed" scan event carries a manifest of detected (home_user, tool_name)
+"""The "completed" scan event carries a manifest of detected (home_user, tool_name)
 pairs + the covered home users, so the backend can set-diff and prune what's gone.
 
 Properties: the manifest is built from per-user DETECTION (not extraction success), so a read
@@ -143,7 +143,7 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
     def _run_cli(self, timeout=600):
         env = os.environ.copy()
         # Throwaway HOME: isolated lock/cache so the run isn't blocked by a live lock and starts cold.
-        env["HOME"] = tempfile.mkdtemp(prefix="web4679_home_")
+        env["HOME"] = tempfile.mkdtemp(prefix="discovery_home_")
         return subprocess.run(
             [
                 sys.executable,
@@ -302,6 +302,9 @@ class TestManifestFromPresence(unittest.TestCase):
         dc.update_tool.return_value = None
         dc.UNBOUND_DIR = "/tmp/unbound-test"
         dc.last_lock_error = None
+        dc.last_lock_outcome = "acquired"
+        dc.resumable_done.return_value = set()
+        dc.read_run.return_value = {}
 
         captured = {}
 
@@ -321,6 +324,7 @@ class TestManifestFromPresence(unittest.TestCase):
              patch.object(adm, "send_report_to_backend", return_value=send_report_result), \
              patch.object(adm, "send_scan_event", side_effect=_send_scan_event), \
              patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "run_sweep", return_value=(0, 0, 0)), \
              patch.object(adm, "load_pending_reports", return_value=[]), \
              patch.object(adm, "save_failed_reports", Mock()), \
              patch.object(adm, "report_to_sentry", Mock()), \
@@ -420,6 +424,9 @@ class TestManifestFromPresence(unittest.TestCase):
         dc.update_tool.return_value = None
         dc.UNBOUND_DIR = "/tmp/unbound-test"
         dc.last_lock_error = None
+        dc.last_lock_outcome = "acquired"
+        dc.resumable_done.return_value = set()
+        dc.read_run.return_value = {}
 
         captured = {}
 
@@ -436,6 +443,7 @@ class TestManifestFromPresence(unittest.TestCase):
              patch.object(adm, "send_report_to_backend", return_value=(True, False)), \
              patch.object(adm, "send_scan_event", side_effect=_send_scan_event), \
              patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "run_sweep", return_value=(0, 0, 0)), \
              patch.object(adm, "load_pending_reports", return_value=[]), \
              patch.object(adm, "save_failed_reports", Mock()), \
              patch.object(adm, "report_to_sentry", Mock()), \

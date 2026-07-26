@@ -39,8 +39,7 @@ class LinuxRooDetector(BaseToolDetector):
         return "Roo Code"
 
     def detect(self) -> Optional[List[Dict]]:
-        # Per-user scan (user_home set by detect_tool_for_user): scope to THIS user only, else an
-        # elevated scan enumerates every home and attributes other users' extensions to the caller.
+        # Scope to this user's home when set, so an elevated scan can't attribute other users' extensions.
         scoped_home = getattr(self, 'user_home', None)
         if scoped_home is not None:
             return self._detect_roo_for_user(Path(scoped_home)) or None

@@ -50,8 +50,7 @@ class MacOSKiloCodeDetector(BaseToolDetector):
         Returns:
             Dict containing tool info (name, version, install_path) or None if not found
         """
-        # Per-user scan (user_home set by detect_tool_for_user): scope to THIS user only. Without
-        # this, a root scan self-enumerates /Users and attributes every user's extension to the caller.
+        # Scope to this user's home when set, so an elevated scan can't attribute other users' extensions.
         scoped_home = getattr(self, 'user_home', None)
         if scoped_home is not None:
             return self._check_user_for_kilocode(Path(scoped_home))

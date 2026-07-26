@@ -365,17 +365,28 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         self.assertFalse(lock.exists(), "discovery.lock left behind after self-timeout")
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
-    def test_main_restores_signal_handlers(self):
-        # main() installs SIGTERM/SIGINT handlers but must restore the originals
-        # in its finally so importing/calling it doesn't pollute the process.
+    def test_main_traps_and_restores_termination_signals(self):
+        # main() must install its abort handler for every catchable termination
+        # signal present on this platform (incl. the newly-added SIGHUP), and
+        # restore the originals in finally so importing/calling it doesn't pollute
+        # the process.
         import signal as _signal
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
 
-        prev_term = _signal.getsignal(_signal.SIGTERM)
-        prev_int = _signal.getsignal(_signal.SIGINT)
+        names = ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGXCPU", "SIGXFSZ", "SIGPWR"]
+        sigs = [getattr(_signal, n) for n in names if getattr(_signal, n, None) is not None]
+        self.assertIn(_signal.SIGHUP, sigs)  # SIGHUP is trapped on POSIX
+
+        prev = {s: _signal.getsignal(s) for s in sigs}
+        installed = {}
+        real_signal = _signal.signal
+
+        def spy(sig, handler):
+            if sig in sigs and sig not in installed:  # record the FIRST (install), not the restore
+                installed[sig] = handler
+            return real_signal(sig, handler)
+
         argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
-        # acquire_lock -> "contended" makes main() exit BEFORE installing handlers,
-        # so use a detector that finishes instantly with the lock acquired.
         detector_inst = Mock()
         detector_inst.get_device_id.return_value = "dev"
         detector_inst.detect_all_tools.return_value = []
@@ -391,13 +402,19 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
              patch.object(adm, "get_all_users_linux", return_value=[]), \
              patch.object(adm, "get_user_info", return_value={}), \
              patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(_signal, "signal", spy), \
              patch.object(sys, "argv", argv):
             try:
                 adm.main()
             except SystemExit:
                 pass
-        self.assertEqual(_signal.getsignal(_signal.SIGTERM), prev_term)
-        self.assertEqual(_signal.getsignal(_signal.SIGINT), prev_int)
+
+        for s in sigs:
+            # A real (non-default) handler was installed during the run...
+            self.assertTrue(callable(installed.get(s)), f"no handler installed for {s}")
+            self.assertNotIn(installed[s], (_signal.SIG_DFL, _signal.SIG_IGN))
+            # ...and the original was restored afterward.
+            self.assertEqual(_signal.getsignal(s), prev[s], f"{s} not restored")
 
 
 class TestUnsupportedPlatformGuard(unittest.TestCase):
@@ -972,6 +989,297 @@ class TestStaleLockPidLiveness(unittest.TestCase):
         self.assertFalse(self.cache._pid_alive(self._dead_pid()))
         self.assertFalse(self.cache._pid_alive(0))
 
+    @unittest.skipUnless(os.name == "posix", "PID liveness check is POSIX-only")
+    def test_lock_outcome_records_dead_pid_steal(self):
+        # Observability: stealing a dead predecessor's lock is recorded so the run
+        # can surface it in discovery metrics (lock_outcome).
+        self.cache.LOCK_PATH.write_text(f"{self._dead_pid()} now\n")
+        self._fresh()
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache.last_lock_outcome, "stolen_dead_pid")
+
+    def test_lock_outcome_records_clean_acquire(self):
+        self.assertEqual(self.cache.acquire_lock(), "acquired")
+        self.assertEqual(self.cache.last_lock_outcome, "acquired")
+
+
+class TestWindowsPidLiveness(unittest.TestCase):
+    """WEB-4774 (B1-Win): Windows process-liveness so a lock left by a killed
+    Windows scan is stolen immediately instead of waiting out the stale window.
+    The ctypes/kernel32 calls are mocked so these run on any platform."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+
+    @staticmethod
+    def _kernel32(open_handle):
+        k = Mock()
+        k.OpenProcess.return_value = open_handle
+        return k
+
+    def test_windows_probe_alive_when_handle_opens(self):
+        k = self._kernel32(open_handle=1234)
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=0, create=True):
+            self.assertTrue(self.cache._pid_alive_windows(4321))
+        k.CloseHandle.assert_called_once()  # handle must be closed
+
+    def test_windows_probe_dead_on_invalid_parameter(self):
+        # OpenProcess -> NULL with ERROR_INVALID_PARAMETER means the PID does not exist.
+        k = self._kernel32(open_handle=0)
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=87, create=True):
+            self.assertFalse(self.cache._pid_alive_windows(4321))
+
+    def test_windows_probe_alive_on_access_denied(self):
+        # NULL with ERROR_ACCESS_DENIED means the process exists but isn't openable.
+        k = self._kernel32(open_handle=0)
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=5, create=True):
+            self.assertTrue(self.cache._pid_alive_windows(4321))
+
+    def test_windows_probe_reads_saved_error_not_live_getlasterror(self):
+        # Regression for the use_last_error fix: the verdict must come from the
+        # error ctypes SAVED right after OpenProcess (ctypes.get_last_error), NOT a
+        # late kernel32.GetLastError() that intervening ctypes calls could have
+        # clobbered. Here a live GetLastError would wrongly say "alive" (0), but the
+        # saved error is ERROR_INVALID_PARAMETER -> must be read as dead.
+        k = self._kernel32(open_handle=0)
+        k.GetLastError.return_value = 0  # stale/clobbered live value
+        with patch("ctypes.WinDLL", return_value=k, create=True), \
+             patch("ctypes.get_last_error", return_value=87, create=True):
+            self.assertFalse(self.cache._pid_alive_windows(4321))
+        k.GetLastError.assert_not_called()  # must not rely on the unreliable live read
+
+    def test_windows_probe_conservative_on_ctypes_failure(self):
+        with patch("ctypes.WinDLL", side_effect=OSError("no kernel32"), create=True):
+            self.assertTrue(self.cache._pid_alive_windows(4321))
+
+    def test_windows_probe_nonpositive_pid_is_dead(self):
+        self.assertFalse(self.cache._pid_alive_windows(0))
+        self.assertFalse(self.cache._pid_alive_windows(-1))
+
+    def test_owner_alive_dispatches_to_windows(self):
+        with patch.object(self.cache.os, "name", "nt"), \
+             patch.object(self.cache, "_pid_alive_windows", return_value=False) as win:
+            self.assertIs(self.cache._owner_alive(4321), False)
+            win.assert_called_once_with(4321)
+
+    def test_owner_alive_none_for_unknown_platform(self):
+        with patch.object(self.cache.os, "name", "java"):
+            self.assertIsNone(self.cache._owner_alive(4321))
+
+    def test_owner_alive_none_for_missing_pid(self):
+        self.assertIsNone(self.cache._owner_alive(None))
+
+    @unittest.skipUnless(os.name == "nt", "exercises the real Win32 OpenProcess path; runs only on Windows")
+    def test_windows_probe_real_process_smoke(self):
+        # Real OpenProcess (no mocks): this live test process is alive; a very
+        # high, almost-certainly-invalid PID is reported dead. This is the only
+        # test that actually exercises the ctypes/kernel32 path end to end.
+        self.assertTrue(self.cache._pid_alive_windows(os.getpid()))
+        self.assertFalse(self.cache._pid_alive_windows(0x7FFFFFF0))
+        # And the platform dispatcher routes to it on Windows.
+        self.assertTrue(self.cache._owner_alive(os.getpid()))
+
+
+class TestResumeCheckpoint(unittest.TestCase):
+    """WEB-4774 (resume): the run checkpoint lets a quick re-run skip
+    re-processing tools a recent interrupted run already reported. Fresh run_id
+    stays data-safe because the backend replaces installations per-tool."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        unbound_dir.mkdir(parents=True, exist_ok=True)
+        self._patchers = [
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _age_updated_at(self, seconds_ago):
+        """Rewrite the checkpoint's updated_at to `seconds_ago` in the past
+        (negative => future, to exercise the clock-skew guard)."""
+        from datetime import datetime, timezone, timedelta
+        cache = self.cache.read_cache()
+        old = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cache["run"]["updated_at"] = old
+        self.cache.atomic_write_cache(cache)
+
+    def test_fresh_run_has_no_resumable_done(self):
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_uploaded_entries_are_resumable_within_window(self):
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.cache.mark_run_uploaded("Claude Code:/b", "alice")
+        self.assertEqual(
+            self.cache.resumable_done(),
+            {("Cursor:/a", "alice"), ("Claude Code:/b", "alice")},
+        )
+
+    def test_completed_run_is_not_resumable(self):
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.cache.mark_run_completed()
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_stale_run_outside_window_is_not_resumable(self):
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self._age_updated_at(self.cache.RESUME_WINDOW_SECONDS + 60)
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_future_updated_at_is_not_resumable(self):
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self._age_updated_at(-120)  # 2 min in the future (clock skew)
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_non_uuid_run_id_is_not_resumable(self):
+        # Fail-safe: a checkpoint whose run_id isn't a real UUID (corrupt state or a
+        # lazy forge) is not trusted -> full scan. Real runs always use uuid4().
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.assertTrue(self.cache.resumable_done())  # valid uuid -> resumable
+        c = self.cache.read_cache()
+        c["run"]["run_id"] = "not-a-uuid"
+        self.cache.atomic_write_cache(c)
+        self.assertEqual(self.cache.resumable_done(), set())
+
+    def test_mark_uploaded_dedups(self):
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.assertEqual(self.cache.read_run()["done"], [["Cursor:/a", "alice"]])
+
+    def test_start_run_carries_forward_done(self):
+        seed = {("Cursor:/a", "alice"), ("Codex:/c", "bob")}
+        self.cache.start_run("22222222-2222-2222-2222-222222222222", done=seed)
+        self.assertEqual(self.cache.resumable_done(), seed)
+
+    def test_mark_uploaded_is_noop_without_active_run(self):
+        self.cache.mark_run_uploaded("Cursor:/a", "alice")
+        self.assertEqual(self.cache.read_run(), {})
+
+    def test_start_run_preserves_hash_cache(self):
+        # The checkpoint must not clobber the existing per-tool hash cache.
+        self.cache.update_tool("Cursor", "alice", "hash-xyz")
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.assertEqual(self.cache.get_cached_hash("Cursor", "alice"), "hash-xyz")
+
+    def test_record_report_writes_hash_and_done_together(self):
+        # The folded write updates BOTH the per-tool hash and the run done-set.
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.record_report("Cursor", "alice", "Cursor:/a", payload_hash="h1")
+        self.assertEqual(self.cache.get_cached_hash("Cursor", "alice"), "h1")
+        self.assertEqual(self.cache.resumable_done(), {("Cursor:/a", "alice")})
+
+    def test_record_report_without_hash_records_done_only(self):
+        # Hash-match / hashless path: record progress without touching the hash.
+        self.cache.start_run("11111111-1111-1111-1111-111111111111")
+        self.cache.record_report("Cursor", "alice", "Cursor:/a")
+        self.assertIsNone(self.cache.get_cached_hash("Cursor", "alice"))
+        self.assertEqual(self.cache.resumable_done(), {("Cursor:/a", "alice")})
+
+
+class TestResumeSkipsReprocessingInMain(unittest.TestCase):
+    """WEB-4774 integration: a re-run within the resume window skips
+    process_single_tool for tools a recent interrupted run already reported,
+    while still processing (and reporting) the ones it didn't. Drives main()
+    in-process with the detector + backend mocked, over a real temp cache."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.cache as cache
+        self.cache = cache
+        self._tmp = tempfile.mkdtemp()
+        unbound_dir = Path(self._tmp) / ".unbound"
+        unbound_dir.mkdir(parents=True, exist_ok=True)
+        self._patchers = [
+            patch.object(cache, "_HOME_STATE_DIR", unbound_dir),
+            patch.object(cache, "UNBOUND_DIR", unbound_dir),
+            patch.object(cache, "LOCK_PATH", unbound_dir / "discovery.lock"),
+            patch.object(cache, "CACHE_PATH", unbound_dir / "discovery-cache.json"),
+        ]
+        for p in self._patchers:
+            p.start()
+        utils_mod._SENTRY_DSN = ""
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_done_tool_is_skipped_pending_tool_is_processed(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        tool_a = {"name": "ToolA", "install_path": "/path/a", "version": "1"}
+        tool_b = {"name": "ToolB", "install_path": "/path/b", "version": "1"}
+
+        # Seed a recent INTERRUPTED run: ToolA already reported for alice and
+        # never flipped to completed -> resumable within the window.
+        self.cache.start_run("33333333-3333-3333-3333-333333333333")
+        self.cache.mark_run_uploaded("ToolA:/path/a", "alice")
+
+        detector = Mock()
+        detector.get_device_id.return_value = "dev"
+        detector.detect_all_tools.return_value = [tool_a, tool_b]
+        detector.process_single_tool.return_value = {"projects": []}
+        detector.filter_tool_projects_by_user.return_value = {
+            "projects": [], "version": "1", "install_path": "/path/x",
+        }
+        detector.generate_single_tool_report.return_value = {"tools": [{"name": "T", "projects": []}]}
+
+        metrics_mock = Mock()
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "AIToolsDetector", return_value=detector), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_report_to_backend", Mock(return_value=(True, False))), \
+             patch.object(adm, "send_discovery_metrics", metrics_mock), \
+             patch.object(adm, "compute_payload_hash", Mock(return_value="h")), \
+             patch.object(adm, "run_sweep", Mock(return_value=(0, 0, 0))), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=["alice"]), \
+             patch.object(adm, "get_user_info", return_value="alice"), \
+             patch.object(adm, "get_audit_user", return_value="alice"), \
+             patch.object(sys, "argv", argv):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+        processed = [c.args[0]["name"] for c in detector.process_single_tool.call_args_list]
+        self.assertNotIn("ToolA", processed, "already-reported tool must be skipped")
+        self.assertIn("ToolB", processed, "pending tool must be processed")
+        # A report was generated only for the pending tool.
+        self.assertEqual(detector.generate_single_tool_report.call_count, 1)
+        # Clean finish -> checkpoint flipped to completed (next run won't resume).
+        self.assertEqual(self.cache.read_run().get("status"), "completed")
+        # Resume observability is surfaced in the discovery metrics payload.
+        self.assertTrue(metrics_mock.called, "discovery metrics were not sent")
+        meta = metrics_mock.call_args.args[3]["metadata"]
+        self.assertTrue(meta["resumed"])
+        self.assertEqual(meta["resume_pairs_skipped"], 1)   # (ToolA, alice)
+        self.assertEqual(meta["resume_tools_skipped"], 1)   # ToolA fully skipped
+
 
 class TestStateDirFallback(unittest.TestCase):
     """_ensure_state_dir falls back to a deterministic uid-namespaced temp dir
@@ -1431,6 +1739,94 @@ class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
         # context is passed positionally as the 2nd argument.
         context = args[1]
         self.assertEqual(context.get("phase"), "extract")
+
+
+class TestNoToolsSentryEvent(unittest.TestCase):
+    """main() emits exactly one enriched 'no_tools_found' warning on a zero-tool
+    scan (the only signal that distinguishes an enumeration miss from a genuinely
+    empty device) and stays silent when any tool is detected."""
+
+    @staticmethod
+    def _context_of(call):
+        # report_to_sentry is invoked two ways in the codebase: context as the
+        # keyword `context=` (the no-tools path) and context positionally as the
+        # 2nd arg (extraction/process paths). Read whichever is present.
+        args, kwargs = call
+        if "context" in kwargs:
+            return kwargs["context"]
+        return args[1] if len(args) > 1 else {}
+
+    def _run_main(self, detect_return, mock_sentry):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        detector_inst = Mock()
+        detector_inst.get_device_id.return_value = "dev"
+        detector_inst.detect_all_tools.return_value = detect_return
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"), \
+             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())), \
+             patch.object(adm.discovery_cache, "release_lock", Mock()), \
+             patch.object(adm, "AIToolsDetector", return_value=detector_inst), \
+             patch.object(adm, "report_to_sentry", mock_sentry), \
+             patch.object(adm, "send_scan_event", Mock(return_value=(True, None))), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "get_all_users_linux", return_value=[]), \
+             patch.object(adm, "get_user_info", return_value="runner"), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", argv):
+            detector_inst._set_canonical_vscode_copilot = Mock()
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_fires_on_zero_tool_scan(self):
+        mock_sentry = Mock()
+        self._run_main([], mock_sentry)
+
+        no_tools_calls = [
+            c for c in mock_sentry.call_args_list
+            if self._context_of(c).get("phase") == "no_tools_found"
+        ]
+        self.assertEqual(len(no_tools_calls), 1, "expected exactly one no_tools_found event")
+
+        call = no_tools_calls[0]
+        args, kwargs = call
+        # Exception is positional, RuntimeError with the fixed message.
+        self.assertIsInstance(args[0], RuntimeError)
+        self.assertEqual(str(args[0]), "Discovery found no tools")
+        self.assertEqual(kwargs.get("level"), "warning")
+
+        ctx = self._context_of(call)
+        # get_all_users_linux -> [] means enumeration missed every account, so the
+        # current-user fallback supplies the single scanned home.
+        self.assertEqual(ctx.get("homes_enumerated"), 0)
+        self.assertEqual(ctx.get("users_scanned"), 1)
+        self.assertIs(ctx.get("used_fallback_user"), True)
+        self.assertIn("device_id", ctx)
+        self.assertIn("run_id", ctx)
+        self.assertIn("duration_ms", ctx)
+        # PII guard: no list-valued context (e.g. the raw user list) may leak.
+        for key, value in ctx.items():
+            self.assertNotIsInstance(value, list, f"context key {key!r} is a list")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
+    def test_does_not_fire_when_tools_found(self):
+        mock_sentry = Mock()
+        self._run_main(
+            [{"name": "Claude Code", "version": "1.0", "install_path": "/home/runner/.claude"}],
+            mock_sentry,
+        )
+
+        no_tools_calls = [
+            c for c in mock_sentry.call_args_list
+            if self._context_of(c).get("phase") == "no_tools_found"
+        ]
+        self.assertEqual(no_tools_calls, [], "no_tools_found must not fire when a tool is detected")
 
 
 if __name__ == "__main__":

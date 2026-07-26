@@ -261,22 +261,19 @@ class TestLinuxReplitResidue(unittest.TestCase):
         return pkg
 
     def test_config_dir_only_not_detected(self):
-        """``~/.config/Replit`` data dir, candidate install dirs hold no
-        resource tree, and ``which replit`` is empty -> None (FP fix). The
-        ``run_command`` stub neutralises the ``which`` backstop."""
+        """``~/.config/Replit`` data dir with no resource tree in any candidate
+        install dir -> not detected (residue is not an install)."""
         cfg = self.home / ".config" / "Replit"
         cfg.mkdir(parents=True, exist_ok=True)
         # Candidate dir is the bare config dir — exists, but no resource tree.
-        with patch.object(self.detector, "_candidate_install_dirs", return_value=[cfg]), \
-             patch.object(self.mod, "run_command", return_value=None):
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[cfg]):
             result = self.detector.detect()
         self.assertIsNone(result)
 
     def test_resource_tree_install_detected(self):
         """An install dir with ``resources/app/package.json`` -> detected."""
         self._write_package_json("2.0.1")
-        with patch.object(self.detector, "_candidate_install_dirs", return_value=[self.install]), \
-             patch.object(self.detector, "_version_via_command", return_value=None):
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[self.install]):
             result = self.detector.detect()
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(self.install))
@@ -293,8 +290,7 @@ class TestLinuxReplitResidue(unittest.TestCase):
         asar = lib_install / "resources" / "app.asar"
         asar.parent.mkdir(parents=True, exist_ok=True)
         asar.write_text("")  # packed archive; never parsed (zero-dep)
-        with patch.object(self.detector, "_candidate_install_dirs", return_value=[lib_install]), \
-             patch.object(self.mod, "run_command", return_value=None):
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[lib_install]):
             result = self.detector.detect()
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(lib_install))
@@ -307,24 +303,17 @@ class TestLinuxReplitResidue(unittest.TestCase):
         ``/usr/share/*`` entries were dropped."""
         self.assertIn(Path("/usr/lib/replit"), self.detector._candidate_install_dirs())
 
-    def test_which_replit_backstop_detected(self):
-        """No resource-tree install, but ``which replit`` resolves to a real
-        path -> detected. Proves the PATH backstop survives."""
-        replit_bin = self.root / "usr" / "bin" / "replit"
-        replit_bin.parent.mkdir(parents=True, exist_ok=True)
-        replit_bin.write_text("")
-
-        def fake_run(cmd, *a, **k):
-            # ``which replit`` -> the real tmp path; version probes -> None.
-            if cmd[:1] == ["which"]:
-                return str(replit_bin)
-            return None
-
-        with patch.object(self.detector, "_candidate_install_dirs", return_value=[]), \
-             patch.object(self.mod, "run_command", side_effect=fake_run):
+    def test_which_replit_pypi_collision_not_detected(self):
+        """A ``replit`` on PATH that is NOT Replit Desktop (e.g. the PyPI
+        ``replit`` package's console script) must NOT be detected when there is
+        no install resource tree. detect() gates on the resource tree only and
+        never consults ``which replit`` — the backstop was removed because it
+        name-collided with the PyPI package and reported a phantom Desktop."""
+        # A `replit` console script may sit on PATH (the collision); without a
+        # real install resource tree, detection must ignore it.
+        with patch.object(self.detector, "_candidate_install_dirs", return_value=[]):
             result = self.detector.detect()
-        self.assertIsNotNone(result)
-        self.assertEqual(result["install_path"], str(replit_bin))
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

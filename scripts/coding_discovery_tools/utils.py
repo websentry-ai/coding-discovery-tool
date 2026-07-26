@@ -10,6 +10,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -1584,9 +1585,11 @@ def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
         return None
 
 
+# Low-cardinality no_tools_found discriminators (bools + small ints); duration_ms stays in extra.
 _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
+    "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -1619,10 +1622,55 @@ def reset_sentry_run_state() -> None:
     _sentry_dead_this_run = False
 
 
+def _ip_is_loopback(host: str) -> bool:
+    """True when ``host`` is a loopback IP literal (IPv4 incl. shorthand, ::1, IPv4-mapped)."""
+    try:
+        return socket.inet_aton(host)[0] == 127
+    except OSError:
+        pass
+    try:
+        packed = socket.inet_pton(socket.AF_INET6, host)
+    except (OSError, AttributeError):
+        return False
+    if packed == b"\x00" * 15 + b"\x01":
+        return True
+    if packed[:12] == b"\x00" * 10 + b"\xff\xff":
+        return packed[12] == 127
+    return False
+
+
+def _event_domain_is_loopback(domain: str) -> bool:
+    """True when ``domain``'s host is loopback. Plain string parsing, no urllib (Zscaler)."""
+    if not domain:
+        return False
+    host = domain.strip().lower()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") <= 1:
+        host = host.split(":", 1)[0]
+    if host == "localhost" or host.endswith(".localhost") or host == "0.0.0.0":
+        return True
+    return _ip_is_loopback(host)
+
+
+def _is_ci_or_local_event(ctx: Dict) -> bool:
+    """True for CI/local-run events (loopback report domain). Never raises; defaults False."""
+    try:
+        return _event_domain_is_loopback(str(ctx.get("domain") or ""))
+    except Exception:
+        return False
+
+
 def report_to_sentry(
     exception: Exception,
     context: Optional[Dict] = None,
     level: str = "error",
+    priority: bool = False,
 ) -> None:
     """Send an event to Sentry using the raw HTTP store endpoint.
 
@@ -1630,6 +1678,12 @@ def report_to_sentry(
         exception: The exception to report.
         context: Extra tags/context (e.g. phase, tool_name, http_code).
         level: Sentry level -- "error" for crashes, "warning" for HTTP send failures.
+        priority: Best-effort guarantee a terminal once-per-run diagnostic
+            (e.g. the no_tools_found summary) is delivered. Bypasses both the
+            per-run event cap AND the circuit breaker so earlier transient
+            per-tool send failures can't silently skip it -- it still gets ONE
+            attempt at the end of the run (bounded: at most one ~4s curl). Dedup
+            is still honored (no spam). Reserve for a single terminal event/run.
     """
     try:
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
@@ -1639,14 +1693,24 @@ def report_to_sentry(
 
         ctx = context or {}
 
+        if _is_ci_or_local_event(ctx):
+            logger.debug("Sentry reporting skipped (CI/local run)")
+            return
+
         global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
         # Circuit breaker: once the transport looks dead, stop calling Sentry for the
         # rest of the run so a blocked endpoint can't add its timeout to every failure.
-        if _sentry_dead_this_run:
+        # priority events bypass it for ONE bounded attempt so a transient mid-scan
+        # outage doesn't silently drop the terminal diagnostic.
+        if _sentry_dead_this_run and not priority:
             return
         # Collapse duplicate events and hard-cap the synchronous curls per run.
+        # priority events skip the count cap + breaker (but never dedup) so a
+        # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
         signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
-        if signature in _sentry_sent_signatures or _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
+        if signature in _sentry_sent_signatures:
+            return
+        if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:
             return
         _sentry_sent_signatures.add(signature)
         _sentry_event_count += 1

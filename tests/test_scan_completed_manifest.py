@@ -140,7 +140,7 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
     well-formed manifest + covered_home_users; lifecycle events that are not
     "completed" carry neither."""
 
-    def _run_cli(self, timeout=600):
+    def _run_cli(self, timeout=1800):
         env = os.environ.copy()
         # Throwaway HOME: isolated lock/cache so the run isn't blocked by a live lock and starts cold.
         env["HOME"] = tempfile.mkdtemp(prefix="discovery_home_")

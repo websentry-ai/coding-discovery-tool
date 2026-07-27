@@ -3296,12 +3296,10 @@ def main():
                 user_tools = detector.detect_all_tools(
                     user_home=user_home, failures=user_detect_failures
                 )
-            # Per-user presence: a detected tool stays in the manifest even if reading it later
-            # errors (a read failure isn't an uninstall).
+            # Detected tools stay in the manifest even if a later read errors (a read failure isn't an uninstall).
             for detected in user_tools:
                 scanned_manifest.add((user, detected.get('name', 'Unknown')))
-            # A detector error means presence is unknown for this user -> mark the scan incomplete
-            # so it doesn't prune (detector.tool_name is an umbrella label, not the real row name).
+            # Detector error = presence unknown -> incomplete, no prune (tool_name is an umbrella label, not a row key).
             if user_detect_failures:
                 incomplete_reasons.append(f"detector error for user {user}")
 
@@ -3387,8 +3385,7 @@ def main():
                         user_home = Path.home()
 
                     try:
-                        # all_tools is deduped globally; only report a tool for users who actually
-                        # detected it (i.e. it's in their manifest) to avoid phantom installs.
+                        # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
                         if (user_name, tool_name) not in scanned_manifest:
                             continue
 
@@ -3647,8 +3644,7 @@ def main():
 
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
-                # Detected tools are already in the manifest from the detection phase, so this
-                # extraction failure can't drop a live tool.
+                # Manifest entries come from the detection phase, so this extraction failure can't drop a live tool.
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
@@ -3744,8 +3740,7 @@ def main():
 
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")
-        # An incomplete scan sends neither manifest nor covered scope, so the backend has no
-        # partial inventory to prune from (atomic on this event — no separate signal to lose).
+        # Incomplete scan: send neither manifest nor covered scope, so the backend can't prune from partial data.
         if incomplete_reasons:
             manifest, covered = None, None
         else:

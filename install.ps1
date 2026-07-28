@@ -16,7 +16,8 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 $_domain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
 $_key = if ($ApiKey) { $ApiKey } else { $env:UNBOUND_API_KEY }
 $BRANCH = 'main'
-if ($_domain -and $_key) {
+# Only send the key over https.
+if ($_domain -and $_key -and $_domain -match '^https://') {
     try {
         $_url = ($_domain.TrimEnd('/')) + '/api/v1/ai-tools/discovery-branch/'
         $_resp = Invoke-RestMethod -Uri $_url -TimeoutSec 5 -Headers @{ Authorization = "Bearer $_key" } -ErrorAction Stop

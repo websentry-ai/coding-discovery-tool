@@ -19,22 +19,8 @@ set -e  # Exit on any error
 
 REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
 
-# Which branch of THIS repo the discovery code runs from. It must follow the
-# backend it reports to: a staging backend runs the staging branch, everything
-# else runs main. Without this, staging environments silently ran production
-# discovery code.
-#
-# The BACKEND is authoritative — it reports its own environment, so the mapping
-# survives any domain/subdomain rename (unlike matching the hostname string).
-# We fall back to a domain-string heuristic, and ultimately to main, whenever the
-# backend can't be asked: an older backend without the endpoint, an offline
-# machine, or a network blip. main is always the safe default, so a production
-# backend can never pull staging code.
-#
-# --domain is passed by every caller (the CLI, the agent hooks, the scheduled
-# wrapper); UNBOUND_DOMAIN is honoured too, since the Windows wrapper passes the
-# domain that way. Both "--domain <url>" and "--domain=<url>" are accepted, since
-# argparse accepts either on the Python side.
+# Ask the backend which branch to run: staging only when it replies "staging",
+# otherwise main. Reads the domain from --domain / --domain= or UNBOUND_DOMAIN.
 resolve_branch() {
     local domain="${UNBOUND_DOMAIN:-}" prev=""
     for arg in "$@"; do
@@ -45,23 +31,14 @@ resolve_branch() {
         prev="$arg"
     done
 
-    # 1. Authoritative: ask the backend. Short timeout so a hung endpoint can't
-    #    stall discovery. Only "staging"/"main" are honoured from the reply, so a
-    #    malformed or hostile response can never steer `git clone --branch`.
     if [ -n "$domain" ] && command -v curl >/dev/null 2>&1; then
         local resp b
         resp=$(curl -fsS --connect-timeout 2 -m 5 "${domain%/}/api/v1/ai-tools/discovery-branch/" 2>/dev/null) || resp=""
         b=$(printf '%s' "$resp" | sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p')
-        case "$b" in
-            staging|main) printf '%s' "$b"; return ;;
-        esac
+        [ "$b" = "staging" ] && { printf 'staging'; return; }
     fi
 
-    # 2. Fallback: derive from the domain string.
-    case "$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')" in
-        *staging*) printf 'staging' ;;
-        *)         printf 'main' ;;
-    esac
+    printf 'main'
 }
 BRANCH="$(resolve_branch "$@")"
 

@@ -11,30 +11,16 @@ param(
 
 $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 
-# Which branch of THIS repo the discovery code runs from. It follows the backend it
-# reports to: a staging backend runs the staging branch, everything else runs main.
-#
-# The BACKEND is authoritative — it reports its own environment, so the mapping
-# survives a domain/subdomain rename. We fall back to a -match on the domain string,
-# and ultimately to main, when the backend can't be asked (no endpoint / offline /
-# blip). main is always the safe default, so prod can never pull staging.
-# -Domain is passed by every caller; UNBOUND_DOMAIN is honoured too (Windows wrapper).
+# Ask the backend which branch to run: staging only when it replies "staging",
+# otherwise main. Reads the domain from -Domain or UNBOUND_DOMAIN.
 $_domain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
 $BRANCH = 'main'
-$_branchResolved = $false
 if ($_domain) {
     try {
-        # Invoke-RestMethod uses the Windows system cert store (schannel), so it
-        # works behind enterprise TLS-inspection CAs. Only staging/main are honoured.
         $_url = ($_domain.TrimEnd('/')) + '/api/v1/ai-tools/discovery-branch/'
         $_resp = Invoke-RestMethod -Uri $_url -TimeoutSec 5 -ErrorAction Stop
-        if ($_resp.branch -eq 'staging' -or $_resp.branch -eq 'main') {
-            $BRANCH = $_resp.branch; $_branchResolved = $true
-        }
+        if ($_resp.branch -eq 'staging') { $BRANCH = 'staging' }
     } catch { }
-}
-if (-not $_branchResolved) {
-    $BRANCH = if ($_domain -match 'staging') { 'staging' } else { 'main' }   # -match is case-insensitive
 }
 
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"

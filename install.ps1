@@ -15,10 +15,10 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 # otherwise main. Reads the domain from -Domain or UNBOUND_DOMAIN.
 $_domain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
 $BRANCH = 'main'
-if ($_domain -and $_domain -match '^https://') {
+if ($_domain) {
     try {
         $_url = ($_domain.TrimEnd('/')) + '/api/v1/ai-tools/discovery-branch/'
-        $_resp = Invoke-RestMethod -Uri $_url -TimeoutSec 5 -MaximumRedirection 0 -ErrorAction Stop
+        $_resp = Invoke-RestMethod -Uri $_url -TimeoutSec 5 -ErrorAction Stop
         if ($_resp.branch -eq 'staging') { $BRANCH = 'staging' }
     } catch { }
 }

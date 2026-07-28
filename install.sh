@@ -22,18 +22,20 @@ REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
 # Ask the backend which branch to run: staging only when it replies "staging",
 # otherwise main. Reads the domain from --domain / --domain= or UNBOUND_DOMAIN.
 resolve_branch() {
-    local domain="${UNBOUND_DOMAIN:-}" prev=""
+    local domain="${UNBOUND_DOMAIN:-}" key="${UNBOUND_API_KEY:-}" prev=""
     for arg in "$@"; do
         case "$arg" in
-            --domain=*) domain="${arg#--domain=}" ;;
+            --domain=*)  domain="${arg#--domain=}" ;;
+            --api-key=*) key="${arg#--api-key=}" ;;
         esac
-        [ "$prev" = "--domain" ] && domain="$arg"
+        [ "$prev" = "--domain" ]  && domain="$arg"
+        [ "$prev" = "--api-key" ] && key="$arg"
         prev="$arg"
     done
 
-    if [ -n "$domain" ] && command -v curl >/dev/null 2>&1; then
+    if [ -n "$domain" ] && [ -n "$key" ] && command -v curl >/dev/null 2>&1; then
         local resp b
-        resp=$(curl -fsS --connect-timeout 2 -m 5 -- "${domain%/}/api/v1/ai-tools/discovery-branch/" 2>/dev/null) || resp=""
+        resp=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer $key" -- "${domain%/}/api/v1/ai-tools/discovery-branch/" 2>/dev/null) || resp=""
         b=$(printf '%s' "$resp" | sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p')
         [ "$b" = "staging" ] && { printf 'staging'; return; }
     fi

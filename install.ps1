@@ -14,11 +14,12 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 # Ask the backend which branch to run: staging only when it replies "staging",
 # otherwise main. Reads the domain from -Domain or UNBOUND_DOMAIN.
 $_domain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
+$_key = if ($ApiKey) { $ApiKey } else { $env:UNBOUND_API_KEY }
 $BRANCH = 'main'
-if ($_domain) {
+if ($_domain -and $_key) {
     try {
         $_url = ($_domain.TrimEnd('/')) + '/api/v1/ai-tools/discovery-branch/'
-        $_resp = Invoke-RestMethod -Uri $_url -TimeoutSec 5 -ErrorAction Stop
+        $_resp = Invoke-RestMethod -Uri $_url -TimeoutSec 5 -Headers @{ Authorization = "Bearer $_key" } -ErrorAction Stop
         if ($_resp.branch -eq 'staging') { $BRANCH = 'staging' }
     } catch { }
 }

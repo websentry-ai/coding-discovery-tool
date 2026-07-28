@@ -131,10 +131,39 @@ def extract_codex_user_level_items(
 
     Reads ``~/.codex/skills`` (where Codex itself installs skills) and the
     ``~/.agents/skills`` alias, resolving both back to the home via the
-    ``.codex``-aware parent set.
+    ``.codex``-aware parent set. Also picks up skills bundled inside installed Codex
+    marketplace plugins (see :func:`_extract_codex_plugin_skills`).
     """
     extract_user_level_items(
         user_home, user_skills, extract_single_rule_file_func, configs,
         user_dir_names=CODEX_USER_DIR_NAMES,
         parent_dir_names=CODEX_USER_PARENT_DIR_NAMES,
     )
+    _extract_codex_plugin_skills(user_home, user_skills)
+
+
+def _extract_codex_plugin_skills(user_home: Path, user_skills: List[Dict]) -> None:
+    """Append skills bundled inside installed Codex marketplace plugins.
+
+    Codex installs plugins via ``codex plugin add`` and each can carry skills under
+    ``~/.codex/plugins/cache/<marketplace>/<plugin>/<hash>/skills/``. These are the
+    Codex analogue of the plugin-bundled skills already reported for Claude Code and
+    Cursor, so they are tagged ``source="plugin"`` with provenance and attributed to
+    the owning home (``project_path``) exactly like standalone user skills.
+
+    Deliberately NOT included: ``~/.codex/skills/.system/`` (OpenAI built-ins, identical
+    on every machine) stay excluded as vendor content. Never raises.
+    """
+    try:
+        from .plugin_extraction_helpers import extract_codex_plugins, extract_plugin_skills
+        plugins = extract_codex_plugins(user_home / CODEX_DIR_NAME)
+        if not plugins:
+            return
+        home = str(user_home)
+        for skill in extract_plugin_skills(plugins):
+            # A user skill without project_path is dropped (never filed under the
+            # scanner's home), so attribute plugin skills to their owning home.
+            skill["project_path"] = home
+            user_skills.append(skill)
+    except Exception as exc:  # enumeration must never break the scan
+        logger.debug("Error extracting Codex plugin skills for %s: %s", user_home, exc)

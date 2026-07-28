@@ -8,6 +8,7 @@ detection. Uses functional composition — no classes.
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -83,6 +84,108 @@ _OFFICIAL_CURSOR_MARKETPLACES = frozenset({
 def _is_official_cursor_marketplace(marketplace_name: str) -> bool:
     """Check if a marketplace is an official Cursor marketplace."""
     return marketplace_name.lower() in _OFFICIAL_CURSOR_MARKETPLACES
+
+
+_OFFICIAL_CODEX_MARKETPLACES = frozenset({
+    "openai-curated",
+})
+
+
+def _is_official_codex_marketplace(marketplace_name: str) -> bool:
+    """Check if a marketplace is the official Codex (OpenAI) marketplace."""
+    return marketplace_name.lower() in _OFFICIAL_CODEX_MARKETPLACES
+
+
+_CODEX_PLUGIN_HEADER_RE = re.compile(r'^\s*\[plugins\."([^"]+)"\]\s*$')
+_CODEX_ENABLED_TRUE_RE = re.compile(r'^\s*enabled\s*=\s*true\s*$')
+
+
+def _codex_enabled_plugin_ids(codex_home: Path) -> Optional[set]:
+    """Best-effort set of ``<plugin>@<marketplace>`` ids marked ``enabled = true`` in
+    ``~/.codex/config.toml``.
+
+    Returns None if the config is missing/unreadable — callers then treat every
+    *installed* plugin (present in the cache) as enabled. Parsed with a tiny line
+    scanner rather than a TOML library on purpose: ``tomllib`` is 3.11+ and this
+    codebase targets 3.9.
+    """
+    config = codex_home / "config.toml"
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except (OSError, PermissionError):
+        return None
+    enabled: set = set()
+    current: Optional[str] = None
+    for line in text.splitlines():
+        header = _CODEX_PLUGIN_HEADER_RE.match(line)
+        if header:
+            current = header.group(1)
+            continue
+        if line.lstrip().startswith("["):          # any other table ends the block
+            current = None
+            continue
+        if current and _CODEX_ENABLED_TRUE_RE.match(line):
+            enabled.add(current)
+    return enabled
+
+
+def extract_codex_plugins(codex_home: Path) -> List[Dict]:
+    """Enumerate installed Codex marketplace plugins.
+
+    Codex installs plugins (``codex plugin add <plugin>@<marketplace>``) under
+    ``<codex_home>/plugins/cache/<marketplace>/<plugin>/<hash>/`` and each plugin can
+    bundle skills at ``<hash>/skills/<name>/SKILL.md`` — the Codex analogue of the
+    plugin-bundled skills already reported for Claude Code and Cursor. Returns dicts in
+    the shape :func:`extract_plugin_skills` consumes. Disabled plugins (per
+    ``config.toml``) are skipped.
+    """
+    plugins: List[Dict] = []
+    cache = codex_home / "plugins" / "cache"
+    if not cache.is_dir():
+        return plugins
+
+    enabled_ids = _codex_enabled_plugin_ids(codex_home)  # None -> treat all installed as enabled
+    try:
+        for marketplace_dir in cache.iterdir():
+            if not marketplace_dir.is_dir():
+                continue
+            marketplace_name = marketplace_dir.name
+            for plugin_dir in marketplace_dir.iterdir():
+                if not plugin_dir.is_dir():
+                    continue
+                plugin_name = plugin_dir.name
+                plugin_id = f"{plugin_name}@{marketplace_name}"
+                if enabled_ids is not None and plugin_id not in enabled_ids:
+                    continue  # installed but disabled
+
+                # A plugin may keep multiple content-hash install dirs; take the newest
+                # one that actually carries a skills/ payload.
+                install_path: Optional[Path] = None
+                try:
+                    hash_dirs = sorted(
+                        (d for d in plugin_dir.iterdir() if d.is_dir()),
+                        key=lambda d: d.stat().st_mtime,
+                    )
+                except (OSError, PermissionError):
+                    hash_dirs = []
+                for hash_dir in hash_dirs:
+                    if (hash_dir / "skills").is_dir():
+                        install_path = hash_dir
+                if install_path is None:
+                    continue
+
+                plugins.append({
+                    "plugin_id": plugin_id,
+                    "plugin_name": plugin_name,
+                    "marketplace_name": marketplace_name,
+                    "install_path": str(install_path),
+                    "has_skills": True,
+                    "source_type": "marketplace",
+                    "is_official": _is_official_codex_marketplace(marketplace_name),
+                })
+    except (OSError, PermissionError) as exc:
+        logger.debug("Error enumerating Codex plugins under %s: %s", cache, exc)
+    return plugins
 
 
 def _construct_source_url(source_type: str, source_repo: Optional[str]) -> Optional[str]:

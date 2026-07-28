@@ -616,3 +616,66 @@ class TestMcpProvenanceTagging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCodexPluginEnumeration(unittest.TestCase):
+    """extract_codex_plugins: resilience, symlink/containment, version selection."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mk_plugin(self, codex, marketplace, plugin, skill, version=None, hashname="h1"):
+        base = codex / "plugins" / "cache" / marketplace / plugin / hashname
+        (base / "skills" / skill).mkdir(parents=True)
+        (base / "skills" / skill / "SKILL.md").write_text(f"# {skill}", encoding="utf-8")
+        if version is not None:
+            (base / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+            (base / ".codex-plugin" / "plugin.json").write_text(
+                json.dumps({"name": plugin, "version": version}), encoding="utf-8")
+        return base
+
+    def _enable(self, codex, *ids):
+        codex.mkdir(parents=True, exist_ok=True)
+        (codex / "config.toml").write_text(
+            "".join(f'[plugins."{i}"]\nenabled = true\n' for i in ids), encoding="utf-8")
+
+    def test_selects_highest_version_not_newest_mtime(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        self._mk_plugin(codex, "openai-curated", "linear", "linear", version="0.0.9", hashname="hi")
+        low = self._mk_plugin(codex, "openai-curated", "linear", "linear", version="0.0.3", hashname="lo")
+        os.utime(low, None)  # low version is the newest by mtime -> version must still win
+        self._enable(codex, "linear@openai-curated")
+        plugins = extract_codex_plugins(codex)
+        self.assertEqual(len(plugins), 1)
+        self.assertTrue(plugins[0]["install_path"].endswith("hi"))
+
+    def test_unreadable_marketplace_does_not_abort_the_rest(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        self._mk_plugin(codex, "good", "alpha", "alpha")
+        bad = codex / "plugins" / "cache" / "bad"
+        (bad / "beta").mkdir(parents=True)
+        os.chmod(bad, 0o000)
+        try:
+            names = {p["plugin_name"] for p in extract_codex_plugins(codex)}
+            self.assertIn("alpha", names)  # good marketplace still scanned
+        finally:
+            os.chmod(bad, 0o755)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_symlinked_plugin_dir_escaping_home_is_rejected(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        outside = self.tmp / "evil"
+        (outside / "skills" / "secret").mkdir(parents=True)
+        (outside / "skills" / "secret" / "SKILL.md").write_text("# secret", encoding="utf-8")
+        cache = codex / "plugins" / "cache" / "openai-curated"
+        cache.mkdir(parents=True)
+        os.symlink(outside, cache / "linear")
+        self._enable(codex, "linear@openai-curated")
+        self.assertEqual(extract_codex_plugins(codex), [])  # symlink escape rejected

@@ -8,10 +8,13 @@ detection. Uses functional composition — no classes.
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from .constants import is_symlink_or_junction
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +132,39 @@ def _codex_enabled_plugin_ids(codex_home: Path) -> Optional[set]:
     return enabled
 
 
+def _codex_plugin_version_key(hash_dir: Path):
+    """Sort key for choosing a plugin's active install dir: (version_tuple, mtime).
+
+    Codex resolves the active install by highest ``version`` (from the plugin's
+    ``.codex-plugin/plugin.json``), so we prefer that; ``mtime`` only breaks ties or
+    fills in when the manifest has no parseable version. Best-effort — never raises.
+    """
+    version_tuple = (-1,)
+    try:
+        manifest = _read_json_file(hash_dir / ".codex-plugin" / "plugin.json") or {}
+        raw = str(manifest.get("version", ""))
+        parts = tuple(int(p) for p in re.split(r"[.\-+]", raw) if p.isdigit())
+        if parts:
+            version_tuple = parts
+    except Exception:  # pragma: no cover - version parsing is advisory only
+        pass
+    try:
+        mtime = hash_dir.stat().st_mtime
+    except (OSError, PermissionError):
+        mtime = 0.0
+    return (version_tuple, mtime)
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """True if `child` resolves to a path inside `parent` (symlink-escape guard)."""
+    try:
+        child_real = Path(os.path.realpath(str(child)))
+        parent_real = Path(os.path.realpath(str(parent)))
+        return child_real == parent_real or parent_real in child_real.parents
+    except (OSError, ValueError):
+        return False
+
+
 def extract_codex_plugins(codex_home: Path) -> List[Dict]:
     """Enumerate installed Codex marketplace plugins.
 
@@ -138,53 +174,70 @@ def extract_codex_plugins(codex_home: Path) -> List[Dict]:
     plugin-bundled skills already reported for Claude Code and Cursor. Returns dicts in
     the shape :func:`extract_plugin_skills` consumes. Disabled plugins (per
     ``config.toml``) are skipped.
+
+    Robust by construction: a filesystem error in one marketplace/plugin skips only that
+    entry and keeps scanning the rest, symlinked cache entries are rejected, and every
+    chosen install path is confirmed to resolve inside ``codex_home`` so a crafted cache
+    layout cannot redirect reads outside the owning user's tree.
     """
     plugins: List[Dict] = []
     cache = codex_home / "plugins" / "cache"
-    if not cache.is_dir():
+    if not cache.is_dir() or is_symlink_or_junction(cache):
         return plugins
 
     enabled_ids = _codex_enabled_plugin_ids(codex_home)  # None -> treat all installed as enabled
     try:
-        for marketplace_dir in cache.iterdir():
-            if not marketplace_dir.is_dir():
+        marketplaces = list(cache.iterdir())
+    except (OSError, PermissionError) as exc:
+        logger.debug("Error listing Codex plugin cache %s: %s", cache, exc)
+        return plugins
+
+    for marketplace_dir in marketplaces:
+        try:
+            if not marketplace_dir.is_dir() or is_symlink_or_junction(marketplace_dir):
                 continue
             marketplace_name = marketplace_dir.name
             for plugin_dir in marketplace_dir.iterdir():
-                if not plugin_dir.is_dir():
-                    continue
-                plugin_name = plugin_dir.name
-                plugin_id = f"{plugin_name}@{marketplace_name}"
-                if enabled_ids is not None and plugin_id not in enabled_ids:
-                    continue  # installed but disabled
-
-                # A plugin may keep multiple content-hash install dirs; take the newest
-                # one that actually carries a skills/ payload.
-                install_path: Optional[Path] = None
                 try:
-                    hash_dirs = sorted(
-                        (d for d in plugin_dir.iterdir() if d.is_dir()),
-                        key=lambda d: d.stat().st_mtime,
-                    )
-                except (OSError, PermissionError):
-                    hash_dirs = []
-                for hash_dir in hash_dirs:
-                    if (hash_dir / "skills").is_dir():
-                        install_path = hash_dir
-                if install_path is None:
-                    continue
+                    if not plugin_dir.is_dir() or is_symlink_or_junction(plugin_dir):
+                        continue
+                    plugin_name = plugin_dir.name
+                    plugin_id = f"{plugin_name}@{marketplace_name}"
+                    if enabled_ids is not None and plugin_id not in enabled_ids:
+                        continue  # installed but disabled
 
-                plugins.append({
-                    "plugin_id": plugin_id,
-                    "plugin_name": plugin_name,
-                    "marketplace_name": marketplace_name,
-                    "install_path": str(install_path),
-                    "has_skills": True,
-                    "source_type": "marketplace",
-                    "is_official": _is_official_codex_marketplace(marketplace_name),
-                })
-    except (OSError, PermissionError) as exc:
-        logger.debug("Error enumerating Codex plugins under %s: %s", cache, exc)
+                    # Multiple content-hash install dirs can accumulate after updates;
+                    # pick the one Codex would load — highest version, mtime as tiebreak —
+                    # among the non-symlinked dirs that actually carry a skills/ payload.
+                    candidates = [
+                        d for d in plugin_dir.iterdir()
+                        if d.is_dir() and not is_symlink_or_junction(d)
+                        and (d / "skills").is_dir()
+                    ]
+                    if not candidates:
+                        continue
+                    install_path = max(candidates, key=_codex_plugin_version_key)
+
+                    # Containment guard: the chosen dir must resolve inside codex_home.
+                    if not _is_within(install_path, codex_home):
+                        logger.debug("Skipping Codex plugin dir outside home: %s", install_path)
+                        continue
+
+                    plugins.append({
+                        "plugin_id": plugin_id,
+                        "plugin_name": plugin_name,
+                        "marketplace_name": marketplace_name,
+                        "install_path": str(install_path),
+                        "has_skills": True,
+                        "source_type": "marketplace",
+                        "is_official": _is_official_codex_marketplace(marketplace_name),
+                    })
+                except (OSError, PermissionError) as exc:
+                    logger.debug("Skipping unreadable Codex plugin %s: %s", plugin_dir, exc)
+                    continue
+        except (OSError, PermissionError) as exc:
+            logger.debug("Skipping unreadable Codex marketplace %s: %s", marketplace_dir, exc)
+            continue
     return plugins
 
 

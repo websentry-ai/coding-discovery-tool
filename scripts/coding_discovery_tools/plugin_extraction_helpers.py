@@ -119,7 +119,22 @@ def _codex_enabled_plugin_ids(codex_home: Path) -> Optional[set]:
         return None
     enabled: set = set()
     current: Optional[str] = None
+    in_multiline: Optional[str] = None  # the delimiter (''' or \"\"\") we are inside, if any
     for line in text.splitlines():
+        # Skip lines inside a TOML multiline string so crafted string content like
+        #   note = '''\n[plugins.\"evil@x\"]\nenabled = true\n'''
+        # cannot be mis-read as a real enablement record. A delimiter appearing an even
+        # number of times on one line opens and closes within that line (net no change).
+        if in_multiline:
+            if line.count(in_multiline) % 2 == 1:
+                in_multiline = None
+            continue
+        for delim in ('"""', "'''"):
+            if line.count(delim) % 2 == 1:
+                in_multiline = delim
+                break
+        if in_multiline:
+            continue
         header = _CODEX_PLUGIN_HEADER_RE.match(line)
         if header:
             current = header.group(1)
@@ -678,13 +693,17 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
             continue
         skills_dir = Path(install_path) / "skills"
         try:
-            if not skills_dir.is_dir():
+            if not skills_dir.is_dir() or is_symlink_or_junction(skills_dir):
                 continue
             for entry in skills_dir.iterdir():
-                if not entry.is_dir():
+                # Reject symlinked entries and a symlinked SKILL.md before reading: a
+                # crafted plugin could point skills/<name>/SKILL.md at another file
+                # (e.g. ~/.ssh/id_ed25519) even within the same home, and is_file()
+                # follows the link. Rejecting the link means we never read the target.
+                if not entry.is_dir() or is_symlink_or_junction(entry):
                     continue
                 skill_file = entry / "SKILL.md"
-                if not skill_file.is_file():
+                if not skill_file.is_file() or is_symlink_or_junction(skill_file):
                     continue
                 try:
                     st = skill_file.stat()

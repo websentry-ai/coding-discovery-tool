@@ -161,13 +161,14 @@ def _extract_codex_plugin_skills(user_home: Path, user_skills: List[Dict]) -> No
         if not plugins:
             return
         home = str(user_home)
-        home_real = os.path.realpath(home)
+        # Contain to the plugin cache, not just the home: a within-home symlink (e.g.
+        # skills/<name>/SKILL.md -> ~/.ssh/id_ed25519) resolves inside the home but NOT
+        # inside the cache, so this drops it. (extract_plugin_skills already refuses to
+        # read a symlinked SKILL.md; this is the belt to that suspenders.)
+        cache_real = os.path.realpath(str(user_home / CODEX_DIR_NAME / "plugins" / "cache"))
         for skill in extract_plugin_skills(plugins):
-            # Defence in depth: drop any skill whose file resolves outside the owning
-            # home (a symlink inside a plugin's skills/ could still escape). Belt to the
-            # containment guard already applied when choosing the plugin install dir.
             file_real = os.path.realpath(str(skill.get("file_path", "")))
-            if file_real != home_real and not file_real.startswith(home_real + os.sep):
+            if file_real != cache_real and not file_real.startswith(cache_real + os.sep):
                 continue
             # A user skill without project_path is dropped (never filed under the
             # scanner's home), so attribute plugin skills to their owning home.

@@ -679,3 +679,42 @@ class TestCodexPluginEnumeration(unittest.TestCase):
         os.symlink(outside, cache / "linear")
         self._enable(codex, "linear@openai-curated")
         self.assertEqual(extract_codex_plugins(codex), [])  # symlink escape rejected
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_within_home_skill_symlink_is_not_read(self):
+        """A crafted plugin whose skills/<name>/SKILL.md symlinks to another file under
+        the SAME home (e.g. ~/.ssh/id_ed25519) must not be read or reported."""
+        from scripts.coding_discovery_tools.codex_skills_helpers import (
+            extract_codex_user_level_items, CODEX_ITEM_CONFIGS)
+        from scripts.coding_discovery_tools.macos_extraction_helpers import extract_single_rule_file
+        home = self.tmp / "alice"
+        secret = home / ".ssh" / "id_ed25519"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("PRIVATE KEY MATERIAL", encoding="utf-8")
+        inst = home / ".codex" / "plugins" / "cache" / "openai-curated" / "evil" / "h" / "skills" / "x"
+        inst.mkdir(parents=True)
+        os.symlink(secret, inst / "SKILL.md")
+        self._enable(home / ".codex", "evil@openai-curated")
+        us = []
+        extract_codex_user_level_items(home, us, extract_single_rule_file, CODEX_ITEM_CONFIGS)
+        self.assertFalse([s for s in us if "PRIVATE KEY" in (s.get("content") or "")])
+        self.assertNotIn("x", [s.get("skill_name") for s in us])
+
+    def test_multiline_string_cannot_false_enable_plugin(self):
+        """The config.toml line scanner must not treat an enabled record embedded in a
+        TOML multiline string as real."""
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import _codex_enabled_plugin_ids
+        codex = self.tmp / ".codex"
+        codex.mkdir(parents=True)
+        (codex / "config.toml").write_text(
+            'note = """\n'
+            '[plugins."evil@openai-curated"]\n'
+            'enabled = true\n'
+            '"""\n'
+            '[plugins."real@openai-curated"]\n'
+            'enabled = true\n',
+            encoding="utf-8",
+        )
+        enabled = _codex_enabled_plugin_ids(codex)
+        self.assertIn("real@openai-curated", enabled)
+        self.assertNotIn("evil@openai-curated", enabled)

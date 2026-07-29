@@ -15,8 +15,9 @@ $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 # otherwise main. Reads the domain from -Domain or UNBOUND_DOMAIN.
 $_domain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
 $_key = if ($ApiKey) { $ApiKey } else { $env:UNBOUND_API_KEY }
+# Scheme-less domain -> https (matches the reporting path); never send the key over http.
+if ($_domain -and $_domain -notmatch '^https?://') { $_domain = "https://$_domain" }
 $BRANCH = 'main'
-# Only send the key over https.
 if ($_domain -and $_key -and $_domain -match '^https://') {
     try {
         $_url = ($_domain.TrimEnd('/')) + '/api/v1/ai-tools/discovery-branch/'

@@ -614,10 +614,6 @@ class TestMcpProvenanceTagging(unittest.TestCase):
             self.assertEqual(projects[0]["plugin_id"], "my-plugin@marketplace")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCodexPluginEnumeration(unittest.TestCase):
     """extract_codex_plugins: resilience, symlink/containment, version selection."""
 
@@ -700,21 +696,43 @@ class TestCodexPluginEnumeration(unittest.TestCase):
         self.assertFalse([s for s in us if "PRIVATE KEY" in (s.get("content") or "")])
         self.assertNotIn("x", [s.get("skill_name") for s in us])
 
-    def test_multiline_string_cannot_false_enable_plugin(self):
-        """The config.toml line scanner must not treat an enabled record embedded in a
-        TOML multiline string as real."""
-        from scripts.coding_discovery_tools.plugin_extraction_helpers import _codex_enabled_plugin_ids
+    def test_multiline_string_cannot_false_disable_plugin(self):
+        """An `enabled = false` embedded in a TOML multiline string must not disable a
+        real plugin (Codex is enabled-unless-disabled, so only genuine records count)."""
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import _codex_disabled_plugin_ids
         codex = self.tmp / ".codex"
         codex.mkdir(parents=True)
         (codex / "config.toml").write_text(
             'note = """\n'
-            '[plugins."evil@openai-curated"]\n'
-            'enabled = true\n'
-            '"""\n'
             '[plugins."real@openai-curated"]\n'
-            'enabled = true\n',
+            'enabled = false\n'
+            '"""\n'
+            '[plugins."reallyoff@openai-curated"]\n'
+            'enabled = false\n',
             encoding="utf-8",
         )
-        enabled = _codex_enabled_plugin_ids(codex)
-        self.assertIn("real@openai-curated", enabled)
-        self.assertNotIn("evil@openai-curated", enabled)
+        disabled = _codex_disabled_plugin_ids(codex)
+        self.assertIn("reallyoff@openai-curated", disabled)     # genuine record honored
+        self.assertNotIn("real@openai-curated", disabled)       # string-embedded one ignored
+
+    def test_installed_plugin_enabled_by_default_and_comment_tolerant(self):
+        """Codex reports an installed plugin unless it is explicitly turned off. A config
+        with no plugin table, or `enabled = true # comment`, must still be reported."""
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        self._mk_plugin(codex, "openai-curated", "linear", "linear")
+        # MCP-only config, no [plugins."..."] table at all -> default enabled
+        (codex / "config.toml").write_text('[mcp_servers.foo]\nurl = "x"\n', encoding="utf-8")
+        self.assertIn("linear", {p["plugin_name"] for p in extract_codex_plugins(codex)})
+        # explicit enable with a trailing comment -> still reported
+        (codex / "config.toml").write_text(
+            '[plugins."linear@openai-curated"]\nenabled = true  # on\n', encoding="utf-8")
+        self.assertIn("linear", {p["plugin_name"] for p in extract_codex_plugins(codex)})
+        # explicit disable (with comment / case) -> skipped
+        (codex / "config.toml").write_text(
+            '[plugins."linear@openai-curated"]\nenabled = False  # off\n', encoding="utf-8")
+        self.assertEqual(extract_codex_plugins(codex), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

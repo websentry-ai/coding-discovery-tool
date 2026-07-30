@@ -99,32 +99,32 @@ def _is_official_codex_marketplace(marketplace_name: str) -> bool:
     return marketplace_name.lower() in _OFFICIAL_CODEX_MARKETPLACES
 
 
-_CODEX_PLUGIN_HEADER_RE = re.compile(r'^\s*\[plugins\."([^"]+)"\]\s*$')
-_CODEX_ENABLED_TRUE_RE = re.compile(r'^\s*enabled\s*=\s*true\s*$')
+# Header tolerates surrounding whitespace: `[ plugins."id" ]`. The enabled value is
+# captured up to whitespace/`#`, so a trailing comment (`enabled = false  # off`) and
+# case (`False`) are handled.
+_CODEX_PLUGIN_HEADER_RE = re.compile(r'^\s*\[\s*plugins\.\s*"([^"]+)"\s*\]\s*$')
+_CODEX_ENABLED_RE = re.compile(r'^\s*enabled\s*=\s*([^\s#]+)')
 
 
-def _codex_enabled_plugin_ids(codex_home: Path) -> Optional[set]:
-    """Best-effort set of ``<plugin>@<marketplace>`` ids marked ``enabled = true`` in
-    ``~/.codex/config.toml``.
+def _codex_disabled_plugin_ids(codex_home: Path) -> set:
+    """Set of ``<plugin>@<marketplace>`` ids EXPLICITLY disabled in ``~/.codex/config.toml``.
 
-    Returns None if the config is missing/unreadable — callers then treat every
-    *installed* plugin (present in the cache) as enabled. Parsed with a tiny line
-    scanner rather than a TOML library on purpose: ``tomllib`` is 3.11+ and this
-    codebase targets 3.9.
+    Codex treats an installed plugin as **enabled unless it is turned off**, so callers
+    skip only these ids — a missing/unreadable config, a plugin with no table, or an
+    unparseable ``enabled`` value all fail OPEN (the plugin is reported). Parsed with a
+    tiny line scanner rather than a TOML library on purpose (``tomllib`` is 3.11+; this
+    codebase targets 3.9); comment-, whitespace- and case-tolerant, and multiline-string
+    aware so a fake record embedded in string content can't disable a real plugin.
     """
+    disabled: set = set()
     config = codex_home / "config.toml"
     try:
         text = config.read_text(encoding="utf-8", errors="replace")
     except (OSError, PermissionError):
-        return None
-    enabled: set = set()
+        return disabled  # fail open -> caller reports the plugin
     current: Optional[str] = None
-    in_multiline: Optional[str] = None  # the delimiter (''' or \"\"\") we are inside, if any
+    in_multiline: Optional[str] = None  # the ''' or \"\"\" delimiter we are inside, if any
     for line in text.splitlines():
-        # Skip lines inside a TOML multiline string so crafted string content like
-        #   note = '''\n[plugins.\"evil@x\"]\nenabled = true\n'''
-        # cannot be mis-read as a real enablement record. A delimiter appearing an even
-        # number of times on one line opens and closes within that line (net no change).
         if in_multiline:
             if line.count(in_multiline) % 2 == 1:
                 in_multiline = None
@@ -142,9 +142,11 @@ def _codex_enabled_plugin_ids(codex_home: Path) -> Optional[set]:
         if line.lstrip().startswith("["):          # any other table ends the block
             current = None
             continue
-        if current and _CODEX_ENABLED_TRUE_RE.match(line):
-            enabled.add(current)
-    return enabled
+        if current:
+            m = _CODEX_ENABLED_RE.match(line)
+            if m and m.group(1).strip().strip('"').lower() == "false":
+                disabled.add(current)
+    return disabled
 
 
 def _codex_plugin_version_key(hash_dir: Path):
@@ -200,7 +202,7 @@ def extract_codex_plugins(codex_home: Path) -> List[Dict]:
     if not cache.is_dir() or is_symlink_or_junction(cache):
         return plugins
 
-    enabled_ids = _codex_enabled_plugin_ids(codex_home)  # None -> treat all installed as enabled
+    disabled_ids = _codex_disabled_plugin_ids(codex_home)  # Codex: enabled unless turned off
     try:
         marketplaces = list(cache.iterdir())
     except (OSError, PermissionError) as exc:
@@ -218,8 +220,8 @@ def extract_codex_plugins(codex_home: Path) -> List[Dict]:
                         continue
                     plugin_name = plugin_dir.name
                     plugin_id = f"{plugin_name}@{marketplace_name}"
-                    if enabled_ids is not None and plugin_id not in enabled_ids:
-                        continue  # installed but disabled
+                    if plugin_id in disabled_ids:
+                        continue  # explicitly disabled in config.toml
 
                     # Multiple content-hash install dirs can accumulate after updates;
                     # pick the one Codex would load — highest version, mtime as tiebreak —
@@ -686,6 +688,7 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
     Returns:
         List of skill dicts ready to merge into user_skills.
     """
+    from .claude_code_skills_helpers import _is_foreign_hardlink  # local: avoid import cycle
     skills: List[Dict] = []
     for plugin in plugins:
         install_path = plugin.get("install_path")
@@ -703,7 +706,12 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                 if not entry.is_dir() or is_symlink_or_junction(entry):
                     continue
                 skill_file = entry / "SKILL.md"
-                if not skill_file.is_file() or is_symlink_or_junction(skill_file):
+                # Reject symlinks (leaf may point elsewhere) and foreign hardlinks
+                # (st_nlink > 1 -> a second link could be another user's file) before
+                # reading, so a crafted plugin can't smuggle off-plugin content in.
+                if (not skill_file.is_file()
+                        or is_symlink_or_junction(skill_file)
+                        or _is_foreign_hardlink(skill_file)):
                     continue
                 try:
                     st = skill_file.stat()

@@ -1740,56 +1740,190 @@ def extract_managed_mcp_config(projects: List[Dict]) -> None:
         logger.warning(f"Error reading managed MCP config {managed_path}: {e}")
 
 
+CLAUDEAI_NAME_PREFIX = "claude.ai "
+
+# Session folders holding `remoteMcpServersConfig` — the only local record of a
+# claude.ai connector's tool list. Written by the desktop app (both the Claude
+# Code it hosts and Cowork); the terminal CLI never writes them, so a CLI-only
+# device yields names with no tools.
+_CLAUDE_SESSION_SUBDIRS = ("claude-code-sessions", "local-agent-mode-sessions")
+
+
+def _claude_app_support_dir(home: Path) -> Path:
+    """Claude's application-support directory for a given user's home."""
+    system = platform.system()
+    if system == "Darwin":
+        return home / "Library" / "Application Support" / "Claude"
+    if system == "Windows":
+        return home / "AppData" / "Roaming" / "Claude"
+    return home / ".config" / "Claude"
+
+
+def _read_json_dict(path: Path) -> Dict[str, Any]:
+    """Parse `path` as a JSON object, or return {} for anything unreadable."""
+    try:
+        parsed = json.loads(path.read_text(encoding='utf-8', errors='replace'))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        logger.debug(f"Invalid JSON in {path}: {e}")
+        return {}
+    except PermissionError as e:
+        logger.debug(f"Permission denied reading {path}: {e}")
+        return {}
+    except Exception as e:
+        logger.debug(f"Error reading {path}: {e}")
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _claudeai_names(values) -> List[str]:
+    return [v for v in values
+            if isinstance(v, str) and v.startswith(CLAUDEAI_NAME_PREFIX)]
+
+
+def _claudeai_names_from_auth_cache(claude_dir: Path) -> List[str]:
+    """Connector names from ~/.claude/mcp-needs-auth-cache.json. Only holds the
+    connectors pending authentication, so it misses every one the user has
+    already signed into."""
+    return _claudeai_names(_read_json_dict(claude_dir / "mcp-needs-auth-cache.json"))
+
+
+def _claudeai_names_from_config(home: Path) -> List[str]:
+    """Connector names from ~/.claude.json's `claudeAiMcpEverConnected`, which
+    the CLI maintains for every claude.ai connector it has connected to —
+    authenticated ones included. Ever-connected, so a since-disconnected
+    connector still appears."""
+    ever_connected = _read_json_dict(home / ".claude.json").get("claudeAiMcpEverConnected")
+    return _claudeai_names(ever_connected) if isinstance(ever_connected, list) else []
+
+
+def _claudeai_session_tools(home: Path) -> Dict[str, Dict[str, Any]]:
+    """Map lowercased connector name -> {"tools", "observed_at"} read from the
+    Claude session files under `home`.
+
+    Files are walked newest-first and the first sighting of a name wins, so a
+    stale session never overwrites a connector's current tool list.
+    `observed_at` is the session file's mtime — when the tools were actually
+    seen, not when discovery ran.
+
+    The session `url` is deliberately not collected. A claude.ai server
+    fingerprints by name (`claudeai:<name>`), and compute_fingerprint's url
+    branch runs first, so carrying a url would split this row away from the
+    hook-reported one for the same connector.
+    """
+    base = _claude_app_support_dir(home)
+    files: List[Path] = []
+    for sub in _CLAUDE_SESSION_SUBDIRS:
+        folder = base / sub
+        try:
+            if folder.is_dir():
+                files.extend(folder.glob("**/local_*.json"))
+        except OSError as e:
+            logger.debug(f"Error listing Claude session folder {folder}: {e}")
+
+    stamped: List[Tuple[float, Path]] = []
+    for f in files:
+        try:
+            stamped.append((f.stat().st_mtime, f))
+        except OSError:
+            continue
+    stamped.sort(key=lambda pair: pair[0], reverse=True)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for mtime, f in stamped:
+        try:
+            data = json.loads(f.read_text(encoding='utf-8', errors='replace'))
+        except (OSError, ValueError) as e:
+            logger.debug(f"Error reading Claude session file {f}: {e}")
+            continue
+        if not isinstance(data, dict):
+            continue
+        for entry in (data.get("remoteMcpServersConfig") or []):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            tools = entry.get("tools")
+            if not isinstance(name, str) or not name or not isinstance(tools, list):
+                continue
+            key = name.strip().lower()
+            if key in out:
+                continue
+            out[key] = {
+                "tools": tools,
+                "observed_at": (
+                    datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+                    .replace(microsecond=0).isoformat()
+                ),
+            }
+    return out
+
+
 def extract_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None:
     """
-    Extract cloud-synced MCP server names from claude.ai auth cache.
+    Extract claude.ai native connectors (Gmail, Notion, ...) for one user.
 
-    Reads ~/.claude/mcp-needs-auth-cache.json and extracts server names
-    prefixed with "claude.ai ". These are cloud-synced MCP servers whose
-    full config lives server-side; only names are available locally.
+    Names come from two files, unioned — neither is complete on its own:
+      - ~/.claude/mcp-needs-auth-cache.json: only connectors pending auth.
+      - ~/.claude.json `claudeAiMcpEverConnected`: every connector the CLI has
+        connected to, authenticated included.
+
+    The full config lives server-side, so a name is all that identifies these.
+    When the desktop app has left a session file naming the same connector, its
+    tool list is attached as a `scan` block; otherwise the server is reported
+    with the name alone.
 
     Args:
         claude_dir: Path to the .claude directory (e.g., ~/.claude)
         projects: List to append results to
     """
-    cache_file = claude_dir / "mcp-needs-auth-cache.json"
-    if not cache_file.exists() or not cache_file.is_file():
+    home = claude_dir.parent
+
+    names: List[str] = []
+    seen = set()
+    for name in _claudeai_names_from_auth_cache(claude_dir) + _claudeai_names_from_config(home):
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
+            names.append(name)
+
+    if not names:
         return
 
     try:
-        content = cache_file.read_text(encoding='utf-8', errors='replace')
-        cache_data = json.loads(content)
-
-        if not isinstance(cache_data, dict):
-            return
-
-        servers = [
-            {"name": key, "scope": "claudeai"}
-            for key in cache_data
-            if key.startswith("claude.ai ")
-        ]
-
-        if servers:
-            projects.append({
-                "path": str(claude_dir),
-                "mcpServers": servers,
-                "scope": "claudeai"
-            })
-    except json.JSONDecodeError as e:
-        logger.debug(f"Invalid JSON in claude.ai auth cache {cache_file}: {e}")
-    except PermissionError as e:
-        logger.debug(f"Permission denied reading claude.ai auth cache {cache_file}: {e}")
+        tools_by_name = _claudeai_session_tools(home)
     except Exception as e:
-        logger.debug(f"Error reading claude.ai auth cache {cache_file}: {e}")
+        logger.debug(f"Error collecting claude.ai session tools under {home}: {e}")
+        tools_by_name = {}
+
+    servers = []
+    for name in names:
+        server = {"name": name, "scope": "claudeai"}
+        observed = tools_by_name.get(name[len(CLAUDEAI_NAME_PREFIX):].strip().lower())
+        if observed:
+            trimmed = _trim_tools(observed["tools"])
+            server["scan"] = {
+                "scanned_at": observed["observed_at"],
+                "tools": trimmed,
+                "tool_count": len(trimmed) if trimmed else 0,
+                "server_info": None,
+                "error": None,
+            }
+        servers.append(server)
+
+    projects.append({
+        "path": str(claude_dir),
+        "mcpServers": servers,
+        "scope": "claudeai"
+    })
 
 
 def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None:
     """
-    Extract cloud-synced MCP server names with root user support.
+    Extract claude.ai native connectors with root user support.
 
-    When running as root/admin, scans all user directories for
-    ~/.claude/mcp-needs-auth-cache.json. Otherwise checks only
-    the current user's home directory.
+    When running as root/admin, scans all user directories. Otherwise checks
+    only the current user's home directory.
     """
     import platform
 

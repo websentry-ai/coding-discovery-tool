@@ -43,7 +43,8 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         3. ~/.claude/mcp.json (fallback - separate MCP config file)
         4. Project-scope .mcp.json files at project roots throughout the filesystem
         5. Plugin MCP servers from ~/.claude/plugins/
-        6. Cloud-synced MCP server names from ~/.claude/mcp-needs-auth-cache.json
+        6. claude.ai native connectors from ~/.claude/mcp-needs-auth-cache.json
+           and ~/.claude.json, with tool lists from the desktop session files
 
         When running as root, collects MCP configs from ALL user directories.
 

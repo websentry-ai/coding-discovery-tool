@@ -18,7 +18,39 @@ set -e  # Exit on any error
 # ==============================================================================
 
 REPO_URL="https://github.com/websentry-ai/coding-discovery-tool.git"
-BRANCH="main"
+
+# Ask the backend which branch to run: staging only when it replies "staging",
+# otherwise main. Reads the domain from --domain / --domain= or UNBOUND_DOMAIN.
+resolve_branch() {
+    local domain="${UNBOUND_DOMAIN:-}" key="${UNBOUND_API_KEY:-}" prev=""
+    for arg in "$@"; do
+        case "$arg" in
+            --domain=*)  domain="${arg#--domain=}" ;;
+            --api-key=*) key="${arg#--api-key=}" ;;
+        esac
+        [ "$prev" = "--domain" ]  && domain="$arg"
+        [ "$prev" = "--api-key" ] && key="$arg"
+        prev="$arg"
+    done
+
+    # Scheme-less domain -> https (matches the reporting path); never send the key
+    # over http. The key goes via stdin (-H @-), not argv.
+    case "$domain" in
+        http://*)  domain="" ;;
+        https://*) ;;
+        ?*)        domain="https://$domain" ;;
+    esac
+    if [ -n "$domain" ] && [ -n "$key" ] && command -v curl >/dev/null 2>&1; then
+        local resp b
+        resp=$(printf 'Authorization: Bearer %s\n' "$key" | curl -fsS --connect-timeout 2 -m 5 -H @- -- "${domain%/}/api/v1/ai-tools/discovery-branch/" 2>/dev/null) || resp=""
+        b=$(printf '%s' "$resp" | sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p')
+        [ "$b" = "staging" ] && { printf 'staging'; return; }
+    fi
+
+    printf 'main'
+}
+BRANCH="$(resolve_branch "$@")"
+
 TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'coding-discovery-tool')
 
 # ==============================================================================

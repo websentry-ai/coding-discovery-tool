@@ -256,6 +256,23 @@ class ClaudeAISessionToolsTest(unittest.TestCase):
         self.assertEqual(
             self._servers()["claude.ai Gmail"]["scan"]["tool_count"], 1)
 
+    def test_newest_session_wins_even_when_its_tool_list_is_empty(self):
+        """The newest session is authoritative, full stop — no walking back
+        through older files hunting for a populated list. Across a fleet some
+        other device reports the same connector with its tools."""
+        _write_session(self.sessions / "org", "local_old.json", [
+            {"uuid": "u1", "name": "Gmail", "tools": self.GMAIL_TOOLS},
+        ], mtime=1_600_000_000)
+        _write_session(self.sessions / "org", "local_new.json", [
+            {"uuid": "u1", "name": "Gmail", "tools": []},
+        ], mtime=1_700_000_000)
+
+        scan = self._servers()["claude.ai Gmail"]["scan"]
+
+        self.assertEqual(scan["tool_count"], 0)
+        self.assertIsNone(scan["tools"])
+        self.assertEqual(scan["scanned_at"], "2023-11-14T22:13:20+00:00")
+
     def test_connector_absent_from_names_is_not_reported(self):
         """Session files only enrich; they never introduce a server on their own."""
         _write_session(self.sessions / "org", "local_a.json", [
@@ -263,6 +280,36 @@ class ClaudeAISessionToolsTest(unittest.TestCase):
         ], mtime=1_700_000_000)
 
         self.assertNotIn("claude.ai Asana", self._servers())
+
+
+class ClaudeAIRootScanTest(unittest.TestCase):
+    """A root scan must not gate on ~/.claude/ existing — one of the two name
+    sources is ~/.claude.json, which sits beside that directory."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.users = Path(self._tmp.name)
+        self.home = self.users / "alice"
+        self.home.mkdir()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_user_with_config_but_no_claude_dir_is_scanned(self):
+        _write_json(self.home / ".claude.json", {
+            "claudeAiMcpEverConnected": ["claude.ai Gmail"],
+        })
+        self.assertFalse((self.home / ".claude").exists())
+
+        projects = []
+        with mock.patch.object(helpers, "_iter_admin_user_homes", return_value=[self.home]), \
+             mock.patch.object(helpers.Path, "home", return_value=self.home), \
+             mock.patch.object(helpers.platform, "system", return_value="Darwin"), \
+             mock.patch("platform.system", return_value="Darwin"):
+            helpers.extract_claudeai_mcp_servers_with_root_support(projects)
+
+        self.assertEqual(
+            [s["name"] for p in projects for s in p["mcpServers"]],
+            ["claude.ai Gmail"],
+        )
 
 
 if __name__ == "__main__":

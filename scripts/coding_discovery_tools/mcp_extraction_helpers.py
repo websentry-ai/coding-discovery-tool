@@ -1960,12 +1960,14 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
     admin_homes = _iter_admin_user_homes(is_admin, users_dir)
     if admin_homes:
         for user_dir in admin_homes:
-            claude_dir = user_dir / ".claude"
-            if claude_dir.exists() and claude_dir.is_dir():
-                try:
-                    extract_claudeai_mcp_servers(claude_dir, projects)
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
+            # No ~/.claude/ precondition: one of the two name sources is
+            # ~/.claude.json, which sits beside that directory rather than in
+            # it, so gating on the directory would skip a user whose only
+            # source is the config file. Both readers tolerate absent files.
+            try:
+                extract_claudeai_mcp_servers(user_dir / ".claude", projects)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
         # On Darwin also scan the admin's own home (/var/root, not under /Users).
         # On Windows the admin's home is already in admin_homes — skip to avoid

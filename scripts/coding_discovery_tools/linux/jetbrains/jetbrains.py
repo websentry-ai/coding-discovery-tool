@@ -10,6 +10,7 @@ from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...linux_extraction_helpers import get_linux_user_homes
+from ...xml_helpers import safe_xml_fromstring
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +190,7 @@ class LinuxJetBrainsDetector(BaseToolDetector):
         plugin_name = None
         try:
             xml_content_clean = re.sub(r'\sxmlns[^"]*"[^"]*"', "", xml_content)
-            root = ET.fromstring(xml_content_clean)
+            root = safe_xml_fromstring(xml_content_clean)
             id_elem = root.find(".//id")
             if id_elem is not None and id_elem.text:
                 plugin_id = id_elem.text.strip()

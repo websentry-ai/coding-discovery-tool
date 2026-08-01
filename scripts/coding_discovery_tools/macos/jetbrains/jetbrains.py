@@ -12,6 +12,7 @@ from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...macos_extraction_helpers import is_running_as_root
+from ...xml_helpers import safe_xml_fromstring
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +248,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         try:
             # Remove XML namespace declarations for simpler parsing
             xml_content_clean = re.sub(r'\sxmlns[^"]*"[^"]*"', '', xml_content)
-            root = ET.fromstring(xml_content_clean)
+            root = safe_xml_fromstring(xml_content_clean)
 
             # Try to find <id> tag, can be at root level or nested
             id_elem = root.find('.//id')

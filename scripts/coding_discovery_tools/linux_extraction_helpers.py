@@ -49,10 +49,18 @@ from .macos_extraction_helpers import (  # noqa: F401
 # Linux-specific overrides
 # ---------------------------------------------------------------------------
 
+# Precomputed once so the per-path check is a single C-level ``str.startswith``
+# over a tuple instead of a Python generator that re-iterates every skip dir on
+# every path — this predicate runs on every entry of every walk.
+_LINUX_SKIP_SYSTEM_PREFIXES = tuple(d + '/' for d in _LINUX_SKIP_SYSTEM_DIRS)
+
+
 def should_skip_system_path(path: Path) -> bool:
     """Return True for Linux virtual-filesystem and system directories."""
     path_str = str(path)
-    return any(path_str == d or path_str.startswith(d + '/') for d in _LINUX_SKIP_SYSTEM_DIRS)
+    # Same result as ``any(s == d or s.startswith(d + '/') for d in ...)``, but the
+    # prefix scan runs in C via ``startswith(tuple)`` instead of a Python loop.
+    return path_str in _LINUX_SKIP_SYSTEM_DIRS or path_str.startswith(_LINUX_SKIP_SYSTEM_PREFIXES)
 
 
 def get_top_level_directories(root_path: Path) -> List[Path]:

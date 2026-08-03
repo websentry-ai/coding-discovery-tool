@@ -88,21 +88,28 @@ def should_skip_path(path: Path) -> bool:
     Returns:
         True if path should be skipped, False otherwise
     """
-    return any(part in SKIP_DIRS for part in path.parts)
+    # Same result as ``any(part in SKIP_DIRS for part in path.parts)``, but the
+    # membership test runs as one C-level set intersection instead of a Python loop.
+    return not SKIP_DIRS.isdisjoint(path.parts)
+
+
+# Precomputed once so the per-path check is a single C-level ``str.startswith`` over
+# a tuple rather than a Python generator that re-iterates every skip dir per path.
+_SKIP_SYSTEM_PREFIXES = tuple(SKIP_SYSTEM_DIRS)
 
 
 def should_skip_system_path(path: Path) -> bool:
     """
     Check if path is in a system directory that should be skipped.
-    
+
     Args:
         path: Path to check
-        
+
     Returns:
         True if path should be skipped, False otherwise
     """
-    path_str = str(path)
-    return any(path_str.startswith(skip_dir) for skip_dir in SKIP_SYSTEM_DIRS)
+    # Same result as ``any(path_str.startswith(d) for d in SKIP_SYSTEM_DIRS)``.
+    return str(path).startswith(_SKIP_SYSTEM_PREFIXES)
 
 
 def extract_and_add_rule(

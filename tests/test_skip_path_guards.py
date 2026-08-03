@@ -6,6 +6,7 @@ instead of Python generator loops. These tests pin the exact behavior so the spe
 can never quietly change what gets skipped (i.e. what gets discovered).
 """
 
+import os
 import unittest
 from pathlib import Path
 
@@ -43,6 +44,7 @@ class TestShouldSkipPath(unittest.TestCase):
             self.assertTrue(should_skip_path(Path("/home/alice") / d / "child"))
 
 
+@unittest.skipUnless(os.name == "posix", "macOS/Linux system-path predicate")
 class TestMacSystemPath(unittest.TestCase):
     def test_skips_system_prefixes(self):
         self.assertTrue(mac_should_skip_system_path(Path("/System/Library/x")))
@@ -59,6 +61,7 @@ class TestMacSystemPath(unittest.TestCase):
             self.assertTrue(mac_should_skip_system_path(Path(d + "foo")))
 
 
+@unittest.skipUnless(os.name == "posix", "macOS/Linux system-path predicate")
 class TestLinuxSystemPath(unittest.TestCase):
     def test_skips_exact_and_nested_system_dirs(self):
         self.assertTrue(linux_should_skip_system_path(Path("/proc")))

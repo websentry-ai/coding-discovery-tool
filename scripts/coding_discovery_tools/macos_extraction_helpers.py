@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
 from .mcp_extraction_helpers import is_home_dotdir_descendant
+from .project_dir_index import get_subtree_index, outermost_only
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +568,19 @@ def extract_project_level_rules_with_fallback(
                 continue
 
 
+# Canonical macOS project-walk prune, shared by the rules walker and the shared
+# directory index so a single traversal serves every tool. Matches the predicate
+# the old per-basename walk applied inline (skip dirs + system dirs + hidden
+# home-level tool dirs). The id keys the index cache; keep it stable and unique
+# so callers with a different prune never collide with this policy.
+def _macos_project_skip(item: Path) -> bool:
+    return (should_skip_path(item) or should_skip_system_path(item)
+            or is_home_dotdir_descendant(item))
+
+
+_MACOS_PROJECT_SKIP_ID = "macos_project"
+
+
 def walk_for_tool_directories(
     root_path: Path,
     current_dir: Path,
@@ -587,55 +601,28 @@ def walk_for_tool_directories(
         extract_from_dir_func: Function to extract rules from a found tool directory
                               Signature: func(tool_dir: Path, projects_by_root: Dict)
         projects_by_root: Dictionary to populate with rules
-        current_depth: Current recursion depth
+        current_depth: Current recursion depth (unused; retained for call-site
+                       compatibility — depth is derived from ``root_path`` inside
+                       the shared index)
+
+    The subtree under ``current_dir`` is walked once and memoized as a
+    ``basename -> [dirs]`` map (see :mod:`.project_dir_index`); every tool that
+    searches the same subtree reuses that single traversal instead of re-walking.
+    This dispatches to the same directories, in the same depth-first order, that
+    the old per-basename recursion did — ``outermost_only`` reproduces the old
+    "don't recurse into a matched dir" pruning.
     """
-    # Check depth limit
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-
-    try:
-        for item in current_dir.iterdir():
-            try:
-                # Check if we should skip this path
-                if (should_skip_path(item) or should_skip_system_path(item)
-                        or is_home_dotdir_descendant(item)):
-                    continue
-
-                # Check depth for this item
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    continue
-
-                if item.is_dir():
-                    # Found the tool directory!
-                    if item.name == tool_dir_name:
-                        # Extract rules from this tool directory
-                        extract_from_dir_func(item, projects_by_root)
-                        # Don't recurse into tool directory
-                        continue
-
-                    if item.is_symlink():
-                        continue
-
-                    # Recurse into subdirectories
-                    walk_for_tool_directories(
-                        root_path, item, tool_dir_name, extract_from_dir_func,
-                        projects_by_root, current_depth + 1
-                    )
-                
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
-                continue
-                
-    except (PermissionError, OSError):
-        pass
-    except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+    index = get_subtree_index(
+        root_path, current_dir, _macos_project_skip, _MACOS_PROJECT_SKIP_ID
+    )
+    for tool_dir in outermost_only(index.get(tool_dir_name, [])):
+        try:
+            extract_from_dir_func(tool_dir, projects_by_root)
+        except (PermissionError, OSError):
+            continue
+        except Exception as e:
+            logger.debug(f"Error processing {tool_dir}: {e}")
+            continue
 
 
 def extract_project_level_mcp_configs_with_fallback(

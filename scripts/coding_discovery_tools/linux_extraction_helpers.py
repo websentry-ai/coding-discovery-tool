@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .constants import MAX_SEARCH_DEPTH
+from .project_dir_index import get_subtree_index, outermost_only
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,17 @@ def is_user_level_tool_dir(tool_dir: Path) -> bool:
     return False
 
 
+# Canonical Linux project-walk prune, shared with the directory index. Unlike
+# macOS it does NOT skip hidden home-level dirs (Linux tool configs live under
+# /home/<u>/.<tool>), matching the old inline predicate exactly. The id keys the
+# index cache and must differ from the macOS policy so the two never collide.
+def _linux_project_skip(item: Path) -> bool:
+    return should_skip_path(item) or should_skip_system_path(item)
+
+
+_LINUX_PROJECT_SKIP_ID = "linux_project"
+
+
 def walk_for_tool_directories(
     root_path: Path,
     current_dir: Path,
@@ -150,34 +162,22 @@ def walk_for_tool_directories(
 
     The macOS version skips '/home' entirely (it's in macOS SKIP_SYSTEM_DIRS),
     which would silently drop all project-level configs under /home/*.
+
+    Backed by the shared single-pass directory index: the subtree under
+    ``current_dir`` is walked once and reused across every tool, instead of a
+    fresh recursion per basename. Dispatch is identical to the old walk (same
+    dirs, same depth-first order; ``outermost_only`` reproduces the old
+    "don't recurse into a matched dir" pruning). ``current_depth`` is retained
+    for call-site compatibility; depth is derived from ``root_path`` in the index.
     """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-    try:
-        for item in current_dir.iterdir():
-            try:
-                if should_skip_path(item) or should_skip_system_path(item):
-                    continue
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    continue
-                if item.is_dir():
-                    if item.name == tool_dir_name:
-                        extract_from_dir_func(item, projects_by_root)
-                        continue
-                    if item.is_symlink():
-                        continue
-                    walk_for_tool_directories(
-                        root_path, item, tool_dir_name,
-                        extract_from_dir_func, projects_by_root, current_depth + 1,
-                    )
-            except (PermissionError, OSError):
-                continue
-    except (PermissionError, OSError):
-        pass
+    index = get_subtree_index(
+        root_path, current_dir, _linux_project_skip, _LINUX_PROJECT_SKIP_ID
+    )
+    for tool_dir in outermost_only(index.get(tool_dir_name, [])):
+        try:
+            extract_from_dir_func(tool_dir, projects_by_root)
+        except (PermissionError, OSError):
+            continue
 
 
 def get_linux_user_homes() -> List[Path]:

@@ -20,6 +20,7 @@ below is still found, as the old cross-basename walks did) and reproduce the pru
 with :func:`outermost_only`. Dispatch stays depth-first, so output is unchanged.
 """
 
+import logging
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -27,6 +28,8 @@ try:
     from .constants import MAX_SEARCH_DEPTH
 except ImportError:  # pragma: no cover - direct-script execution fallback
     from constants import MAX_SEARCH_DEPTH
+
+logger = logging.getLogger(__name__)
 
 
 # Memoized subtree indexes, keyed by (skip_id, root_path, current_dir). A scan is
@@ -49,11 +52,16 @@ def _collect(root_path: Path, current_dir: Path,
     the cache's memory — without changing any lookup. The traversal still descends
     into non-hidden dirs to reach hidden ones nested inside them. A directory is
     always recorded before anything inside it, which :func:`outermost_only` relies on.
+
+    Returns True if ``current_dir`` itself was readable. A caller uses this to avoid
+    caching a result whose root could not be listed, so a one-off failure isn't
+    baked in for the whole scan (the old per-tool walks re-listed each time).
     """
     try:
         entries = list(current_dir.iterdir())
-    except (PermissionError, OSError):
-        return
+    except (PermissionError, OSError) as e:
+        logger.debug("could not read %s: %s", current_dir, e)
+        return False
 
     for item in entries:
         try:
@@ -70,9 +78,14 @@ def _collect(root_path: Path, current_dir: Path,
             if not item.is_symlink():
                 _collect(root_path, item, should_skip, index)
         except (PermissionError, OSError, ValueError):
-            # ValueError: item not under root_path. As in the old walk, one bad
-            # entry must not abort the traversal.
+            # ValueError: item not under root_path.
             continue
+        except Exception as e:
+            # As in the old walk, one unexpected bad entry (e.g. an odd name that
+            # trips a predicate) must not abort the whole traversal.
+            logger.debug("skipping %s: %s", item, e)
+            continue
+    return True
 
 
 def get_subtree_index(root_path: Path, current_dir: Path,
@@ -83,13 +96,19 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     ``root_path`` is the depth reference (matches the old walk's
     ``item.relative_to(root_path)``); ``skip_id`` distinguishes skip policies so
     two callers that prune differently never share a cached traversal.
+
+    If the subtree root can't be listed the (empty) result is returned but NOT
+    cached, so a later tool re-attempts rather than inheriting a one-off failure.
     """
     key = (skip_id, str(root_path), str(current_dir))
     index = _INDEX_CACHE.get(key)
     if index is None:
         index = {}
-        _collect(root_path, current_dir, should_skip, index)
-        _INDEX_CACHE[key] = index
+        readable = _collect(root_path, current_dir, should_skip, index)
+        if readable:
+            _INDEX_CACHE[key] = index
+        else:
+            logger.warning("subtree root unreadable, not caching: %s", current_dir)
     return index
 
 

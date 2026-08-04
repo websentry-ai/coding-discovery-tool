@@ -144,6 +144,31 @@ class TestSubtreeIndex(unittest.TestCase):
         found = idx.get(".cursor", [])
         self.assertTrue(any(p.parts[-2:] == ("components", ".cursor") for p in found))
 
+    def test_unreadable_root_is_not_cached(self):
+        # First lookup of a not-yet-existing subtree root is unreadable -> empty
+        # and NOT cached, so a later lookup re-attempts and sees the new state
+        # (the old per-tool walks re-listed every time; a one-off failure must not
+        # be baked in for the whole scan).
+        later = self.root / "appears_later"
+        self.assertEqual(get_subtree_index(self.root, later, _never_skip, "t"), {})
+        (later / ".cursor").mkdir(parents=True)
+        self.assertIn(".cursor", get_subtree_index(self.root, later, _never_skip, "t"))
+
+    def test_unexpected_entry_error_does_not_abort_build(self):
+        # A predicate that blows up on one entry must not stop the whole walk —
+        # sibling subtrees are still indexed (matches the old walk's broad guard).
+        self.mk("a", ".cursor")
+        self.mk("b", ".windsurf")
+        boom = str(self.root / "a")
+
+        def skip(p: Path) -> bool:
+            if str(p) == boom:
+                raise RuntimeError("boom")
+            return False
+
+        idx = get_subtree_index(self.root, self.root, skip, "boom")
+        self.assertIn(".windsurf", idx)
+
     def test_memoized_per_key(self):
         self.mk("p", ".cursor")
         a = get_subtree_index(self.root, self.root, _never_skip, "t")

@@ -8,9 +8,12 @@ re-hash of the body matches the gateway's scriptHash.
 
 import base64
 import hashlib
+import logging
 import os
 import re
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 _SCRIPT_RUNTIMES = {
     'node', 'nodejs', 'bun', 'deno', 'python', 'python2', 'python3', 'py',
@@ -67,45 +70,17 @@ def _resolve_script_path(command, args, cwd) -> Optional[str]:
     return path
 
 
-def compute_script_hash(command, args, cwd=None) -> Optional[str]:
-    try:
-        path = _resolve_script_path(command, args, cwd)
-        if not path:
-            return None
-        h = hashlib.sha256()
-        remaining = MAX_SCRIPT_BYTES
-        with open(path, 'rb') as f:
-            while remaining > 0:
-                chunk = f.read(min(65536, remaining))
-                if not chunk:
-                    break
-                h.update(chunk)
-                remaining -= len(chunk)
-        return h.hexdigest()
-    except Exception:
-        return None
-
-
-def read_script_body_b64(command, args, cwd=None) -> Optional[str]:
-    try:
-        path = _resolve_script_path(command, args, cwd)
-        if not path:
-            return None
-        with open(path, 'rb') as f:
-            data = f.read(MAX_SCRIPT_BYTES)
-        return base64.b64encode(data).decode('ascii')
-    except Exception:
-        return None
-
-
 def _read_script_bytes(command, args, cwd) -> Optional[bytes]:
+    path = _resolve_script_path(command, args, cwd)
+    if not path:
+        return None
     try:
-        path = _resolve_script_path(command, args, cwd)
-        if not path:
-            return None
         with open(path, 'rb') as f:
             return f.read(MAX_SCRIPT_BYTES)
-    except Exception:
+    except OSError as exc:
+        # A resolved script we can't read (permission/IO) -- log a breadcrumb so
+        # this is distinguishable from "not a local script", then degrade.
+        logger.debug("mcp script fingerprint: could not read %s: %s", path, exc)
         return None
 
 

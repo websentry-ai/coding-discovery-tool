@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 
 from .constants import MAX_SEARCH_DEPTH
-from .project_dir_index import get_subtree_index, outermost_only
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -784,30 +784,29 @@ def walk_for_mcp_configs_generic(
     ``basename -> [dirs]`` index (see :mod:`.project_dir_index`), so the MCP tools
     that search the same tree reuse one traversal instead of each re-walking it.
     Dispatch matches the old recursion: the tool dir is matched case-insensitively
-    (as the old ``item.name.lower() == tool_dir_name.lower()`` did), and
-    ``outermost_only`` reproduces the old "found it — don't recurse into it" prune.
+    (as the old ``item.name.lower() == tool_dir_name.lower()`` did). If the shared
+    index ever faults, this tool falls back to an independent walk (see
+    :func:`dispatch_matches`) rather than failing discovery for every tool.
     """
     def prune(item: Path) -> bool:
         return should_skip_func(item) or is_home_dotdir_descendant(item)
 
-    index = get_subtree_index(root_path, current_dir, prune, _MCP_PROJECT_SKIP_ID)
-
     target = tool_dir_name.lower()
-    matches: List[Path] = []
-    for name, dirs in index.items():
-        if name.lower() == target:
-            matches.extend(dirs)
 
-    for tool_dir in outermost_only(matches):
+    def on_match(tool_dir: Path) -> None:
         try:
             extract_mcp_from_dir_generic(
                 tool_dir, projects, config_filename, tool_name, global_tool_dir
             )
         except (PermissionError, OSError):
-            continue
+            pass
         except Exception as e:
             logger.debug(f"Error processing {tool_dir}: {e}")
-            continue
+
+    dispatch_matches(
+        root_path, current_dir, prune, _MCP_PROJECT_SKIP_ID,
+        lambda name: name.lower() == target, on_match,
+    )
 
 
 def extract_claude_mcp_fields(config_data: Dict, config_path: Path) -> List[Dict]:

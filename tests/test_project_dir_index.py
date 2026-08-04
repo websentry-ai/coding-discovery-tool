@@ -15,9 +15,11 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
+from coding_discovery_tools import project_dir_index as pdi  # noqa: E402
 from coding_discovery_tools.project_dir_index import (  # noqa: E402
     get_subtree_index,
     outermost_only,
+    dispatch_matches,
     clear_cache,
 )
 from coding_discovery_tools.constants import MAX_SEARCH_DEPTH  # noqa: E402
@@ -176,6 +178,55 @@ class TestSubtreeIndex(unittest.TestCase):
         self.assertIs(a, b)  # same cached object, no re-walk
         c = get_subtree_index(self.root, self.root, _never_skip, "other")
         self.assertIsNot(a, c)  # different skip policy -> separate index
+
+
+class TestFailSafeDispatch(unittest.TestCase):
+    """The shared index is an optimization, not a single point of failure: if it
+    faults, one tool degrades to an independent walk instead of breaking discovery
+    for every tool."""
+
+    def setUp(self):
+        clear_cache()
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        # A spread of matches including same-name nesting (must de-nest) and a
+        # cross-name wrapper (must still be reached).
+        for parts in [("a", ".cursor"), ("a", ".cursor", "deep", ".cursor"),
+                      ("b", "src", ".cursor"), ("c", ".roo", "inner", ".cursor")]:
+            self.root.joinpath(*parts).mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        clear_cache()
+        self._tmp.cleanup()
+
+    def _collect_via(self, force_index_error):
+        got = []
+        orig = pdi.get_subtree_index
+        if force_index_error:
+            pdi.get_subtree_index = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            dispatch_matches(self.root, self.root, _never_skip, "t",
+                             lambda n: n == ".cursor", got.append)
+        finally:
+            pdi.get_subtree_index = orig
+        return sorted(str(p) for p in got)
+
+    def test_fallback_dispatch_is_identical_to_index(self):
+        # The independent fallback walk must discover exactly what the index does.
+        via_index = self._collect_via(force_index_error=False)
+        clear_cache()
+        via_fallback = self._collect_via(force_index_error=True)
+        self.assertEqual(via_index, via_fallback)
+        self.assertTrue(via_index)  # and it actually found the planted dirs
+
+    def test_index_fault_does_not_break_discovery(self):
+        # Even when the shared index raises, matches are still dispatched.
+        got = self._collect_via(force_index_error=True)
+        self.assertIn(str(self.root / "a" / ".cursor"), got)
+        # same-name nesting is still de-nested by the fallback (prune-at-match)
+        self.assertNotIn(str(self.root / "a" / ".cursor" / "deep" / ".cursor"), got)
+        # a .cursor nested under a differently-named dir is still reached
+        self.assertIn(str(self.root / "c" / ".roo" / "inner" / ".cursor"), got)
 
 
 if __name__ == "__main__":

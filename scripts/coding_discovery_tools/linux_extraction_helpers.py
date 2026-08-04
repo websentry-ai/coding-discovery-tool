@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .constants import MAX_SEARCH_DEPTH
-from .project_dir_index import get_subtree_index, outermost_only
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -165,19 +165,22 @@ def walk_for_tool_directories(
 
     Backed by the shared single-pass directory index: the subtree under
     ``current_dir`` is walked once and reused across every tool, instead of a
-    fresh recursion per basename. Dispatch is identical to the old walk (same
-    dirs, same depth-first order; ``outermost_only`` reproduces the old
-    "don't recurse into a matched dir" pruning). ``current_depth`` is retained
-    for call-site compatibility; depth is derived from ``root_path`` in the index.
+    fresh recursion per basename. Dispatch is identical to the old walk. If the
+    shared index ever faults, this tool falls back to an independent walk (see
+    :func:`dispatch_matches`) instead of failing discovery for every tool.
+    ``current_depth`` is retained for call-site compatibility; depth is derived
+    from ``root_path`` in the index.
     """
-    index = get_subtree_index(
-        root_path, current_dir, _linux_project_skip, _LINUX_PROJECT_SKIP_ID
-    )
-    for tool_dir in outermost_only(index.get(tool_dir_name, [])):
+    def on_match(tool_dir: Path) -> None:
         try:
             extract_from_dir_func(tool_dir, projects_by_root)
         except (PermissionError, OSError):
-            continue
+            pass
+
+    dispatch_matches(
+        root_path, current_dir, _linux_project_skip, _LINUX_PROJECT_SKIP_ID,
+        lambda name: name == tool_dir_name, on_match,
+    )
 
 
 def get_linux_user_homes() -> List[Path]:

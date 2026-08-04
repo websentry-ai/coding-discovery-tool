@@ -137,6 +137,77 @@ def outermost_only(dirs: List[Path]) -> List[Path]:
     return kept
 
 
+def _walk_direct(root_path: Path, current_dir: Path,
+                 is_match: Callable[[str], bool],
+                 on_match: Callable[[Path], None],
+                 should_skip: Callable[[Path], bool]) -> None:
+    """Stateless independent walk — the fallback when the shared index errors.
+
+    Reproduces the old per-tool recursion exactly: a name match is dispatched and
+    NOT descended into; symlinked non-matches are not descended; the depth cap and
+    skip predicate apply. It holds no shared state and touches no cache, so a
+    failure is contained to this one call — the blast radius of a single tool, as
+    it was before the shared index existed.
+    """
+    try:
+        scan = os.scandir(current_dir)
+    except (PermissionError, OSError):
+        return
+    with scan:
+        for entry in scan:
+            try:
+                item = Path(entry.path)
+                if should_skip(item):
+                    continue
+                if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                    continue
+                if not entry.is_dir():
+                    continue
+                if is_match(entry.name):
+                    on_match(item)
+                    continue  # matched — don't recurse into it
+                if not entry.is_symlink():
+                    _walk_direct(root_path, item, is_match, on_match, should_skip)
+            except (PermissionError, OSError, ValueError):
+                continue
+            except Exception as e:
+                logger.debug("skipping %s: %s", entry.path, e)
+                continue
+
+
+def dispatch_matches(root_path: Path, current_dir: Path,
+                     should_skip: Callable[[Path], bool], skip_id: str,
+                     is_match: Callable[[str], bool],
+                     on_match: Callable[[Path], None]) -> None:
+    """Dispatch every matching directory under ``current_dir`` to ``on_match``.
+
+    Fast path: look the matches up in the shared single-pass index. If ANYTHING in
+    the shared index raises, degrade to :func:`_walk_direct` — an independent,
+    stateless walk for THIS call only. That keeps a bug or fault in the shared
+    index from breaking discovery for every tool at once: the worst case is that
+    one tool quietly falls back to the old (correct, slower) per-tool walk.
+
+    ``on_match`` is responsible for its own error handling; a failure there is not
+    treated as an index failure (so it never triggers a re-walk / double dispatch).
+    Both paths dispatch the same directories, so output is unchanged whether or not
+    the fallback fires.
+    """
+    try:
+        index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
+        targets = outermost_only(
+            [d for name, dirs in index.items() if is_match(name) for d in dirs]
+        )
+    except Exception as e:
+        logger.warning(
+            "shared directory index failed (%s); falling back to an independent "
+            "walk for this tool", e,
+        )
+        _walk_direct(root_path, current_dir, is_match, on_match, should_skip)
+        return
+    for target in targets:
+        on_match(target)
+
+
 def clear_cache() -> None:
     """Drop all memoized indexes (used for test isolation)."""
     _INDEX_CACHE.clear()

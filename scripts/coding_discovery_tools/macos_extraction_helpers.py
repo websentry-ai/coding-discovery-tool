@@ -13,7 +13,7 @@ from typing import List, Dict, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
 from .mcp_extraction_helpers import is_home_dotdir_descendant
-from .project_dir_index import get_subtree_index, outermost_only
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -609,20 +609,22 @@ def walk_for_tool_directories(
     ``basename -> [dirs]`` map (see :mod:`.project_dir_index`); every tool that
     searches the same subtree reuses that single traversal instead of re-walking.
     This dispatches to the same directories, in the same depth-first order, that
-    the old per-basename recursion did — ``outermost_only`` reproduces the old
-    "don't recurse into a matched dir" pruning.
+    the old per-basename recursion did. If the shared index ever faults, this one
+    tool falls back to an independent walk (see :func:`dispatch_matches`) rather
+    than failing discovery for every tool.
     """
-    index = get_subtree_index(
-        root_path, current_dir, _macos_project_skip, _MACOS_PROJECT_SKIP_ID
-    )
-    for tool_dir in outermost_only(index.get(tool_dir_name, [])):
+    def on_match(tool_dir: Path) -> None:
         try:
             extract_from_dir_func(tool_dir, projects_by_root)
         except (PermissionError, OSError):
-            continue
+            pass
         except Exception as e:
             logger.debug(f"Error processing {tool_dir}: {e}")
-            continue
+
+    dispatch_matches(
+        root_path, current_dir, _macos_project_skip, _MACOS_PROJECT_SKIP_ID,
+        lambda name: name == tool_dir_name, on_match,
+    )
 
 
 def extract_project_level_mcp_configs_with_fallback(

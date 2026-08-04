@@ -65,6 +65,14 @@ class TestAugmentScriptFields(unittest.TestCase):
         # must not be hashed against the scanner's own working directory.
         self.assertIsNone(compute_script_hash("python3", ["server.py"], None))
 
+    def test_relative_arg_resolves_via_server_config_cwd(self):
+        # A relative script arg paired with the config's own cwd must still be
+        # fingerprinted (resolved against that cwd, not the scanner's).
+        directory, base = os.path.split(self.path)
+        server_obj = {"command": "python3", "args": [base], "cwd": directory}
+        augment_script_fields(server_obj)
+        self.assertEqual(server_obj["scriptHash"], hashlib.sha256(_BODY).hexdigest())
+
 
 if __name__ == "__main__":
     unittest.main()

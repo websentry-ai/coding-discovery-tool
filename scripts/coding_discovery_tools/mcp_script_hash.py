@@ -98,6 +98,17 @@ def read_script_body_b64(command, args, cwd=None) -> Optional[str]:
         return None
 
 
+def _read_script_bytes(command, args, cwd) -> Optional[bytes]:
+    try:
+        path = _resolve_script_path(command, args, cwd)
+        if not path:
+            return None
+        with open(path, 'rb') as f:
+            return f.read(MAX_SCRIPT_BYTES)
+    except Exception:
+        return None
+
+
 def augment_script_fields(server_obj: dict, cwd=None) -> dict:
     """Attach scriptHash + script_content when server_obj runs a local script."""
     if not isinstance(server_obj, dict):
@@ -105,12 +116,14 @@ def augment_script_fields(server_obj: dict, cwd=None) -> dict:
     command = server_obj.get('command')
     if not command:
         return server_obj
-    args = server_obj.get('args')
-    script_hash = compute_script_hash(command, args, cwd)
-    if not script_hash:
+    # One read: hash and body must describe the same bytes (a mid-scan edit would
+    # otherwise leave scriptHash and script_content disagreeing). Fall back to the
+    # server's configured cwd so a relative script arg still resolves.
+    data = _read_script_bytes(command, server_obj.get('args'), cwd or server_obj.get('cwd'))
+    if data is None:
         return server_obj
-    server_obj['scriptHash'] = script_hash
-    body = read_script_body_b64(command, args, cwd)
+    server_obj['scriptHash'] = hashlib.sha256(data).hexdigest()
+    body = base64.b64encode(data).decode('ascii')
     if body:
         server_obj['script_content'] = body
     return server_obj

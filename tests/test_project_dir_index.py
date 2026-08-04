@@ -36,8 +36,9 @@ class TestOutermostOnly(unittest.TestCase):
     def test_drops_nested_same_basename(self):
         outer = Path("/a/.cursor")
         inner = Path("/a/.cursor/x/.cursor")
-        # Old walk found only the outer one (pruned at match); reproduce that.
-        self.assertEqual(outermost_only([inner, outer]), [outer])
+        # The index records a dir before its descendants, so the outer comes
+        # first; old walk found only the outer one (pruned at match).
+        self.assertEqual(outermost_only([outer, inner]), [outer])
 
     def test_keeps_siblings(self):
         a = Path("/a/.cursor")

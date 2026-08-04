@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 
 from .constants import MAX_SEARCH_DEPTH
+from .project_dir_index import get_subtree_index, outermost_only
 
 logger = logging.getLogger(__name__)
 
@@ -741,6 +742,15 @@ def extract_mcp_from_dir_generic(
         logger.warning(f"Error reading {tool_name} MCP config {mcp_config_file}: {e}")
 
 
+# Skip-policy id for the shared directory index. All generic-MCP callers prune
+# with ``should_skip_path or should_skip_system_path`` (plus the walker's own
+# ``is_home_dotdir_descendant``), so they share one traversal. It is kept distinct
+# from the rules index id because the Linux rules prune omits the hidden-home
+# term, so the two must not share a cached tree. (claude_code MCP prunes an extra
+# plugins path and keeps its own separate walker.)
+_MCP_PROJECT_SKIP_ID = "mcp_project"
+
+
 def walk_for_mcp_configs_generic(
     root_path: Path,
     current_dir: Path,
@@ -766,55 +776,38 @@ def walk_for_mcp_configs_generic(
         tool_name: Name of the tool (for logging)
         global_tool_dir: Path to global tool directory to skip (optional)
         should_skip_func: Function to check if a path should be skipped
-        current_depth: Current recursion depth
+        current_depth: Current recursion depth (unused; retained for call-site
+                       compatibility — depth is derived from ``root_path`` in the
+                       shared index)
+
+    The subtree under ``current_dir`` is walked once and memoized as a shared
+    ``basename -> [dirs]`` index (see :mod:`.project_dir_index`), so the MCP tools
+    that search the same tree reuse one traversal instead of each re-walking it.
+    Dispatch matches the old recursion: the tool dir is matched case-insensitively
+    (as the old ``item.name.lower() == tool_dir_name.lower()`` did), and
+    ``outermost_only`` reproduces the old "found it — don't recurse into it" prune.
     """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-    
-    try:
-        for item in current_dir.iterdir():
-            try:
-                # Check if we should skip this path
-                if should_skip_func(item) or is_home_dotdir_descendant(item):
-                    continue
+    def prune(item: Path) -> bool:
+        return should_skip_func(item) or is_home_dotdir_descendant(item)
 
-                # Check depth
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    # Path not relative to root (different drive on Windows)
-                    continue
-                
-                if item.is_dir():
-                    # Found the tool directory!
-                    if item.name.lower() == tool_dir_name.lower():
-                        extract_mcp_from_dir_generic(
-                            item, projects, config_filename, tool_name, global_tool_dir
-                        )
-                        # Don't recurse into tool directory
-                        continue
-                    
-                    if item.is_symlink():
-                        continue
+    index = get_subtree_index(root_path, current_dir, prune, _MCP_PROJECT_SKIP_ID)
 
-                    # Recurse into subdirectories
-                    walk_for_mcp_configs_generic(
-                        root_path, item, projects, tool_dir_name, config_filename,
-                        tool_name, global_tool_dir, should_skip_func, current_depth + 1
-                    )
-                
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
-                continue
-                
-    except (PermissionError, OSError):
-        pass
-    except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+    target = tool_dir_name.lower()
+    matches: List[Path] = []
+    for name, dirs in index.items():
+        if name.lower() == target:
+            matches.extend(dirs)
+
+    for tool_dir in outermost_only(matches):
+        try:
+            extract_mcp_from_dir_generic(
+                tool_dir, projects, config_filename, tool_name, global_tool_dir
+            )
+        except (PermissionError, OSError):
+            continue
+        except Exception as e:
+            logger.debug(f"Error processing {tool_dir}: {e}")
+            continue
 
 
 def extract_claude_mcp_fields(config_data: Dict, config_path: Path) -> List[Dict]:

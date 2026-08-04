@@ -140,8 +140,9 @@ class TestSubtreeIndex(unittest.TestCase):
         idx = get_subtree_index(self.root, self.root, _never_skip, "t")
         self.assertNotIn("src", idx)
         self.assertNotIn("components", idx)
-        found = {str(p) for p in idx.get(".cursor", [])}
-        self.assertTrue(any(p.endswith("components/.cursor") for p in found))
+        # Compare path parts (OS-agnostic — Windows uses backslash separators).
+        found = idx.get(".cursor", [])
+        self.assertTrue(any(p.parts[-2:] == ("components", ".cursor") for p in found))
 
     def test_memoized_per_key(self):
         self.mk("p", ".cursor")

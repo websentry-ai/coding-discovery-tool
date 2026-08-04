@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 
 from .constants import MAX_SEARCH_DEPTH
+from .mcp_script_hash import augment_script_fields
 
 logger = logging.getLogger(__name__)
 
@@ -673,6 +674,7 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
                 **{field_name: field_value for field_name, field_value in server_config.items()
                     if field_name not in excluded_fields}
             }
+            augment_script_fields(server_obj)
             server_obj["scan"] = scan_results.get(server_name) or batch_error
             servers_array.append(server_obj)
 

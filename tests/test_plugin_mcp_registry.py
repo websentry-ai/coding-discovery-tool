@@ -370,6 +370,28 @@ class TestAuthoritativeDirOrder(unittest.TestCase):
         )
         self.assertEqual(dirs, [Path("/installed/tools")])
 
+    def test_path_syntax_in_plugin_key_yields_no_marketplace_dir(self):
+        """Only a plain component is joined onto installLocation."""
+        mkt = {"source": {"source": "directory"}, "installLocation": "/mkt"}
+        for key in ("../evil", "..", ".", "/evil", "sub/evil", "a/../b"):
+            with self.subTest(key=key):
+                self.assertEqual(_authoritative_plugin_dirs(key, mkt, []), [])
+
+    def test_plain_plugin_key_yields_both_layouts(self):
+        mkt = {"source": {"source": "directory"}, "installLocation": "/mkt"}
+        self.assertEqual(
+            _authoritative_plugin_dirs("my.plugin", mkt, []),
+            [Path("/mkt/plugins/my.plugin"), Path("/mkt/my.plugin")],
+        )
+
+    def test_hostile_key_still_uses_its_install_path(self):
+        """The guard drops the marketplace join, not the registry's own path."""
+        mkt = {"source": {"source": "directory"}, "installLocation": "/mkt"}
+        self.assertEqual(
+            _authoritative_plugin_dirs("..", mkt, [{"installPath": "/dev/plugin"}]),
+            [Path("/dev/plugin")],
+        )
+
     def test_no_duplicate_dirs(self):
         dirs = _authoritative_plugin_dirs(
             "tools",
@@ -398,16 +420,44 @@ class TestRegistryAuthorityEdges(unittest.TestCase):
             self.assertEqual(projects, [])
 
     def test_traversal_in_plugin_key_is_rejected(self):
-        """A registry key like `../evil@mkt` must not reach outside installLocation."""
+        """A registry key that is not one plain path component is not joined on."""
+        for key in ("../evil", "..", ".", "/evil", "sub/evil"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                plugins_dir = base / ".claude" / "plugins"
+                location = base / "marketplace" / "inner"
+                location.mkdir(parents=True)
+                _write_json(base / "evil" / ".mcp.json", _server("escaped"))
+                # `..` resolves to the marketplace's parent, `.` to itself.
+                _write_json(base / "marketplace" / ".mcp.json", _server("parent"))
+                _write_json(location / ".mcp.json", _server("self"))
+                _write_json(location / "sub" / "evil" / ".mcp.json", _server("nested"))
+                _write_json(plugins_dir / "installed_plugins.json", {
+                    "version": 2,
+                    "plugins": {f"{key}@local-mkt": [{"version": "1.0.0"}]},
+                })
+                _write_json(plugins_dir / "known_marketplaces.json", {
+                    "local-mkt": {
+                        "source": {"source": "directory"},
+                        "installLocation": str(location),
+                    },
+                })
+
+                projects = []
+                _extract_plugin_mcp_for_dir(plugins_dir, projects)
+
+                self.assertEqual(projects, [])
+
+    def test_dotted_plugin_name_still_resolves_via_marketplace(self):
+        """The guard rejects path syntax, not ordinary names containing dots."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             plugins_dir = base / ".claude" / "plugins"
             location = base / "marketplace"
-            location.mkdir(parents=True)
-            _write_json(base / "evil" / ".mcp.json", _server("escaped"))
+            _write_json(location / "plugins" / "my.plugin" / ".mcp.json", _server("srv"))
             _write_json(plugins_dir / "installed_plugins.json", {
                 "version": 2,
-                "plugins": {"../evil@local-mkt": [{"version": "1.0.0"}]},
+                "plugins": {"my.plugin@local-mkt": [{"version": "1.0.0"}]},
             })
             _write_json(plugins_dir / "known_marketplaces.json", {
                 "local-mkt": {
@@ -419,7 +469,7 @@ class TestRegistryAuthorityEdges(unittest.TestCase):
             projects = []
             _extract_plugin_mcp_for_dir(plugins_dir, projects)
 
-            self.assertEqual(projects, [])
+            self.assertEqual(_server_names(projects[0]), {"plugin_my_plugin_srv"})
 
     def test_symlinked_manifest_out_of_plugin_is_rejected(self):
         """A .mcp.json symlinked outside the plugin can't ship a foreign file."""

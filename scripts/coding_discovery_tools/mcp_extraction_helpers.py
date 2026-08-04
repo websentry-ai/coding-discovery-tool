@@ -2006,7 +2006,8 @@ def _authoritative_plugin_dirs(
         marketplace_info.get("installLocation") if isinstance(marketplace_info, dict) else None
     )
 
-    if source_type == "directory" and install_location and Path(plugin).name == plugin:
+    safe_name = plugin != ".." and Path(plugin).name == plugin
+    if source_type == "directory" and install_location and safe_name:
         location = Path(install_location)
         for candidate in (
             location / "plugins" / plugin,

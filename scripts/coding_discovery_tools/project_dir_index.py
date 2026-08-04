@@ -21,6 +21,7 @@ with :func:`outermost_only`. Dispatch stays depth-first, so output is unchanged.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -56,35 +57,44 @@ def _collect(root_path: Path, current_dir: Path,
     Returns True if ``current_dir`` itself was readable. A caller uses this to avoid
     caching a result whose root could not be listed, so a one-off failure isn't
     baked in for the whole scan (the old per-tool walks re-listed each time).
+
+    Uses :func:`os.scandir`, so ``is_dir``/``is_symlink`` come from the directory
+    entry the OS already returned (no extra ``stat`` per item). ``Path.iterdir``
+    is itself built on ``scandir``, so iteration order — and therefore dispatch
+    order — is unchanged.
     """
     try:
-        entries = list(current_dir.iterdir())
+        scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
         logger.debug("could not read %s: %s", current_dir, e)
         return False
 
-    for item in entries:
-        try:
-            if should_skip(item):
+    with scan:
+        for entry in scan:
+            try:
+                item = Path(entry.path)
+                if should_skip(item):
+                    continue
+                if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                    continue
+                # is_dir() follows symlinks (matches the old Path.is_dir()).
+                if not entry.is_dir():
+                    continue
+                if entry.name.startswith("."):
+                    index.setdefault(entry.name, []).append(item)
+                # A name match still extracts even on a symlink (the old walk
+                # checked the name before the symlink), but we never descend
+                # into a symlink.
+                if not entry.is_symlink():
+                    _collect(root_path, item, should_skip, index)
+            except (PermissionError, OSError, ValueError):
+                # ValueError: item not under root_path.
                 continue
-            if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+            except Exception as e:
+                # As in the old walk, one unexpected bad entry (e.g. an odd name
+                # that trips a predicate) must not abort the whole traversal.
+                logger.debug("skipping %s: %s", entry.path, e)
                 continue
-            if not item.is_dir():
-                continue
-            if item.name.startswith("."):
-                index.setdefault(item.name, []).append(item)
-            # A name match still extracts even on a symlink (the old walk checked
-            # the name before the symlink), but we never descend into a symlink.
-            if not item.is_symlink():
-                _collect(root_path, item, should_skip, index)
-        except (PermissionError, OSError, ValueError):
-            # ValueError: item not under root_path.
-            continue
-        except Exception as e:
-            # As in the old walk, one unexpected bad entry (e.g. an odd name that
-            # trips a predicate) must not abort the whole traversal.
-            logger.debug("skipping %s: %s", item, e)
-            continue
     return True
 
 

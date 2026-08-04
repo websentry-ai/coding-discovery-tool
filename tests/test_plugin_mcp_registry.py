@@ -438,6 +438,23 @@ class TestRegistryAuthorityEdges(unittest.TestCase):
 
             self.assertEqual(projects, [])
 
+    def test_empty_mcp_servers_still_reads_root_map(self):
+        """`"mcpServers": {}` plus root-level servers: the root map still counts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plugins_dir = base / ".claude" / "plugins"
+            install_path = base / "dev" / "plugin"
+            _write_json(install_path / ".mcp.json", {
+                "mcpServers": {},
+                "root-srv": {"command": "npx", "args": ["root-srv"]},
+            })
+            _registry(plugins_dir, "plugin@local", install_path)
+
+            projects = []
+            _extract_plugin_mcp_for_dir(plugins_dir, projects)
+
+            self.assertEqual(_server_names(projects[0]), {"plugin_plugin_root-srv"})
+
     def test_symlinked_manifest_inside_plugin_is_read(self):
         """A link that stays inside the plugin is a normal layout, not an escape."""
         with tempfile.TemporaryDirectory() as tmp:

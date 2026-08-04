@@ -1871,12 +1871,10 @@ def _read_plugin_json(path: Path) -> Optional[Any]:
 
 
 def _server_entries_from_root_map(data: Dict) -> Dict:
-    """Server entries from an unwrapped ``.mcp.json`` (server map at the root).
+    """Server entries from an unwrapped ``.mcp.json``.
 
-    Only entries carrying a string ``command`` or ``url`` count. A plugin's
-    ``.mcp.json`` also holds metadata blocks (``$schema``, VS Code-style
-    ``inputs``) that would otherwise be reported — and live-scanned — as
-    phantom servers.
+    Needs a string ``command`` or ``url``, else ``$schema`` and ``inputs``
+    blocks get reported and live-scanned as phantom servers.
     """
     return {
         key: entry
@@ -1887,11 +1885,7 @@ def _server_entries_from_root_map(data: Dict) -> Dict:
 
 
 def _resolve_relative_mcp_servers(value: str, plugin_dir: Path) -> Optional[Dict]:
-    """Follow a ``mcpServers`` that names another file instead of inlining a map.
-
-    Contained to ``plugin_dir``: absolute paths, ``../`` traversal and symlink
-    escapes are rejected, so a manifest cannot name a file outside its plugin.
-    """
+    """Follow a ``mcpServers`` that names another file instead of inlining a map."""
     candidate = plugin_dir / value
     if not _is_contained(candidate, plugin_dir):
         return None
@@ -1903,13 +1897,8 @@ def _resolve_relative_mcp_servers(value: str, plugin_dir: Path) -> Optional[Dict
 def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
     """``{server_name: config}`` declared by the plugin rooted at ``plugin_dir``.
 
-    Sources in precedence order: ``.mcp.json``, ``.claude-plugin/plugin.json``,
-    then a bare ``plugin.json`` at the root. The first source to declare a name
-    wins. The bare root file is not one the hook reads; it is kept because the
-    sweep read it before this resolver existed.
-
-    Each source must resolve inside ``plugin_dir``: a manifest symlinked out of
-    the plugin would otherwise ship an arbitrary JSON file's contents upstream.
+    First source to declare a name wins. The bare root ``plugin.json`` is not
+    one the hook reads; it is kept because the sweep read it before.
     """
     servers: Dict = {}
     sources = (
@@ -1926,7 +1915,9 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
             continue
 
         mcp_servers = data.get('mcpServers')
-        if mcp_servers is None and source.name == '.mcp.json':
+        # Falsy, not `is None`: `"mcpServers": {}` alongside root-level servers
+        # must still read the root map, as the sweep did before.
+        if not mcp_servers and source.name == '.mcp.json':
             mcp_servers = _server_entries_from_root_map(data) or None
         if isinstance(mcp_servers, str):
             mcp_servers = _resolve_relative_mcp_servers(mcp_servers, plugin_dir)
@@ -1938,9 +1929,10 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
 
 
 def _select_plugin_version_dir(plugin_dir: Path) -> Optional[Path]:
-    """The live version dir of a cached plugin: the one marked ``.in_use``, else
-    the most recently modified. Reading every version dir would report stale
-    copies as live servers."""
+    """The live version dir of a cached plugin: ``.in_use``, else newest.
+
+    Reading every version dir reports stale copies as live servers.
+    """
     try:
         version_dirs = [d for d in plugin_dir.iterdir() if d.is_dir()]
         if not version_dirs:
@@ -1954,15 +1946,11 @@ def _select_plugin_version_dir(plugin_dir: Path) -> Optional[Path]:
 
 
 def _installed_plugins_registry(plugins_root: Path) -> Optional[Dict]:
-    """The ``plugins`` map from ``installed_plugins.json``, ``None`` when the
-    file is missing, unreadable or malformed.
+    """The ``plugins`` map, ``None`` when the file is missing or malformed.
 
-    An empty map is a usable answer — every plugin uninstalled — and must not
-    read as "no registry", which would resurrect the cache's leftovers.
-
-    The file's ``version`` field is deliberately not gated on: the shape has
-    been ``{plugin_id: [entries]}`` throughout, and refusing to read a bumped
-    file would silently drop every plugin's MCP servers.
+    An empty map means every plugin was uninstalled, not "no registry" — the
+    latter would resurrect the cache's leftovers. ``version`` is not gated on:
+    a bumped file would otherwise drop every plugin.
     """
     data = _read_plugin_json(plugins_root / "installed_plugins.json")
     plugins = data.get("plugins") if isinstance(data, dict) else None
@@ -1976,11 +1964,7 @@ def _marketplace_registry(plugins_root: Path) -> Dict:
 
 
 def _directory_marketplace_plugin_dir(location: Path, plugin: str) -> Optional[Path]:
-    """The dir a directory-source marketplace's own manifest assigns to ``plugin``.
-
-    Contained to ``location`` for the same reason as
-    ``_resolve_relative_mcp_servers``.
-    """
+    """The dir a directory-source marketplace's manifest assigns to ``plugin``."""
     manifest = _read_plugin_json(location / ".claude-plugin" / "marketplace.json")
     if not isinstance(manifest, dict):
         return None
@@ -2009,15 +1993,10 @@ def _authoritative_plugin_dirs(
 ) -> List[Path]:
     """Every dir that may hold ``plugin``, most authoritative first.
 
-    Directory-source marketplaces install outside the plugin cache, so their
-    ``installLocation`` layouts come first; ``installPath`` from the registry
-    entries covers everything else.
-
-    The plugin name is a registry key, so it is joined onto ``installLocation``
-    only when it is a single path component: ``../../etc@mkt`` would otherwise
-    reach outside the marketplace. Symlinks are left alone — a dev marketplace
-    legitimately links a plugin dir elsewhere, and ``installPath`` may not be
-    set for it.
+    Directory-source marketplaces install outside the cache, so their
+    ``installLocation`` layouts come first, then ``installPath``. The plugin
+    name is a registry key, joined on only when it is one path component —
+    ``../../etc@mkt`` would otherwise reach outside the marketplace.
     """
     dirs: List[Path] = []
 
@@ -2058,12 +2037,10 @@ def _mangle_mcp_token(token: Optional[str]) -> str:
 def _claude_plugin_server_names(plugin_name: str, servers: Dict) -> Dict:
     """Re-key a plugin's server map to the names Claude Code exposes.
 
-    A plugin's server is addressed as ``plugin_<plugin>_<key>`` at the tool-call
-    layer, so that is the name the hook reports for it. Reporting the bare key
-    here would file one server under two identities.
-
-    Punctuation collapses to ``_``, so two keys can mangle to the same name; the
-    loser keeps its raw key rather than vanishing from the report.
+    A plugin server is ``plugin_<plugin>_<key>`` at the tool-call layer, which
+    is what the hook reports; the bare key would file it under a second
+    identity. Punctuation collapses to ``_``, so two keys can collide — the
+    loser keeps its raw key rather than vanishing.
     """
     renamed: Dict = {}
     prefix = "plugin_%s_" % _mangle_mcp_token(plugin_name)
@@ -2116,8 +2093,7 @@ def _extract_registered_plugin_mcp(
 ) -> bool:
     """Resolve plugin MCP servers through the installed-plugins registry.
 
-    Returns False when the registry is missing or unreadable, so the caller can
-    fall back to scanning the on-disk layouts.
+    False when the registry is unusable, so the caller falls back to disk.
     """
     installed = _installed_plugins_registry(plugins_root)
     if installed is None:
@@ -2136,8 +2112,7 @@ def _extract_registered_plugin_mcp(
             servers = _plugin_mcp_server_map(plugin_dir)
             if not servers:
                 continue
-            # The first candidate that declares the plugin's servers is
-            # authoritative; later ones would re-report the same servers.
+            # First dir that declares the servers wins; later ones repeat them.
             if _append_plugin_project(
                 plugin_dir, plugin, servers, projects, plugin_lookup=plugin_lookup
             ):
@@ -2198,11 +2173,9 @@ def _extract_plugin_mcp_for_dir(
     """
     Extract MCP configs from one ``.claude/plugins`` directory.
 
-    Mirrors the Claude Code hook's resolution order: the installed-plugins
-    registry is authoritative, because it is the only source that knows about
-    plugins installed outside the cache (directory-source marketplaces, local
-    development installs). The on-disk scan runs only when that registry is
-    missing or unreadable.
+    Mirrors the hook: the registry is authoritative, being the only source that
+    knows about plugins installed outside the cache (directory-source
+    marketplaces, dev installs). The disk scan runs only when it is unusable.
     """
     if not plugins_dir.exists() or not plugins_dir.is_dir():
         return

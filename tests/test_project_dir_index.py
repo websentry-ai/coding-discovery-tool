@@ -123,14 +123,25 @@ class TestSubtreeIndex(unittest.TestCase):
     def test_symlinked_dir_recorded_but_not_descended(self):
         target = self.mk("real")
         (target / ".cursor").mkdir()
-        link = self.root / "link"
+        link = self.root / ".link"  # hidden, so it is recorded
         os.symlink(target, link)
         idx = get_subtree_index(self.root, self.root, _never_skip, "t")
-        # The symlink dir itself is recorded by basename...
-        self.assertIn("link", idx)
+        # The symlink dir itself is recorded by basename (a name match would still
+        # extract it, as the old walk checked the name before the symlink)...
+        self.assertIn(".link", idx)
         # ...but we never descend into it, so its .cursor is not reached via the link.
-        via_link = [p for p in idx.get(".cursor", []) if "link" in p.parts]
+        via_link = [p for p in idx.get(".cursor", []) if ".link" in p.parts]
         self.assertEqual(via_link, [])
+
+    def test_non_hidden_dirs_are_not_stored_but_are_descended(self):
+        # A non-hidden dir is traversed (so nested hidden dirs are found) but not
+        # itself stored, which keeps the cache small.
+        self.mk("src", "components", ".cursor")
+        idx = get_subtree_index(self.root, self.root, _never_skip, "t")
+        self.assertNotIn("src", idx)
+        self.assertNotIn("components", idx)
+        found = {str(p) for p in idx.get(".cursor", [])}
+        self.assertTrue(any(p.endswith("components/.cursor") for p in found))
 
     def test_memoized_per_key(self):
         self.mk("p", ".cursor")

@@ -40,10 +40,15 @@ def _collect(root_path: Path, current_dir: Path,
     """Depth-first walk of ``current_dir`` recording every directory by basename.
 
     Mirrors the old ``walk_for_tool_directories`` recursion, minus the
-    single-basename match/prune: it records ALL directories (one pass serves every
-    tool) and descends through matches (so nested different-tool dirs are still
-    found). A directory is always recorded before anything inside it, which
-    :func:`outermost_only` relies on.
+    single-basename match/prune: one pass serves every tool, and it descends
+    through matches (so a different tool's dir nested below is still found).
+
+    Only HIDDEN directories (dot-prefixed) are recorded. Every tool-marker dir the
+    scan looks for is hidden (``.cursor``, ``.claude``, ``.roo``, …), so this holds
+    just the handful of hidden dirs per tree instead of every directory — bounding
+    the cache's memory — without changing any lookup. The traversal still descends
+    into non-hidden dirs to reach hidden ones nested inside them. A directory is
+    always recorded before anything inside it, which :func:`outermost_only` relies on.
     """
     try:
         entries = list(current_dir.iterdir())
@@ -58,7 +63,8 @@ def _collect(root_path: Path, current_dir: Path,
                 continue
             if not item.is_dir():
                 continue
-            index.setdefault(item.name, []).append(item)
+            if item.name.startswith("."):
+                index.setdefault(item.name, []).append(item)
             # A name match still extracts even on a symlink (the old walk checked
             # the name before the symlink), but we never descend into a symlink.
             if not item.is_symlink():

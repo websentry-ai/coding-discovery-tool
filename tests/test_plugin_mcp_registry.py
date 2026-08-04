@@ -379,6 +379,81 @@ class TestAuthoritativeDirOrder(unittest.TestCase):
         self.assertEqual(len(dirs), len(set(dirs)))
 
 
+class TestRegistryAuthorityEdges(unittest.TestCase):
+    """An empty registry is an answer; a hostile registry key is not a path."""
+
+    def test_empty_plugins_map_does_not_revive_cache(self):
+        """Every plugin uninstalled -> report nothing, don't resurrect the cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plugins_dir = Path(tmp) / ".claude" / "plugins"
+            _write_json(plugins_dir / "installed_plugins.json", {"version": 2, "plugins": {}})
+            _write_json(
+                plugins_dir / "cache" / "official" / "slack" / "1.0.0" / ".mcp.json",
+                _server("leftover"),
+            )
+
+            projects = []
+            _extract_plugin_mcp_for_dir(plugins_dir, projects)
+
+            self.assertEqual(projects, [])
+
+    def test_traversal_in_plugin_key_is_rejected(self):
+        """A registry key like `../evil@mkt` must not reach outside installLocation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plugins_dir = base / ".claude" / "plugins"
+            location = base / "marketplace"
+            location.mkdir(parents=True)
+            _write_json(base / "evil" / ".mcp.json", _server("escaped"))
+            _write_json(plugins_dir / "installed_plugins.json", {
+                "version": 2,
+                "plugins": {"../evil@local-mkt": [{"version": "1.0.0"}]},
+            })
+            _write_json(plugins_dir / "known_marketplaces.json", {
+                "local-mkt": {
+                    "source": {"source": "directory"},
+                    "installLocation": str(location),
+                },
+            })
+
+            projects = []
+            _extract_plugin_mcp_for_dir(plugins_dir, projects)
+
+            self.assertEqual(projects, [])
+
+    def test_symlinked_manifest_out_of_plugin_is_rejected(self):
+        """A .mcp.json symlinked outside the plugin can't ship a foreign file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plugins_dir = base / ".claude" / "plugins"
+            install_path = base / "dev" / "plugin"
+            install_path.mkdir(parents=True)
+            outside = base / "elsewhere" / "secrets.json"
+            _write_json(outside, _server("leaked"))
+            (install_path / ".mcp.json").symlink_to(outside)
+            _registry(plugins_dir, "plugin@local", install_path)
+
+            projects = []
+            _extract_plugin_mcp_for_dir(plugins_dir, projects)
+
+            self.assertEqual(projects, [])
+
+    def test_symlinked_manifest_inside_plugin_is_read(self):
+        """A link that stays inside the plugin is a normal layout, not an escape."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plugins_dir = base / ".claude" / "plugins"
+            install_path = base / "dev" / "plugin"
+            _write_json(install_path / "config" / "servers.json", _server("linked"))
+            (install_path / ".mcp.json").symlink_to(install_path / "config" / "servers.json")
+            _registry(plugins_dir, "plugin@local", install_path)
+
+            projects = []
+            _extract_plugin_mcp_for_dir(plugins_dir, projects)
+
+            self.assertEqual(_server_names(projects[0]), {"plugin_plugin_linked"})
+
+
 class TestClaudeExposedServerNames(unittest.TestCase):
     """Servers are reported under the name Claude Code addresses them by.
 

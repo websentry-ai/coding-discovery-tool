@@ -1849,6 +1849,15 @@ def _lookup_plugin_provenance(
     return find_plugin_provenance_by_path(path_str, plugin_lookup)
 
 
+def _is_contained(path: Path, root: Path) -> bool:
+    """True when ``path`` stays inside ``root`` once symlinks are followed."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError, RuntimeError):
+        return False
+    return True
+
+
 def _read_plugin_json(path: Path) -> Optional[Any]:
     """Parse a plugin JSON file. None when absent, unreadable or malformed."""
     try:
@@ -1883,10 +1892,8 @@ def _resolve_relative_mcp_servers(value: str, plugin_dir: Path) -> Optional[Dict
     Contained to ``plugin_dir``: absolute paths, ``../`` traversal and symlink
     escapes are rejected, so a manifest cannot name a file outside its plugin.
     """
-    try:
-        candidate = (plugin_dir / value).resolve()
-        candidate.relative_to(plugin_dir.resolve())
-    except (ValueError, OSError, RuntimeError):
+    candidate = plugin_dir / value
+    if not _is_contained(candidate, plugin_dir):
         return None
     data = _read_plugin_json(candidate)
     servers = data.get('mcpServers') if isinstance(data, dict) else None
@@ -1900,6 +1907,9 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
     then a bare ``plugin.json`` at the root. The first source to declare a name
     wins. The bare root file is not one the hook reads; it is kept because the
     sweep read it before this resolver existed.
+
+    Each source must resolve inside ``plugin_dir``: a manifest symlinked out of
+    the plugin would otherwise ship an arbitrary JSON file's contents upstream.
     """
     servers: Dict = {}
     sources = (
@@ -1908,6 +1918,9 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
         plugin_dir / "plugin.json",
     )
     for source in sources:
+        if not _is_contained(source, plugin_dir):
+            logger.debug(f"Plugin MCP source escapes its plugin dir: {source}")
+            continue
         data = _read_plugin_json(source)
         if not isinstance(data, dict):
             continue
@@ -1940,8 +1953,12 @@ def _select_plugin_version_dir(plugin_dir: Path) -> Optional[Path]:
         return None
 
 
-def _installed_plugins_registry(plugins_root: Path) -> Dict:
-    """The ``plugins`` map from ``installed_plugins.json``.
+def _installed_plugins_registry(plugins_root: Path) -> Optional[Dict]:
+    """The ``plugins`` map from ``installed_plugins.json``, ``None`` when the
+    file is missing, unreadable or malformed.
+
+    An empty map is a usable answer — every plugin uninstalled — and must not
+    read as "no registry", which would resurrect the cache's leftovers.
 
     The file's ``version`` field is deliberately not gated on: the shape has
     been ``{plugin_id: [entries]}`` throughout, and refusing to read a bumped
@@ -1949,7 +1966,7 @@ def _installed_plugins_registry(plugins_root: Path) -> Dict:
     """
     data = _read_plugin_json(plugins_root / "installed_plugins.json")
     plugins = data.get("plugins") if isinstance(data, dict) else None
-    return plugins if isinstance(plugins, dict) else {}
+    return plugins if isinstance(plugins, dict) else None
 
 
 def _marketplace_registry(plugins_root: Path) -> Dict:
@@ -1995,6 +2012,12 @@ def _authoritative_plugin_dirs(
     Directory-source marketplaces install outside the plugin cache, so their
     ``installLocation`` layouts come first; ``installPath`` from the registry
     entries covers everything else.
+
+    The plugin name is a registry key, so it is joined onto ``installLocation``
+    only when it is a single path component: ``../../etc@mkt`` would otherwise
+    reach outside the marketplace. Symlinks are left alone — a dev marketplace
+    legitimately links a plugin dir elsewhere, and ``installPath`` may not be
+    set for it.
     """
     dirs: List[Path] = []
 
@@ -2004,7 +2027,7 @@ def _authoritative_plugin_dirs(
         marketplace_info.get("installLocation") if isinstance(marketplace_info, dict) else None
     )
 
-    if source_type == "directory" and install_location:
+    if source_type == "directory" and install_location and Path(plugin).name == plugin:
         location = Path(install_location)
         for candidate in (
             location / "plugins" / plugin,
@@ -2097,7 +2120,7 @@ def _extract_registered_plugin_mcp(
     fall back to scanning the on-disk layouts.
     """
     installed = _installed_plugins_registry(plugins_root)
-    if not installed:
+    if installed is None:
         return False
 
     marketplaces = _marketplace_registry(plugins_root)

@@ -10,7 +10,22 @@ param(
 )
 
 $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
-$BRANCH = "main"
+
+# Ask the backend which branch to run: staging only when it replies "staging",
+# otherwise main. Reads the domain from -Domain or UNBOUND_DOMAIN.
+$_domain = if ($Domain) { $Domain } else { $env:UNBOUND_DOMAIN }
+$_key = if ($ApiKey) { $ApiKey } else { $env:UNBOUND_API_KEY }
+# Scheme-less domain -> https (matches the reporting path); never send the key over http.
+if ($_domain -and $_domain -notmatch '^https?://') { $_domain = "https://$_domain" }
+$BRANCH = 'main'
+if ($_domain -and $_key -and $_domain -match '^https://') {
+    try {
+        $_url = ($_domain.TrimEnd('/')) + '/api/v1/ai-tools/discovery-branch/'
+        $_resp = Invoke-RestMethod -Uri $_url -TimeoutSec 5 -Headers @{ Authorization = "Bearer $_key" } -ErrorAction Stop
+        if ($_resp.branch -eq 'staging') { $BRANCH = 'staging' }
+    } catch { }
+}
+
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"
 
 function Write-Info { Write-Host "i " -ForegroundColor Blue -NoNewline; Write-Host $args[0] }

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import platform
+import re
 import signal
 import sys
 import threading
@@ -52,6 +53,14 @@ try:
         ClaudeSettingsExtractorFactory,
         ClaudeSkillsExtractorFactory,
         ClaudeCoworkSkillsExtractorFactory,
+        CodexSkillsExtractorFactory,
+        GeminiCliSkillsExtractorFactory,
+        JunieSkillsExtractorFactory,
+        KiloCodeSkillsExtractorFactory,
+        OpenCodeSkillsExtractorFactory,
+        RooSkillsExtractorFactory,
+        ReplitSkillsExtractorFactory,
+        WindsurfSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -112,6 +121,14 @@ except ImportError:
         ClaudeSettingsExtractorFactory,
         ClaudeSkillsExtractorFactory,
         ClaudeCoworkSkillsExtractorFactory,
+        CodexSkillsExtractorFactory,
+        GeminiCliSkillsExtractorFactory,
+        JunieSkillsExtractorFactory,
+        KiloCodeSkillsExtractorFactory,
+        OpenCodeSkillsExtractorFactory,
+        RooSkillsExtractorFactory,
+        ReplitSkillsExtractorFactory,
+        WindsurfSkillsExtractorFactory,
         CursorSettingsExtractorFactory,
         WindsurfMCPConfigExtractorFactory,
         RooMCPConfigExtractorFactory,
@@ -161,6 +178,22 @@ configure_logger()
 # "not yet computed" marker — otherwise the expensive whole-disk walk re-runs on
 # every accessor call whenever the real result is ``None``.
 _AUGMENT_CACHE_UNSET = object()
+
+# Sentry metric keys must match [a-zA-Z_][a-zA-Z0-9_.\-]* — tool names like
+# "Gemini CLI" / "Roo Code" carry spaces, so they cannot be used verbatim.
+_METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
+
+
+def _metric_safe_name(name: str) -> str:
+    """Lowercase a tool name into a valid Sentry metric-key suffix.
+
+    "Gemini CLI" -> "gemini_cli"; "Roo Code" -> "roo_code". Leading characters that
+    are not a letter/underscore are prefixed with ``_`` so the key stays valid.
+    """
+    key = _METRIC_NAME_ILLEGAL.sub("_", (name or "").strip().lower())
+    if not key:
+        return "unknown"
+    return key if (key[0].isalpha() or key[0] == "_") else f"_{key}"
 
 
 def _normalise_path(p: str) -> str:
@@ -275,7 +308,12 @@ class AIToolsDetector:
             os_name: Operating system name (defaults to current OS)
         """
         self.system = os_name or platform.system()
-        
+
+        # Per-flow skills counters, keyed by metric-safe tool name. Accumulated by
+        # _record_skills_metric during processing and forwarded once at end of run
+        # in the discovery-metrics payload (see main()).
+        self.skills_metrics: Dict[str, Dict[str, object]] = {}
+
         try:
             # Initialize shared extractors
             self._device_id_extractor = DeviceIdExtractorFactory.create(self.system)
@@ -323,6 +361,15 @@ class AIToolsDetector:
             # Initialize Codex extractors (macOS only, returns None for unsupported OS)
             self._codex_rules_extractor = CodexRulesExtractorFactory.create(self.system)
             self._codex_mcp_extractor = CodexMCPConfigExtractorFactory.create(self.system)
+            self._codex_skills_extractor = CodexSkillsExtractorFactory.create(self.system)
+            # Agent Skills (SKILL.md) extractors for the remaining SKILL.md-adopting tools
+            self._gemini_cli_skills_extractor = GeminiCliSkillsExtractorFactory.create(self.system)
+            self._junie_skills_extractor = JunieSkillsExtractorFactory.create(self.system)
+            self._kilocode_skills_extractor = KiloCodeSkillsExtractorFactory.create(self.system)
+            self._opencode_skills_extractor = OpenCodeSkillsExtractorFactory.create(self.system)
+            self._roo_skills_extractor = RooSkillsExtractorFactory.create(self.system)
+            self._replit_skills_extractor = ReplitSkillsExtractorFactory.create(self.system)
+            self._windsurf_skills_extractor = WindsurfSkillsExtractorFactory.create(self.system)
             
             # Initialize OpenCode extractors (macOS only, returns None for unsupported OS)
             self._opencode_rules_extractor = OpenCodeRulesExtractorFactory.create(self.system)
@@ -396,7 +443,7 @@ class AIToolsDetector:
         """
         return self._device_id_extractor.extract_device_id()
 
-    def detect_all_tools(self, user_home: Optional[Path] = None) -> List[Dict]:
+    def detect_all_tools(self, user_home: Optional[Path] = None, failures: Optional[set] = None) -> List[Dict]:
         """
         Detect all supported AI tools.
         
@@ -427,6 +474,9 @@ class AIToolsDetector:
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
                 report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
+                # Detection errored: record the tool so the caller can keep it (presence unknown != uninstalled).
+                if failures is not None:
+                    failures.add(detector.tool_name)
 
         return tools
 
@@ -567,6 +617,94 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting Cline skills: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": "Cline skills"}, level="warning")
+            return None
+
+    def extract_all_codex_skills(self) -> Optional[Dict]:
+        """Extract all OpenAI Codex skills (~/.agents/skills, project .agents/skills)."""
+        try:
+            if self._codex_skills_extractor:
+                return self._codex_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Codex skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Codex skills"}, level="warning")
+            return None
+
+    def extract_all_gemini_cli_skills(self) -> Optional[Dict]:
+        """Extract all Gemini CLI skills (~/.gemini/skills + .agents compat)."""
+        try:
+            if self._gemini_cli_skills_extractor:
+                return self._gemini_cli_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Gemini CLI skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Gemini CLI skills"}, level="warning")
+            return None
+
+    def extract_all_junie_skills(self) -> Optional[Dict]:
+        """Extract all Junie skills (~/.junie/skills, project .junie/skills)."""
+        try:
+            if self._junie_skills_extractor:
+                return self._junie_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Junie skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Junie skills"}, level="warning")
+            return None
+
+    def extract_all_kilocode_skills(self) -> Optional[Dict]:
+        """Extract all Kilo Code skills (~/.kilo/skills + .agents/.claude compat)."""
+        try:
+            if self._kilocode_skills_extractor:
+                return self._kilocode_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Kilo Code skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Kilo Code skills"}, level="warning")
+            return None
+
+    def extract_all_opencode_skills(self) -> Optional[Dict]:
+        """Extract all OpenCode skills (~/.config/opencode/skills + .claude/.agents compat)."""
+        try:
+            if self._opencode_skills_extractor:
+                return self._opencode_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting OpenCode skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "OpenCode skills"}, level="warning")
+            return None
+
+    def extract_all_roo_skills(self) -> Optional[Dict]:
+        """Extract all Roo Code skills (~/.roo/skills + skills-{mode} + .agents compat)."""
+        try:
+            if self._roo_skills_extractor:
+                return self._roo_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Roo Code skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Roo Code skills"}, level="warning")
+            return None
+
+    def extract_all_replit_skills(self) -> Optional[Dict]:
+        """Extract all Replit skills (project-scope .agents/skills only)."""
+        try:
+            if self._replit_skills_extractor:
+                return self._replit_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Replit skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Replit skills"}, level="warning")
+            return None
+
+    def extract_all_windsurf_skills(self) -> Optional[Dict]:
+        """Extract all Windsurf skills (~/.codeium/windsurf/skills + project compat dirs)."""
+        try:
+            if self._windsurf_skills_extractor:
+                return self._windsurf_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Windsurf skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Windsurf skills"}, level="warning")
             return None
 
     def extract_all_windsurf_rules(self) -> List[Dict]:
@@ -741,11 +879,13 @@ class AIToolsDetector:
         rules_extractor: Optional[object],
         mcp_extractor: Optional[BaseMCPConfigExtractor],
         extract_rules_func: Callable[[], List[Dict]],
-        merge_mcp_func: Optional[Callable[[List[Dict], Dict[str, Dict]], None]] = None
+        merge_mcp_func: Optional[Callable[[List[Dict], Dict[str, Dict]], None]] = None,
+        skills_extractor: Optional[object] = None,
+        extract_skills_func: Optional[Callable[[], Optional[Dict]]] = None,
     ) -> Dict[str, Dict]:
         """
         Helper method to process a tool that has both rules and MCP config extraction.
-        
+
         This method handles the common pattern of:
         1. Logging processing header
         2. Extracting rules (if extractor exists)
@@ -754,7 +894,8 @@ class AIToolsDetector:
         5. Extracting MCP configs (if extractor exists)
         6. Merging MCP configs into projects (using custom merge function if provided)
         7. Logging MCP details
-        
+        8. Extracting + merging Agent Skills (if a skills extractor is provided)
+
         Args:
             tool: Tool info dict from detection
             rules_extractor: Rules extractor instance (can be None)
@@ -763,7 +904,14 @@ class AIToolsDetector:
             merge_mcp_func: Optional custom merge function for MCP configs.
                           Defaults to _merge_mcp_configs_into_projects.
                           Should have signature: (mcp_projects: List[Dict], projects_dict: Dict[str, Dict]) -> None
-            
+            skills_extractor: Optional skills extractor instance (can be None). Only used
+                          to gate the "extractor not available for this OS" warning; the
+                          actual extraction is driven by extract_skills_func.
+            extract_skills_func: Optional callable returning the standard
+                          {"user_skills": [...], "project_skills": [...]} dict (or None).
+                          When provided, skills are extracted and merged into
+                          projects_dict via _extract_and_merge_tool_skills.
+
         Returns:
             Dictionary mapping project_root to project dict
         """
@@ -825,8 +973,181 @@ class AIToolsDetector:
                 report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
         else:
             logger.info(f"  ⚠ {tool_name} MCP extractor not available for this OS")
-        
+
+        # Extract and merge Agent Skills (opt-in via extract_skills_func)
+        if extract_skills_func is not None:
+            self._extract_and_merge_tool_skills(
+                tool_name, skills_extractor, extract_skills_func, projects_dict
+            )
+
         return projects_dict
+
+    def _extract_and_merge_tool_skills(
+        self,
+        tool_name: str,
+        skills_extractor: Optional[object],
+        extract_skills_func: Callable[[], Optional[Dict]],
+        projects_dict: Dict[str, Dict],
+    ) -> None:
+        """
+        Extract Agent Skills for a standalone tool and merge them into projects_dict.
+
+        Mirrors the Cline skills-merge path so every SKILL.md-based tool shares one
+        code path:
+        - user-level skills key under their OWNING user's home (derived from each
+          skill's ``project_path``), so the per-user project filter scopes them
+          correctly under a root/all-users scan;
+        - project-level skills merge via ``_merge_skills_into_projects``.
+
+        No-ops (with a warning) when the skills extractor is unavailable for this OS.
+        Never raises — extraction failures are logged and swallowed so one tool's
+        skills can't fail the whole tool's report.
+
+        Args:
+            tool_name: Display name of the tool (for log lines)
+            skills_extractor: The OS-specific skills extractor instance (or None)
+            extract_skills_func: Callable returning {"user_skills", "project_skills"} or None
+            projects_dict: Project dict to merge into (mutated in place)
+        """
+        if not skills_extractor:
+            logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+            self._record_skills_metric(tool_name, status="unsupported_os")
+            return
+
+        logger.info(f"  Extracting {tool_name} skills...")
+        try:
+            skills_result = extract_skills_func()
+
+            # The extract_all_<tool>_skills wrappers catch their own exceptions (log +
+            # Sentry) and return None on failure. We already confirmed the extractor
+            # exists above, so a None result here means the extractor RAISED, not that
+            # the machine genuinely has no skills. Record it as an error so the
+            # fleet-wide failure alert can distinguish a broken extractor (which would
+            # otherwise masquerade as status=ok with zero counts) from a clean zero.
+            if skills_result is None:
+                logger.warning(f"  ⚠ {tool_name} skills extraction returned no result; recording error")
+                self._record_skills_metric(tool_name, status="error")
+                return
+
+            user_skills = skills_result.get("user_skills", [])
+            project_skills = skills_result.get("project_skills", [])
+
+            # A user skill's owning home is its ``project_path`` (derived from the
+            # skill file at extraction time). It must ALWAYS be present; if it isn't,
+            # DROP the skill rather than fall back to the scanning process's home —
+            # under a root/all-user scan Path.home() is the scanner's home (e.g.
+            # /root), so the fallback would mis-file another user's SKILL.md content
+            # into the wrong user's report/filter context.
+            attributable = [s for s in user_skills if s.get("project_path")]
+            dropped = len(user_skills) - len(attributable)
+            if dropped:
+                logger.warning(
+                    f"  ⚠ Dropping {dropped} {tool_name} user skill(s) with no owning "
+                    f"home (project_path); not attributing to the scanner's home"
+                )
+
+            # Record per-flow counts (including ZERO) so a silently-broken extractor
+            # — e.g. a vendor path change or a permission regression — is visible as a
+            # fleet-wide drop, not just an indistinguishable "no skills found" log line.
+            self._record_skills_metric(
+                tool_name,
+                status="ok",
+                user_skills=len(attributable),
+                project_skills=sum(len(p.get("skills", [])) for p in project_skills),
+                projects=len(project_skills),
+                dropped_no_home=dropped,
+            )
+
+            if attributable:
+                logger.info(f"  ✓ Found {len(attributable)} user-level {tool_name} skill(s)")
+                for skill in attributable:
+                    user_home = skill["project_path"]
+                    if user_home not in projects_dict:
+                        projects_dict[user_home] = {
+                            "path": user_home,
+                            "rules": [],
+                            "skills": [],
+                            "mcpServers": [],
+                        }
+                    projects_dict[user_home].setdefault("skills", []).append(skill)
+
+            if project_skills:
+                num_skills_projects = len(project_skills)
+                total_skills = sum(len(p.get("skills", [])) for p in project_skills)
+                logger.info(
+                    f"  ✓ Found {num_skills_projects} project(s) with {total_skills} "
+                    f"project-level {tool_name} skill(s)"
+                )
+                self._merge_skills_into_projects(project_skills, projects_dict)
+
+            if not attributable and not project_skills:
+                logger.info(f"  ℹ No {tool_name} skills found")
+        except Exception as e:
+            logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": f"{tool_name} skills"}, level="warning")
+            self._record_skills_metric(tool_name, status="error")
+
+    def _record_skills_metric(
+        self,
+        tool_name: str,
+        status: str,
+        user_skills: int = 0,
+        project_skills: int = 0,
+        projects: int = 0,
+        dropped_no_home: int = 0,
+    ) -> None:
+        """Record one per-flow skills counter for the metrics payload.
+
+        Each of the SKILL.md extraction flows records its result here — including a
+        zero count, which is the whole point: a silently-failing extractor produces
+        no exception and no Sentry event, only a benign "No skills found" log that is
+        indistinguishable from a machine that genuinely has none. Aggregated across a
+        fleet, a per-tool counter makes that regression alertable.
+
+        ``tool`` is sanitised to the backend's Sentry metric-key pattern
+        ``[a-zA-Z_][a-zA-Z0-9_.\\-]*`` (tool names like "Gemini CLI" contain spaces),
+        so it can be used directly as a metric name suffix. Never raises.
+        """
+        try:
+            self.skills_metrics[_metric_safe_name(tool_name)] = {
+                "status": status,
+                "user_skills": user_skills,
+                "project_skills": project_skills,
+                "projects": projects,
+                "dropped_no_home": dropped_no_home,
+            }
+        except Exception:  # never let telemetry bookkeeping break a scan
+            pass
+
+    def _record_skills_result_metric(self, tool_name: str, skills_result: Optional[Dict]) -> None:
+        """Record per-flow skills counts for a tool that merges skills INLINE.
+
+        The legacy Claude Code / Cursor / Cline / Augment / Copilot CLI / Copilot
+        (VS Code) / Cowork paths predate ``_extract_and_merge_tool_skills`` and merge
+        skills with bespoke code, so they don't go through the shared recorder. This
+        puts them in the same metrics payload as the 8 newer tools (same
+        ``{user_skills, project_skills, projects}`` shape) so fleet-wide drop
+        alerting has no blind spot.
+
+        ``skills_result is None`` is recorded as ``status="error"``, exactly as the
+        newer tools do. Every call site sits inside ``if self._<tool>_skills_extractor:``
+        (so "unsupported OS" is already excluded) and the ``extract_all_<tool>_skills``
+        wrappers return ``None`` only when extraction raised — a genuine "no skills"
+        returns a dict with empty lists. So ``None`` here means the extractor FAILED,
+        and reporting it as a legitimate zero would hide a broken extractor behind a
+        plausible count. Never raises."""
+        if skills_result is None:
+            self._record_skills_metric(tool_name, status="error")
+            return
+        us = skills_result.get("user_skills", []) or []
+        ps = skills_result.get("project_skills", []) or []
+        self._record_skills_metric(
+            tool_name,
+            status="ok",
+            user_skills=len(us),
+            project_skills=sum(len(p.get("skills", [])) for p in ps),
+            projects=len(ps),
+        )
 
     def _process_tool_with_mcp_only(
         self,
@@ -1299,6 +1620,7 @@ class AIToolsDetector:
         if self._claude_skills_extractor:
             try:
                 skills_result = self.extract_all_claude_skills(plugin_lookup=plugin_lookup)
+                self._record_skills_result_metric("Claude Code", skills_result)
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -1642,6 +1964,7 @@ class AIToolsDetector:
         if self._copilot_cli_skills_extractor:
             try:
                 skills_result = self._get_copilot_cli_skills()
+                self._record_skills_result_metric("GitHub Copilot CLI", skills_result)
                 user_skills = skills_result.get("user_skills", [])
                 project_skills = skills_result.get("project_skills", [])
 
@@ -1917,6 +2240,7 @@ class AIToolsDetector:
 
         logger.info(f"  Extracting {tool.get('name')} skills...")
         skills_result = self._get_augment_skills()
+        self._record_skills_result_metric(tool.get("name") or "Augment", skills_result)
         user_skills = skills_result.get("user_skills", [])
         project_skills = skills_result.get("project_skills", [])
 
@@ -2101,6 +2425,7 @@ class AIToolsDetector:
             if is_canonical_vscode:
                 logger.info(f"  Attaching shared Copilot skills to {tool_name}...")
                 skills_result = self._get_copilot_cli_skills()
+                self._record_skills_result_metric(tool_name, skills_result)
 
                 # Project-scope skills land under their absolute repo root, so
                 # the per-user project filter scopes them correctly.
@@ -2225,6 +2550,7 @@ class AIToolsDetector:
             if self._cursor_skills_extractor:
                 try:
                     skills_result = self.extract_all_cursor_skills(plugin_lookup=cursor_plugin_lookup)
+                    self._record_skills_result_metric("Cursor", skills_result)
                     user_skills = skills_result.get("user_skills", []) if skills_result else []
                     project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -2284,6 +2610,7 @@ class AIToolsDetector:
             logger.info(f"  Extracting Claude Cowork skills...")
             try:
                 skills_result = self.extract_all_cowork_skills()
+                self._record_skills_result_metric("Claude Cowork", skills_result)
                 user_skills = skills_result.get("user_skills", []) if skills_result else []
                 if user_skills:
                     logger.info(f"  ✓ Found {len(user_skills)} Claude Cowork skill(s)")
@@ -2304,15 +2631,25 @@ class AIToolsDetector:
                 tool,
                 self._windsurf_rules_extractor,
                 self._windsurf_mcp_extractor,
-                self.extract_all_windsurf_rules
+                self.extract_all_windsurf_rules,
+                skills_extractor=self._windsurf_skills_extractor,
+                extract_skills_func=self.extract_all_windsurf_skills,
             )
-        
+
+        elif tool_name == "replit":
+            # Replit exposes only Agent Skills (project-scope .agents/skills); no rules/MCP.
+            self._extract_and_merge_tool_skills(
+                "Replit", self._replit_skills_extractor, self.extract_all_replit_skills, projects_dict
+            )
+
         elif tool_name.startswith("roo code"):
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
                 self._roo_rules_extractor,
                 self._roo_mcp_extractor,
-                self.extract_all_roo_rules
+                self.extract_all_roo_rules,
+                skills_extractor=self._roo_skills_extractor,
+                extract_skills_func=self.extract_all_roo_skills,
             )
         
         elif tool_name.startswith("cline"):
@@ -2328,6 +2665,7 @@ class AIToolsDetector:
             if self._cline_skills_extractor:
                 try:
                     skills_result = self.extract_all_cline_skills()
+                    self._record_skills_result_metric("Cline", skills_result)
                     user_skills = skills_result.get("user_skills", []) if skills_result else []
                     project_skills = skills_result.get("project_skills", []) if skills_result else []
 
@@ -2372,7 +2710,9 @@ class AIToolsDetector:
                 tool,
                 self._kilocode_rules_extractor,
                 self._kilocode_mcp_extractor,
-                self.extract_all_kilocode_rules
+                self.extract_all_kilocode_rules,
+                skills_extractor=self._kilocode_skills_extractor,
+                extract_skills_func=self.extract_all_kilocode_skills,
             )
         
         elif tool_name.replace(" ", "").lower() == "geminicli":
@@ -2380,7 +2720,9 @@ class AIToolsDetector:
                 tool,
                 self._gemini_cli_rules_extractor,
                 self._gemini_cli_mcp_extractor,
-                self.extract_all_gemini_cli_rules
+                self.extract_all_gemini_cli_rules,
+                skills_extractor=self._gemini_cli_skills_extractor,
+                extract_skills_func=self.extract_all_gemini_cli_skills,
             )
         
         elif tool_name.replace(" ", "").lower() == "codex":
@@ -2388,7 +2730,9 @@ class AIToolsDetector:
                 tool,
                 self._codex_rules_extractor,
                 self._codex_mcp_extractor,
-                self.extract_all_codex_rules
+                self.extract_all_codex_rules,
+                skills_extractor=self._codex_skills_extractor,
+                extract_skills_func=self.extract_all_codex_skills,
             )
         
         elif tool_name.replace(" ", "").lower() == "opencode":
@@ -2396,7 +2740,9 @@ class AIToolsDetector:
                 tool,
                 self._opencode_rules_extractor,
                 self._opencode_mcp_extractor,
-                self.extract_all_opencode_rules
+                self.extract_all_opencode_rules,
+                skills_extractor=self._opencode_skills_extractor,
+                extract_skills_func=self.extract_all_opencode_skills,
             )
 
         elif tool_name.lower() == "junie":
@@ -2404,7 +2750,9 @@ class AIToolsDetector:
                 tool,
                 self._junie_rules_extractor,
                 self._junie_mcp_extractor,
-                self.extract_all_junie_rules
+                self.extract_all_junie_rules,
+                skills_extractor=self._junie_skills_extractor,
+                extract_skills_func=self.extract_all_junie_skills,
             )
 
         elif tool_name.lower() == "cursor cli":
@@ -2801,8 +3149,26 @@ def main():
     # Save + restore prior handlers so importing/calling main() (tests) doesn't
     # leave process-wide handlers installed. signal.signal only works on the main
     # thread, so guard against ValueError/OSError elsewhere.
+    #
+    # Trap every CATCHABLE signal whose default action would terminate us on an
+    # external/environmental request, so the abort path (release lock + report
+    # failed) runs instead of dying dirty and leaving a leaked lock:
+    #   SIGTERM / SIGINT  - polite kill / Ctrl-C
+    #   SIGHUP            - controlling terminal or login session closed
+    #   SIGQUIT           - Ctrl-\
+    #   SIGBREAK          - Windows Ctrl-Break (Windows-only name)
+    #   SIGXCPU / SIGXFSZ - CPU / file-size rlimit exceeded (constrained MDM / containers)
+    #   SIGPWR            - system power-down / UPS low battery (Linux-only name)
+    # Deliberately NOT trapped: SIGKILL / SIGSTOP (uncatchable by design);
+    # SIGPIPE (Python raises BrokenPipeError, it is not a termination request);
+    # SIGTSTP / SIGTTIN / SIGTTOU (suspend, not terminate); and the
+    # program-error / core signals SIGSEGV / SIGBUS / SIGABRT / SIGFPE / SIGILL /
+    # SIGSYS / SIGTRAP (running cleanup from an already-corrupted process is
+    # unsafe — genuine crashes are still reported via the except-Exception path).
+    # Names absent or unsupported on a given platform are skipped by getattr + try.
     _prev_signal_handlers = {}
-    for _signame in ("SIGTERM", "SIGINT"):
+    for _signame in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGBREAK",
+                     "SIGXCPU", "SIGXFSZ", "SIGPWR"):
         _sig = getattr(signal, _signame, None)
         if _sig is not None:
             try:
@@ -2825,8 +3191,32 @@ def main():
         sentry_ctx["run_id"] = run_id
         logger.info(f"Scan run_id: {run_id}")
 
+        # Auto-resume (perf only): if a recent run was interrupted (checkpoint
+        # still "in_progress" within RESUME_WINDOW_SECONDS), carry its done-set
+        # forward and skip re-PROCESSING those already-reported tools. Data-safe
+        # with a fresh run_id — the backend replaces installations per (device,
+        # tool, home_user), never per scan, so skipped tools keep their prior
+        # upload. Detection still runs below, so tools/skills installed since the
+        # interruption are still found and reported.
+        resume_done = discovery_cache.resumable_done()
+        if resume_done:
+            # Log the interrupted run's id (the join key between the two runs' logs)
+            # alongside this resumed run's id, so "why did resume skip tool X?" can
+            # be traced back to the original run's upload logs.
+            _prev_run_id = discovery_cache.read_run().get("run_id")
+            logger.info(
+                f"Resuming interrupted run {_prev_run_id} as {run_id}: "
+                f"{len(resume_done)} tool/user already reported; skipping their re-processing."
+            )
+        discovery_cache.start_run(run_id, done=resume_done)
+
         # Track failed reports for persistence
         failed_reports = []
+
+        # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
+        scanned_manifest = set()
+        # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
+        incomplete_reasons = []
 
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
@@ -2926,7 +3316,16 @@ def main():
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             with time_step("detect_tools", "detect"):
-                user_tools = detector.detect_all_tools(user_home=user_home)
+                user_detect_failures = set()
+                user_tools = detector.detect_all_tools(
+                    user_home=user_home, failures=user_detect_failures
+                )
+            # Detected tools stay in the manifest even if a later read errors (a read failure isn't an uninstall).
+            for detected in user_tools:
+                scanned_manifest.add((user, detected.get('name', 'Unknown')))
+            # Detector error = presence unknown -> incomplete, no prune (tool_name is an umbrella label, not a row key).
+            if user_detect_failures:
+                incomplete_reasons.append(f"detector error for user {user}")
 
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
@@ -2954,10 +3353,23 @@ def main():
         # Pick the single Augment surface that should carry the shared config.
         detector._set_canonical_augment_surface(tools)
 
+        # Resume observability: how many tools had their processing fully skipped.
+        resume_tools_skipped = 0
         # Process each tool, then explore all users for that tool and send reports
         for tool in tools:
             tool_name = tool.get('name', 'Unknown')
             sentry_ctx["tool_name"] = tool_name
+            # Resume identity matches the upload granularity (name + install
+            # path) so two same-named tools at different paths never alias.
+            tool_key = f"{tool_name}:{tool.get('install_path', '')}"
+
+            # Skip a tool entirely when every user was already reported by the
+            # resumed run — this is where re-processing (filesystem walk + CLI
+            # subprocesses) is actually saved.
+            if resume_done and all((tool_key, u) in resume_done for u in all_users):
+                logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
+                resume_tools_skipped += 1
+                continue
 
             logger.info("")
             logger.info("=" * 60)
@@ -2979,6 +3391,14 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
+                    # Already reported by the resumed run -> skip its re-upload.
+                    # Log the per-user skip AND record it in the summary so a
+                    # partially-resumed tool's summary reflects every user (resumed
+                    # + freshly processed), not a silently reduced count.
+                    if (tool_key, user_name) in resume_done:
+                        logger.info(f"  · {tool_name} for user {user_name} already reported by the resumed run; skipping re-processing")
+                        tool_users_summary.append({'user': user_name, 'resumed': True})
+                        continue
                     if platform.system() == "Darwin":
                         user_home = Path(f"/Users/{user_name}")
                     elif platform.system() == "Windows":
@@ -2989,6 +3409,10 @@ def main():
                         user_home = Path.home()
 
                     try:
+                        # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
+                        if (user_name, tool_name) not in scanned_manifest:
+                            continue
+
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
@@ -3004,6 +3428,8 @@ def main():
                                 f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
                                 f"not owned by this user and no per-user data"
                             )
+                            # Detected globally but not owned by this user -> drop the presence entry.
+                            scanned_manifest.discard((user_name, tool_name))
                             continue
 
                         # Ownership gate (Augment surfaces): same ~/.augment-keyed
@@ -3016,6 +3442,8 @@ def main():
                                 f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
                                 f"not owned by this user and no per-user data"
                             )
+                            # Detected globally but not owned by this user -> drop the presence entry.
+                            scanned_manifest.discard((user_name, tool_name))
                             continue
 
                         # Detect subscription plan for Claude Code
@@ -3170,7 +3598,10 @@ def main():
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
                         cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        reported_ok = False
+                        hash_to_store = None
                         if local_payload_hash and cached_hash == local_payload_hash:
+                            reported_ok = True  # unchanged -> already current on the backend
                             if args.dump:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
@@ -3180,14 +3611,21 @@ def main():
                             with time_step("send_report_per_tool_user", "send"):
                                 success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
                             if success:
+                                reported_ok = True
+                                hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
-                                if local_payload_hash:
-                                    discovery_cache.update_tool(tool_name, user_name, local_payload_hash)
                             else:
                                 logger.error(f"  ✗ Failed to send {tool_name} report for user {user_name} to backend")
                                 if retryable:
                                     failed_reports.append(single_tool_report)
+
+                        # One atomic cache write: persist the payload hash (only when
+                        # we uploaded a changed report) AND checkpoint this (tool,
+                        # user) so a kill afterward lets the next quick re-run skip
+                        # re-processing it.
+                        if reported_ok:
+                            discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
                             logger.info("")
@@ -3226,13 +3664,17 @@ def main():
                 logger.info(f"Summary for tool: {tool_name}")
                 logger.info("=" * 60)
                 for user_summary in tool_users_summary:
-                    logger.info(f"  - User {user_summary['user']}: {user_summary['projects']} projects, {user_summary['rules']} rule files")
+                    if user_summary.get('resumed'):
+                        logger.info(f"  - User {user_summary['user']}: (already reported by the resumed run; re-processing skipped)")
+                    else:
+                        logger.info(f"  - User {user_summary['user']}: {user_summary['projects']} projects, {user_summary['rules']} rule files")
                 logger.info(f"Total: {tool_total_projects} projects, {tool_total_rules} rule files across {len(tool_users_summary)} user(s)")
                 logger.info("=" * 60)
                 logger.info("")
 
             except Exception as e:
                 logger.error(f"Error processing tool {tool_name}: {e}", exc_info=True)
+                # Manifest entries come from the detection phase, so this extraction failure can't drop a live tool.
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
@@ -3269,10 +3711,30 @@ def main():
                     "os": platform.system(),
                     "tool_count": len(tools),
                     "user_count": len(all_users),
+                    "manifest_size": len(scanned_manifest),
+                    "scan_incomplete": bool(incomplete_reasons),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
+                    # Observability for the kill/rerun behavior so it's visible in
+                    # dashboards and alertable if the checkpoint logic misbehaves
+                    # (e.g. a spike in resumed runs or in skipped pairs/tools):
+                    "resumed": bool(resume_done),                 # did this run resume an interrupted one
+                    "resume_pairs_skipped": len(resume_done),     # (tool,user) pairs skipped
+                    "resume_tools_skipped": resume_tools_skipped,  # tools whose processing was fully skipped
+                    "lock_outcome": discovery_cache.last_lock_outcome,  # acquired | stolen_dead_pid | stolen_stale
                 },
             }
+            # Per-flow skills counters (one entry per SKILL.md extraction flow that
+            # ran, zero counts included). Lets the backend emit a per-tool
+            # `discovery.skills.<tool>` counter so a silently-failing extractor shows
+            # up as a fleet-wide drop instead of an unalertable "no skills found" log.
+            # Ignored by a backend that doesn't consume it yet; this POST carries
+            # `tools=[]` and is fire-and-forget, so it can never affect tool reports.
+            if isinstance(detector.skills_metrics, dict) and detector.skills_metrics:
+                sentry_metrics_payload["skills"] = [
+                    {"tool": tool_key, **counts}
+                    for tool_key, counts in sorted(detector.skills_metrics.items())
+                ]
             send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
@@ -3308,15 +3770,27 @@ def main():
 
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")
+        # Incomplete scan: send neither manifest nor covered scope, so the backend can't prune from partial data.
+        if incomplete_reasons:
+            manifest, covered = None, None
+        else:
+            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+            covered = all_users
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
-            args.app_name, sentry_context=sentry_ctx, system_user=system_user
+            args.app_name, sentry_context=sentry_ctx, system_user=system_user,
+            manifest=manifest, covered_home_users=covered,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")
         else:
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
+
+        # Local scan finished cleanly -> flip the checkpoint to "completed" so the
+        # next run starts fresh (won't resume), independent of the completed-event
+        # send result above.
+        discovery_cache.mark_run_completed()
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs

@@ -11,6 +11,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...windows_extraction_helpers import get_file_metadata, read_file_content
+from ...xml_helpers import safe_xml_parse
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         servers = []
 
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             root = tree.getroot()
 
             for server_node in root.findall(".//McpServerConfigurationProperties"):
@@ -284,7 +285,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         paths = set()
 
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             root = tree.getroot()
 
             # Various path formats used by JetBrains

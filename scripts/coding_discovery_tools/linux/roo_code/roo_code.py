@@ -39,6 +39,10 @@ class LinuxRooDetector(BaseToolDetector):
         return "Roo Code"
 
     def detect(self) -> Optional[List[Dict]]:
+        # Scope to this user's home when set, so an elevated scan can't attribute other users' extensions.
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            return self._detect_roo_for_user(Path(scoped_home)) or None
         all_results = []
         for user_home in get_linux_user_homes():
             try:

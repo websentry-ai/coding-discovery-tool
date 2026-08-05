@@ -1,11 +1,6 @@
-"""Contract tests for the shared single-pass project directory index.
-
-The index replaces N independent per-basename tree walks with one memoized walk.
-These tests pin the exact behaviors the consolidation relies on to stay identical
-to the old ``walk_for_tool_directories`` recursion: full-descent recording,
-same-basename de-nesting (``outermost_only``), the depth cap, symlink handling,
-skip-predicate pruning, and per-key memoization.
-"""
+"""Contract tests for the shared single-pass project directory index —
+de-nesting, depth cap, symlink handling, skip pruning, memoization, and the
+fail-safe fallback."""
 
 import os
 import sys

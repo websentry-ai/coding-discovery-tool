@@ -139,10 +139,9 @@ def is_user_level_tool_dir(tool_dir: Path) -> bool:
     return False
 
 
-# Canonical Linux project-walk prune, shared with the directory index. Unlike
-# macOS it does NOT skip hidden home-level dirs (Linux tool configs live under
-# /home/<u>/.<tool>), matching the old inline predicate exactly. The id keys the
-# index cache and must differ from the macOS policy so the two never collide.
+# Linux project-walk prune. Unlike macOS it does NOT skip hidden home-level dirs
+# (Linux tool configs live under /home/<u>/.<tool>). The id keys the index cache
+# and must differ from the macOS policy.
 def _linux_project_skip(item: Path) -> bool:
     return should_skip_path(item) or should_skip_system_path(item)
 
@@ -158,18 +157,11 @@ def walk_for_tool_directories(
     projects_by_root: Dict,
     current_depth: int = 0,
 ) -> None:
-    """Linux-aware walk: uses Linux should_skip_system_path, not the macOS one.
+    """Linux-aware walk: uses Linux should_skip_system_path, not the macOS one
+    (macOS skips '/home' entirely, which would drop all /home/* configs).
 
-    The macOS version skips '/home' entirely (it's in macOS SKIP_SYSTEM_DIRS),
-    which would silently drop all project-level configs under /home/*.
-
-    Backed by the shared single-pass directory index: the subtree under
-    ``current_dir`` is walked once and reused across every tool, instead of a
-    fresh recursion per basename. Dispatch is identical to the old walk. If the
-    shared index ever faults, this tool falls back to an independent walk (see
-    :func:`dispatch_matches`) instead of failing discovery for every tool.
-    ``current_depth`` is retained for call-site compatibility; depth is derived
-    from ``root_path`` in the index.
+    Routes through the shared directory index, falling back to an independent walk
+    if the index faults. ``current_depth`` is unused (call-site compatibility).
     """
     def on_match(tool_dir: Path) -> None:
         try:

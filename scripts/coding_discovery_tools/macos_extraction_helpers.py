@@ -568,11 +568,8 @@ def extract_project_level_rules_with_fallback(
                 continue
 
 
-# Canonical macOS project-walk prune, shared by the rules walker and the shared
-# directory index so a single traversal serves every tool. Matches the predicate
-# the old per-basename walk applied inline (skip dirs + system dirs + hidden
-# home-level tool dirs). The id keys the index cache; keep it stable and unique
-# so callers with a different prune never collide with this policy.
+# macOS project-walk prune (skip dirs + system dirs + hidden home-level tool
+# dirs). The id keys the index cache; keep it unique per prune policy.
 def _macos_project_skip(item: Path) -> bool:
     return (should_skip_path(item) or should_skip_system_path(item)
             or is_home_dotdir_descendant(item))
@@ -590,28 +587,18 @@ def walk_for_tool_directories(
     current_depth: int = 0
 ) -> None:
     """
-    Recursively walk directory tree looking for tool-specific directories.
-    
-    This is a generic helper that can be used by any tool's rules extractor.
-    
+    Find each tool-specific dir under ``current_dir`` and extract from it.
+
+    Routes through the shared directory index, falling back to an independent
+    walk if the index faults. ``current_depth`` is unused (retained for call-site
+    compatibility).
+
     Args:
         root_path: Root search path (for depth calculation)
         current_dir: Current directory being processed
-        tool_dir_name: Name of the tool directory to look for (e.g., ".cursor", ".windsurf")
-        extract_from_dir_func: Function to extract rules from a found tool directory
-                              Signature: func(tool_dir: Path, projects_by_root: Dict)
+        tool_dir_name: Name of the tool directory to look for (e.g., ".cursor")
+        extract_from_dir_func: func(tool_dir: Path, projects_by_root: Dict)
         projects_by_root: Dictionary to populate with rules
-        current_depth: Current recursion depth (unused; retained for call-site
-                       compatibility — depth is derived from ``root_path`` inside
-                       the shared index)
-
-    The subtree under ``current_dir`` is walked once and memoized as a
-    ``basename -> [dirs]`` map (see :mod:`.project_dir_index`); every tool that
-    searches the same subtree reuses that single traversal instead of re-walking.
-    This dispatches to the same directories, in the same depth-first order, that
-    the old per-basename recursion did. If the shared index ever faults, this one
-    tool falls back to an independent walk (see :func:`dispatch_matches`) rather
-    than failing discovery for every tool.
     """
     def on_match(tool_dir: Path) -> None:
         try:

@@ -741,12 +741,8 @@ def extract_mcp_from_dir_generic(
         logger.warning(f"Error reading {tool_name} MCP config {mcp_config_file}: {e}")
 
 
-# Skip-policy id for the shared directory index. All generic-MCP callers prune
-# with ``should_skip_path or should_skip_system_path`` (plus the walker's own
-# ``is_home_dotdir_descendant``), so they share one traversal. It is kept distinct
-# from the rules index id because the Linux rules prune omits the hidden-home
-# term, so the two must not share a cached tree. (claude_code MCP prunes an extra
-# plugins path and keeps its own separate walker.)
+# Distinct from the rules index id: the MCP prune adds is_home_dotdir_descendant,
+# which the Linux rules prune omits, so the two must not share a cached tree.
 _MCP_PROJECT_SKIP_ID = "mcp_project"
 
 
@@ -775,17 +771,10 @@ def walk_for_mcp_configs_generic(
         tool_name: Name of the tool (for logging)
         global_tool_dir: Path to global tool directory to skip (optional)
         should_skip_func: Function to check if a path should be skipped
-        current_depth: Current recursion depth (unused; retained for call-site
-                       compatibility — depth is derived from ``root_path`` in the
-                       shared index)
+        current_depth: unused; retained for call-site compatibility
 
-    The subtree under ``current_dir`` is walked once and memoized as a shared
-    ``basename -> [dirs]`` index (see :mod:`.project_dir_index`), so the MCP tools
-    that search the same tree reuse one traversal instead of each re-walking it.
-    Dispatch matches the old recursion: the tool dir is matched case-insensitively
-    (as the old ``item.name.lower() == tool_dir_name.lower()`` did). If the shared
-    index ever faults, this tool falls back to an independent walk (see
-    :func:`dispatch_matches`) rather than failing discovery for every tool.
+    Routes through the shared directory index (matching the tool dir
+    case-insensitively), falling back to an independent walk if the index faults.
     """
     def prune(item: Path) -> bool:
         return should_skip_func(item) or is_home_dotdir_descendant(item)

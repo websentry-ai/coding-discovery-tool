@@ -1555,9 +1555,50 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
+def _resolve_auggie_binary_for_self_scan(
+    auggie_binary: Optional[str],
+    user_home: Optional[Path],
+) -> Optional[str]:
+    """Return the absolute auggie binary to run, or None if it isn't safe.
+
+    Guards that make executing the CLI safe on a shared/privileged machine:
+      * ``user_home`` is required — never run unconditionally.
+      * Only the scanning user's OWN session is read. On POSIX "own" is the
+        effective account's real home (``pwd.getpwuid(os.geteuid())``), NOT
+        ``$HOME`` — which ``sudo -E``/systemd can point at a user's writable home
+        while running as root — and we refuse outright when running as root.
+      * The binary is resolved to an ABSOLUTE path (``shutil.which`` for the bare
+        name) so a planted ``auggie`` in the CWD can never be picked up.
+    """
+    if user_home is None:
+        return None
+
+    if platform.system() == "Windows":
+        own_home = Path.home()
+    else:
+        try:
+            if os.geteuid() == 0:
+                return None  # never execute a user binary with root privileges
+        except AttributeError:
+            return None
+        own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
+
+    try:
+        if Path(user_home).resolve() != own_home.resolve():
+            logger.debug("Skipping auggie plan for non-self home %s", user_home)
+            return None
+    except (OSError, KeyError, RuntimeError):
+        return None
+
+    resolved = auggie_binary or shutil.which("auggie")
+    if not resolved:
+        return None
+    return os.path.abspath(resolved)
+
+
 def get_auggie_subscription_type(
     auggie_binary: Optional[str],
-    user_home: Optional[Path] = None,
+    user_home: Optional[Path],
 ) -> Optional[str]:
     """Get the Auggie CLI (Augment) subscription plan for a specific user.
 
@@ -1567,54 +1608,47 @@ def get_auggie_subscription_type(
 
         auggie account status --json  ->  {"planName": "Business Plan", ...}
 
-    The command runs the tool's own CLI, so this only reads the scanning user's
-    OWN session: if ``user_home`` is another user's home we skip it. That avoids
-    executing that user's (writable) auggie binary with the scanner's privileges
-    in a root/admin multi-user scan, and avoids reading the wrong user's session
-    (auggie is a Node CLI that resolves its config via the process home, which
-    HOME cannot reliably retarget on Windows). Cross-user plan detection is
-    skipped; the plan is an optional field.
-
-    Args:
-        auggie_binary: Absolute path to the auggie binary, or None to let PATH
-            resolve ``auggie``.
-        user_home: The home directory being scanned. When it is not the running
-            user's own home, detection is skipped.
+    Only the scanning user's own session is read, and only a resolved, absolute
+    binary is run (see :func:`_resolve_auggie_binary_for_self_scan`). Cross-user
+    plan detection is skipped; the plan is an optional field.
 
     Returns:
         Plan string (e.g. "Business Plan") or None if not logged in / on failure.
     """
-    if user_home is not None:
-        try:
-            if Path(user_home).resolve() != Path.home().resolve():
-                logger.debug("Skipping auggie plan for non-self home %s", user_home)
-                return None
-        except (OSError, RuntimeError):
-            return None
+    resolved = _resolve_auggie_binary_for_self_scan(auggie_binary, user_home)
+    if resolved is None:
+        return None
 
-    cmd = [auggie_binary or "auggie", "account", "status", "--json"]
     # npm installs auggie as a .cmd shim on Windows, which the OS can't exec
-    # directly — run it through the shell there, as the Copilot CLI / Codex version
-    # probes do. The self-scan gate above keeps this to our own resolved binary.
-    use_shell = platform.system() == "Windows"
+    # directly. Run it through cmd.exe explicitly with shell=False (so path
+    # metacharacters are never interpreted by a shell) rather than shell=True.
+    if platform.system() == "Windows":
+        cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", resolved,
+               "account", "status", "--json"]
+    else:
+        cmd = [resolved, "account", "status", "--json"]
+
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=AUTH_STATUS_TIMEOUT,
-            shell=use_shell,
         )
         if result.returncode != 0:
-            logger.debug(
-                "auggie account status returned non-zero: rc=%s stderr=%s",
-                result.returncode, result.stderr.strip(),
-            )
+            # Log the code only — stderr can carry session/account details.
+            logger.debug("auggie account status returned rc=%s", result.returncode)
             return None
 
         parsed = json.loads(result.stdout.strip())
         plan = parsed.get("planName")
-        return plan.strip() if isinstance(plan, str) and plan.strip() else None
+        if not isinstance(plan, str):
+            return None
+        plan = plan.strip()
+        # Bound an externally-produced value before it enters the report.
+        if not plan or len(plan) > 100 or any(ord(c) < 32 for c in plan):
+            return None
+        return plan
 
     except subprocess.TimeoutExpired:
         logger.debug("auggie account status timed out")

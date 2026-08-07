@@ -2,9 +2,9 @@
 
 Auggie stores no plan on disk, so the plan is read by running the tool's own
 ``auggie account status --json`` and parsing ``planName`` — mirroring how Claude
-Code's plan is read. These tests mock ``subprocess.run`` and cover the happy path
-plus every failure mode (non-zero exit, non-JSON, timeout, missing binary, and a
-response without a plan).
+Code's plan is read. Because that means executing a CLI, the safety gate
+(:func:`_resolve_auggie_binary_for_self_scan`) is tested separately from the
+run/parse logic.
 """
 
 import json
@@ -16,7 +16,13 @@ from unittest.mock import patch, MagicMock
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.coding_discovery_tools.utils import get_auggie_subscription_type
+from scripts.coding_discovery_tools import utils
+from scripts.coding_discovery_tools.utils import (
+    get_auggie_subscription_type,
+    _resolve_auggie_binary_for_self_scan,
+)
+
+_MOD = "scripts.coding_discovery_tools.utils"
 
 
 def _proc(returncode=0, stdout="", stderr=""):
@@ -27,103 +33,135 @@ def _proc(returncode=0, stdout="", stderr=""):
     return m
 
 
-_OK_JSON = json.dumps({
-    "planName": "Business Plan",
-    "usageUnit": "usd",
-    "amountRemaining": "95.85",
-    "amountIncludedPerCycle": "100",
-    "billingCycleEndDate": "2026-08-24T21:34:26Z",
-    "daysRemainingInCycle": 17,
-    "banner": None,
-})
+_OK_JSON = json.dumps({"planName": "Business Plan", "usageUnit": "usd"})
+
+
+class TestResolveBinaryForSelfScan(unittest.TestCase):
+    """The safety gate: only our own session, never as root, absolute binary."""
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    def test_own_home_resolves_binary(self, mock_pwd, _euid, _sys):
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        got = _resolve_auggie_binary_for_self_scan("/home/alice/.local/bin/auggie",
+                                                   Path("/home/alice"))
+        self.assertEqual(got, "/home/alice/.local/bin/auggie")
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    def test_other_user_home_refused(self, mock_pwd, _euid, _sys):
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        self.assertIsNone(
+            _resolve_auggie_binary_for_self_scan("/bin/auggie", Path("/home/bob")))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=0, create=True)
+    def test_root_refused(self, _euid, _sys):
+        # $HOME could be spoofed to a user's home under sudo -E; refuse outright.
+        self.assertIsNone(
+            _resolve_auggie_binary_for_self_scan("/home/alice/.local/bin/auggie",
+                                                 Path("/home/alice")))
+
+    def test_none_user_home_refused(self):
+        self.assertIsNone(_resolve_auggie_binary_for_self_scan("/bin/auggie", None))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    @patch(f"{_MOD}.shutil.which", return_value=None)
+    def test_unresolvable_bare_name_refused(self, _which, mock_pwd, _euid, _sys):
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        self.assertIsNone(
+            _resolve_auggie_binary_for_self_scan(None, Path("/home/alice")))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
+    def test_bare_name_resolved_to_absolute(self, _which, mock_pwd, _euid, _sys):
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        self.assertEqual(
+            _resolve_auggie_binary_for_self_scan(None, Path("/home/alice")),
+            "/usr/bin/auggie")
 
 
 class TestGetAuggieSubscriptionType(unittest.TestCase):
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    """Run/parse logic, with the safety gate stubbed to a fixed binary."""
+
+    def setUp(self):
+        p = patch(f"{_MOD}._resolve_auggie_binary_for_self_scan",
+                  return_value="/usr/bin/auggie")
+        self.addCleanup(p.stop)
+        p.start()
+
+    @patch(f"{_MOD}.subprocess.run")
     def test_parses_plan_name(self, mock_run):
         mock_run.return_value = _proc(stdout=_OK_JSON)
-        self.assertEqual(get_auggie_subscription_type("/usr/bin/auggie"), "Business Plan")
+        self.assertEqual(get_auggie_subscription_type("/usr/bin/auggie", Path.home()),
+                         "Business Plan")
 
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_runs_account_status_json(self, mock_run):
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_posix_runs_without_shell(self, mock_run, _sys):
         mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type("/opt/homebrew/bin/auggie")
+        get_auggie_subscription_type("/usr/bin/auggie", Path.home())
+        self.assertEqual(mock_run.call_args[0][0],
+                         ["/usr/bin/auggie", "account", "status", "--json"])
+        self.assertNotIn("shell", mock_run.call_args.kwargs)
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_windows_runs_via_comspec_not_shell(self, mock_run, _sys):
+        mock_run.return_value = _proc(stdout=_OK_JSON)
+        get_auggie_subscription_type("C:\\npm\\auggie.cmd", Path.home())
         cmd = mock_run.call_args[0][0]
-        self.assertEqual(cmd, ["/opt/homebrew/bin/auggie", "account", "status", "--json"])
+        self.assertEqual(cmd[1:], ["/c", "/usr/bin/auggie", "account", "status", "--json"])
+        self.assertNotIn("shell", mock_run.call_args.kwargs)  # never shell=True
 
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_none_binary_falls_back_to_path(self, mock_run):
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type(None)
-        self.assertEqual(mock_run.call_args[0][0][0], "auggie")
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_runs_for_own_home(self, mock_run):
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        self.assertEqual(
-            get_auggie_subscription_type("/usr/bin/auggie", Path.home()),
-            "Business Plan",
-        )
-        mock_run.assert_called_once()
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_other_user_home_is_skipped(self, mock_run):
-        # Never execute another user's binary / read their session during a
-        # privileged multi-user scan.
-        other = Path.home() / "definitely-not-the-scanning-users-home"
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", other))
-        mock_run.assert_not_called()
-
-    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_uses_shell_on_windows(self, mock_run, _sys):
-        # npm installs auggie as a .cmd shim that can't be exec'd without a shell.
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        self.assertEqual(get_auggie_subscription_type("C:\\npm\\auggie.cmd"), "Business Plan")
-        self.assertTrue(mock_run.call_args.kwargs["shell"])
-
-    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Linux")
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_no_shell_on_posix(self, mock_run, _sys):
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type("/usr/bin/auggie")
-        self.assertFalse(mock_run.call_args.kwargs["shell"])
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch(f"{_MOD}.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):
         mock_run.return_value = _proc(stdout=json.dumps({"planName": "  Business Plan  "}))
-        self.assertEqual(get_auggie_subscription_type("/usr/bin/auggie"), "Business Plan")
+        self.assertEqual(get_auggie_subscription_type("/usr/bin/auggie", Path.home()),
+                         "Business Plan")
 
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_oversized_plan_rejected(self, mock_run):
+        mock_run.return_value = _proc(stdout=json.dumps({"planName": "x" * 101}))
+        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+
+    @patch(f"{_MOD}.subprocess.run")
+    def test_control_char_plan_rejected(self, mock_run):
+        mock_run.return_value = _proc(stdout=json.dumps({"planName": "Bus\x00iness"}))
+        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+
+    @patch(f"{_MOD}.subprocess.run")
     def test_missing_plan_name_returns_none(self, mock_run):
-        mock_run.return_value = _proc(stdout=json.dumps({"amountRemaining": "10"}))
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie"))
+        mock_run.return_value = _proc(stdout=json.dumps({"usageUnit": "usd"}))
+        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
 
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_empty_plan_name_returns_none(self, mock_run):
-        mock_run.return_value = _proc(stdout=json.dumps({"planName": "   "}))
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie"))
+    @patch(f"{_MOD}.subprocess.run")
+    def test_non_zero_exit_returns_none_without_logging_stderr(self, mock_run):
+        mock_run.return_value = _proc(returncode=1, stderr="token=abc123 session leak")
+        with self.assertLogs(utils.logger, level="DEBUG") as cm:
+            self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+        self.assertFalse(any("abc123" in line for line in cm.output))
 
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_non_zero_exit_returns_none(self, mock_run):
-        # e.g. not logged in / "User has no subscription"
-        mock_run.return_value = _proc(returncode=1, stderr="not authenticated")
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie"))
-
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch(f"{_MOD}.subprocess.run")
     def test_non_json_returns_none(self, mock_run):
         mock_run.return_value = _proc(stdout="Business Plan (human text)")
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie"))
+        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
 
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch(f"{_MOD}.subprocess.run")
     def test_timeout_returns_none(self, mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="auggie", timeout=15)
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie"))
+        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
 
-    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch(f"{_MOD}.subprocess.run")
     def test_missing_binary_returns_none(self, mock_run):
         mock_run.side_effect = FileNotFoundError("auggie not found")
-        self.assertIsNone(get_auggie_subscription_type("/nope/auggie"))
+        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
 
 
 if __name__ == "__main__":

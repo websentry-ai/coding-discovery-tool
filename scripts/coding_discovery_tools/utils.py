@@ -1555,6 +1555,21 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
+def _is_windows_admin() -> bool:
+    """True if the current Windows process holds an admin token; False otherwise
+    or on any error / non-Windows."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+# cmd.exe metacharacters — a resolved path containing any of these could be
+# re-parsed by ``cmd /c`` into extra commands, so such paths are refused.
+_WINDOWS_CMD_METACHARS = '&|^<>()"%!'
+
+
 def _resolve_auggie_binary_for_self_scan(
     auggie_binary: Optional[str],
     user_home: Optional[Path],
@@ -1563,22 +1578,27 @@ def _resolve_auggie_binary_for_self_scan(
 
     Guards that make executing the CLI safe on a shared/privileged machine:
       * ``user_home`` is required — never run unconditionally.
+      * Never run elevated: refuse when POSIX ``euid == 0`` or the Windows process
+        holds an admin token.
       * Only the scanning user's OWN session is read. On POSIX "own" is the
         effective account's real home (``pwd.getpwuid(os.geteuid())``), NOT
-        ``$HOME`` — which ``sudo -E``/systemd can point at a user's writable home
-        while running as root — and we refuse outright when running as root.
+        ``$HOME`` — which ``sudo -E``/systemd can point at a user's writable home.
       * The binary is resolved to an ABSOLUTE path (``shutil.which`` for the bare
-        name) so a planted ``auggie`` in the CWD can never be picked up.
+        name) so a planted ``auggie`` in the CWD can never be picked up, and on
+        Windows a path carrying cmd metacharacters is rejected.
     """
     if user_home is None:
         return None
 
-    if platform.system() == "Windows":
+    is_windows = platform.system() == "Windows"
+    if is_windows:
+        if _is_windows_admin():
+            return None
         own_home = Path.home()
     else:
         try:
             if os.geteuid() == 0:
-                return None  # never execute a user binary with root privileges
+                return None
         except AttributeError:
             return None
         own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
@@ -1593,7 +1613,11 @@ def _resolve_auggie_binary_for_self_scan(
     resolved = auggie_binary or shutil.which("auggie")
     if not resolved:
         return None
-    return os.path.abspath(resolved)
+    resolved = os.path.abspath(resolved)
+    if is_windows and any(c in resolved for c in _WINDOWS_CMD_METACHARS):
+        logger.debug("Refusing auggie path with cmd metacharacters: %s", resolved)
+        return None
+    return resolved
 
 
 def get_auggie_subscription_type(
@@ -1620,11 +1644,13 @@ def get_auggie_subscription_type(
         return None
 
     # npm installs auggie as a .cmd shim on Windows, which the OS can't exec
-    # directly. Run it through cmd.exe explicitly with shell=False (so path
-    # metacharacters are never interpreted by a shell) rather than shell=True.
+    # directly. Run it through cmd.exe (shell=False, and the resolved path is
+    # metacharacter-free per the gate). Use an absolute System32\cmd.exe rather
+    # than a bare name so the interpreter can't be resolved from the CWD.
     if platform.system() == "Windows":
-        cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", resolved,
-               "account", "status", "--json"]
+        system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+        comspec = os.path.join(system_root, "System32", "cmd.exe")
+        cmd = [comspec, "/c", resolved, "account", "status", "--json"]
     else:
         cmd = [resolved, "account", "status", "--json"]
 

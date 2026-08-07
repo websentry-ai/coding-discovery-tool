@@ -8,6 +8,7 @@ run/parse logic.
 """
 
 import json
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -46,7 +47,19 @@ class TestResolveBinaryForSelfScan(unittest.TestCase):
         mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
         got = _resolve_auggie_binary_for_self_scan("/home/alice/.local/bin/auggie",
                                                    Path("/home/alice"))
-        self.assertEqual(got, "/home/alice/.local/bin/auggie")
+        self.assertEqual(got, os.path.abspath("/home/alice/.local/bin/auggie"))
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._is_windows_admin", return_value=True)
+    def test_windows_admin_refused(self, _admin, _sys):
+        self.assertIsNone(
+            _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", Path.home()))
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._is_windows_admin", return_value=False)
+    def test_windows_metachar_path_refused(self, _admin, _sys):
+        self.assertIsNone(
+            _resolve_auggie_binary_for_self_scan("C:\\a&b\\auggie.cmd", Path.home()))
 
     @patch(f"{_MOD}.platform.system", return_value="Linux")
     @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
@@ -84,7 +97,7 @@ class TestResolveBinaryForSelfScan(unittest.TestCase):
         mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
         self.assertEqual(
             _resolve_auggie_binary_for_self_scan(None, Path("/home/alice")),
-            "/usr/bin/auggie")
+            os.path.abspath("/usr/bin/auggie"))
 
 
 class TestGetAuggieSubscriptionType(unittest.TestCase):
@@ -117,6 +130,7 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         mock_run.return_value = _proc(stdout=_OK_JSON)
         get_auggie_subscription_type("C:\\npm\\auggie.cmd", Path.home())
         cmd = mock_run.call_args[0][0]
+        self.assertTrue(cmd[0].endswith("cmd.exe"))  # absolute System32 cmd.exe
         self.assertEqual(cmd[1:], ["/c", "/usr/bin/auggie", "account", "status", "--json"])
         self.assertNotIn("shell", mock_run.call_args.kwargs)  # never shell=True
 

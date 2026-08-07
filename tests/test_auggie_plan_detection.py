@@ -58,16 +58,21 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         self.assertEqual(mock_run.call_args[0][0][0], "auggie")
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_home_env_set_when_user_home_given(self, mock_run):
+    def test_runs_for_own_home(self, mock_run):
         mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type("/usr/bin/auggie", Path("/home/alice"))
-        self.assertEqual(mock_run.call_args.kwargs["env"]["HOME"], "/home/alice")
+        self.assertEqual(
+            get_auggie_subscription_type("/usr/bin/auggie", Path.home()),
+            "Business Plan",
+        )
+        mock_run.assert_called_once()
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
-    def test_no_env_when_no_user_home(self, mock_run):
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type("/usr/bin/auggie")
-        self.assertIsNone(mock_run.call_args.kwargs["env"])
+    def test_other_user_home_is_skipped(self, mock_run):
+        # Never execute another user's binary / read their session during a
+        # privileged multi-user scan.
+        other = Path.home() / "definitely-not-the-scanning-users-home"
+        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", other))
+        mock_run.assert_not_called()
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):

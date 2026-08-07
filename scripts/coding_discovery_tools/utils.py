@@ -1567,27 +1567,38 @@ def get_auggie_subscription_type(
 
         auggie account status --json  ->  {"planName": "Business Plan", ...}
 
-    The command reads the user's ``~/.augment/session.json`` (resolved via HOME)
-    and returns the plan; it makes a network call and needs the user logged in.
+    The command runs the tool's own CLI, so this only reads the scanning user's
+    OWN session: if ``user_home`` is another user's home we skip it. That avoids
+    executing that user's (writable) auggie binary with the scanner's privileges
+    in a root/admin multi-user scan, and avoids reading the wrong user's session
+    (auggie is a Node CLI that resolves its config via the process home, which
+    HOME cannot reliably retarget on Windows). Cross-user plan detection is
+    skipped; the plan is an optional field.
 
     Args:
         auggie_binary: Absolute path to the auggie binary, or None to let PATH
             resolve ``auggie``.
-        user_home: The user's home directory. When set, HOME points there so the
-            right user's session is read (matters for root/multi-user scans).
+        user_home: The home directory being scanned. When it is not the running
+            user's own home, detection is skipped.
 
     Returns:
         Plan string (e.g. "Business Plan") or None if not logged in / on failure.
     """
+    if user_home is not None:
+        try:
+            if Path(user_home).resolve() != Path.home().resolve():
+                logger.debug("Skipping auggie plan for non-self home %s", user_home)
+                return None
+        except (OSError, RuntimeError):
+            return None
+
     cmd = [auggie_binary or "auggie", "account", "status", "--json"]
-    env = {**os.environ, "HOME": str(user_home)} if user_home is not None else None
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=AUTH_STATUS_TIMEOUT,
-            env=env,
         )
         if result.returncode != 0:
             logger.debug(

@@ -50,16 +50,15 @@ class TestResolveBinaryForSelfScan(unittest.TestCase):
         self.assertEqual(got, os.path.abspath("/home/alice/.local/bin/auggie"))
 
     @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}._is_windows_admin", return_value=True)
-    def test_windows_admin_refused(self, _admin, _sys):
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", Path.home()))
+    def test_windows_own_home_resolves(self, _sys):
+        got = _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", Path.home())
+        self.assertEqual(got, os.path.abspath("C:\\npm\\auggie.cmd"))
 
     @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}._is_windows_admin", return_value=False)
-    def test_windows_metachar_path_refused(self, _admin, _sys):
+    def test_windows_other_home_refused(self, _sys):
+        other = Path.home() / "not-the-scanning-users-home"
         self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan("C:\\a&b\\auggie.cmd", Path.home()))
+            _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", other))
 
     @patch(f"{_MOD}.platform.system", return_value="Linux")
     @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
@@ -122,17 +121,15 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         get_auggie_subscription_type("/usr/bin/auggie", Path.home())
         self.assertEqual(mock_run.call_args[0][0],
                          ["/usr/bin/auggie", "account", "status", "--json"])
-        self.assertNotIn("shell", mock_run.call_args.kwargs)
+        self.assertFalse(mock_run.call_args.kwargs["shell"])
 
     @patch(f"{_MOD}.platform.system", return_value="Windows")
     @patch(f"{_MOD}.subprocess.run")
-    def test_windows_runs_via_comspec_not_shell(self, mock_run, _sys):
+    def test_windows_uses_shell(self, mock_run, _sys):
+        # npm .cmd shim needs shell=True, matching the Codex/Copilot probes.
         mock_run.return_value = _proc(stdout=_OK_JSON)
         get_auggie_subscription_type("C:\\npm\\auggie.cmd", Path.home())
-        cmd = mock_run.call_args[0][0]
-        self.assertTrue(cmd[0].endswith("cmd.exe"))  # absolute System32 cmd.exe
-        self.assertEqual(cmd[1:], ["/c", "/usr/bin/auggie", "account", "status", "--json"])
-        self.assertNotIn("shell", mock_run.call_args.kwargs)  # never shell=True
+        self.assertTrue(mock_run.call_args.kwargs["shell"])
 
     @patch(f"{_MOD}.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):

@@ -1593,12 +1593,17 @@ def get_auggie_subscription_type(
             return None
 
     cmd = [auggie_binary or "auggie", "account", "status", "--json"]
+    # npm installs auggie as a .cmd shim on Windows, which the OS can't exec
+    # directly — run it through the shell there, as the Copilot CLI / Codex version
+    # probes do. The self-scan gate above keeps this to our own resolved binary.
+    use_shell = platform.system() == "Windows"
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=AUTH_STATUS_TIMEOUT,
+            shell=use_shell,
         )
         if result.returncode != 0:
             logger.debug(

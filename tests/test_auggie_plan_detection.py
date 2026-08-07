@@ -74,6 +74,21 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", other))
         mock_run.assert_not_called()
 
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    def test_uses_shell_on_windows(self, mock_run, _sys):
+        # npm installs auggie as a .cmd shim that can't be exec'd without a shell.
+        mock_run.return_value = _proc(stdout=_OK_JSON)
+        self.assertEqual(get_auggie_subscription_type("C:\\npm\\auggie.cmd"), "Business Plan")
+        self.assertTrue(mock_run.call_args.kwargs["shell"])
+
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Linux")
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    def test_no_shell_on_posix(self, mock_run, _sys):
+        mock_run.return_value = _proc(stdout=_OK_JSON)
+        get_auggie_subscription_type("/usr/bin/auggie")
+        self.assertFalse(mock_run.call_args.kwargs["shell"])
+
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):
         mock_run.return_value = _proc(stdout=json.dumps({"planName": "  Business Plan  "}))

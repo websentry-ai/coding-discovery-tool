@@ -1555,6 +1555,62 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
+def get_auggie_subscription_type(
+    auggie_binary: Optional[str],
+    user_home: Optional[Path] = None,
+) -> Optional[str]:
+    """Get the Auggie CLI (Augment) subscription plan for a specific user.
+
+    Auggie keeps no plan on disk (its ``session.json`` holds only an opaque
+    token), so the plan is read the same way Claude Code's is — by running the
+    tool's own supported command and parsing its JSON::
+
+        auggie account status --json  ->  {"planName": "Business Plan", ...}
+
+    The command reads the user's ``~/.augment/session.json`` (resolved via HOME)
+    and returns the plan; it makes a network call and needs the user logged in.
+
+    Args:
+        auggie_binary: Absolute path to the auggie binary, or None to let PATH
+            resolve ``auggie``.
+        user_home: The user's home directory. When set, HOME points there so the
+            right user's session is read (matters for root/multi-user scans).
+
+    Returns:
+        Plan string (e.g. "Business Plan") or None if not logged in / on failure.
+    """
+    cmd = [auggie_binary or "auggie", "account", "status", "--json"]
+    env = {**os.environ, "HOME": str(user_home)} if user_home is not None else None
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=AUTH_STATUS_TIMEOUT,
+            env=env,
+        )
+        if result.returncode != 0:
+            logger.debug(
+                "auggie account status returned non-zero: rc=%s stderr=%s",
+                result.returncode, result.stderr.strip(),
+            )
+            return None
+
+        parsed = json.loads(result.stdout.strip())
+        plan = parsed.get("planName")
+        return plan.strip() if isinstance(plan, str) and plan.strip() else None
+
+    except subprocess.TimeoutExpired:
+        logger.debug("auggie account status timed out")
+        return None
+    except json.JSONDecodeError:
+        logger.debug("auggie account status returned non-JSON")
+        return None
+    except OSError as e:
+        logger.debug("Could not run auggie account status: %s", e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Sentry error reporting via raw HTTP (no SDK dependency)
 # ---------------------------------------------------------------------------

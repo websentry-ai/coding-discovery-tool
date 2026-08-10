@@ -12,6 +12,7 @@ import shlex
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -1571,15 +1572,16 @@ def _windows_process_is_elevated() -> bool:
 def _binary_in_cwd(path: str) -> bool:
     """True if ``path`` resolves to somewhere inside the current working directory.
 
-    That whole subtree is where a planted binary can hide — a Windows CWD search,
-    a ``.`` entry on PATH, or a nested hit like ``<cwd>/node_modules/.bin`` when
-    the scan starts in an attacker-writable directory. A filesystem root is
     A binary sitting directly in the cwd is always planted — even at a filesystem
-    or drive root like ``/`` or ``D:\\``. The subtree check below (for nested
-    plants) is what a root cwd exempts: a root is an ancestor of every real
-    install, so extending "planted" to the whole filesystem would reject
-    legitimate PATH hits like ``/usr/bin/auggie``. Fails closed on error."""
+    or drive root like ``/`` or ``D:\\``. The subtree check (for a nested hit like
+    ``<cwd>/node_modules/.bin`` when the scan starts in a writable directory) is
+    what a root cwd exempts: a root is an ancestor of every real install, so
+    extending "planted" to the whole filesystem would reject legitimate PATH hits
+    like ``/usr/bin/auggie``. Comparisons fold case (``normcase``) so a Windows
+    plant isn't missed when ``getcwd`` and ``which`` differ only in casing. Fails
+    closed on error."""
     try:
+        nc = os.path.normcase  # case-fold on Windows; no-op on POSIX
         real_cwd = os.path.realpath(os.getcwd())
         cwd_is_root = os.path.dirname(real_cwd) == real_cwd  # '/', 'D:\\', ...
         abs_parent = os.path.dirname(os.path.abspath(path))
@@ -1590,6 +1592,7 @@ def _binary_in_cwd(path: str) -> bool:
         # otherwise resolve the parent out of the tree and dodge the check.
         for parent, base in ((abs_parent, os.path.abspath(os.getcwd())),
                              (os.path.realpath(abs_parent), real_cwd)):
+            parent, base = nc(parent), nc(base)
             if parent == base:
                 return True  # directly in the cwd — planted, root or not
             if not cwd_is_root and os.path.commonpath([parent, base]) == base:
@@ -1645,6 +1648,25 @@ _AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
 _SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
 
 
+def _read_regular_file_capped(path: Path, max_bytes: int) -> Optional[str]:
+    """Read up to ``max_bytes`` of a REGULAR file, or None. Opens non-blocking and
+    verifies the fd is a regular file, so a user-planted FIFO or device at the
+    path can't block the scanner or stream unbounded data — the file may be owned
+    by another (possibly hostile) user in an all-users scan."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None  # FIFO / device / dir planted here — don't block or stream
+        return os.read(fd, max_bytes).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def _augment_tenant_host(url: str) -> Optional[str]:
     """Return the lowercased host if ``url`` is an ``https://…augmentcode.com``
     tenant URL, else None. Plain string parsing, no urllib (Zscaler). This is the
@@ -1680,14 +1702,15 @@ def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
     own path/query is discarded), so a tampered session can neither point the
     authenticated call at another host nor inject curl directives. Returns None if
     not logged in or the session is unusable."""
+    # Bounded, regular-file-only read: another user owns this file, so it must not
+    # block the scanner (a planted FIFO) or slurp a deliberately huge file.
+    raw = _read_regular_file_capped(
+        Path(user_home) / ".augment" / "session.json", _SESSION_MAX_BYTES)
+    if raw is None:
+        return None
     try:
-        # Bounded read: another user owns this file, so cap it rather than slurp a
-        # deliberately huge file into memory (session.json is well under a KB).
-        with open(Path(user_home) / ".augment" / "session.json", "r",
-                  encoding="utf-8", errors="replace") as f:
-            raw = f.read(_SESSION_MAX_BYTES)
         data = json.loads(raw)
-    except (OSError, ValueError):
+    except ValueError:
         return None
     if not isinstance(data, dict):
         return None

@@ -141,6 +141,15 @@ class TestReadAuggieSession(unittest.TestCase):
         _write_session(self.home, tenant="https://evil.com/")
         self.assertIsNone(_read_auggie_session(self.home))
 
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "POSIX FIFO")
+    def test_fifo_session_returns_none_without_blocking(self):
+        # A low-priv user could plant a FIFO here; reading it must not block the
+        # scanner (this test would hang if the open were blocking).
+        aug = self.home / ".augment"
+        aug.mkdir()
+        os.mkfifo(str(aug / "session.json"))
+        self.assertIsNone(_read_auggie_session(self.home))
+
 
 class TestGetAuggieSubscriptionType(unittest.TestCase):
     """The billing HTTP call + parse, with a real session file on disk."""
@@ -247,6 +256,14 @@ class TestWhichNoCwd(unittest.TestCase):
     @patch(f"{_MOD}.shutil.which")
     def test_rejects_cwd_planted(self, mock_which):
         mock_which.return_value = os.path.join(os.getcwd(), "auggie")
+        self.assertIsNone(_which_no_cwd("auggie"))
+
+    @patch(f"{_MOD}.os.path.normcase", side_effect=str.lower)
+    @patch(f"{_MOD}.os.getcwd", return_value="/Proj")
+    @patch(f"{_MOD}.shutil.which", return_value="/proj/auggie")
+    def test_rejects_cwd_planted_case_insensitive(self, _w, _cwd, _nc):
+        # On Windows getcwd()/which casing can differ (C:\Proj vs c:\proj); folding
+        # case (here simulated with str.lower) must still catch the plant.
         self.assertIsNone(_which_no_cwd("auggie"))
 
     @patch(f"{_MOD}.os.getcwd", return_value=os.path.abspath("proj"))

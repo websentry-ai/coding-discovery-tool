@@ -8,7 +8,6 @@ run/parse logic.
 """
 
 import json
-import ntpath
 import os
 import subprocess
 import unittest
@@ -51,12 +50,16 @@ class TestResolveBinaryForSelfScan(unittest.TestCase):
                                                    Path("/home/alice"))
         self.assertEqual(got, os.path.abspath("/home/alice/.local/bin/auggie"))
 
-    @patch(f"{_MOD}.os.path", ntpath)  # Windows path semantics on any host
+    # A Windows drive path isn't absolute under posixpath, so on a non-Windows
+    # host stand in the platform's isabs/CWD checks; the point is the elevation
+    # gate, not path parsing (covered on Windows CI and by the resolver tests).
+    @patch(f"{_MOD}.os.path.isabs", return_value=True)
+    @patch(f"{_MOD}._binary_in_cwd", return_value=False)
     @patch(f"{_MOD}.platform.system", return_value="Windows")
     @patch(f"{_MOD}._windows_process_is_elevated", return_value=False)
-    def test_windows_own_home_resolves(self, _elev, _sys):
+    def test_windows_own_home_resolves(self, _elev, _sys, _incwd, _isabs):
         got = _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", Path.home())
-        self.assertEqual(got, ntpath.abspath("C:\\npm\\auggie.cmd"))
+        self.assertEqual(got, os.path.abspath("C:\\npm\\auggie.cmd"))
 
     @patch(f"{_MOD}.platform.system", return_value="Windows")
     @patch(f"{_MOD}._windows_process_is_elevated", return_value=True)

@@ -47,6 +47,12 @@ NAMING_TABLE = [
     # Unmapped AND unversioned (JetBrains Remote Development) still falls back
     # to the raw folder name; there is nothing better to report.
     ("RemoteDev-IU", "RemoteDev-IU", "Unknown"),
+    # Distinct products that merely start with a mapped prefix keep their own
+    # identity, or _filter_old_versions would drop one of the two installs.
+    ("PyCharmEdu2024.1", "PyCharmEdu", "2024.1"),
+    ("CLionNova2024.3", "CLionNova", "2024.3"),
+    # No clean split available, so the branded name is kept rather than lost.
+    ("IntelliJIdea2024.1-EAP", "IntelliJ IDEA", "2024.1-EAP"),
 ]
 
 SKIP_TABLE = [
@@ -166,6 +172,30 @@ class TestConfigDirScan(_TempHomeTestCase):
         found = detector._scan_for_ides(config_dir, self.tmp_path / "Local" / "JetBrains")
 
         self.assertEqual({(ide["display_name"], ide["version"]) for ide in found}, EXPECTED_SCAN)
+
+
+class TestPrefixCollisionSurvivesFiltering(_TempHomeTestCase):
+
+    def test_edu_edition_is_not_dropped_alongside_regular_install(self) -> None:
+        _make_config_dir(
+            self.tmp_path / "Library" / "Application Support" / "JetBrains",
+            ["PyCharmEdu2024.1", "PyCharm2025.2", "CLionNova2024.3", "CLion2023.1"],
+        )
+        detector = MacOSJetBrainsDetector()
+
+        found = MacOSJetBrainsDetector._filter_old_versions(
+            detector._scan_jetbrains_config_dir(self.tmp_path)
+        )
+
+        self.assertEqual(
+            {(ide["display_name"], ide["version"]) for ide in found},
+            {
+                ("PyCharmEdu", "2024.1"),
+                ("PyCharm", "2025.2"),
+                ("CLionNova", "2024.3"),
+                ("CLion", "2023.1"),
+            },
+        )
 
 
 class TestVersionSuffixRegex(unittest.TestCase):

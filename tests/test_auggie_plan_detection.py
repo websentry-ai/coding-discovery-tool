@@ -210,6 +210,14 @@ class TestWhichNoCwd(unittest.TestCase):
         mock_which.return_value = os.path.join(os.getcwd(), "auggie")
         self.assertIsNone(_which_no_cwd("auggie"))
 
+    @patch(f"{_MOD}.os.getcwd", return_value=os.path.abspath("proj"))
+    @patch(f"{_MOD}.shutil.which")
+    def test_rejects_plant_nested_under_cwd(self, mock_which, _cwd):
+        # A hit one level down (e.g. <cwd>/node_modules/.bin) is still planted.
+        mock_which.return_value = os.path.join(
+            os.path.abspath("proj"), "node_modules", ".bin", "auggie")
+        self.assertIsNone(_which_no_cwd("auggie"))
+
     @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
     def test_accepts_outside_cwd(self, _w):
         self.assertEqual(_which_no_cwd("auggie"), os.path.abspath("/usr/bin/auggie"))

@@ -1569,16 +1569,23 @@ def _windows_process_is_elevated() -> bool:
 
 
 def _binary_in_cwd(path: str) -> bool:
-    """True if ``path`` is a file directly inside the current working directory.
+    """True if ``path`` resolves to somewhere inside the current working directory.
 
-    That is exactly where a Windows CWD search (or a ``.`` entry on PATH) would
-    find a planted binary. Only the immediate directory counts — not ancestors —
-    so a real install under a broad cwd like ``/`` (launchd/systemd default) is
-    not falsely rejected. Fails closed if the paths can't be resolved."""
+    That whole subtree is where a planted binary can hide — a Windows CWD search,
+    a ``.`` entry on PATH, or a nested hit like ``<cwd>/node_modules/.bin`` when
+    the scan starts in an attacker-writable directory. A filesystem root is
+    exempt: a root cwd (the launchd/systemd default) is an ancestor of every real
+    install, so treating the entire filesystem as planted would reject legitimate
+    PATH hits. Fails closed if the paths can't be resolved."""
     try:
+        cwd = os.path.realpath(os.getcwd())
+        if os.path.dirname(cwd) == cwd:  # filesystem root ('/', 'C:\\', ...)
+            return False
+        # Resolve only the parent dir, not the leaf, so a symlink planted at
+        # <cwd>/auggie can't point outside the tree to dodge the check.
         parent = os.path.realpath(os.path.dirname(os.path.abspath(path)))
-        return parent == os.path.realpath(os.getcwd())
-    except OSError:
+        return os.path.commonpath([parent, cwd]) == cwd
+    except (OSError, ValueError):
         return True
 
 

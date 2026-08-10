@@ -1574,13 +1574,14 @@ def _binary_in_cwd(path: str) -> bool:
     That whole subtree is where a planted binary can hide — a Windows CWD search,
     a ``.`` entry on PATH, or a nested hit like ``<cwd>/node_modules/.bin`` when
     the scan starts in an attacker-writable directory. A filesystem root is
-    exempt: a root cwd (the launchd/systemd default) is an ancestor of every real
-    install, so treating the entire filesystem as planted would reject legitimate
-    PATH hits. Fails closed if the paths can't be resolved."""
+    A binary sitting directly in the cwd is always planted — even at a filesystem
+    or drive root like ``/`` or ``D:\\``. The subtree check below (for nested
+    plants) is what a root cwd exempts: a root is an ancestor of every real
+    install, so extending "planted" to the whole filesystem would reject
+    legitimate PATH hits like ``/usr/bin/auggie``. Fails closed on error."""
     try:
         real_cwd = os.path.realpath(os.getcwd())
-        if os.path.dirname(real_cwd) == real_cwd:  # filesystem root ('/', 'C:\\')
-            return False
+        cwd_is_root = os.path.dirname(real_cwd) == real_cwd  # '/', 'D:\\', ...
         abs_parent = os.path.dirname(os.path.abspath(path))
         # Check the parent in both forms. The lexical (abspath) form catches a
         # path that sits inside the working dir on paper — including a leaf like
@@ -1589,8 +1590,10 @@ def _binary_in_cwd(path: str) -> bool:
         # otherwise resolve the parent out of the tree and dodge the check.
         for parent, base in ((abs_parent, os.path.abspath(os.getcwd())),
                              (os.path.realpath(abs_parent), real_cwd)):
-            if os.path.commonpath([parent, base]) == base:
-                return True
+            if parent == base:
+                return True  # directly in the cwd — planted, root or not
+            if not cwd_is_root and os.path.commonpath([parent, base]) == base:
+                return True  # nested under a non-root cwd
         return False
     except (OSError, ValueError):
         return True

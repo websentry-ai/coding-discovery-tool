@@ -245,6 +245,13 @@ class TestWhichNoCwd(unittest.TestCase):
         # binary isn't *in* it — a real install must still resolve.
         self.assertEqual(_which_no_cwd("auggie"), os.path.abspath("/usr/bin/auggie"))
 
+    @patch(f"{_MOD}.os.getcwd", return_value=os.sep)
+    @patch(f"{_MOD}.shutil.which", return_value=os.sep + "auggie")
+    def test_rejects_plant_directly_in_root_cwd(self, _w, _cwd):
+        # The root exemption is only for "cwd is an ancestor"; a binary planted
+        # directly in a writable root cwd (e.g. D:\auggie) is still refused.
+        self.assertIsNone(_which_no_cwd("auggie"))
+
 
 class TestResolveRejectsUntrustedInstallPath(unittest.TestCase):
     """A detector-supplied install_path must be absolute and outside the CWD."""

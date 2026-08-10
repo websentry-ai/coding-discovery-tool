@@ -14,6 +14,7 @@ from ...coding_tool_base import BaseToolDetector
 from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
+    looks_like_ide_folder,
     parse_ide_name_and_version,
     should_skip_folder,
 )
@@ -25,11 +26,6 @@ logger = logging.getLogger(__name__)
 
 class MacOSJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for macOS systems."""
-
-    IDE_PATTERNS = [
-        "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
-        "Rider", "CLion", "RustRover", "RubyMine", "DataGrip", "DataSpell"
-    ]
 
     IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
@@ -107,15 +103,18 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                     if user_dir.is_dir() and not user_dir.name.startswith('.'):
                         try:
                             user_ides = self._scan_jetbrains_config_dir(user_dir)
-                            all_detected_ides.extend(user_ides)
+                            # Dedup per-user so multiple installed versions of the same IDE
+                            # collapse to the latest for that user, but never discard another
+                            # user's IDE just because someone else has a newer version.
+                            all_detected_ides.extend(self._filter_old_versions(user_ides))
                         except (PermissionError, OSError) as e:
                             logger.debug(f"Skipping user directory {user_dir}: {e}")
                             continue
 
         home_ides = self._scan_jetbrains_config_dir(Path.home())
-        all_detected_ides.extend(home_ides)
+        all_detected_ides.extend(self._filter_old_versions(home_ides))
 
-        return self._filter_old_versions(all_detected_ides)
+        return all_detected_ides
 
     def _scan_jetbrains_config_dir(self, user_home: Path) -> List[Dict]:
         """
@@ -145,10 +144,10 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                 if should_skip_folder(folder, self.SKIP_FOLDERS):
                     continue
 
-                matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
+                is_versioned = looks_like_ide_folder(folder)
                 has_structure = (folder_path / "plugins").exists() or (folder_path / "options").exists()
 
-                if not (matches_name or has_structure):
+                if not (is_versioned or has_structure):
                     continue
 
                 display_name, version = self._parse_ide_name_and_version(folder)

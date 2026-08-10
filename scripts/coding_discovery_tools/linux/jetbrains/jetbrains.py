@@ -12,6 +12,7 @@ from ...coding_tool_base import BaseToolDetector
 from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
+    looks_like_ide_folder,
     parse_ide_name_and_version,
     should_skip_folder,
 )
@@ -23,11 +24,6 @@ logger = logging.getLogger(__name__)
 
 class LinuxJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for Linux systems."""
-
-    IDE_PATTERNS = [
-        "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
-        "Rider", "CLion", "RustRover", "RubyMine", "DataGrip", "DataSpell"
-    ]
 
     IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
@@ -107,11 +103,11 @@ class LinuxJetBrainsDetector(BaseToolDetector):
                     continue
                 if should_skip_folder(folder, self.SKIP_FOLDERS):
                     continue
-                matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
+                is_versioned = looks_like_ide_folder(folder)
                 has_structure = (
                     (folder_path / "plugins").exists() or (folder_path / "options").exists()
                 )
-                if not (matches_name or has_structure):
+                if not (is_versioned or has_structure):
                     continue
 
                 display_name, version = self._parse_ide_name_and_version(folder)

@@ -44,6 +44,10 @@ VERSION_SUFFIX = re.compile(r'^([A-Za-z][A-Za-z ._-]*?)((?:\d+\.)+\d+)$')
 # What a mapped prefix's remainder must look like for the prefix to own the folder.
 VERSION_ONLY = re.compile(r'^\d[\d.]*$')
 
+# Real IDE config folders carry a version ("CLion2025.3"); the consent leftovers
+# JetBrains keeps after an uninstall carry the bare product name ("Clion").
+VERSIONED_FOLDER = re.compile(r'^[A-Za-z][A-Za-z ._-]*\d+(?:\.\d+)+')
+
 
 def should_skip_folder(folder: str, skip_folders: Iterable[str]) -> bool:
     """
@@ -59,6 +63,19 @@ def should_skip_folder(folder: str, skip_folders: Iterable[str]) -> bool:
     """
     prefixes = (skip_folders,) if isinstance(skip_folders, str) else tuple(skip_folders)
     return folder.startswith(prefixes)
+
+
+def looks_like_ide_folder(folder: str) -> bool:
+    """
+    Report whether a config subfolder name is shaped like an IDE install.
+
+    Args:
+        folder: Config subfolder name, e.g. "CLion2025.3"
+
+    Returns:
+        True if the name carries a version; False for bare-product leftovers
+    """
+    return VERSIONED_FOLDER.match(folder) is not None
 
 
 def parse_ide_name_and_version(folder_name: str, mapping: Mapping[str, str]) -> Tuple[str, str]:

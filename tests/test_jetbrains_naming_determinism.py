@@ -198,6 +198,55 @@ class TestPrefixCollisionSurvivesFiltering(_TempHomeTestCase):
         )
 
 
+class TestConsentResidueIsNotAnIde(_TempHomeTestCase):
+
+    def test_bare_product_folder_without_config_is_dropped(self) -> None:
+        jetbrains = self.tmp_path / "Library" / "Application Support" / "JetBrains"
+        _make_config_dir(jetbrains, ["GoLand2025.1"])
+        # What JetBrains leaves behind after an uninstall: product name, consent data only.
+        for residue in ["GoLand", "PyCharm", "Clion", "consentOptions"]:
+            (jetbrains / residue / "localConsents").mkdir(parents=True)
+        detector = MacOSJetBrainsDetector()
+
+        found = detector._scan_jetbrains_config_dir(self.tmp_path)
+
+        self.assertEqual({ide["display_name"] for ide in found}, {"GoLand"})
+        self.assertEqual([ide["version"] for ide in found], ["2025.1"])
+
+    def test_versionless_folder_with_real_config_still_detected(self) -> None:
+        _make_config_dir(
+            self.tmp_path / "Library" / "Application Support" / "JetBrains", ["DataSpell"]
+        )
+        detector = MacOSJetBrainsDetector()
+
+        found = detector._scan_jetbrains_config_dir(self.tmp_path)
+
+        self.assertEqual(
+            [(ide["display_name"], ide["version"]) for ide in found], [("DataSpell", "Unknown")]
+        )
+
+
+class TestPerUserVersionFiltering(unittest.TestCase):
+
+    def test_one_users_newer_ide_does_not_evict_anothers(self) -> None:
+        def install(version: str, user: str) -> dict:
+            return {
+                "folder_name": "PyCharm" + version,
+                "display_name": "PyCharm",
+                "version": version,
+                "plan": "Licensed",
+                "config_path": "/Users/{}/PyCharm{}".format(user, version),
+            }
+
+        alice = MacOSJetBrainsDetector._filter_old_versions([install("2024.1", "alice")])
+        bob = MacOSJetBrainsDetector._filter_old_versions([install("2025.2", "bob")])
+
+        self.assertEqual(
+            {ide["config_path"] for ide in alice + bob},
+            {"/Users/alice/PyCharm2024.1", "/Users/bob/PyCharm2025.2"},
+        )
+
+
 class TestVersionSuffixRegex(unittest.TestCase):
 
     def test_version_suffix_regex_does_not_backtrack(self) -> None:

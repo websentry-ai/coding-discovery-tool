@@ -1568,23 +1568,27 @@ def _windows_process_is_elevated() -> bool:
         return True
 
 
-def _which_no_cwd(name: str) -> Optional[str]:
-    """``shutil.which`` that rejects a match inside the current directory.
+def _binary_in_cwd(path: str) -> bool:
+    """True if ``path`` is a file directly inside the current working directory.
 
-    Windows searches the CWD before PATH (and a ``.`` entry does the same on
-    POSIX), so a planted binary in a writable working directory could be run.
-    Returns an absolute path outside the CWD subtree, or None (fail closed)."""
+    That is exactly where a Windows CWD search (or a ``.`` entry on PATH) would
+    find a planted binary. Only the immediate directory counts — not ancestors —
+    so a real install under a broad cwd like ``/`` (launchd/systemd default) is
+    not falsely rejected. Fails closed if the paths can't be resolved."""
+    try:
+        parent = os.path.realpath(os.path.dirname(os.path.abspath(path)))
+        return parent == os.path.realpath(os.getcwd())
+    except OSError:
+        return True
+
+
+def _which_no_cwd(name: str) -> Optional[str]:
+    """``shutil.which`` that rejects a match planted directly in the CWD."""
     found = shutil.which(name)
     if not found:
         return None
-    try:
-        found_abs = os.path.realpath(found)
-        cwd = os.path.realpath(os.getcwd())
-        if os.path.commonpath([found_abs, cwd]) == cwd:
-            return None
-    except (OSError, ValueError):
-        return None
-    return found_abs
+    found = os.path.abspath(found)
+    return None if _binary_in_cwd(found) else found
 
 
 def _resolve_auggie_binary_for_self_scan(
@@ -1630,11 +1634,16 @@ def _resolve_auggie_binary_for_self_scan(
     except (OSError, KeyError, RuntimeError):
         return None
 
-    # A detector-provided path is already from a trusted install location; only
-    # the bare-name fallback needs the CWD guard.
-    resolved = os.path.abspath(auggie_binary) if auggie_binary else _which_no_cwd("auggie")
-    if not resolved:
-        return None
+    if auggie_binary:
+        # Detector install_paths are absolute; a relative one would be joined to
+        # the CWD, so refuse it — and reject an absolute one planted in the CWD.
+        if not os.path.isabs(auggie_binary) or _binary_in_cwd(auggie_binary):
+            return None
+        resolved = os.path.abspath(auggie_binary)
+    else:
+        resolved = _which_no_cwd("auggie")
+        if not resolved:
+            return None
     # On Windows the shim runs via cmd.exe; reject a path carrying cmd
     # metacharacters so it can't be re-parsed into extra commands.
     if platform.system() == "Windows" and any(c in resolved for c in '&|^<>()"%!'):

@@ -8,6 +8,7 @@ run/parse logic.
 """
 
 import json
+import ntpath
 import os
 import subprocess
 import unittest
@@ -50,11 +51,12 @@ class TestResolveBinaryForSelfScan(unittest.TestCase):
                                                    Path("/home/alice"))
         self.assertEqual(got, os.path.abspath("/home/alice/.local/bin/auggie"))
 
+    @patch(f"{_MOD}.os.path", ntpath)  # Windows path semantics on any host
     @patch(f"{_MOD}.platform.system", return_value="Windows")
     @patch(f"{_MOD}._windows_process_is_elevated", return_value=False)
     def test_windows_own_home_resolves(self, _elev, _sys):
         got = _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", Path.home())
-        self.assertEqual(got, os.path.abspath("C:\\npm\\auggie.cmd"))
+        self.assertEqual(got, ntpath.abspath("C:\\npm\\auggie.cmd"))
 
     @patch(f"{_MOD}.platform.system", return_value="Windows")
     @patch(f"{_MOD}._windows_process_is_elevated", return_value=True)
@@ -145,8 +147,9 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
     def test_home_env_set_to_user_home(self, mock_run):
         # auggie reads ~/.augment via HOME; point it at the verified own home.
         mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type("/usr/bin/auggie", Path("/home/alice"))
-        self.assertEqual(mock_run.call_args.kwargs["env"]["HOME"], "/home/alice")
+        home = Path("/home/alice")
+        get_auggie_subscription_type("/usr/bin/auggie", home)
+        self.assertEqual(mock_run.call_args.kwargs["env"]["HOME"], str(home))
 
     @patch(f"{_MOD}.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):
@@ -206,7 +209,36 @@ class TestWhichNoCwd(unittest.TestCase):
 
     @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
     def test_accepts_outside_cwd(self, _w):
-        self.assertEqual(_which_no_cwd("auggie"), os.path.realpath("/usr/bin/auggie"))
+        self.assertEqual(_which_no_cwd("auggie"), os.path.abspath("/usr/bin/auggie"))
+
+    @patch(f"{_MOD}.os.getcwd", return_value=os.sep)
+    @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
+    def test_accepts_when_cwd_is_ancestor(self, _w, _cwd):
+        # cwd='/' (launchd/systemd default) is an ancestor of every path, but the
+        # binary isn't *in* it — a real install must still resolve.
+        self.assertEqual(_which_no_cwd("auggie"), os.path.abspath("/usr/bin/auggie"))
+
+
+class TestResolveRejectsUntrustedInstallPath(unittest.TestCase):
+    """A detector-supplied install_path must be absolute and outside the CWD."""
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    def test_relative_install_path_refused(self, mock_pwd, _euid, _sys):
+        # A relative path would be joined to the CWD; never exec it.
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        self.assertIsNone(
+            _resolve_auggie_binary_for_self_scan("auggie", Path("/home/alice")))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    def test_absolute_install_path_in_cwd_refused(self, mock_pwd, _euid, _sys):
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        planted = os.path.join(os.getcwd(), "auggie")
+        self.assertIsNone(
+            _resolve_auggie_binary_for_self_scan(planted, Path("/home/alice")))
 
 
 if __name__ == "__main__":

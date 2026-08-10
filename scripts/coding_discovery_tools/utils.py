@@ -1641,100 +1641,140 @@ def _is_scanning_users_own_home(user_home: Optional[Path]) -> bool:
         return False
 
 
-def _resolve_auggie_binary_for_self_scan(
-    auggie_binary: Optional[str],
-    user_home: Optional[Path],
-) -> Optional[str]:
-    """Return the absolute auggie binary to run, or None if it isn't safe.
+_AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
+_SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
 
-    Runs only for the scanning user's own, non-privileged session
-    (:func:`_is_scanning_users_own_home`). The binary is resolved to an ABSOLUTE
-    path (``shutil.which`` for the bare name) so a planted ``auggie`` in the CWD
-    can never be picked up.
-    """
-    if not _is_scanning_users_own_home(user_home):
+
+def _augment_tenant_host(url: str) -> Optional[str]:
+    """Return the lowercased host if ``url`` is an ``https://…augmentcode.com``
+    tenant URL, else None. Plain string parsing, no urllib (Zscaler). This is the
+    only place the token's destination is decided, so a tampered ``session.json``
+    can neither redirect the authenticated call to an arbitrary/internal host
+    (SSRF) nor smuggle whitespace/control chars into the curl config."""
+    if not url or "://" not in url:
         return None
-
-    if auggie_binary:
-        # Detector install_paths are absolute; a relative one would be joined to
-        # the CWD, so refuse it — and reject an absolute one planted in the CWD.
-        if not os.path.isabs(auggie_binary) or _binary_in_cwd(auggie_binary):
-            return None
-        resolved = os.path.abspath(auggie_binary)
-    else:
-        resolved = _which_no_cwd("auggie")
-        if not resolved:
-            return None
-    # On Windows the shim runs via cmd.exe; reject a path carrying cmd
-    # metacharacters so it can't be re-parsed into extra commands.
-    if platform.system() == "Windows" and any(c in resolved for c in '&|^<>()"%!'):
+    # No spaces or control chars anywhere — they could break out of the config
+    # line the URL is later formatted into. (ord 32 = space, <32 = control.)
+    if any(ord(c) <= 32 or ord(c) == 127 for c in url):
         return None
-    return resolved
+    scheme, rest = url.split("://", 1)
+    if scheme.lower() != "https":
+        return None
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in host:                      # strip user:pass@ credentials
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):             # IPv6 literal — never an Augment tenant
+        return None
+    host = host.split(":", 1)[0].lower()   # strip :port
+    if host == "augmentcode.com" or host.endswith(_AUGMENT_TENANT_HOST_SUFFIX):
+        return host
+    return None
 
 
-def get_auggie_subscription_type(
-    auggie_binary: Optional[str],
-    user_home: Optional[Path],
-) -> Optional[str]:
-    """Get the Auggie CLI (Augment) subscription plan for a specific user.
+def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
+    """Return ``(tenant_base_url, access_token)`` from a user's Auggie session.
 
-    Auggie keeps no plan on disk (its ``session.json`` holds only an opaque
-    token), so the plan is read the same way Claude Code's is — by running the
-    tool's own supported command and parsing its JSON::
+    Reads only ``~/.augment/session.json`` — a plain file read, so it works for
+    any user's home in a privileged all-users scan without executing that user's
+    binary. The base URL is rebuilt from the *validated host only* (the session's
+    own path/query is discarded), so a tampered session can neither point the
+    authenticated call at another host nor inject curl directives. Returns None if
+    not logged in or the session is unusable."""
+    try:
+        # Bounded read: another user owns this file, so cap it rather than slurp a
+        # deliberately huge file into memory (session.json is well under a KB).
+        with open(Path(user_home) / ".augment" / "session.json", "r",
+                  encoding="utf-8", errors="replace") as f:
+            raw = f.read(_SESSION_MAX_BYTES)
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = data.get("accessToken")
+    tenant = data.get("tenantURL")
+    if not isinstance(token, str) or not isinstance(tenant, str):
+        return None
+    # Must be usable as an HTTP header value: bounded, no control chars.
+    if not 0 < len(token) <= 4096 or any(ord(c) < 32 or ord(c) == 127 for c in token):
+        return None
+    host = _augment_tenant_host(tenant)
+    if host is None:
+        return None
+    return "https://" + host + "/", token
 
-        auggie account status --json  ->  {"planName": "Business Plan", ...}
 
-    Only for the scanning user's own session (see
-    :func:`_resolve_auggie_binary_for_self_scan`); cross-user detection is
-    skipped. The plan is an optional field.
+def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
+    """Get the Auggie CLI (Augment) subscription plan for ``user_home``.
+
+    Auggie keeps no plan on disk, so — like Cursor's plan is read from its state
+    DB — we read the user's session token from ``~/.augment/session.json`` and ask
+    Augment's billing endpoint directly with curl. Being a file read plus an HTTP
+    call (never executing the user's binary), it works across every user in a
+    privileged all-users scan and stays clear of running a user-writable shim as
+    the scanner. The plan is an optional, best-effort field.
 
     Returns:
         Plan string (e.g. "Business Plan") or None if not logged in / on failure.
     """
-    resolved = _resolve_auggie_binary_for_self_scan(auggie_binary, user_home)
-    if resolved is None:
+    if user_home is None:
         return None
+    session = _read_auggie_session(user_home)
+    if session is None:
+        return None
+    base_url, token = session
 
-    # npm installs auggie as a .cmd shim on Windows, which the OS can't exec from
-    # a bare argv list — run it with shell=True, as this codebase's Codex/Copilot
-    # CLI probes do for the same reason.
-    use_shell = platform.system() == "Windows"
-    # Point HOME at the verified own home so auggie reads the right ~/.augment
-    # session even where the ambient $HOME differs (daemon containers, systemd).
-    env = {**os.environ, "HOME": str(user_home)}
+    # Pass the bearer token through a curl config on stdin, never argv, so it is
+    # not exposed in the process list on a shared machine. curl (not urllib) uses
+    # the system cert store, which includes any customer VPN/proxy CA (Zscaler).
+    def _cfg_quote(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+    config = (
+        'silent\n'
+        'fail\n'                 # non-2xx -> non-zero exit, no error body to parse
+        'request = "POST"\n'
+        'header = "Authorization: Bearer %s"\n'
+        'header = "Content-Type: application/json"\n'
+        'data = "{}"\n'
+        'max-time = %d\n'
+        'url = "%s"\n'
+    ) % (_cfg_quote(token), AUTH_STATUS_TIMEOUT,
+         _cfg_quote(base_url + "get-billing-summary"))
+
     try:
         result = subprocess.run(
-            [resolved, "account", "status", "--json"],
+            ["curl", "--config", "-"],
+            input=config,
             capture_output=True,
             text=True,
-            env=env,
-            timeout=AUTH_STATUS_TIMEOUT,
-            shell=use_shell,
+            timeout=AUTH_STATUS_TIMEOUT + 5,
         )
-        if result.returncode != 0:
-            # Log the code only — stderr can carry session/account details.
-            logger.debug("auggie account status returned rc=%s", result.returncode)
-            return None
-
-        parsed = json.loads(result.stdout.strip())
-        plan = parsed.get("planName")
-        if not isinstance(plan, str):
-            return None
-        plan = plan.strip()
-        # Bound an externally-produced value before it enters the report.
-        if not plan or len(plan) > 100 or any(ord(c) < 32 for c in plan):
-            return None
-        return plan
-
     except subprocess.TimeoutExpired:
-        logger.debug("auggie account status timed out")
-        return None
-    except json.JSONDecodeError:
-        logger.debug("auggie account status returned non-JSON")
+        logger.debug("auggie billing lookup timed out")
         return None
     except OSError as e:
-        logger.debug("Could not run auggie account status: %s", e)
+        logger.debug("Could not run auggie billing lookup: %s", e)
         return None
+
+    if result.returncode != 0:
+        # Log the code only — curl output can carry account details.
+        logger.debug("auggie billing lookup curl rc=%s", result.returncode)
+        return None
+    try:
+        parsed = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        logger.debug("auggie billing lookup returned non-JSON")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    plan = parsed.get("plan_name")
+    if not isinstance(plan, str):
+        return None
+    plan = plan.strip()
+    # Bound an externally-produced value before it enters the report.
+    if not plan or len(plan) > 100 or any(ord(c) < 32 for c in plan):
+        return None
+    return plan
 
 
 # ---------------------------------------------------------------------------

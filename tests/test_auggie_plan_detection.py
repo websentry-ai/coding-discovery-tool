@@ -1,10 +1,12 @@
 """Tests for Auggie CLI (Augment) subscription plan detection.
 
-Auggie stores no plan on disk, so the plan is read by running the tool's own
-``auggie account status --json`` and parsing ``planName`` — mirroring how Claude
-Code's plan is read. Because that means executing a CLI, the safety gate
-(:func:`_resolve_auggie_binary_for_self_scan`) is tested separately from the
-run/parse logic.
+Auggie stores no plan on disk, so the plan is read by taking the user's session
+token from ``~/.augment/session.json`` and querying Augment's billing endpoint
+with curl — a file read plus an HTTP call, never executing the user's binary, so
+it works for every user in a privileged all-users scan. The session read and the
+tenant-URL validation (SSRF guard) are tested separately from the HTTP/parse
+logic. ``_which_no_cwd`` / ``_is_scanning_users_own_home`` remain in use by the
+detectors (for install_path/version) and are covered here too.
 """
 
 import json
@@ -20,12 +22,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scripts.coding_discovery_tools import utils
 from scripts.coding_discovery_tools.utils import (
     get_auggie_subscription_type,
-    _resolve_auggie_binary_for_self_scan,
+    _read_auggie_session,
+    _augment_tenant_host,
     _which_no_cwd,
     _is_scanning_users_own_home,
 )
 
 _MOD = "scripts.coding_discovery_tools.utils"
+_TOKEN = "a" * 64
+_TENANT = "https://d19.api.augmentcode.com/"
+_BILLING_JSON = json.dumps({"plan_name": "Business Plan", "usage_unit": 2})
 
 
 def _proc(returncode=0, stdout="", stderr=""):
@@ -36,171 +42,203 @@ def _proc(returncode=0, stdout="", stderr=""):
     return m
 
 
-_OK_JSON = json.dumps({"planName": "Business Plan", "usageUnit": "usd"})
+def _write_session(home, token=_TOKEN, tenant=_TENANT):
+    aug = Path(home) / ".augment"
+    aug.mkdir(parents=True, exist_ok=True)
+    (aug / "session.json").write_text(
+        json.dumps({"accessToken": token, "tenantURL": tenant, "scopes": ["email"]}),
+        encoding="utf-8")
+    return Path(home)
 
 
-class TestResolveBinaryForSelfScan(unittest.TestCase):
-    """The safety gate: only our own session, never as root, absolute binary."""
+class TestAugmentTenantHost(unittest.TestCase):
+    """SSRF / config-injection guard: the token may only go to an Augment tenant."""
 
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
-    @patch(f"{_MOD}.pwd")
-    def test_own_home_resolves_binary(self, mock_pwd, _euid, _sys):
-        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
-        got = _resolve_auggie_binary_for_self_scan("/home/alice/.local/bin/auggie",
-                                                   Path("/home/alice"))
-        self.assertEqual(got, os.path.abspath("/home/alice/.local/bin/auggie"))
+    def test_accepts_augment_tenant(self):
+        self.assertEqual(_augment_tenant_host("https://d19.api.augmentcode.com/"),
+                         "d19.api.augmentcode.com")
+        self.assertEqual(_augment_tenant_host("https://augmentcode.com"),
+                         "augmentcode.com")
 
-    # A Windows drive path isn't absolute under posixpath, so on a non-Windows
-    # host stand in the platform's isabs/CWD checks; the point is the elevation
-    # gate, not path parsing (covered on Windows CI and by the resolver tests).
-    @patch(f"{_MOD}.os.path.isabs", return_value=True)
-    @patch(f"{_MOD}._binary_in_cwd", return_value=False)
-    @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}._windows_process_is_elevated", return_value=False)
-    def test_windows_own_home_resolves(self, _elev, _sys, _incwd, _isabs):
-        got = _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", Path.home())
-        self.assertEqual(got, os.path.abspath("C:\\npm\\auggie.cmd"))
+    def test_rejects_non_https(self):
+        self.assertIsNone(_augment_tenant_host("http://d19.api.augmentcode.com/"))
 
-    @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}._windows_process_is_elevated", return_value=True)
-    def test_windows_elevated_refused(self, _elev, _sys):
-        # An elevated (or unknown-elevation) scan must not exec a user-writable shim.
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", Path.home()))
+    def test_rejects_suffix_lookalike(self):
+        self.assertIsNone(_augment_tenant_host("https://augmentcode.com.evil.com/"))
 
-    @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}._windows_process_is_elevated", return_value=False)
-    def test_windows_other_home_refused(self, _elev, _sys):
-        other = Path.home() / "not-the-scanning-users-home"
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan("C:\\npm\\auggie.cmd", other))
+    def test_rejects_userinfo_trick(self):
+        self.assertIsNone(_augment_tenant_host("https://augmentcode.com@evil.com/"))
 
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
-    @patch(f"{_MOD}.pwd")
-    def test_other_user_home_refused(self, mock_pwd, _euid, _sys):
-        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan("/bin/auggie", Path("/home/bob")))
+    def test_rejects_unrelated_host(self):
+        self.assertIsNone(_augment_tenant_host("https://evil.com/"))
 
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.os.geteuid", return_value=0, create=True)
-    def test_root_refused(self, _euid, _sys):
-        # $HOME could be spoofed to a user's home under sudo -E; refuse outright.
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan("/home/alice/.local/bin/auggie",
-                                                 Path("/home/alice")))
+    def test_rejects_ip_and_ipv6(self):
+        self.assertIsNone(_augment_tenant_host("https://127.0.0.1/"))
+        self.assertIsNone(_augment_tenant_host("https://[::1]/"))
 
-    def test_none_user_home_refused(self):
-        self.assertIsNone(_resolve_auggie_binary_for_self_scan("/bin/auggie", None))
+    def test_rejects_whitespace_or_control_chars(self):
+        # A newline in the URL could inject a line into the curl config.
+        self.assertIsNone(_augment_tenant_host("https://augmentcode.com/\nfoo"))
+        self.assertIsNone(_augment_tenant_host("https://augmentcode.com/ x"))
 
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
-    @patch(f"{_MOD}.pwd")
-    @patch(f"{_MOD}.shutil.which", return_value=None)
-    def test_unresolvable_bare_name_refused(self, _which, mock_pwd, _euid, _sys):
-        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan(None, Path("/home/alice")))
+    def test_rejects_garbage(self):
+        self.assertIsNone(_augment_tenant_host("not a url"))
+        self.assertIsNone(_augment_tenant_host(""))
 
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
-    @patch(f"{_MOD}.pwd")
-    @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
-    def test_bare_name_resolved_to_absolute(self, _which, mock_pwd, _euid, _sys):
-        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
-        self.assertEqual(
-            _resolve_auggie_binary_for_self_scan(None, Path("/home/alice")),
-            os.path.abspath("/usr/bin/auggie"))
+
+class TestReadAuggieSession(unittest.TestCase):
+    """Reading + validating ~/.augment/session.json (works cross-user as a file)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.home = Path(self.tmp)
+
+    def test_valid_session_returns_base_and_token(self):
+        _write_session(self.home)
+        got = _read_auggie_session(self.home)
+        self.assertEqual(got, (_TENANT, _TOKEN))
+
+    def test_tenant_url_gets_trailing_slash(self):
+        _write_session(self.home, tenant="https://d19.api.augmentcode.com")
+        base, _ = _read_auggie_session(self.home)
+        self.assertEqual(base, "https://d19.api.augmentcode.com/")
+
+    def test_base_url_rebuilt_from_host_discards_path(self):
+        # The session's own path/query is untrusted and thrown away; the base is
+        # rebuilt as https://<host>/ so no curl directive can be smuggled in.
+        _write_session(self.home, tenant="https://d19.api.augmentcode.com/x/y?q=1")
+        base, _ = _read_auggie_session(self.home)
+        self.assertEqual(base, "https://d19.api.augmentcode.com/")
+
+    def test_newline_in_tenant_url_returns_none(self):
+        _write_session(self.home, tenant="https://d19.api.augmentcode.com/\nheader = evil")
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    def test_bad_json_returns_none(self):
+        aug = self.home / ".augment"
+        aug.mkdir()
+        (aug / "session.json").write_text("{not json", encoding="utf-8")
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    def test_missing_token_returns_none(self):
+        aug = self.home / ".augment"
+        aug.mkdir()
+        (aug / "session.json").write_text(json.dumps({"tenantURL": _TENANT}), encoding="utf-8")
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    def test_control_char_token_returns_none(self):
+        _write_session(self.home, token="abc\ndef")
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    def test_non_augment_tenant_returns_none(self):
+        # Even with a valid-looking token, an off-domain tenant is refused so the
+        # token is never sent off Augment's servers.
+        _write_session(self.home, tenant="https://evil.com/")
+        self.assertIsNone(_read_auggie_session(self.home))
 
 
 class TestGetAuggieSubscriptionType(unittest.TestCase):
-    """Run/parse logic, with the safety gate stubbed to a fixed binary."""
+    """The billing HTTP call + parse, with a real session file on disk."""
 
     def setUp(self):
-        p = patch(f"{_MOD}._resolve_auggie_binary_for_self_scan",
-                  return_value="/usr/bin/auggie")
-        self.addCleanup(p.stop)
-        p.start()
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.home = _write_session(Path(self.tmp))
+
+    def test_none_home_returns_none(self):
+        self.assertIsNone(get_auggie_subscription_type(None))
+
+    def test_no_session_returns_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertIsNone(get_auggie_subscription_type(Path(empty)))
 
     @patch(f"{_MOD}.subprocess.run")
     def test_parses_plan_name(self, mock_run):
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        self.assertEqual(get_auggie_subscription_type("/usr/bin/auggie", Path.home()),
-                         "Business Plan")
-
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.subprocess.run")
-    def test_posix_runs_without_shell(self, mock_run, _sys):
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type("/usr/bin/auggie", Path.home())
-        self.assertEqual(mock_run.call_args[0][0],
-                         ["/usr/bin/auggie", "account", "status", "--json"])
-        self.assertFalse(mock_run.call_args.kwargs["shell"])
-
-    @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}.subprocess.run")
-    def test_windows_uses_shell(self, mock_run, _sys):
-        # npm .cmd shim needs shell=True, matching the Codex/Copilot probes.
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        get_auggie_subscription_type("C:\\npm\\auggie.cmd", Path.home())
-        self.assertTrue(mock_run.call_args.kwargs["shell"])
+        mock_run.return_value = _proc(stdout=_BILLING_JSON)
+        self.assertEqual(get_auggie_subscription_type(self.home), "Business Plan")
 
     @patch(f"{_MOD}.subprocess.run")
-    def test_home_env_set_to_user_home(self, mock_run):
-        # auggie reads ~/.augment via HOME; point it at the verified own home.
-        mock_run.return_value = _proc(stdout=_OK_JSON)
-        home = Path("/home/alice")
-        get_auggie_subscription_type("/usr/bin/auggie", home)
-        self.assertEqual(mock_run.call_args.kwargs["env"]["HOME"], str(home))
+    def test_reads_any_users_home_cross_user(self, mock_run):
+        # The whole point: a home that is NOT the scanning user's still resolves,
+        # because it's a file read + HTTP call, not an execution.
+        import tempfile
+        with tempfile.TemporaryDirectory() as other:
+            _write_session(Path(other), token="b" * 64)
+            mock_run.return_value = _proc(stdout=_BILLING_JSON)
+            self.assertEqual(get_auggie_subscription_type(Path(other)), "Business Plan")
+
+    @patch(f"{_MOD}.subprocess.run")
+    def test_token_passed_via_stdin_not_argv(self, mock_run):
+        # The bearer token must never land in the process argv (ps-visible on a
+        # shared machine); it goes through the curl config on stdin.
+        mock_run.return_value = _proc(stdout=_BILLING_JSON)
+        get_auggie_subscription_type(self.home)
+        argv = mock_run.call_args.args[0]
+        self.assertEqual(argv, ["curl", "--config", "-"])
+        self.assertNotIn(_TOKEN, " ".join(argv))
+        cfg = mock_run.call_args.kwargs["input"]
+        self.assertIn(_TOKEN, cfg)
+        self.assertIn("get-billing-summary", cfg)
 
     @patch(f"{_MOD}.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):
-        mock_run.return_value = _proc(stdout=json.dumps({"planName": "  Business Plan  "}))
-        self.assertEqual(get_auggie_subscription_type("/usr/bin/auggie", Path.home()),
-                         "Business Plan")
+        mock_run.return_value = _proc(stdout=json.dumps({"plan_name": "  Business Plan  "}))
+        self.assertEqual(get_auggie_subscription_type(self.home), "Business Plan")
 
     @patch(f"{_MOD}.subprocess.run")
     def test_oversized_plan_rejected(self, mock_run):
-        mock_run.return_value = _proc(stdout=json.dumps({"planName": "x" * 101}))
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+        mock_run.return_value = _proc(stdout=json.dumps({"plan_name": "x" * 101}))
+        self.assertIsNone(get_auggie_subscription_type(self.home))
 
     @patch(f"{_MOD}.subprocess.run")
     def test_control_char_plan_rejected(self, mock_run):
-        mock_run.return_value = _proc(stdout=json.dumps({"planName": "Bus\x00iness"}))
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+        mock_run.return_value = _proc(stdout=json.dumps({"plan_name": "Bus\x00iness"}))
+        self.assertIsNone(get_auggie_subscription_type(self.home))
 
     @patch(f"{_MOD}.subprocess.run")
     def test_missing_plan_name_returns_none(self, mock_run):
-        mock_run.return_value = _proc(stdout=json.dumps({"usageUnit": "usd"}))
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+        mock_run.return_value = _proc(stdout=json.dumps({"usage_unit": 2}))
+        self.assertIsNone(get_auggie_subscription_type(self.home))
 
     @patch(f"{_MOD}.subprocess.run")
-    def test_non_zero_exit_returns_none_without_logging_stderr(self, mock_run):
-        mock_run.return_value = _proc(returncode=1, stderr="token=abc123 session leak")
+    def test_non_zero_exit_returns_none_without_logging_body(self, mock_run):
+        mock_run.return_value = _proc(returncode=22, stdout="token=abc123 leak")
         with self.assertLogs(utils.logger, level="DEBUG") as cm:
-            self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+            self.assertIsNone(get_auggie_subscription_type(self.home))
         self.assertFalse(any("abc123" in line for line in cm.output))
 
     @patch(f"{_MOD}.subprocess.run")
     def test_non_json_returns_none(self, mock_run):
         mock_run.return_value = _proc(stdout="Business Plan (human text)")
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+        self.assertIsNone(get_auggie_subscription_type(self.home))
 
     @patch(f"{_MOD}.subprocess.run")
     def test_timeout_returns_none(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="auggie", timeout=15)
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="curl", timeout=15)
+        self.assertIsNone(get_auggie_subscription_type(self.home))
 
     @patch(f"{_MOD}.subprocess.run")
-    def test_missing_binary_returns_none(self, mock_run):
-        mock_run.side_effect = FileNotFoundError("auggie not found")
-        self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+    def test_curl_missing_returns_none(self, mock_run):
+        mock_run.side_effect = FileNotFoundError("curl not found")
+        self.assertIsNone(get_auggie_subscription_type(self.home))
+
+    @patch(f"{_MOD}.subprocess.run")
+    def test_off_domain_session_never_calls_curl(self, mock_run):
+        # A tampered tenant URL is rejected at read time, so curl is never run.
+        _write_session(self.home, tenant="https://evil.com/")
+        self.assertIsNone(get_auggie_subscription_type(self.home))
+        mock_run.assert_not_called()
 
 
 class TestWhichNoCwd(unittest.TestCase):
-    """The PATH resolver must never return a binary planted in the CWD."""
+    """The PATH resolver (used by the detectors) must never return a CWD plant."""
 
     @patch(f"{_MOD}.shutil.which", return_value=None)
     def test_none_when_not_found(self, _w):
@@ -255,7 +293,7 @@ class TestWhichNoCwd(unittest.TestCase):
 
 
 class TestIsScanningUsersOwnHome(unittest.TestCase):
-    """The shared own-home gate used by the plan probe AND both detectors."""
+    """The shared own-home gate used by both detectors' PATH fallback."""
 
     def test_none_home_refused(self):
         self.assertFalse(_is_scanning_users_own_home(None))
@@ -299,28 +337,6 @@ class TestIsScanningUsersOwnHome(unittest.TestCase):
     @patch(f"{_MOD}._windows_process_is_elevated", return_value=False)
     def test_windows_own_home_allowed(self, _elev, _sys):
         self.assertTrue(_is_scanning_users_own_home(Path.home()))
-
-
-class TestResolveRejectsUntrustedInstallPath(unittest.TestCase):
-    """A detector-supplied install_path must be absolute and outside the CWD."""
-
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
-    @patch(f"{_MOD}.pwd")
-    def test_relative_install_path_refused(self, mock_pwd, _euid, _sys):
-        # A relative path would be joined to the CWD; never exec it.
-        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan("auggie", Path("/home/alice")))
-
-    @patch(f"{_MOD}.platform.system", return_value="Linux")
-    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
-    @patch(f"{_MOD}.pwd")
-    def test_absolute_install_path_in_cwd_refused(self, mock_pwd, _euid, _sys):
-        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
-        planted = os.path.join(os.getcwd(), "auggie")
-        self.assertIsNone(
-            _resolve_auggie_binary_for_self_scan(planted, Path("/home/alice")))
 
 
 if __name__ == "__main__":

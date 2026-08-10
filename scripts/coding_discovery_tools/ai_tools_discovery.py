@@ -3473,14 +3473,14 @@ def main():
                                 logger.warning(f"    Could not detect Cursor plan for {user_name}: {e}")
 
                         # Detect subscription plan for Auggie CLI. Auggie stores no
-                        # plan on disk, so we read it the same way Claude Code does:
-                        # by running the tool's own 'auggie account status --json'.
+                        # plan on disk, so we read the user's session token from
+                        # ~/.augment/session.json and query Augment's billing API
+                        # directly — a file read plus HTTP call, so it works for
+                        # every user in an all-users scan without executing a shim.
                         if tool_name.lower() == "auggie cli":
                             try:
                                 with time_step("detect_subscriptions", "process"):
-                                    subscription = get_auggie_subscription_type(
-                                        tool_filtered.get("install_path"), user_home
-                                    )
+                                    subscription = get_auggie_subscription_type(user_home)
                                 if subscription:
                                     tool_filtered["plan"] = subscription
                                     logger.info(f"    Plan: {subscription}")

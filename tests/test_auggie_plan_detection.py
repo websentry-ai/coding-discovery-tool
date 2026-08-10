@@ -218,6 +218,22 @@ class TestWhichNoCwd(unittest.TestCase):
             os.path.abspath("proj"), "node_modules", ".bin", "auggie")
         self.assertIsNone(_which_no_cwd("auggie"))
 
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
+    def test_rejects_plant_with_symlinked_parent_escaping_tree(self):
+        # Attacker owns the working dir and points a nested dir out of the tree:
+        # <cwd>/nm -> <outside>. The hit still lives under the writable cwd on
+        # paper, so it must be refused even though realpath escapes the tree.
+        import tempfile
+        with tempfile.TemporaryDirectory() as cwd, \
+                tempfile.TemporaryDirectory() as outside:
+            planted = os.path.join(outside, "auggie")
+            open(planted, "w").close()
+            os.symlink(outside, os.path.join(cwd, "nm"))
+            hit = os.path.join(cwd, "nm", "auggie")
+            with patch(f"{_MOD}.os.getcwd", return_value=cwd), \
+                    patch(f"{_MOD}.shutil.which", return_value=hit):
+                self.assertIsNone(_which_no_cwd("auggie"))
+
     @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
     def test_accepts_outside_cwd(self, _w):
         self.assertEqual(_which_no_cwd("auggie"), os.path.abspath("/usr/bin/auggie"))

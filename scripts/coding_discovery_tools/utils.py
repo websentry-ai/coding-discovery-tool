@@ -1578,13 +1578,20 @@ def _binary_in_cwd(path: str) -> bool:
     install, so treating the entire filesystem as planted would reject legitimate
     PATH hits. Fails closed if the paths can't be resolved."""
     try:
-        cwd = os.path.realpath(os.getcwd())
-        if os.path.dirname(cwd) == cwd:  # filesystem root ('/', 'C:\\', ...)
+        real_cwd = os.path.realpath(os.getcwd())
+        if os.path.dirname(real_cwd) == real_cwd:  # filesystem root ('/', 'C:\\')
             return False
-        # Resolve only the parent dir, not the leaf, so a symlink planted at
-        # <cwd>/auggie can't point outside the tree to dodge the check.
-        parent = os.path.realpath(os.path.dirname(os.path.abspath(path)))
-        return os.path.commonpath([parent, cwd]) == cwd
+        abs_parent = os.path.dirname(os.path.abspath(path))
+        # Check the parent in both forms. The lexical (abspath) form catches a
+        # path that sits inside the working dir on paper — including a leaf like
+        # <cwd>/auggie. The resolved (realpath) form catches symlinks — a planted
+        # <cwd>/node_modules/.bin -> /elsewhere, or a symlinked cwd — that would
+        # otherwise resolve the parent out of the tree and dodge the check.
+        for parent, base in ((abs_parent, os.path.abspath(os.getcwd())),
+                             (os.path.realpath(abs_parent), real_cwd)):
+            if os.path.commonpath([parent, base]) == base:
+                return True
+        return False
     except (OSError, ValueError):
         return True
 

@@ -1608,47 +1608,51 @@ def _which_no_cwd(name: str) -> Optional[str]:
     return None if _binary_in_cwd(found) else found
 
 
+def _is_scanning_users_own_home(user_home: Optional[Path]) -> bool:
+    """True only if ``user_home`` is the scanning account's OWN home and the
+    process is not (and may not be) privileged — the one condition under which
+    it's safe to resolve an auggie binary from PATH for that home and run it.
+
+    Both the plan probe and the detector PATH fallbacks gate on this, so the two
+    can't drift into weaker checks. Fails CLOSED on any error:
+      * Never privileged. POSIX refuses ``euid == 0``; Windows refuses when the
+        process holds (or may hold) an admin token — otherwise an Administrator
+        scan would run the profile-local, user-writable ``auggie.cmd`` shim.
+      * Only the OWN session. POSIX compares against the effective account's real
+        home (``pwd.getpwuid(os.geteuid())``), NOT ``$HOME`` (which ``sudo -E`` /
+        systemd can spoof); Windows compares against ``Path.home()``.
+    """
+    if user_home is None:
+        return False
+    try:
+        if platform.system() == "Windows":
+            if _windows_process_is_elevated():
+                return False
+            own_home = Path.home()
+        else:
+            if not hasattr(os, "geteuid") or os.geteuid() == 0:
+                return False
+            try:
+                own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
+            except (KeyError, OSError):
+                return False  # arbitrary UID with no passwd entry — soft-fail
+        return Path(user_home).resolve() == own_home.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
 def _resolve_auggie_binary_for_self_scan(
     auggie_binary: Optional[str],
     user_home: Optional[Path],
 ) -> Optional[str]:
     """Return the absolute auggie binary to run, or None if it isn't safe.
 
-    Guards that make executing the CLI safe on a shared/privileged machine:
-      * ``user_home`` is required — never run unconditionally.
-      * Never run elevated. POSIX refuses ``euid == 0``; Windows refuses when the
-        process holds (or may hold) an admin token — otherwise an Administrator
-        scan would execute the profile-local, user-writable ``auggie.cmd`` shim
-        with the scanner's elevated privileges.
-      * Only the scanning user's OWN session is read. POSIX compares ``user_home``
-        to the effective account's real home (``pwd.getpwuid(os.geteuid())``), NOT
-        ``$HOME`` (which ``sudo -E``/systemd can spoof); Windows compares to
-        ``Path.home()``.
-      * The binary is resolved to an ABSOLUTE path (``shutil.which`` for the bare
-        name) so a planted ``auggie`` in the CWD can never be picked up.
+    Runs only for the scanning user's own, non-privileged session
+    (:func:`_is_scanning_users_own_home`). The binary is resolved to an ABSOLUTE
+    path (``shutil.which`` for the bare name) so a planted ``auggie`` in the CWD
+    can never be picked up.
     """
-    if user_home is None:
-        return None
-
-    if platform.system() == "Windows":
-        if _windows_process_is_elevated():
-            return None
-        own_home = Path.home()
-    else:
-        if not hasattr(os, "geteuid"):
-            return None
-        if os.geteuid() == 0:
-            return None
-        try:
-            own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
-        except (KeyError, OSError):
-            return None  # arbitrary UID with no passwd entry — soft-fail
-
-    try:
-        if Path(user_home).resolve() != own_home.resolve():
-            logger.debug("Skipping auggie plan for non-self home %s", user_home)
-            return None
-    except (OSError, KeyError, RuntimeError):
+    if not _is_scanning_users_own_home(user_home):
         return None
 
     if auggie_binary:

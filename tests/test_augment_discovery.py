@@ -142,26 +142,18 @@ class TestAugmentDetection(unittest.TestCase):
             self.assertIsNone(self.detector.detect())
 
     def test_resolve_falls_back_to_path_for_own_home(self):
-        # No per-user binary here, but auggie is on PATH (e.g. Homebrew) and this
-        # is the scanning user's own home -> resolved via the CWD-guarded which.
+        # No per-user binary here, but auggie is on PATH (e.g. Homebrew) and the
+        # shared own-home gate allows it -> resolved via the CWD-guarded which.
         with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
-                patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home):
+                patch(f"{_DETECTOR_MOD}._is_scanning_users_own_home", return_value=True):
             self.assertEqual(_resolve_auggie_binary(self.user_home),
                              Path("/opt/homebrew/bin/auggie"))
 
-    def test_resolve_no_path_fallback_for_other_home(self):
-        # A different user's home must NOT borrow the scanner's PATH auggie.
-        other = Path(self.tmp_dir) / "someone_else"
-        other.mkdir()
+    def test_resolve_no_path_fallback_when_gate_refuses(self):
+        # When the shared gate refuses (other user's home, or running privileged),
+        # the scanner's PATH auggie must NOT be resolved for this home.
         with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
-                patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home):
-            self.assertIsNone(_resolve_auggie_binary(other))
-
-    def test_resolve_no_path_fallback_as_root(self):
-        # Root's PATH auggie must not be resolved (it could be user-writable).
-        with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
-                patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home), \
-                patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=True):
+                patch(f"{_DETECTOR_MOD}._is_scanning_users_own_home", return_value=False):
             self.assertIsNone(_resolve_auggie_binary(self.user_home))
 
     def test_vscode_row_from_extensions_json(self):

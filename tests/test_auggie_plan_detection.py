@@ -22,6 +22,7 @@ from scripts.coding_discovery_tools.utils import (
     get_auggie_subscription_type,
     _resolve_auggie_binary_for_self_scan,
     _which_no_cwd,
+    _is_scanning_users_own_home,
 )
 
 _MOD = "scripts.coding_discovery_tools.utils"
@@ -251,6 +252,53 @@ class TestWhichNoCwd(unittest.TestCase):
         # The root exemption is only for "cwd is an ancestor"; a binary planted
         # directly in a writable root cwd (e.g. D:\auggie) is still refused.
         self.assertIsNone(_which_no_cwd("auggie"))
+
+
+class TestIsScanningUsersOwnHome(unittest.TestCase):
+    """The shared own-home gate used by the plan probe AND both detectors."""
+
+    def test_none_home_refused(self):
+        self.assertFalse(_is_scanning_users_own_home(None))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    def test_posix_own_passwd_home_allowed(self, mock_pwd, _euid, _sys):
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        self.assertTrue(_is_scanning_users_own_home(Path("/home/alice")))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    def test_posix_uses_passwd_not_spoofable_env_home(self, mock_pwd, _euid, _sys):
+        # $HOME could be spoofed to another user's home under sudo -E; the gate
+        # must compare against the passwd home, not Path.home().
+        mock_pwd.getpwuid.return_value = MagicMock(pw_dir="/home/alice")
+        self.assertFalse(_is_scanning_users_own_home(Path("/home/bob")))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=0, create=True)
+    def test_posix_root_refused(self, _euid, _sys):
+        self.assertFalse(_is_scanning_users_own_home(Path("/home/alice")))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.geteuid", return_value=1000, create=True)
+    @patch(f"{_MOD}.pwd")
+    def test_posix_missing_passwd_entry_refused(self, mock_pwd, _euid, _sys):
+        mock_pwd.getpwuid.side_effect = KeyError("no such uid")
+        self.assertFalse(_is_scanning_users_own_home(Path("/home/alice")))
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._windows_process_is_elevated", return_value=True)
+    def test_windows_elevated_refused(self, _elev, _sys):
+        # Fail-closed: an elevated (or unknown-elevation) scan is refused, unlike
+        # the detector's old fail-open is_running_as_admin().
+        self.assertFalse(_is_scanning_users_own_home(Path.home()))
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._windows_process_is_elevated", return_value=False)
+    def test_windows_own_home_allowed(self, _elev, _sys):
+        self.assertTrue(_is_scanning_users_own_home(Path.home()))
 
 
 class TestResolveRejectsUntrustedInstallPath(unittest.TestCase):

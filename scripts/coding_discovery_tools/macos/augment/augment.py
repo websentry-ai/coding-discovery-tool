@@ -25,7 +25,7 @@ from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from ...macos_extraction_helpers import is_running_as_root
-from ...utils import run_command, _which_no_cwd
+from ...utils import run_command, _which_no_cwd, _is_scanning_users_own_home
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +89,12 @@ def _resolve_auggie_binary(user_home: Path) -> Optional[Path]:
         except OSError:
             pass
 
-        # PATH fallback (Homebrew, system installs). Only for the scanning user's
-        # own home and never as root — root's PATH must not be attributed to
-        # another user's row, and shutil.which is CWD-guarded so a planted binary
-        # in the working directory can't be picked up.
+        # PATH fallback (Homebrew, system installs). Gated on the same
+        # spoof-resistant, fail-closed own-home check as the plan probe, so
+        # root's PATH is never attributed to another user's row; shutil.which is
+        # CWD-guarded so a planted binary in the working dir can't be picked up.
         try:
-            if user_home.resolve() == Path.home().resolve() and not is_running_as_root():
+            if _is_scanning_users_own_home(user_home):
                 found = _which_no_cwd("auggie")
                 if found:
                     return Path(found)

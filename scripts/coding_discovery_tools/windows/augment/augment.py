@@ -17,7 +17,7 @@ from typing import List, Optional
 from ...windows.jetbrains.jetbrains import WindowsJetBrainsDetector
 from ...windows_extraction_helpers import is_running_as_admin
 from ...macos.augment.augment import MacOSAugmentDetector
-from ...utils import _which_no_cwd
+from ...utils import _which_no_cwd, _is_scanning_users_own_home
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +57,13 @@ class WindowsAugmentDetector(MacOSAugmentDetector):
                 except OSError:
                     continue
 
-            # PATH fallback, only for the scanning user's own home, never when
-            # elevated (an admin's profile-local shim is user-writable), and
-            # CWD-guarded so a planted binary in the working directory (searched
-            # before PATH on Windows) can't be resolved into an install_path.
+            # PATH fallback: same fail-closed own-home gate as the plan probe
+            # (refuses on a held/uncertain admin token, since an admin's
+            # profile-local shim is user-writable), and CWD-guarded so a planted
+            # binary in the working dir (searched before PATH on Windows) can't
+            # be resolved into an install_path.
             try:
-                if user_home.resolve() == Path.home().resolve() and not is_running_as_admin():
+                if _is_scanning_users_own_home(user_home):
                     found = _which_no_cwd("auggie")
                     if found:
                         return found

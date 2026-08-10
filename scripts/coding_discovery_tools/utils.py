@@ -1555,6 +1555,19 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
+def _windows_process_is_elevated() -> bool:
+    """True if the Windows process is elevated OR elevation can't be confirmed.
+
+    Fails CLOSED: any error answering the question is treated as elevated, so the
+    caller never executes a user-writable binary with an unknown token.
+    """
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True
+
+
 def _resolve_auggie_binary_for_self_scan(
     auggie_binary: Optional[str],
     user_home: Optional[Path],
@@ -1563,11 +1576,14 @@ def _resolve_auggie_binary_for_self_scan(
 
     Guards that make executing the CLI safe on a shared/privileged machine:
       * ``user_home`` is required — never run unconditionally.
+      * Never run elevated. POSIX refuses ``euid == 0``; Windows refuses when the
+        process holds (or may hold) an admin token — otherwise an Administrator
+        scan would execute the profile-local, user-writable ``auggie.cmd`` shim
+        with the scanner's elevated privileges.
       * Only the scanning user's OWN session is read. POSIX compares ``user_home``
         to the effective account's real home (``pwd.getpwuid(os.geteuid())``), NOT
-        ``$HOME`` (which ``sudo -E``/systemd can spoof), and refuses root outright.
-        Windows compares to ``Path.home()``, consistent with the rest of the
-        codebase's Windows CLI probes (Claude auth-status, Codex/Copilot version).
+        ``$HOME`` (which ``sudo -E``/systemd can spoof); Windows compares to
+        ``Path.home()``.
       * The binary is resolved to an ABSOLUTE path (``shutil.which`` for the bare
         name) so a planted ``auggie`` in the CWD can never be picked up.
     """
@@ -1575,6 +1591,8 @@ def _resolve_auggie_binary_for_self_scan(
         return None
 
     if platform.system() == "Windows":
+        if _windows_process_is_elevated():
+            return None
         own_home = Path.home()
     else:
         if not hasattr(os, "geteuid"):

@@ -57,10 +57,11 @@ class WindowsAugmentDetector(MacOSAugmentDetector):
                 except OSError:
                     continue
 
-            # PATH fallback, only for the scanning user's own home (never attribute
-            # an admin's PATH to another user in a C:\Users scan).
+            # PATH fallback, only for the scanning user's own home, and never when
+            # elevated — an admin's profile-local shim is user-writable, so it must
+            # not be resolved into an install_path the probe would run elevated.
             try:
-                if user_home.resolve() == Path.home().resolve():
+                if user_home.resolve() == Path.home().resolve() and not is_running_as_admin():
                     found = shutil.which("auggie")
                     if found:
                         return found

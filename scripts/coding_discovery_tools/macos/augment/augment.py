@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -56,6 +57,9 @@ def _resolve_auggie_binary(user_home: Path) -> Optional[Path]:
       - ``~/.local/bin/auggie`` (npm/standalone user install)
       - ``~/.bun/bin/auggie`` (Bun global install)
       - ``~/.nvm/versions/node/*/bin/auggie`` (nvm-managed Node; newest first)
+      - ``PATH`` (Homebrew, system installs) — only when ``user_home`` is the
+        scanning user's own home, so root's PATH is never attributed to another
+        user in an all-users scan.
 
     Best-effort only: any error is swallowed and None is returned. Never raises.
     """
@@ -83,6 +87,16 @@ def _resolve_auggie_binary(user_home: Path) -> Optional[Path]:
                 except OSError:
                     continue
         except OSError:
+            pass
+
+        # PATH fallback (Homebrew, system installs). Only for the scanning user's
+        # own home — root's PATH must not be attributed to another user's row.
+        try:
+            if user_home.resolve() == Path.home().resolve():
+                found = shutil.which("auggie")
+                if found:
+                    return Path(found)
+        except (OSError, RuntimeError):
             pass
     except (PermissionError, OSError) as exc:
         logger.debug(f"Error resolving Auggie CLI binary for {user_home}: {exc}")

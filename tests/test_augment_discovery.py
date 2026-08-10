@@ -141,6 +141,22 @@ class TestAugmentDetection(unittest.TestCase):
             jb.return_value.detect.return_value = []
             self.assertIsNone(self.detector.detect())
 
+    def test_resolve_falls_back_to_path_for_own_home(self):
+        # No per-user binary here, but auggie is on PATH (e.g. Homebrew) and this
+        # is the scanning user's own home -> resolved via shutil.which.
+        with patch(f"{_DETECTOR_MOD}.shutil.which", return_value="/opt/homebrew/bin/auggie"), \
+                patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home):
+            self.assertEqual(_resolve_auggie_binary(self.user_home),
+                             Path("/opt/homebrew/bin/auggie"))
+
+    def test_resolve_no_path_fallback_for_other_home(self):
+        # A different user's home must NOT borrow the scanner's PATH auggie.
+        other = Path(self.tmp_dir) / "someone_else"
+        other.mkdir()
+        with patch(f"{_DETECTOR_MOD}.shutil.which", return_value="/opt/homebrew/bin/auggie"), \
+                patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home):
+            self.assertIsNone(_resolve_auggie_binary(other))
+
     def test_vscode_row_from_extensions_json(self):
         self._write_vscode_ext(version="2.0.1")
         with patch.object(self.detector, "_make_jetbrains_detector") as jb:

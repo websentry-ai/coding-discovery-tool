@@ -11,6 +11,7 @@ and the Windows JetBrains detector. The version probe is inherited unchanged
 """
 
 import logging
+import shutil
 from pathlib import Path
 from typing import List, Optional
 
@@ -55,6 +56,16 @@ class WindowsAugmentDetector(MacOSAugmentDetector):
                         return str(candidate)
                 except OSError:
                     continue
+
+            # PATH fallback, only for the scanning user's own home (never attribute
+            # an admin's PATH to another user in a C:\Users scan).
+            try:
+                if user_home.resolve() == Path.home().resolve():
+                    found = shutil.which("auggie")
+                    if found:
+                        return found
+            except (OSError, RuntimeError):
+                pass
         except (PermissionError, OSError) as exc:
             logger.debug(f"Error resolving Auggie CLI binary for {user_home}: {exc}")
         return None

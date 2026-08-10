@@ -143,8 +143,8 @@ class TestAugmentDetection(unittest.TestCase):
 
     def test_resolve_falls_back_to_path_for_own_home(self):
         # No per-user binary here, but auggie is on PATH (e.g. Homebrew) and this
-        # is the scanning user's own home -> resolved via shutil.which.
-        with patch(f"{_DETECTOR_MOD}.shutil.which", return_value="/opt/homebrew/bin/auggie"), \
+        # is the scanning user's own home -> resolved via the CWD-guarded which.
+        with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
                 patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home):
             self.assertEqual(_resolve_auggie_binary(self.user_home),
                              Path("/opt/homebrew/bin/auggie"))
@@ -153,9 +153,16 @@ class TestAugmentDetection(unittest.TestCase):
         # A different user's home must NOT borrow the scanner's PATH auggie.
         other = Path(self.tmp_dir) / "someone_else"
         other.mkdir()
-        with patch(f"{_DETECTOR_MOD}.shutil.which", return_value="/opt/homebrew/bin/auggie"), \
+        with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
                 patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home):
             self.assertIsNone(_resolve_auggie_binary(other))
+
+    def test_resolve_no_path_fallback_as_root(self):
+        # Root's PATH auggie must not be resolved (it could be user-writable).
+        with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
+                patch(f"{_DETECTOR_MOD}.Path.home", return_value=self.user_home), \
+                patch(f"{_DETECTOR_MOD}.is_running_as_root", return_value=True):
+            self.assertIsNone(_resolve_auggie_binary(self.user_home))
 
     def test_vscode_row_from_extensions_json(self):
         self._write_vscode_ext(version="2.0.1")

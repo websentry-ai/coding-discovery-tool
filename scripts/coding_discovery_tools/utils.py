@@ -1568,6 +1568,25 @@ def _windows_process_is_elevated() -> bool:
         return True
 
 
+def _which_no_cwd(name: str) -> Optional[str]:
+    """``shutil.which`` that rejects a match inside the current directory.
+
+    Windows searches the CWD before PATH (and a ``.`` entry does the same on
+    POSIX), so a planted binary in a writable working directory could be run.
+    Returns an absolute path outside the CWD subtree, or None (fail closed)."""
+    found = shutil.which(name)
+    if not found:
+        return None
+    try:
+        found_abs = os.path.realpath(found)
+        cwd = os.path.realpath(os.getcwd())
+        if os.path.commonpath([found_abs, cwd]) == cwd:
+            return None
+    except (OSError, ValueError):
+        return None
+    return found_abs
+
+
 def _resolve_auggie_binary_for_self_scan(
     auggie_binary: Optional[str],
     user_home: Optional[Path],
@@ -1599,7 +1618,10 @@ def _resolve_auggie_binary_for_self_scan(
             return None
         if os.geteuid() == 0:
             return None
-        own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
+        try:
+            own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
+        except (KeyError, OSError):
+            return None  # arbitrary UID with no passwd entry — soft-fail
 
     try:
         if Path(user_home).resolve() != own_home.resolve():
@@ -1608,10 +1630,16 @@ def _resolve_auggie_binary_for_self_scan(
     except (OSError, KeyError, RuntimeError):
         return None
 
-    resolved = auggie_binary or shutil.which("auggie")
+    # A detector-provided path is already from a trusted install location; only
+    # the bare-name fallback needs the CWD guard.
+    resolved = os.path.abspath(auggie_binary) if auggie_binary else _which_no_cwd("auggie")
     if not resolved:
         return None
-    return os.path.abspath(resolved)
+    # On Windows the shim runs via cmd.exe; reject a path carrying cmd
+    # metacharacters so it can't be re-parsed into extra commands.
+    if platform.system() == "Windows" and any(c in resolved for c in '&|^<>()"%!'):
+        return None
+    return resolved
 
 
 def get_auggie_subscription_type(
@@ -1641,11 +1669,15 @@ def get_auggie_subscription_type(
     # a bare argv list — run it with shell=True, as this codebase's Codex/Copilot
     # CLI probes do for the same reason.
     use_shell = platform.system() == "Windows"
+    # Point HOME at the verified own home so auggie reads the right ~/.augment
+    # session even where the ambient $HOME differs (daemon containers, systemd).
+    env = {**os.environ, "HOME": str(user_home)}
     try:
         result = subprocess.run(
             [resolved, "account", "status", "--json"],
             capture_output=True,
             text=True,
+            env=env,
             timeout=AUTH_STATUS_TIMEOUT,
             shell=use_shell,
         )

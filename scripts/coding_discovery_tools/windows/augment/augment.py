@@ -11,13 +11,13 @@ and the Windows JetBrains detector. The version probe is inherited unchanged
 """
 
 import logging
-import shutil
 from pathlib import Path
 from typing import List, Optional
 
 from ...windows.jetbrains.jetbrains import WindowsJetBrainsDetector
 from ...windows_extraction_helpers import is_running_as_admin
 from ...macos.augment.augment import MacOSAugmentDetector
+from ...utils import _which_no_cwd
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +57,13 @@ class WindowsAugmentDetector(MacOSAugmentDetector):
                 except OSError:
                     continue
 
-            # PATH fallback, only for the scanning user's own home, and never when
-            # elevated — an admin's profile-local shim is user-writable, so it must
-            # not be resolved into an install_path the probe would run elevated.
+            # PATH fallback, only for the scanning user's own home, never when
+            # elevated (an admin's profile-local shim is user-writable), and
+            # CWD-guarded so a planted binary in the working directory (searched
+            # before PATH on Windows) can't be resolved into an install_path.
             try:
                 if user_home.resolve() == Path.home().resolve() and not is_running_as_admin():
-                    found = shutil.which("auggie")
+                    found = _which_no_cwd("auggie")
                     if found:
                         return found
             except (OSError, RuntimeError):

@@ -21,6 +21,7 @@ from scripts.coding_discovery_tools import utils
 from scripts.coding_discovery_tools.utils import (
     get_auggie_subscription_type,
     _resolve_auggie_binary_for_self_scan,
+    _which_no_cwd,
 )
 
 _MOD = "scripts.coding_discovery_tools.utils"
@@ -141,6 +142,13 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         self.assertTrue(mock_run.call_args.kwargs["shell"])
 
     @patch(f"{_MOD}.subprocess.run")
+    def test_home_env_set_to_user_home(self, mock_run):
+        # auggie reads ~/.augment via HOME; point it at the verified own home.
+        mock_run.return_value = _proc(stdout=_OK_JSON)
+        get_auggie_subscription_type("/usr/bin/auggie", Path("/home/alice"))
+        self.assertEqual(mock_run.call_args.kwargs["env"]["HOME"], "/home/alice")
+
+    @patch(f"{_MOD}.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):
         mock_run.return_value = _proc(stdout=json.dumps({"planName": "  Business Plan  "}))
         self.assertEqual(get_auggie_subscription_type("/usr/bin/auggie", Path.home()),
@@ -182,6 +190,23 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
     def test_missing_binary_returns_none(self, mock_run):
         mock_run.side_effect = FileNotFoundError("auggie not found")
         self.assertIsNone(get_auggie_subscription_type("/usr/bin/auggie", Path.home()))
+
+
+class TestWhichNoCwd(unittest.TestCase):
+    """The PATH resolver must never return a binary planted in the CWD."""
+
+    @patch(f"{_MOD}.shutil.which", return_value=None)
+    def test_none_when_not_found(self, _w):
+        self.assertIsNone(_which_no_cwd("auggie"))
+
+    @patch(f"{_MOD}.shutil.which")
+    def test_rejects_cwd_planted(self, mock_which):
+        mock_which.return_value = os.path.join(os.getcwd(), "auggie")
+        self.assertIsNone(_which_no_cwd("auggie"))
+
+    @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
+    def test_accepts_outside_cwd(self, _w):
+        self.assertEqual(_which_no_cwd("auggie"), os.path.realpath("/usr/bin/auggie"))
 
 
 if __name__ == "__main__":

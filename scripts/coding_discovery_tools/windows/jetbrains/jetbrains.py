@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
+from ...jetbrains_naming_helpers import (
+    JETBRAINS_IDE_NAME_MAPPING,
+    JETBRAINS_SKIP_FOLDERS,
+    parse_ide_name_and_version,
+    should_skip_folder,
+)
 from ...xml_helpers import safe_xml_fromstring
 
 logger = logging.getLogger(__name__)
@@ -62,29 +68,10 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         "DataSpell"
     ]
 
-    IDE_NAME_MAPPING = {
-        "IntelliJIdea": "IntelliJ IDEA",
-        "IdeaIC": "IntelliJ IDEA Community",
-        "IdeaIE": "IntelliJ IDEA Educational",
-        "Aqua": "Aqua",
-        "PyCharm": "PyCharm",
-        "PyCharmCE": "PyCharm Community",
-        "WebStorm": "WebStorm",
-        "PhpStorm": "PhpStorm",
-        "GoLand": "GoLand",
-        "Rider": "Rider",
-        "CLion": "CLion",
-        "RustRover": "RustRover",
-        "RubyMine": "RubyMine",
-        "DataGrip": "DataGrip",
-        "DataSpell": "DataSpell",
-    }
+    IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
     # Folders to skip when scanning JetBrains directory
-    SKIP_FOLDERS = {
-        "consent", "DeviceId", "JetBrainsClient",
-        "consentOptions", "PrivacyPolicy", "Toolbox",
-    }
+    SKIP_FOLDERS = JETBRAINS_SKIP_FOLDERS
 
     PLUGIN_NAME_OVERRIDES = {
         "ml-llm": "JetBrains AI Assistant",
@@ -190,7 +177,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
-                if folder in self.SKIP_FOLDERS:
+                if should_skip_folder(folder, self.SKIP_FOLDERS):
                     continue
 
                 matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
@@ -221,7 +208,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
 
         return self._filter_old_versions(detected_ides)
 
-    def _parse_ide_name_and_version(self, folder_name: str) -> tuple:
+    def _parse_ide_name_and_version(self, folder_name: str) -> Tuple[str, str]:
         """
         Parse IDE name and version from folder name.
 
@@ -231,14 +218,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             Tuple of (display_name, version)
         """
-        sorted_prefixes = sorted(self.IDE_NAME_MAPPING.keys(), key=len, reverse=True)
-        for prefix in sorted_prefixes:
-            if folder_name.startswith(prefix):
-                version = folder_name[len(prefix):]
-                display_name = self.IDE_NAME_MAPPING[prefix]
-                return display_name, version if version else "Unknown"
-
-        return folder_name, "Unknown"
+        return parse_ide_name_and_version(folder_name, self.IDE_NAME_MAPPING)
 
     def _detect_plan(self, folder_name: str, local_dir: Path) -> str:
         """

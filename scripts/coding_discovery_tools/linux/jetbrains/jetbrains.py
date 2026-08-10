@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
+from ...jetbrains_naming_helpers import (
+    JETBRAINS_IDE_NAME_MAPPING,
+    JETBRAINS_SKIP_FOLDERS,
+    parse_ide_name_and_version,
+    should_skip_folder,
+)
 from ...linux_extraction_helpers import get_linux_user_homes
 from ...xml_helpers import safe_xml_fromstring
 
@@ -23,28 +29,9 @@ class LinuxJetBrainsDetector(BaseToolDetector):
         "Rider", "CLion", "RustRover", "RubyMine", "DataGrip", "DataSpell"
     ]
 
-    IDE_NAME_MAPPING = {
-        "IntelliJIdea": "IntelliJ IDEA",
-        "IdeaIC": "IntelliJ IDEA Community",
-        "IdeaIE": "IntelliJ IDEA Educational",
-        "Aqua": "Aqua",
-        "PyCharm": "PyCharm",
-        "PyCharmCE": "PyCharm Community",
-        "WebStorm": "WebStorm",
-        "PhpStorm": "PhpStorm",
-        "GoLand": "GoLand",
-        "Rider": "Rider",
-        "CLion": "CLion",
-        "RustRover": "RustRover",
-        "RubyMine": "RubyMine",
-        "DataGrip": "DataGrip",
-        "DataSpell": "DataSpell",
-    }
+    IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
-    SKIP_FOLDERS = {
-        "consent", "DeviceId", "JetBrainsClient",
-        "consentOptions", "PrivacyPolicy", "Toolbox",
-    }
+    SKIP_FOLDERS = JETBRAINS_SKIP_FOLDERS
 
     PLUGIN_NAME_OVERRIDES = {
         "ml-llm": "JetBrains AI Assistant",
@@ -118,7 +105,7 @@ class LinuxJetBrainsDetector(BaseToolDetector):
                 folder_path = jetbrains_config_dir / folder
                 if folder.startswith(".") or not folder_path.is_dir():
                     continue
-                if folder in self.SKIP_FOLDERS:
+                if should_skip_folder(folder, self.SKIP_FOLDERS):
                     continue
                 matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
                 has_structure = (
@@ -144,14 +131,8 @@ class LinuxJetBrainsDetector(BaseToolDetector):
 
         return detected_ides
 
-    def _parse_ide_name_and_version(self, folder_name: str) -> tuple:
-        sorted_prefixes = sorted(self.IDE_NAME_MAPPING.keys(), key=len, reverse=True)
-        for prefix in sorted_prefixes:
-            if folder_name.startswith(prefix):
-                version = folder_name[len(prefix):]
-                display_name = self.IDE_NAME_MAPPING[prefix]
-                return display_name, version if version else "Unknown"
-        return folder_name, "Unknown"
+    def _parse_ide_name_and_version(self, folder_name: str) -> Tuple[str, str]:
+        return parse_ide_name_and_version(folder_name, self.IDE_NAME_MAPPING)
 
     @staticmethod
     def _detect_plan(folder_name: str) -> str:

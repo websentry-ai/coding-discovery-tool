@@ -1595,10 +1595,14 @@ def _binary_in_cwd(path: str) -> bool:
             parent, base = nc(parent), nc(base)
             if parent == base:
                 return True  # directly in the cwd — planted, root or not
-            if not cwd_is_root and os.path.commonpath([parent, base]) == base:
-                return True  # nested under a non-root cwd
+            if not cwd_is_root:
+                try:
+                    if os.path.commonpath([parent, base]) == base:
+                        return True  # nested under a non-root cwd
+                except ValueError:
+                    pass  # different drive/root -> not under this cwd, so not planted
         return False
-    except (OSError, ValueError):
+    except OSError:
         return True
 
 

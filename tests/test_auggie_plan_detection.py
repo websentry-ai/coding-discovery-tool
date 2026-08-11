@@ -333,6 +333,13 @@ class TestWhichNoCwd(unittest.TestCase):
                     patch(f"{_MOD}.shutil.which", return_value=hit):
                 self.assertIsNone(_which_no_cwd("auggie"))
 
+    @patch(f"{_MOD}.os.path.commonpath", side_effect=ValueError("different drives"))
+    @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
+    def test_accepts_cross_drive_binary(self, _w, _cp):
+        # On Windows a binary on another drive than cwd makes commonpath raise;
+        # that means "not under cwd", so it must resolve, not be rejected.
+        self.assertEqual(_which_no_cwd("auggie"), os.path.abspath("/usr/bin/auggie"))
+
     @patch(f"{_MOD}.shutil.which", return_value="/usr/bin/auggie")
     def test_accepts_outside_cwd(self, _w):
         self.assertEqual(_which_no_cwd("auggie"), os.path.abspath("/usr/bin/auggie"))

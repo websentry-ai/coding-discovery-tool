@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
 from ...mcp_extraction_helpers import extract_ide_global_configs_with_root_support
 from ...xml_helpers import safe_xml_parse
@@ -70,6 +71,8 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
+                if should_skip_folder(folder, JETBRAINS_SKIP_FOLDERS):
+                    continue
                 if not any(pattern in folder for pattern in self.IDE_PATTERNS):
                     continue
 

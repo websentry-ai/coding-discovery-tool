@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
 from ...linux_extraction_helpers import get_linux_user_homes
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
 from ...xml_helpers import safe_xml_parse
@@ -55,6 +56,8 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             for folder in os.listdir(jetbrains_root):
                 folder_path = jetbrains_root / folder
                 if folder.startswith(".") or not folder_path.is_dir():
+                    continue
+                if should_skip_folder(folder, JETBRAINS_SKIP_FOLDERS):
                     continue
                 if not any(pattern in folder for pattern in self.IDE_PATTERNS):
                     continue

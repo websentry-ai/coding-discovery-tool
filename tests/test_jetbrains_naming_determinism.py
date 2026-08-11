@@ -44,11 +44,9 @@ NAMING_TABLE = [
     # Separator between name and version is stripped, not kept.
     ("Space Desktop 1.0", "Space Desktop", "1.0"),
     ("Big_Data_Tools_2024.1", "Big_Data_Tools", "2024.1"),
-    # Unmapped AND unversioned (JetBrains Remote Development) still falls back
-    # to the raw folder name; there is nothing better to report.
+    # Unmapped and unversioned: nothing better to report than the raw folder name.
     ("RemoteDev-IU", "RemoteDev-IU", "Unknown"),
-    # Distinct products that merely start with a mapped prefix keep their own
-    # identity, or _filter_old_versions would drop one of the two installs.
+    # Own identity, or _filter_old_versions drops one of the two installs.
     ("PyCharmEdu2024.1", "PyCharmEdu", "2024.1"),
     ("CLionNova2024.3", "CLionNova", "2024.3"),
     # No clean split available, so the branded name is kept rather than lost.
@@ -135,8 +133,7 @@ class TestPlanDetection(_TempHomeTestCase):
                     self.assertEqual(detector_cls()._detect_plan(folder), "Free")
 
     def test_community_plan_windows(self) -> None:
-        # Windows says "Community" where macOS/Linux say "Free"; the vocabulary
-        # divergence is deliberate and out of scope for WEB-5391.
+        # Windows says "Community" where Unix says "Free"; out of scope for WEB-5391.
         plan = WindowsJetBrainsDetector()._detect_plan("IdeaIE2022.2", self.tmp_path)
         self.assertEqual(plan, "Community")
 

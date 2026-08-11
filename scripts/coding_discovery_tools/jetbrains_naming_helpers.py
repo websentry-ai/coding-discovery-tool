@@ -1,11 +1,9 @@
 """
 Shared JetBrains config-folder naming rules.
 
-The three OS detectors (macos/, linux/, windows/) each scan a JetBrains config
-directory whose subfolders are named `<ProductCode><Version>`, e.g.
-`IntelliJIdea2025.2`. Both the skip list and the name/version split used to be
-duplicated per OS, which let them drift; they now live here so all three
-detectors resolve identical names, versions, and skips for the same folder.
+Subfolders of the JetBrains config directory are named `<ProductCode><Version>`,
+e.g. `IntelliJIdea2025.2`. These rules were duplicated across the macos/, linux/
+and windows/ detectors and drifted; they live here so all three agree.
 """
 
 import re
@@ -18,8 +16,7 @@ JETBRAINS_SKIP_FOLDERS: FrozenSet[str] = frozenset({
     "consentOptions", "PrivacyPolicy", "Toolbox",
 })
 
-# Read-only: this one object is aliased into all three detectors, so an in-place
-# edit anywhere would leak everywhere. Rebinding a detector's attribute is fine.
+# Read-only: one object aliased into all three detectors, so in-place edits would leak.
 JETBRAINS_IDE_NAME_MAPPING: Mapping[str, str] = MappingProxyType({
     "IntelliJIdea": "IntelliJ IDEA",
     "IdeaIC": "IntelliJ IDEA Community",
@@ -44,61 +41,29 @@ VERSION_SUFFIX = re.compile(r'^([A-Za-z][A-Za-z ._-]*?)((?:\d+\.)+\d+)$')
 # What a mapped prefix's remainder must look like for the prefix to own the folder.
 VERSION_ONLY = re.compile(r'^\d[\d.]*$')
 
-# Real IDE config folders carry a version ("CLion2025.3"); the consent leftovers
-# JetBrains keeps after an uninstall carry the bare product name ("Clion").
+# Real config folders carry a version ("CLion2025.3"); uninstall leftovers don't ("Clion").
 VERSIONED_FOLDER = re.compile(r'^[A-Za-z][A-Za-z ._-]*\d+(?:\.\d+)+')
 
 
 def should_skip_folder(folder: str, skip_folders: Iterable[str]) -> bool:
-    """
-    Report whether a JetBrains config subfolder is an internal/system folder.
-
-    Args:
-        folder: Config subfolder name, e.g. "JetBrainsClient241.18034.62"
-        skip_folders: Skip entries to match as a name prefix; a bare str counts
-            as one entry, not as its characters
-
-    Returns:
-        True if the folder should be excluded from IDE detection
-    """
+    """Whether a config subfolder is internal/system. Entries match as name prefixes."""
     prefixes = (skip_folders,) if isinstance(skip_folders, str) else tuple(skip_folders)
     return folder.startswith(prefixes)
 
 
 def looks_like_ide_folder(folder: str) -> bool:
-    """
-    Report whether a config subfolder name is shaped like an IDE install.
-
-    Args:
-        folder: Config subfolder name, e.g. "CLion2025.3"
-
-    Returns:
-        True if the name carries a version; False for bare-product leftovers
-    """
+    """Whether the folder name carries a version, which uninstall leftovers do not."""
     return VERSIONED_FOLDER.match(folder) is not None
 
 
 def parse_ide_name_and_version(folder_name: str, mapping: Mapping[str, str]) -> Tuple[str, str]:
     """
-    Derive an IDE display name and version from its config folder name.
+    Derive (display_name, version) from a config folder name; version is "Unknown" if absent.
 
-    Known product codes resolve through `mapping` first so their branded names
-    win (`IntelliJIdea2025.2` -> "IntelliJ IDEA", not "IntelliJIdea"). Unmapped
-    products fall back to splitting a trailing dotted version off the name, so a
-    newly released IDE reports as ("Writerside", "2024.1") rather than being
-    named after its raw folder.
-
-    A mapped prefix only claims the folder when what follows it is a version.
-    `PyCharmEdu2024.1` is a different product, not PyCharm 'Edu2024.1' -- sharing
-    the display name would make `_filter_old_versions` drop whichever of the two
-    installs sorted lower, losing that IDE and its plugin inventory entirely.
-
-    Args:
-        folder_name: Config subfolder name, e.g. "PyCharmCE2024.1"
-        mapping: Product-code prefix -> display name
-
-    Returns:
-        Tuple of (display_name, version); version is "Unknown" if none is present
+    The mapping runs first so branded names win: `IntelliJIdea2025.2` is "IntelliJ IDEA".
+    A mapped prefix only claims the folder when what follows it is a version, or
+    `PyCharmEdu2024.1` would share a display_name with PyCharm and `_filter_old_versions`
+    would drop one of the two installs.
     """
     for prefix in sorted(mapping, key=len, reverse=True):
         if not folder_name.startswith(prefix):
@@ -109,7 +74,7 @@ def parse_ide_name_and_version(folder_name: str, mapping: Mapping[str, str]) -> 
         if VERSION_ONLY.match(version):
             return mapping[prefix], version
         match = VERSION_SUFFIX.match(folder_name)
-        # No clean split (e.g. "IntelliJIdea2024.1-EAP") -- keep the branded name.
+        # No clean split, e.g. "IntelliJIdea2024.1-EAP" -- keep the branded name.
         return (match.group(1).rstrip(" ._-"), match.group(2)) if match else (mapping[prefix], version)
 
     match = VERSION_SUFFIX.match(folder_name)

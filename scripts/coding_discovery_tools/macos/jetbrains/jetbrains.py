@@ -103,9 +103,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                     if user_dir.is_dir() and not user_dir.name.startswith('.'):
                         try:
                             user_ides = self._scan_jetbrains_config_dir(user_dir)
-                            # Dedup per-user so multiple installed versions of the same IDE
-                            # collapse to the latest for that user, but never discard another
-                            # user's IDE just because someone else has a newer version.
+                            # Dedup per-user, or one user's newer IDE evicts another's.
                             all_detected_ides.extend(self._filter_old_versions(user_ides))
                         except (PermissionError, OSError) as e:
                             logger.debug(f"Skipping user directory {user_dir}: {e}")

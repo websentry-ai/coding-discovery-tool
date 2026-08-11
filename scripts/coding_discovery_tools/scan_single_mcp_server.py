@@ -11,25 +11,14 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 try:
     from coding_discovery_tools.mcp_extraction_helpers import transform_mcp_servers_to_array
-    from coding_discovery_tools import mcp_tools_cache
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from coding_discovery_tools.mcp_extraction_helpers import transform_mcp_servers_to_array
-    from coding_discovery_tools import mcp_tools_cache
 
 REPORT_PATH = "/api/v1/ai-tools/mcp-server-scan/"
-
-
-def _coding_tool_name():
-    """The cache's coding-tool key. The dispatching PreToolUse hooks
-    (claude-code, codex, augment, cursor — setup repo, _dispatch_mcp_server_scan)
-    pass their discovery-report name via UNBOUND_CODING_TOOL; fall back to
-    "Claude Code" for older hooks that don't set it."""
-    return os.environ.get("UNBOUND_CODING_TOOL") or "Claude Code"
 
 
 def _normalize_url(url):
@@ -48,29 +37,6 @@ def scan_one(server_name, server_config):
         print(f"info: forwarding script_content ({len(server_config['script_content'])} b64 chars) for {server_name}",
               file=sys.stderr)
     return obj
-
-
-def update_local_tools_cache(server_obj):
-    """Best-effort upsert of this server's tool content hashes into
-    ~/.unbound/mcp-tools-cache.json (read by the PreToolUse hooks).
-
-    Merges the single entry into the existing (tool, user) subtree — the full
-    per-user replace is the discovery run's job; here only this one server is
-    known. Never raises: cache trouble must not fail the scan/report."""
-    try:
-        cache_key = mcp_tools_cache.cache_key_for_server(server_obj)
-        if not cache_key:
-            return
-        tool_hashes = mcp_tools_cache.tool_hashes_from_scan(server_obj.get("scan"))
-        if not tool_hashes:
-            return
-        # home_user matches the discovery run's key: the home-directory basename
-        # of the user this config belongs to (the hook runs as that user).
-        mcp_tools_cache.upsert_server_entry(
-            _coding_tool_name(), Path.home().name, cache_key, tool_hashes
-        )
-    except Exception as e:
-        print(f"warning: local mcp-tools-cache update failed: {e}", file=sys.stderr)
 
 
 def _curl_config_quote(value):
@@ -144,10 +110,6 @@ def main():
     if not server_obj:
         print(f"error: scan produced no result [{ctx}]", file=sys.stderr)
         return 1
-
-    # Upsert the local hot-path cache after a successful scan, independent of
-    # the report POST below (the hashes are valid either way).
-    update_local_tools_cache(server_obj)
 
     try:
         result = report(args.domain, args.api_key, server_obj)

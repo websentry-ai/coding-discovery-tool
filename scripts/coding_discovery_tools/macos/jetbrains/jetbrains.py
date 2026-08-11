@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
+from ...jetbrains_naming_helpers import (
+    JETBRAINS_IDE_NAME_MAPPING,
+    JETBRAINS_SKIP_FOLDERS,
+    detect_plan,
+    looks_like_ide_folder,
+    parse_ide_name_and_version,
+    should_skip_folder,
+)
 from ...macos_extraction_helpers import is_running_as_root
 from ...xml_helpers import safe_xml_fromstring
 
@@ -20,34 +28,10 @@ logger = logging.getLogger(__name__)
 class MacOSJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for macOS systems."""
 
-    IDE_PATTERNS = [
-        "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
-        "Rider", "CLion", "RustRover", "RubyMine", "DataGrip", "DataSpell"
-    ]
-
-    IDE_NAME_MAPPING = {
-        "IntelliJIdea": "IntelliJ IDEA",
-        "IdeaIC": "IntelliJ IDEA Community",
-        "IdeaIE": "IntelliJ IDEA Educational",
-        "Aqua": "Aqua",
-        "PyCharm": "PyCharm",
-        "PyCharmCE": "PyCharm Community",
-        "WebStorm": "WebStorm",
-        "PhpStorm": "PhpStorm",
-        "GoLand": "GoLand",
-        "Rider": "Rider",
-        "CLion": "CLion",
-        "RustRover": "RustRover",
-        "RubyMine": "RubyMine",
-        "DataGrip": "DataGrip",
-        "DataSpell": "DataSpell"
-    }
+    IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
     # Folders to skip when scanning JetBrains directory
-    SKIP_FOLDERS = {
-        "consent", "DeviceId", "JetBrainsClient",
-        "consentOptions", "PrivacyPolicy", "Toolbox",
-    }
+    SKIP_FOLDERS = JETBRAINS_SKIP_FOLDERS
 
     PLUGIN_NAME_OVERRIDES = {
         "ml-llm": "JetBrains AI Assistant",
@@ -112,6 +96,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         When running as root, scans all user directories in /Users.
         """
         all_detected_ides = []
+        scanned_homes = set()
 
         if is_running_as_root():
             users_dir = Path("/Users")
@@ -120,15 +105,23 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                     if user_dir.is_dir() and not user_dir.name.startswith('.'):
                         try:
                             user_ides = self._scan_jetbrains_config_dir(user_dir)
-                            all_detected_ides.extend(user_ides)
+                            # Dedup per-user, or one user's newer IDE evicts another's.
+                            all_detected_ides.extend(self._filter_old_versions(user_ides))
+                            scanned_homes.add(user_dir)
                         except (PermissionError, OSError) as e:
                             logger.debug(f"Skipping user directory {user_dir}: {e}")
                             continue
 
-        home_ides = self._scan_jetbrains_config_dir(Path.home())
-        all_detected_ides.extend(home_ides)
+        # Under sudo, HOME is often one of the /Users entries already walked above.
+        home = Path.home()
+        if home not in scanned_homes:
+            try:
+                home_ides = self._scan_jetbrains_config_dir(home)
+                all_detected_ides.extend(self._filter_old_versions(home_ides))
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping home directory {home}: {e}")
 
-        return self._filter_old_versions(all_detected_ides)
+        return all_detected_ides
 
     def _scan_jetbrains_config_dir(self, user_home: Path) -> List[Dict]:
         """
@@ -155,13 +148,13 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                     continue
 
                 # Skip system/internal folders
-                if folder in self.SKIP_FOLDERS:
+                if should_skip_folder(folder, self.SKIP_FOLDERS):
                     continue
 
-                matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
+                is_versioned = looks_like_ide_folder(folder)
                 has_structure = (folder_path / "plugins").exists() or (folder_path / "options").exists()
 
-                if not (matches_name or has_structure):
+                if not (is_versioned or has_structure):
                     continue
 
                 display_name, version = self._parse_ide_name_and_version(folder)
@@ -182,25 +175,15 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
         return detected_ides
 
-    def _parse_ide_name_and_version(self, folder_name: str) -> tuple:
+    def _parse_ide_name_and_version(self, folder_name: str) -> Tuple[str, str]:
         """
         Parse IDE name and version from folder name.
         """
-        sorted_prefixes = sorted(self.IDE_NAME_MAPPING.keys(), key=len, reverse=True)
-        for prefix in sorted_prefixes:
-            if folder_name.startswith(prefix):
-                version = folder_name[len(prefix):]
-                display_name = self.IDE_NAME_MAPPING[prefix]
-                return display_name, version if version else "Unknown"
-
-        return folder_name, "Unknown"
+        return parse_ide_name_and_version(folder_name, self.IDE_NAME_MAPPING)
 
     @staticmethod
     def _detect_plan(folder_name: str) -> str:
-        """Return 'Free' for Community/Educational editions, 'Licensed' otherwise."""
-        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
-            return "Free"
-        return "Licensed"
+        return detect_plan(folder_name)
 
     @staticmethod
     def _filter_old_versions(ide_list: List[Dict]) -> List[Dict]:

@@ -1652,6 +1652,22 @@ _AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
 _SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
 
 
+def _trusted_curl() -> Optional[str]:
+    """Absolute path to the system curl from trusted OS locations only — never
+    PATH. A privileged scan must not resolve curl from a user-writable PATH entry
+    (or the CWD on Windows) and hand it the user's bearer token. Returns None if
+    no system curl is found (the plan lookup then soft-fails)."""
+    if platform.system() == "Windows":
+        root = os.environ.get("SystemRoot") or r"C:\Windows"
+        candidates = [os.path.join(root, "System32", "curl.exe")]
+    else:
+        candidates = ["/usr/bin/curl", "/bin/curl"]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
 def _is_symlink_or_reparse(p: Path) -> bool:
     """True if ``p`` is a symlink (any OS) or a Windows reparse point (junction /
     mount point) — either of which could redirect an elevated read into another
@@ -1693,7 +1709,22 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None  # FIFO / device / dir planted here — don't block or stream
-        if hasattr(os, "geteuid"):  # POSIX: the file must belong to this home's owner
+        # Post-open, TOCTOU-safe: the opened file must canonically resolve INSIDE
+        # this home and be the very file at that resolved path. Catches a
+        # junction/symlink swapped in around the open — the Windows case the
+        # pre-open check can't make atomic (no O_NOFOLLOW there).
+        try:
+            nc = os.path.normcase
+            real_home = os.path.realpath(str(owner_ref))
+            resolved = os.path.realpath(str(path))
+            if nc(os.path.commonpath([resolved, real_home])) != nc(real_home):
+                return None
+            rst = os.stat(resolved)
+            if (rst.st_ino, rst.st_dev) != (st.st_ino, st.st_dev):
+                return None
+        except (OSError, ValueError):
+            return None
+        if hasattr(os, "geteuid"):  # POSIX also requires the passwd owner to match
             try:
                 if st.st_uid != os.stat(str(owner_ref)).st_uid:
                     return None
@@ -1786,6 +1817,12 @@ def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
     """
     if user_home is None:
         return None
+    # Resolve curl from trusted system locations, never PATH — a privileged scan
+    # must not hand the user's bearer token to a user-writable curl.
+    curl = _trusted_curl()
+    if curl is None:
+        logger.debug("no trusted curl found; skipping auggie plan lookup")
+        return None
     session = _read_auggie_session(user_home)
     if session is None:
         return None
@@ -1813,7 +1850,7 @@ def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
     try:
         result = subprocess.run(
             # -q: ignore any ambient ~/.curlrc on this token-bearing request.
-            ["curl", "-q", "--config", "-"],
+            [curl, "-q", "--config", "-"],
             input=config,
             capture_output=True,
             text=True,

@@ -183,13 +183,31 @@ class TestReadAuggieSession(unittest.TestCase):
     @unittest.skipIf(not hasattr(os, "geteuid"), "POSIX ownership")
     @patch(f"{_MOD}.os.fstat")
     def test_owner_mismatch_refused(self, mock_fstat):
-        # A symlinked ~/.augment could point at a file owned by another user; the
-        # opened file's uid must match this home's owner, else refuse.
-        import stat as _stat
+        # The opened file's uid must match this home's owner, else refuse. Keep the
+        # real file identity (so the containment/identity check passes) and change
+        # only the uid, so the ownership barrier is what fires.
         _write_session(self.home)
+        real = os.stat(str(self.home / ".augment" / "session.json"))
         mock_fstat.return_value = os.stat_result(
-            (_stat.S_IFREG | 0o600, 0, 0, 1, 999999, 0, 100, 0, 0, 0))
+            (real.st_mode, real.st_ino, real.st_dev, real.st_nlink,
+             real.st_uid + 99999, real.st_gid, real.st_size,
+             int(real.st_atime), int(real.st_mtime), int(real.st_ctime)))
         self.assertIsNone(_read_auggie_session(self.home))
+
+    def test_resolved_outside_home_refused(self):
+        # Simulates a junction / TOCTOU: the opened file canonically resolves into
+        # another tree, outside this user's home — refused post-open.
+        import tempfile
+        _write_session(self.home)
+        other = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(other, ignore_errors=True))
+        sess = str(self.home / ".augment" / "session.json")
+        real_realpath = os.path.realpath
+        def fake(p, *a, **k):
+            return os.path.join(other, "session.json") if str(p) == sess \
+                else real_realpath(p, *a, **k)
+        with patch(f"{_MOD}.os.path.realpath", side_effect=fake):
+            self.assertIsNone(_read_auggie_session(self.home))
 
 
 class TestGetAuggieSubscriptionType(unittest.TestCase):
@@ -200,9 +218,20 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         self.home = _write_session(Path(self.tmp))
+        self.curl = "/usr/bin/curl"
+        p = patch(f"{_MOD}._trusted_curl", return_value=self.curl)
+        self.addCleanup(p.stop)
+        p.start()
 
     def test_none_home_returns_none(self):
         self.assertIsNone(get_auggie_subscription_type(None))
+
+    @patch(f"{_MOD}._trusted_curl", return_value=None)
+    @patch(f"{_MOD}.subprocess.run")
+    def test_no_trusted_curl_returns_none(self, mock_run, _tc):
+        # No system curl found -> soft-fail, and never invoke a PATH-resolved one.
+        self.assertIsNone(get_auggie_subscription_type(self.home))
+        mock_run.assert_not_called()
 
     def test_no_session_returns_none(self):
         import tempfile
@@ -231,7 +260,9 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         mock_run.return_value = _proc(stdout=_BILLING_JSON)
         get_auggie_subscription_type(self.home)
         argv = mock_run.call_args.args[0]
-        self.assertEqual(argv, ["curl", "-q", "--config", "-"])  # -q: ignore .curlrc
+        # curl is pinned to an absolute trusted path (not bare "curl" via PATH).
+        self.assertEqual(argv, [self.curl, "-q", "--config", "-"])
+        self.assertTrue(os.path.isabs(argv[0]))
         self.assertNotIn(_TOKEN, " ".join(argv))
         cfg = mock_run.call_args.kwargs["input"]
         self.assertIn(_TOKEN, cfg)

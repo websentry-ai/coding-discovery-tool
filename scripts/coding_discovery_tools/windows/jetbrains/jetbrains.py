@@ -23,7 +23,6 @@ from ...xml_helpers import safe_xml_fromstring
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of lines to read from idea.log for plan detection
 
 
 class WindowsJetBrainsDetector(BaseToolDetector):
@@ -45,23 +44,6 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         if appdata and appdata != r"%APPDATA%":
             return Path(appdata) / "JetBrains"
         return Path.home() / "AppData" / "Roaming" / "JetBrains"
-
-    @property
-    def jetbrains_local_dir(self) -> Path:
-        """
-        Dynamic Local Directory (Local - for logs).
-
-        Uses self.user_home if available (for scanning other users),
-        otherwise falls back to environment variables or Path.home().
-        """
-        if hasattr(self, 'user_home') and self.user_home:
-            return self.user_home / "AppData" / "Local" / "JetBrains"
-
-        # Fallback to environment variable
-        local = os.path.expandvars(r"%LOCALAPPDATA%")
-        if local and local != r"%LOCALAPPDATA%":
-            return Path(local) / "JetBrains"
-        return Path.home() / "AppData" / "Local" / "JetBrains"
 
     IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
@@ -87,10 +69,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             List of dicts, each containing info for one IDE, or None if not found
         """
-        detected_ides = self._scan_for_ides(
-            self.jetbrains_config_dir,
-            self.jetbrains_local_dir
-        )
+        detected_ides = self._scan_for_ides(self.jetbrains_config_dir)
 
         if not detected_ides:
             return None
@@ -125,10 +104,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             Comma-separated list of detected IDEs with their plans
         """
-        detected_ides = self._scan_for_ides(
-            self.jetbrains_config_dir,
-            self.jetbrains_local_dir
-        )
+        detected_ides = self._scan_for_ides(self.jetbrains_config_dir)
 
         if not detected_ides:
             return None
@@ -138,17 +114,12 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             for ide in detected_ides
         )
 
-    def _scan_for_ides(
-        self,
-        config_dir: Path,
-        local_dir: Path
-    ) -> List[Dict]:
+    def _scan_for_ides(self, config_dir: Path) -> List[Dict]:
         """
         Scan JetBrains config directory for IDE installations.
 
         Args:
             config_dir: Path to JetBrains roaming config directory
-            local_dir: Path to JetBrains local directory (for logs)
 
         Returns:
             List of dicts containing IDE info

@@ -169,7 +169,7 @@ class TestConfigDirScan(_TempHomeTestCase):
         config_dir = _make_config_dir(self.tmp_path / "Roaming" / "JetBrains", FIXTURE_FOLDERS)
         detector = WindowsJetBrainsDetector()
 
-        found = detector._scan_for_ides(config_dir, self.tmp_path / "Local" / "JetBrains")
+        found = detector._scan_for_ides(config_dir)
 
         self.assertEqual({(ide["display_name"], ide["version"]) for ide in found}, EXPECTED_SCAN)
 

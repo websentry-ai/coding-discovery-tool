@@ -1648,18 +1648,33 @@ _AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
 _SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
 
 
-def _read_regular_file_capped(path: Path, max_bytes: int) -> Optional[str]:
-    """Read up to ``max_bytes`` of a REGULAR file, or None. Opens non-blocking and
-    verifies the fd is a regular file, so a user-planted FIFO or device at the
-    path can't block the scanner or stream unbounded data — the file may be owned
-    by another (possibly hostile) user in an all-users scan."""
+def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
+    """Read up to ``max_bytes`` of a regular file that belongs to ``owner_ref``'s
+    owner, or None. Hardened for a privileged all-users scan where another user
+    controls this path:
+
+      * ``O_NONBLOCK`` + a regular-file check — a planted FIFO/device can't block
+        the scanner or stream unbounded data.
+      * ``O_NOFOLLOW`` — the final component isn't followed if it's a symlink.
+      * POSIX owner match — the opened file's ``st_uid`` must equal ``owner_ref``'s
+        (the user's home), so a symlinked ``~/.augment`` pointing at another user's
+        session can't steer the scanner into their credentials (confused deputy).
+    """
     try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(str(path),
+                     os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             return None  # FIFO / device / dir planted here — don't block or stream
+        if hasattr(os, "geteuid"):  # POSIX: the file must belong to this home's owner
+            try:
+                if st.st_uid != os.stat(str(owner_ref)).st_uid:
+                    return None
+            except OSError:
+                return None
         return os.read(fd, max_bytes).decode("utf-8", "replace")
     except OSError:
         return None
@@ -1688,6 +1703,10 @@ def _augment_tenant_host(url: str) -> Optional[str]:
     if host.startswith("["):             # IPv6 literal — never an Augment tenant
         return None
     host = host.split(":", 1)[0].lower()   # strip :port
+    # Only real DNS-label characters — rejects percent-encoding / IDN tricks that
+    # could parse differently in curl than here (defense in depth).
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", host):
+        return None
     if host == "augmentcode.com" or host.endswith(_AUGMENT_TENANT_HOST_SUFFIX):
         return host
     return None
@@ -1702,10 +1721,11 @@ def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
     own path/query is discarded), so a tampered session can neither point the
     authenticated call at another host nor inject curl directives. Returns None if
     not logged in or the session is unusable."""
-    # Bounded, regular-file-only read: another user owns this file, so it must not
-    # block the scanner (a planted FIFO) or slurp a deliberately huge file.
-    raw = _read_regular_file_capped(
-        Path(user_home) / ".augment" / "session.json", _SESSION_MAX_BYTES)
+    # Bounded, own-regular-file-only read: another user controls this path in an
+    # all-users scan, so refuse a FIFO/device (would block/stream) or a symlink
+    # into someone else's session (must belong to this home's owner).
+    home = Path(user_home)
+    raw = _read_own_regular_file(home / ".augment" / "session.json", home, _SESSION_MAX_BYTES)
     if raw is None:
         return None
     try:
@@ -1755,18 +1775,21 @@ def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
     config = (
         'silent\n'
         'fail\n'                 # non-2xx -> non-zero exit, no error body to parse
+        'proto = "=https"\n'     # https only, even if the URL were somehow rewritten
+        'max-filesize = %d\n'    # bound the response so it can't inflate memory
         'request = "POST"\n'
         'header = "Authorization: Bearer %s"\n'
         'header = "Content-Type: application/json"\n'
         'data = "{}"\n'
         'max-time = %d\n'
         'url = "%s"\n'
-    ) % (_cfg_quote(token), AUTH_STATUS_TIMEOUT,
+    ) % (_SESSION_MAX_BYTES, _cfg_quote(token), AUTH_STATUS_TIMEOUT,
          _cfg_quote(base_url + "get-billing-summary"))
 
     try:
         result = subprocess.run(
-            ["curl", "--config", "-"],
+            # -q: ignore any ambient ~/.curlrc on this token-bearing request.
+            ["curl", "-q", "--config", "-"],
             input=config,
             capture_output=True,
             text=True,

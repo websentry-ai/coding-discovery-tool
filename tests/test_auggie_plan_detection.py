@@ -81,6 +81,12 @@ class TestAugmentTenantHost(unittest.TestCase):
         self.assertIsNone(_augment_tenant_host("https://augmentcode.com/\nfoo"))
         self.assertIsNone(_augment_tenant_host("https://augmentcode.com/ x"))
 
+    def test_rejects_non_dns_label_chars(self):
+        # Percent-encoding / underscores aren't real host chars — reject them so
+        # curl can't parse the host differently than we validated it.
+        self.assertIsNone(_augment_tenant_host("https://a%2f.augmentcode.com/"))
+        self.assertIsNone(_augment_tenant_host("https://_.augmentcode.com/"))
+
     def test_rejects_garbage(self):
         self.assertIsNone(_augment_tenant_host("not a url"))
         self.assertIsNone(_augment_tenant_host(""))
@@ -150,6 +156,29 @@ class TestReadAuggieSession(unittest.TestCase):
         os.mkfifo(str(aug / "session.json"))
         self.assertIsNone(_read_auggie_session(self.home))
 
+    @unittest.skipIf(not hasattr(os, "symlink") or os.name == "nt", "POSIX symlink")
+    def test_symlinked_session_refused(self):
+        # session.json is a symlink (into another user's home in the real attack);
+        # O_NOFOLLOW refuses to open it at all.
+        aug = self.home / ".augment"
+        aug.mkdir()
+        target = self.home / "real.json"
+        target.write_text(
+            json.dumps({"accessToken": _TOKEN, "tenantURL": _TENANT}), encoding="utf-8")
+        os.symlink(str(target), str(aug / "session.json"))
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    @unittest.skipIf(not hasattr(os, "geteuid"), "POSIX ownership")
+    @patch(f"{_MOD}.os.fstat")
+    def test_owner_mismatch_refused(self, mock_fstat):
+        # A symlinked ~/.augment could point at a file owned by another user; the
+        # opened file's uid must match this home's owner, else refuse.
+        import stat as _stat
+        _write_session(self.home)
+        mock_fstat.return_value = os.stat_result(
+            (_stat.S_IFREG | 0o600, 0, 0, 1, 999999, 0, 100, 0, 0, 0))
+        self.assertIsNone(_read_auggie_session(self.home))
+
 
 class TestGetAuggieSubscriptionType(unittest.TestCase):
     """The billing HTTP call + parse, with a real session file on disk."""
@@ -190,11 +219,13 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         mock_run.return_value = _proc(stdout=_BILLING_JSON)
         get_auggie_subscription_type(self.home)
         argv = mock_run.call_args.args[0]
-        self.assertEqual(argv, ["curl", "--config", "-"])
+        self.assertEqual(argv, ["curl", "-q", "--config", "-"])  # -q: ignore .curlrc
         self.assertNotIn(_TOKEN, " ".join(argv))
         cfg = mock_run.call_args.kwargs["input"]
         self.assertIn(_TOKEN, cfg)
         self.assertIn("get-billing-summary", cfg)
+        self.assertIn('proto = "=https"', cfg)
+        self.assertIn("max-filesize", cfg)
 
     @patch(f"{_MOD}.subprocess.run")
     def test_plan_name_is_stripped(self, mock_run):

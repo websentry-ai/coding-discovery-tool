@@ -57,11 +57,8 @@ class WindowsAugmentDetector(MacOSAugmentDetector):
                 except OSError:
                     continue
 
-            # PATH fallback: same fail-closed own-home gate as the plan probe
-            # (refuses on a held/uncertain admin token, since an admin's
-            # profile-local shim is user-writable), and CWD-guarded so a planted
-            # binary in the working dir (searched before PATH on Windows) can't
-            # be resolved into an install_path.
+            # PATH fallback, only for the scanning user's own home (shared gate)
+            # and CWD-guarded via _which_no_cwd.
             try:
                 if _is_scanning_users_own_home(user_home):
                     found = _which_no_cwd("auggie")

@@ -89,10 +89,8 @@ def _resolve_auggie_binary(user_home: Path) -> Optional[Path]:
         except OSError:
             pass
 
-        # PATH fallback (Homebrew, system installs). Gated on the same
-        # spoof-resistant, fail-closed own-home check as the plan probe, so
-        # root's PATH is never attributed to another user's row; shutil.which is
-        # CWD-guarded so a planted binary in the working dir can't be picked up.
+        # PATH fallback (Homebrew, system installs), only for the scanning user's
+        # own home (shared gate) and CWD-guarded via _which_no_cwd.
         try:
             if _is_scanning_users_own_home(user_home):
                 found = _which_no_cwd("auggie")

@@ -1557,11 +1557,7 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
 
 
 def _windows_process_is_elevated() -> bool:
-    """True if the Windows process is elevated OR elevation can't be confirmed.
-
-    Fails CLOSED: any error answering the question is treated as elevated, so the
-    caller never executes a user-writable binary with an unknown token.
-    """
+    """True if the process is elevated, or on any error (fail closed)."""
     try:
         import ctypes
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -1570,37 +1566,28 @@ def _windows_process_is_elevated() -> bool:
 
 
 def _binary_in_cwd(path: str) -> bool:
-    """True if ``path`` resolves to somewhere inside the current working directory.
-
-    A binary sitting directly in the cwd is always planted — even at a filesystem
-    or drive root like ``/`` or ``D:\\``. The subtree check (for a nested hit like
-    ``<cwd>/node_modules/.bin`` when the scan starts in a writable directory) is
-    what a root cwd exempts: a root is an ancestor of every real install, so
-    extending "planted" to the whole filesystem would reject legitimate PATH hits
-    like ``/usr/bin/auggie``. Comparisons fold case (``normcase``) so a Windows
-    plant isn't missed when ``getcwd`` and ``which`` differ only in casing. Fails
-    closed on error."""
+    """True if ``path`` is inside the current working directory (a possible
+    planted binary). A binary directly in the cwd counts even at a filesystem
+    root; the nested-subtree check is skipped for a root cwd so real PATH installs
+    aren't rejected. Case-folded for Windows. Fails closed on error."""
     try:
         nc = os.path.normcase  # case-fold on Windows; no-op on POSIX
         real_cwd = os.path.realpath(os.getcwd())
-        cwd_is_root = os.path.dirname(real_cwd) == real_cwd  # '/', 'D:\\', ...
+        cwd_is_root = os.path.dirname(real_cwd) == real_cwd
         abs_parent = os.path.dirname(os.path.abspath(path))
-        # Check the parent in both forms. The lexical (abspath) form catches a
-        # path that sits inside the working dir on paper — including a leaf like
-        # <cwd>/auggie. The resolved (realpath) form catches symlinks — a planted
-        # <cwd>/node_modules/.bin -> /elsewhere, or a symlinked cwd — that would
-        # otherwise resolve the parent out of the tree and dodge the check.
+        # Check the parent lexically (catches a leaf like <cwd>/auggie) and
+        # resolved (catches symlinks that would escape the tree).
         for parent, base in ((abs_parent, os.path.abspath(os.getcwd())),
                              (os.path.realpath(abs_parent), real_cwd)):
             parent, base = nc(parent), nc(base)
             if parent == base:
-                return True  # directly in the cwd — planted, root or not
+                return True
             if not cwd_is_root:
                 try:
                     if os.path.commonpath([parent, base]) == base:
-                        return True  # nested under a non-root cwd
+                        return True
                 except ValueError:
-                    pass  # different drive/root -> not under this cwd, so not planted
+                    pass  # different drive -> not under this cwd
         return False
     except OSError:
         return True
@@ -1616,19 +1603,11 @@ def _which_no_cwd(name: str) -> Optional[str]:
 
 
 def _is_scanning_users_own_home(user_home: Optional[Path]) -> bool:
-    """True only if ``user_home`` is the scanning account's OWN home and the
-    process is not (and may not be) privileged — the one condition under which
-    it's safe to resolve an auggie binary from PATH for that home and run it.
-
-    Both the plan probe and the detector PATH fallbacks gate on this, so the two
-    can't drift into weaker checks. Fails CLOSED on any error:
-      * Never privileged. POSIX refuses ``euid == 0``; Windows refuses when the
-        process holds (or may hold) an admin token — otherwise an Administrator
-        scan would run the profile-local, user-writable ``auggie.cmd`` shim.
-      * Only the OWN session. POSIX compares against the effective account's real
-        home (``pwd.getpwuid(os.geteuid())``), NOT ``$HOME`` (which ``sudo -E`` /
-        systemd can spoof); Windows compares against ``Path.home()``.
-    """
+    """True only if ``user_home`` is the scanning account's own home and the
+    process isn't privileged. Both the plan probe and the detector PATH fallbacks
+    gate on this so they can't drift. POSIX refuses ``euid == 0`` and compares the
+    passwd home (not the spoofable ``$HOME``); Windows refuses an admin token and
+    compares ``Path.home()``. Fails closed on any error."""
     if user_home is None:
         return False
     try:
@@ -1653,10 +1632,8 @@ _SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
 
 
 def _trusted_curl() -> Optional[str]:
-    """Absolute path to the system curl from trusted OS locations only — never
-    PATH. A privileged scan must not resolve curl from a user-writable PATH entry
-    (or the CWD on Windows) and hand it the user's bearer token. Returns None if
-    no system curl is found (the plan lookup then soft-fails)."""
+    """Absolute path to the system curl (trusted OS locations only, never PATH),
+    or None. Keeps a privileged scan from handing the token to a planted curl."""
     if platform.system() == "Windows":
         root = os.environ.get("SystemRoot") or r"C:\Windows"
         candidates = [os.path.join(root, "System32", "curl.exe")]
@@ -1669,9 +1646,8 @@ def _trusted_curl() -> Optional[str]:
 
 
 def _is_symlink_or_reparse(p: Path) -> bool:
-    """True if ``p`` is a symlink (any OS) or a Windows reparse point (junction /
-    mount point) — either of which could redirect an elevated read into another
-    user's files. Fails closed (True) when it can't be determined."""
+    """True if ``p`` is a symlink or a Windows reparse point (junction), which
+    could redirect a read elsewhere. Fails closed (True) if undetermined."""
     try:
         st = os.lstat(str(p))
     except OSError:
@@ -1683,21 +1659,11 @@ def _is_symlink_or_reparse(p: Path) -> bool:
 
 
 def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
-    """Read up to ``max_bytes`` of a regular file that belongs to ``owner_ref``'s
-    owner, or None. Hardened for a privileged all-users scan where another user
-    controls this path:
-
-      * No redirects — the file or its parent dir being a symlink / Windows
-        reparse point (junction) is refused, so the read can't be steered into
-        another user's session. This is the cross-platform guard; ``O_NOFOLLOW``
-        below adds POSIX atomicity, and Windows has no ``O_NOFOLLOW`` equivalent.
-      * ``O_NONBLOCK`` + a regular-file check — a planted FIFO/device can't block
-        the scanner or stream unbounded data.
-      * POSIX owner match — the opened file's ``st_uid`` must equal ``owner_ref``'s
-        (the user's home), a second barrier against a confused-deputy read.
-    """
-    # The parent dir (``~/.augment``) and the file are the components a user
-    # creates in their own home; refuse either being a redirect.
+    """Read up to ``max_bytes`` of ``path`` as a regular file owned by
+    ``owner_ref``'s owner, or None. Hardened for reading another user's file in an
+    all-users scan: refuses redirects and non-regular files, and requires the
+    file to resolve inside the home."""
+    # Refuse a redirect at the file or its parent dir.
     if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
         return None
     try:
@@ -1708,11 +1674,9 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            return None  # FIFO / device / dir planted here — don't block or stream
-        # Post-open, TOCTOU-safe: the opened file must canonically resolve INSIDE
-        # this home and be the very file at that resolved path. Catches a
-        # junction/symlink swapped in around the open — the Windows case the
-        # pre-open check can't make atomic (no O_NOFOLLOW there).
+            return None  # FIFO/device/dir — don't block or stream
+        # Post-open (TOCTOU-safe): the opened file must resolve inside the home
+        # and be that same file, catching a redirect swapped in around the open.
         try:
             nc = os.path.normcase
             real_home = os.path.realpath(str(owner_ref))
@@ -1724,7 +1688,7 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
                 return None
         except (OSError, ValueError):
             return None
-        if hasattr(os, "geteuid"):  # POSIX also requires the passwd owner to match
+        if hasattr(os, "geteuid"):  # POSIX: also require the passwd owner to match
             try:
                 if st.st_uid != os.stat(str(owner_ref)).st_uid:
                     return None
@@ -1738,15 +1702,13 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
 
 
 def _augment_tenant_host(url: str) -> Optional[str]:
-    """Return the lowercased host if ``url`` is an ``https://…augmentcode.com``
-    tenant URL, else None. Plain string parsing, no urllib (Zscaler). This is the
-    only place the token's destination is decided, so a tampered ``session.json``
-    can neither redirect the authenticated call to an arbitrary/internal host
-    (SSRF) nor smuggle whitespace/control chars into the curl config."""
+    """Return the host if ``url`` is an ``https://…augmentcode.com`` tenant URL,
+    else None. The only gate on where the token is sent, so it rejects anything
+    that could resolve elsewhere or break the curl config. String parsing only
+    (no urllib, for Zscaler)."""
     if not url or "://" not in url:
         return None
-    # No spaces or control chars anywhere — they could break out of the config
-    # line the URL is later formatted into. (ord 32 = space, <32 = control.)
+    # Reject spaces/control chars — they'd break the config line built from this.
     if any(ord(c) <= 32 or ord(c) == 127 for c in url):
         return None
     scheme, rest = url.split("://", 1)
@@ -1758,9 +1720,7 @@ def _augment_tenant_host(url: str) -> Optional[str]:
     if host.startswith("["):             # IPv6 literal — never an Augment tenant
         return None
     host = host.split(":", 1)[0].lower()   # strip :port
-    # Only real DNS-label characters — rejects percent-encoding / IDN tricks that
-    # could parse differently in curl than here (defense in depth).
-    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", host):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", host):   # real host chars only
         return None
     if host == "augmentcode.com" or host.endswith(_AUGMENT_TENANT_HOST_SUFFIX):
         return host
@@ -1768,17 +1728,9 @@ def _augment_tenant_host(url: str) -> Optional[str]:
 
 
 def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
-    """Return ``(tenant_base_url, access_token)`` from a user's Auggie session.
-
-    Reads only ``~/.augment/session.json`` — a plain file read, so it works for
-    any user's home in a privileged all-users scan without executing that user's
-    binary. The base URL is rebuilt from the *validated host only* (the session's
-    own path/query is discarded), so a tampered session can neither point the
-    authenticated call at another host nor inject curl directives. Returns None if
-    not logged in or the session is unusable."""
-    # Bounded, own-regular-file-only read: another user controls this path in an
-    # all-users scan, so refuse a FIFO/device (would block/stream) or a symlink
-    # into someone else's session (must belong to this home's owner).
+    """Return ``(tenant_base_url, access_token)`` from ``~/.augment/session.json``,
+    or None. A plain file read, so it works for any user's home in an all-users
+    scan; the base URL is rebuilt from the validated host only."""
     home = Path(user_home)
     raw = _read_own_regular_file(home / ".augment" / "session.json", home, _SESSION_MAX_BYTES)
     if raw is None:
@@ -1793,7 +1745,7 @@ def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
     tenant = data.get("tenantURL")
     if not isinstance(token, str) or not isinstance(tenant, str):
         return None
-    # Must be usable as an HTTP header value: bounded, no control chars.
+    # Usable as a header value: bounded, no control chars.
     if not 0 < len(token) <= 4096 or any(ord(c) < 32 or ord(c) == 127 for c in token):
         return None
     host = _augment_tenant_host(tenant)
@@ -1803,22 +1755,16 @@ def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
 
 
 def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
-    """Get the Auggie CLI (Augment) subscription plan for ``user_home``.
+    """Get the Auggie (Augment) subscription plan for ``user_home``, or None.
 
-    Auggie keeps no plan on disk, so — like Cursor's plan is read from its state
-    DB — we read the user's session token from ``~/.augment/session.json`` and ask
-    Augment's billing endpoint directly with curl. Being a file read plus an HTTP
-    call (never executing the user's binary), it works across every user in a
-    privileged all-users scan and stays clear of running a user-writable shim as
-    the scanner. The plan is an optional, best-effort field.
-
-    Returns:
-        Plan string (e.g. "Business Plan") or None if not logged in / on failure.
+    Auggie keeps no plan on disk, so we read the session token from
+    ``~/.augment/session.json`` and query Augment's billing endpoint with curl —
+    a file read plus an HTTP call, never running the user's binary, so it works
+    for any user in an all-users scan. Best-effort, optional field.
     """
     if user_home is None:
         return None
-    # Resolve curl from trusted system locations, never PATH — a privileged scan
-    # must not hand the user's bearer token to a user-writable curl.
+    # Trusted curl only, never PATH (see _trusted_curl).
     curl = _trusted_curl()
     if curl is None:
         logger.debug("no trusted curl found; skipping auggie plan lookup")
@@ -1828,9 +1774,8 @@ def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
         return None
     base_url, token = session
 
-    # Pass the bearer token through a curl config on stdin, never argv, so it is
-    # not exposed in the process list on a shared machine. curl (not urllib) uses
-    # the system cert store, which includes any customer VPN/proxy CA (Zscaler).
+    # Token goes via the stdin config, never argv (not ps-visible). curl (not
+    # urllib) uses the system cert store, for customer VPN/proxy CAs (Zscaler).
     def _cfg_quote(value: str) -> str:
         return value.replace("\\", "\\\\").replace('"', '\\"')
     config = (

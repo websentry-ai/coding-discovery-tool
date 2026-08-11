@@ -159,13 +159,25 @@ class TestReadAuggieSession(unittest.TestCase):
     @unittest.skipIf(not hasattr(os, "symlink") or os.name == "nt", "POSIX symlink")
     def test_symlinked_session_refused(self):
         # session.json is a symlink (into another user's home in the real attack);
-        # O_NOFOLLOW refuses to open it at all.
+        # the redirect check refuses to open it.
         aug = self.home / ".augment"
         aug.mkdir()
         target = self.home / "real.json"
         target.write_text(
             json.dumps({"accessToken": _TOKEN, "tenantURL": _TENANT}), encoding="utf-8")
         os.symlink(str(target), str(aug / "session.json"))
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    @unittest.skipIf(not hasattr(os, "symlink") or os.name == "nt", "POSIX symlink")
+    def test_symlinked_augment_dir_refused(self):
+        # ~/.augment itself is a symlink/junction into another user's dir — the
+        # Windows-reparse-point vector. Refused even though the file inside is real
+        # (the parent-dir redirect check, which a leaf-only O_NOFOLLOW would miss).
+        victim = self.home / "victim_augment"
+        victim.mkdir()
+        (victim / "session.json").write_text(
+            json.dumps({"accessToken": _TOKEN, "tenantURL": _TENANT}), encoding="utf-8")
+        os.symlink(str(victim), str(self.home / ".augment"))
         self.assertIsNone(_read_auggie_session(self.home))
 
     @unittest.skipIf(not hasattr(os, "geteuid"), "POSIX ownership")

@@ -1648,18 +1648,38 @@ _AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
 _SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
 
 
+def _is_symlink_or_reparse(p: Path) -> bool:
+    """True if ``p`` is a symlink (any OS) or a Windows reparse point (junction /
+    mount point) — either of which could redirect an elevated read into another
+    user's files. Fails closed (True) when it can't be determined."""
+    try:
+        st = os.lstat(str(p))
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(st, "st_file_attributes", 0) & reparse)
+
+
 def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
     """Read up to ``max_bytes`` of a regular file that belongs to ``owner_ref``'s
     owner, or None. Hardened for a privileged all-users scan where another user
     controls this path:
 
+      * No redirects — the file or its parent dir being a symlink / Windows
+        reparse point (junction) is refused, so the read can't be steered into
+        another user's session. This is the cross-platform guard; ``O_NOFOLLOW``
+        below adds POSIX atomicity, and Windows has no ``O_NOFOLLOW`` equivalent.
       * ``O_NONBLOCK`` + a regular-file check — a planted FIFO/device can't block
         the scanner or stream unbounded data.
-      * ``O_NOFOLLOW`` — the final component isn't followed if it's a symlink.
       * POSIX owner match — the opened file's ``st_uid`` must equal ``owner_ref``'s
-        (the user's home), so a symlinked ``~/.augment`` pointing at another user's
-        session can't steer the scanner into their credentials (confused deputy).
+        (the user's home), a second barrier against a confused-deputy read.
     """
+    # The parent dir (``~/.augment``) and the file are the components a user
+    # creates in their own home; refuse either being a redirect.
+    if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
+        return None
     try:
         fd = os.open(str(path),
                      os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))

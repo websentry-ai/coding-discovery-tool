@@ -24,7 +24,6 @@ from ...xml_helpers import safe_xml_fromstring
 logger = logging.getLogger(__name__)
 
 
-
 class WindowsJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for Windows systems."""
 
@@ -154,10 +153,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
 
                 display_name, version = self._parse_ide_name_and_version(folder)
 
-                try:
-                    plan = self._detect_plan(folder)
-                except Exception:
-                    plan = "Licensed"  # Fallback if log is locked
+                plan = self._detect_plan(folder)
 
                 detected_ides.append({
                     "folder_name": folder,

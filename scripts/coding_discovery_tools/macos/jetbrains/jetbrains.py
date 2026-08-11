@@ -115,8 +115,11 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         # Under sudo, HOME is often one of the /Users entries already walked above.
         home = Path.home()
         if home not in scanned_homes:
-            home_ides = self._scan_jetbrains_config_dir(home)
-            all_detected_ides.extend(self._filter_old_versions(home_ides))
+            try:
+                home_ides = self._scan_jetbrains_config_dir(home)
+                all_detected_ides.extend(self._filter_old_versions(home_ides))
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping home directory {home}: {e}")
 
         return all_detected_ides
 

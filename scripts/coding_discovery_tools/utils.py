@@ -1823,8 +1823,9 @@ def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
     if not isinstance(plan, str):
         return None
     plan = plan.strip()
-    # Bound an externally-produced value before it enters the report.
-    if not plan or len(plan) > 100 or any(ord(c) < 32 for c in plan):
+    # Bound it before it enters logs/report: printable only (rejects control
+    # chars, DEL, and line/paragraph separators that could smear a log line).
+    if not plan or len(plan) > 100 or not plan.isprintable():
         return None
     return plan
 

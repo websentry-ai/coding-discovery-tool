@@ -281,9 +281,11 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         self.assertIsNone(get_auggie_subscription_type(self.home))
 
     @patch(f"{_MOD}.subprocess.run")
-    def test_control_char_plan_rejected(self, mock_run):
-        mock_run.return_value = _proc(stdout=json.dumps({"plan_name": "Bus\x00iness"}))
-        self.assertIsNone(get_auggie_subscription_type(self.home))
+    def test_nonprintable_plan_rejected(self, mock_run):
+        # Control char, DEL, and Unicode line/paragraph separators all rejected.
+        for bad in ("Bus\x00iness", "Plan\x7f", "A" + chr(0x2028) + "B", "A" + chr(0x2029) + "B"):
+            mock_run.return_value = _proc(stdout=json.dumps({"plan_name": bad}))
+            self.assertIsNone(get_auggie_subscription_type(self.home), bad)
 
     @patch(f"{_MOD}.subprocess.run")
     def test_missing_plan_name_returns_none(self, mock_run):

@@ -14,6 +14,7 @@ from ...coding_tool_base import BaseToolDetector
 from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
+    detect_plan,
     looks_like_ide_folder,
     parse_ide_name_and_version,
     should_skip_folder,
@@ -179,10 +180,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
     @staticmethod
     def _detect_plan(folder_name: str) -> str:
-        """Return 'Free' for Community/Educational editions, 'Licensed' otherwise."""
-        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
-            return "Free"
-        return "Licensed"
+        return detect_plan(folder_name)
 
     @staticmethod
     def _filter_old_versions(ide_list: List[Dict]) -> List[Dict]:

@@ -48,6 +48,15 @@ def should_skip_folder(folder: str, skip_folders: Iterable[str]) -> bool:
     return folder.startswith(prefixes)
 
 
+# Editions JetBrains ships at no cost; everything else needs a licence.
+FREE_EDITION_MARKERS = ("IdeaIC", "IdeaIE", "PyCharmCE")
+
+
+def detect_plan(folder_name: str) -> str:
+    """Whether the edition is free, derived from the product code in the folder name."""
+    return "Free" if any(m in folder_name for m in FREE_EDITION_MARKERS) else "Licensed"
+
+
 def looks_like_ide_folder(folder: str) -> bool:
     """Whether the folder name carries a version, which uninstall leftovers do not."""
     return VERSIONED_FOLDER.match(folder) is not None

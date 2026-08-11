@@ -14,6 +14,7 @@ from ...coding_tool_base import BaseToolDetector
 from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
+    detect_plan,
     looks_like_ide_folder,
     parse_ide_name_and_version,
     should_skip_folder,
@@ -23,7 +24,6 @@ from ...xml_helpers import safe_xml_fromstring
 logger = logging.getLogger(__name__)
 
 # Maximum number of lines to read from idea.log for plan detection
-MAX_LOG_LINES = 2000
 
 
 class WindowsJetBrainsDetector(BaseToolDetector):
@@ -184,7 +184,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
                 display_name, version = self._parse_ide_name_and_version(folder)
 
                 try:
-                    plan = self._detect_plan(folder, local_dir)
+                    plan = self._detect_plan(folder)
                 except Exception:
                     plan = "Licensed"  # Fallback if log is locked
 
@@ -215,32 +215,9 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         """
         return parse_ide_name_and_version(folder_name, self.IDE_NAME_MAPPING)
 
-    def _detect_plan(self, folder_name: str, local_dir: Path) -> str:
-        """
-        Detect plan type by checking folder name and idea.log.
-        """
-        # Check folder name for community/educational edition markers
-        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
-            return "Community"
-
-        log_file = local_dir / folder_name / "log" / "idea.log"
-        if log_file.exists():
-            try:
-                with open(log_file, 'r', errors='ignore') as f:
-                    lines = []
-                    for i, line in enumerate(f):
-                        if i >= MAX_LOG_LINES:
-                            break
-                        lines.append(line)
-
-                    log_content = "".join(lines)
-                    if "Licensed to" in log_content:
-                        return "Professional"
-            except Exception as e:
-                logger.debug(f"Error reading idea.log for plan detection: {e}")
-
-        # Default to Licensed for non-community editions
-        return "Licensed"
+    @staticmethod
+    def _detect_plan(folder_name: str) -> str:
+        return detect_plan(folder_name)
 
     @staticmethod
     def _filter_old_versions(ide_list: List[Dict]) -> List[Dict]:

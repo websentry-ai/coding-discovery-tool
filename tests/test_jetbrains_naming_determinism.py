@@ -129,18 +129,16 @@ class TestSkipFolderMatching(unittest.TestCase):
         self.assertIs(should_skip_folder("Terminal2024.1", "Toolbox"), False)
 
 
-class TestPlanDetection(_TempHomeTestCase):
+class TestPlanDetection(unittest.TestCase):
 
-    def test_free_plan_unix(self) -> None:
-        for detector_cls in [MacOSJetBrainsDetector, LinuxJetBrainsDetector]:
+    def test_all_detectors_agree_on_plan(self) -> None:
+        for detector_cls in DETECTORS:
             for folder in FREE_PLAN_FOLDERS:
                 with self.subTest(folder=folder, detector=detector_cls.__name__):
                     self.assertEqual(detector_cls()._detect_plan(folder), "Free")
-
-    def test_community_plan_windows(self) -> None:
-        # Windows says "Community" where Unix says "Free"; out of scope for WEB-5391.
-        plan = WindowsJetBrainsDetector()._detect_plan("IdeaIE2022.2", self.tmp_path)
-        self.assertEqual(plan, "Community")
+            for folder in ["IntelliJIdea2025.2", "PyCharm2025.2", "Aqua2024.3", "Fleet1.0"]:
+                with self.subTest(folder=folder, detector=detector_cls.__name__):
+                    self.assertEqual(detector_cls()._detect_plan(folder), "Licensed")
 
 
 class TestConfigDirScan(_TempHomeTestCase):

@@ -35,11 +35,8 @@ JETBRAINS_IDE_NAME_MAPPING: Mapping[str, str] = MappingProxyType({
     "DataSpell": "DataSpell",
 })
 
-# Splits "<Name><dotted version>", e.g. "Writerside2024.1" -> ("Writerside", "2024.1").
-VERSION_SUFFIX = re.compile(r'^([A-Za-z][A-Za-z ._-]*?)((?:\d+\.)+\d+)$')
-
-# What a mapped prefix's remainder must look like for the prefix to own the folder.
-VERSION_ONLY = re.compile(r'^\d[\d.]*$')
+# Splits "<Name><version>", e.g. "Writerside2024.1-EAP" -> ("Writerside", "2024.1-EAP").
+VERSION_SUFFIX = re.compile(r'^([A-Za-z][A-Za-z ._-]*?)((?:\d+\.)+\d+(?:[-.][A-Za-z0-9][A-Za-z0-9.-]*)?)$')
 
 # Real config folders carry a version ("CLion2025.3"); uninstall leftovers don't ("Clion").
 VERSIONED_FOLDER = re.compile(r'^[A-Za-z][A-Za-z ._-]*\d+(?:\.\d+)+')
@@ -71,7 +68,7 @@ def parse_ide_name_and_version(folder_name: str, mapping: Mapping[str, str]) -> 
         version = folder_name[len(prefix):]
         if not version:
             return mapping[prefix], "Unknown"
-        if VERSION_ONLY.match(version):
+        if version[0].isdigit():
             return mapping[prefix], version
         match = VERSION_SUFFIX.match(folder_name)
         # No clean split, e.g. "IntelliJIdea2024.1-EAP" -- keep the branded name.

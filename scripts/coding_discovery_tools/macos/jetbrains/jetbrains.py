@@ -95,6 +95,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         When running as root, scans all user directories in /Users.
         """
         all_detected_ides = []
+        scanned_homes = set()
 
         if is_running_as_root():
             users_dir = Path("/Users")
@@ -105,12 +106,16 @@ class MacOSJetBrainsDetector(BaseToolDetector):
                             user_ides = self._scan_jetbrains_config_dir(user_dir)
                             # Dedup per-user, or one user's newer IDE evicts another's.
                             all_detected_ides.extend(self._filter_old_versions(user_ides))
+                            scanned_homes.add(user_dir)
                         except (PermissionError, OSError) as e:
                             logger.debug(f"Skipping user directory {user_dir}: {e}")
                             continue
 
-        home_ides = self._scan_jetbrains_config_dir(Path.home())
-        all_detected_ides.extend(self._filter_old_versions(home_ides))
+        # Under sudo, HOME is often one of the /Users entries already walked above.
+        home = Path.home()
+        if home not in scanned_homes:
+            home_ides = self._scan_jetbrains_config_dir(home)
+            all_detected_ides.extend(self._filter_old_versions(home_ides))
 
         return all_detected_ides
 

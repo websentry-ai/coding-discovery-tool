@@ -14,12 +14,14 @@ import time
 import unittest
 from pathlib import Path
 from typing import Iterable
+from unittest import mock
 
 from scripts.coding_discovery_tools.jetbrains_naming_helpers import (
     VERSION_SUFFIX,
     should_skip_folder,
 )
 from scripts.coding_discovery_tools.linux.jetbrains.jetbrains import LinuxJetBrainsDetector
+from scripts.coding_discovery_tools.macos.jetbrains import jetbrains as jetbrains_macos
 from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from scripts.coding_discovery_tools.windows.jetbrains.jetbrains import WindowsJetBrainsDetector
 
@@ -49,8 +51,11 @@ NAMING_TABLE = [
     # Own identity, or _filter_old_versions drops one of the two installs.
     ("PyCharmEdu2024.1", "PyCharmEdu", "2024.1"),
     ("CLionNova2024.3", "CLionNova", "2024.3"),
-    # No clean split available, so the branded name is kept rather than lost.
+    # A decorated version still belongs to the mapped product.
     ("IntelliJIdea2024.1-EAP", "IntelliJ IDEA", "2024.1-EAP"),
+    # ...but a decorated edition is still its own product, not the base one.
+    ("PyCharmEdu2024.1-EAP", "PyCharmEdu", "2024.1-EAP"),
+    ("CLionNova2024.3-RC", "CLionNova", "2024.3-RC"),
 ]
 
 SKIP_TABLE = [
@@ -242,6 +247,24 @@ class TestPerUserVersionFiltering(unittest.TestCase):
             {ide["config_path"] for ide in alice + bob},
             {"/Users/alice/PyCharm2024.1", "/Users/bob/PyCharm2025.2"},
         )
+
+
+class TestRootScanDoesNotRescanHome(_TempHomeTestCase):
+
+    def test_invoking_users_home_is_scanned_once(self) -> None:
+        users = self.tmp_path / "Users"
+        home = users / "alice"
+        _make_config_dir(home / "Library" / "Application Support" / "JetBrains", ["PyCharm2025.2"])
+        detector = MacOSJetBrainsDetector()
+
+        with mock.patch.object(jetbrains_macos, "is_running_as_root", return_value=True), \
+                mock.patch.object(jetbrains_macos, "Path", wraps=Path) as patched_path:
+            patched_path.side_effect = lambda *a: users if a == ("/Users",) else Path(*a)
+            patched_path.home.return_value = home
+            found = detector._scan_for_ides()
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["display_name"], "PyCharm")
 
 
 class TestVersionSuffixRegex(unittest.TestCase):

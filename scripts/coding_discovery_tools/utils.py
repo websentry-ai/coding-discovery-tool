@@ -1319,10 +1319,10 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
         if (rst.st_ino, rst.st_dev) != (st.st_ino, st.st_dev):
             return None
         # A hardlink to another user's credentials shares an inode and stays
-        # in-home, so it passes containment + identity. Reject any extra link —
-        # cross-platform (st_nlink is populated on Windows, where the POSIX owner
-        # check below can't help).
-        if st.st_nlink > 1:
+        # in-home, so it passes containment + identity. Reject any extra link.
+        # Use the validated (post-containment) path stat: os.stat populates
+        # st_nlink cross-platform incl. Windows (unlike an open-time fstat).
+        if rst.st_nlink > 1:
             return None
         # POSIX: also require the file to belong to the home's owner.
         if hasattr(os, "geteuid"):

@@ -117,16 +117,16 @@ class TestSubtreeIndex(unittest.TestCase):
         self.assertFalse(any("node_modules" in p for p in found))
 
     @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
-    def test_symlinked_dir_recorded_but_not_descended(self):
+    def test_symlinked_dir_neither_recorded_nor_descended(self):
         target = self.mk("real")
         (target / ".cursor").mkdir()
-        link = self.root / ".link"  # hidden, so it is recorded
+        link = self.root / ".link"  # a hidden symlink to a directory
         os.symlink(target, link)
         idx = get_subtree_index(self.root, self.root, _never_skip, "t")
-        # The symlink dir itself is recorded by basename (a name match would still
-        # extract it, as the old walk checked the name before the symlink)...
-        self.assertIn(".link", idx)
-        # ...but we never descend into it, so its .cursor is not reached via the link.
+        # A privileged scan must not follow a user's symlink into config: the
+        # symlinked dir is not recorded by basename...
+        self.assertNotIn(".link", idx)
+        # ...and never descended, so its .cursor is not reached via the link.
         via_link = [p for p in idx.get(".cursor", []) if ".link" in p.parts]
         self.assertEqual(via_link, [])
 
@@ -222,6 +222,125 @@ class TestFailSafeDispatch(unittest.TestCase):
         self.assertNotIn(str(self.root / "a" / ".cursor" / "deep" / ".cursor"), got)
         # a .cursor nested under a differently-named dir is still reached
         self.assertIn(str(self.root / "c" / ".roo" / "inner" / ".cursor"), got)
+
+
+class TestReviewHardening(unittest.TestCase):
+    """Regressions for the security-review findings on the shared index."""
+
+    def setUp(self):
+        clear_cache()
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        clear_cache()
+        self._tmp.cleanup()
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_dispatch_skips_indexed_dir_swapped_to_symlink(self):
+        # Finding 1 (TOCTOU): a dir indexed as real but swapped for a symlink
+        # before dispatch is re-validated and refused.
+        real = self.root / "proj" / ".cursor"
+        real.mkdir(parents=True)
+        index = {".cursor": [real]}
+        import shutil
+        shutil.rmtree(real)
+        outside = self.root / "elsewhere"
+        outside.mkdir()
+        os.symlink(outside, real)  # .cursor is now a symlink
+        got = []
+        orig = pdi.get_subtree_index
+        pdi.get_subtree_index = lambda *a, **k: index
+        try:
+            dispatch_matches(self.root, self.root, _never_skip, "t",
+                             lambda n: n.lower() == ".cursor", got.append)
+        finally:
+            pdi.get_subtree_index = orig
+        self.assertEqual(got, [])
+
+    def test_dispatch_skips_vanished_indexed_dir(self):
+        # Finding 1: a dir removed after indexing is skipped, not dispatched.
+        gone = self.root / "proj" / ".cursor"
+        index = {".cursor": [gone]}  # never created on disk
+        got = []
+        orig = pdi.get_subtree_index
+        pdi.get_subtree_index = lambda *a, **k: index
+        try:
+            dispatch_matches(self.root, self.root, _never_skip, "t",
+                             lambda n: n.lower() == ".cursor", got.append)
+        finally:
+            pdi.get_subtree_index = orig
+        self.assertEqual(got, [])
+
+    def test_outermost_prune_survives_bucket_order(self):
+        # Finding 4: case-insensitive matching buckets by exact basename, so a
+        # differently-cased nested child (.Cursor) can flatten ahead of its
+        # ancestor (.cursor). The depth sort must still prune the child.
+        anc = self.root / "a" / ".cursor"
+        anc.mkdir(parents=True)
+        child = anc / "n" / ".Cursor"
+        child.mkdir(parents=True)
+        index = {".Cursor": [child], ".cursor": [anc]}  # child's bucket first
+        got = []
+        orig = pdi.get_subtree_index
+        pdi.get_subtree_index = lambda *a, **k: index
+        try:
+            dispatch_matches(self.root, self.root, _never_skip, "t",
+                             lambda n: n.lower() == ".cursor", got.append)
+        finally:
+            pdi.get_subtree_index = orig
+        self.assertEqual([str(p) for p in got], [str(anc)])
+
+    def test_concurrent_get_subtree_index_is_safe(self):
+        # Finding 3: parallel walks (Windows MCP ThreadPoolExecutor) must not race
+        # the shared cache. Exercise the locked path from many threads.
+        import threading
+        self.root.joinpath("a", ".cursor").mkdir(parents=True)
+        clear_cache()
+        results, errors = [], []
+
+        def worker():
+            try:
+                results.append(get_subtree_index(self.root, self.root, _never_skip, "t"))
+            except Exception as e:  # pragma: no cover
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertTrue(all(set(r) == set(results[0]) for r in results))
+
+    def test_mcp_walker_forwards_skip_id(self):
+        # Finding 2: the MCP walker keys the shared cache by a caller-supplied
+        # skip_id (default shared), so a different prune can be isolated.
+        from coding_discovery_tools import mcp_extraction_helpers as mh
+        seen = []
+        orig = mh.dispatch_matches
+        mh.dispatch_matches = lambda root, cur, prune, skip_id, m, om: seen.append(skip_id)
+        try:
+            mh.walk_for_mcp_configs_generic(
+                self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
+                _never_skip)
+            mh.walk_for_mcp_configs_generic(
+                self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
+                _never_skip, skip_id="custom")
+        finally:
+            mh.dispatch_matches = orig
+        self.assertEqual(seen, ["mcp_project", "custom"])
+
+    def test_skip_system_dirs_frozen_and_prefixes_in_sync(self):
+        # Finding 5: source is immutable, so the import-time derived prefix tuple
+        # can't silently drift out of sync.
+        from coding_discovery_tools.constants import SKIP_SYSTEM_DIRS
+        from coding_discovery_tools import macos_extraction_helpers as macos_h
+        from coding_discovery_tools import linux_extraction_helpers as linux_h
+        self.assertIsInstance(SKIP_SYSTEM_DIRS, frozenset)
+        self.assertEqual(set(macos_h._SKIP_SYSTEM_PREFIXES), set(SKIP_SYSTEM_DIRS))
+        self.assertEqual(set(linux_h._LINUX_SKIP_SYSTEM_PREFIXES),
+                         {d + "/" for d in linux_h._LINUX_SKIP_SYSTEM_DIRS})
 
 
 if __name__ == "__main__":

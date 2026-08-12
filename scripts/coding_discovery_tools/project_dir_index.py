@@ -7,6 +7,8 @@ byte-identical to the old per-tool walk.
 
 import logging
 import os
+import stat
+import threading
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -18,9 +20,10 @@ except ImportError:  # pragma: no cover - direct-script execution fallback
 logger = logging.getLogger(__name__)
 
 
-# Keyed by (skip_id, root_path, current_dir). One sequential scan per process, so
-# no locking needed.
+# Keyed by (skip_id, root_path, current_dir). Windows MCP discovery fans out over
+# a ThreadPoolExecutor, so the cache is guarded by a lock.
 _INDEX_CACHE: Dict[tuple, Dict[str, List[Path]]] = {}
+_INDEX_LOCK = threading.Lock()
 
 
 def _collect(root_path: Path, current_dir: Path,
@@ -32,7 +35,8 @@ def _collect(root_path: Path, current_dir: Path,
     Only hidden dirs are stored (all tool markers are hidden) to bound memory, but
     the walk still descends into non-hidden dirs. scandir gives is_dir/is_symlink
     without an extra stat. A dir is recorded before its children — outermost_only
-    relies on that.
+    relies on that. Symlinked dirs are neither recorded nor descended: a privileged
+    scan must not follow a user's symlink into config elsewhere.
     """
     try:
         scan = os.scandir(current_dir)
@@ -50,10 +54,11 @@ def _collect(root_path: Path, current_dir: Path,
                     continue
                 if not entry.is_dir():  # follows symlinks, like Path.is_dir()
                     continue
+                if entry.is_symlink():
+                    continue  # never record or descend a symlinked dir
                 if entry.name.startswith("."):
                     index.setdefault(entry.name, []).append(item)
-                if not entry.is_symlink():  # record symlinks, never descend them
-                    _collect(root_path, item, should_skip, index)
+                _collect(root_path, item, should_skip, index)
             except (PermissionError, OSError, ValueError):
                 continue
             except Exception as e:  # one bad entry must not abort the walk
@@ -71,15 +76,20 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     unreadable root is returned empty but not cached, so a later tool retries.
     """
     key = (skip_id, str(root_path), str(current_dir))
-    index = _INDEX_CACHE.get(key)
-    if index is None:
-        index = {}
-        readable = _collect(root_path, current_dir, should_skip, index)
-        if readable:
-            _INDEX_CACHE[key] = index
-        else:
-            logger.warning("subtree root unreadable, not caching: %s", current_dir)
-    return index
+    with _INDEX_LOCK:
+        cached = _INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    # Build outside the lock so parallel walks of different subtrees don't
+    # serialize; publish atomically. A duplicate concurrent build of the same key
+    # is wasted but harmless (setdefault keeps whichever lands first).
+    index: Dict[str, List[Path]] = {}
+    readable = _collect(root_path, current_dir, should_skip, index)
+    if not readable:
+        logger.warning("subtree root unreadable, not caching: %s", current_dir)
+        return index
+    with _INDEX_LOCK:
+        return _INDEX_CACHE.setdefault(key, index)
 
 
 def outermost_only(dirs: List[Path]) -> List[Path]:
@@ -97,8 +107,9 @@ def _walk_direct(root_path: Path, current_dir: Path,
                  on_match: Callable[[Path], None],
                  should_skip: Callable[[Path], bool]) -> None:
     """Stateless per-tool walk used as the index fallback. Matches are dispatched
-    and not descended into; symlinks are never descended. No shared state, so a
-    failure here is contained to one tool."""
+    and not descended into; symlinked dirs are never dispatched or descended (same
+    as the index path). No shared state, so a failure here is contained to one
+    tool."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError):
@@ -113,11 +124,12 @@ def _walk_direct(root_path: Path, current_dir: Path,
                     continue
                 if not entry.is_dir():
                     continue
+                if entry.is_symlink():
+                    continue  # never dispatch or descend a symlinked dir
                 if is_match(entry.name):
                     on_match(item)
                     continue
-                if not entry.is_symlink():
-                    _walk_direct(root_path, item, is_match, on_match, should_skip)
+                _walk_direct(root_path, item, is_match, on_match, should_skip)
             except (PermissionError, OSError, ValueError):
                 continue
             except Exception as e:
@@ -135,17 +147,29 @@ def dispatch_matches(root_path: Path, current_dir: Path,
     index failure, so no re-walk / double dispatch)."""
     try:
         index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
-        targets = outermost_only(
-            [d for name, dirs in index.items() if is_match(name) for d in dirs]
-        )
+        matches = [d for name, dirs in index.items() if is_match(name) for d in dirs]
+        # Sort shallowest-first so an ancestor always precedes its descendants
+        # before pruning. Index buckets are per-basename, so a differently-cased
+        # nested match can otherwise appear ahead of its ancestor.
+        matches.sort(key=lambda p: len(p.parts))
+        targets = outermost_only(matches)
     except Exception as e:
         logger.warning("shared index failed (%s); independent walk fallback", e)
         _walk_direct(root_path, current_dir, is_match, on_match, should_skip)
         return
     for target in targets:
+        # Re-validate at dispatch: the index recorded a real dir, but a user could
+        # have swapped it for a symlink since. Require it still be a real directory
+        # (lstat, not a symlink) before reading config through it.
+        try:
+            if not stat.S_ISDIR(os.lstat(str(target)).st_mode):
+                continue
+        except OSError:
+            continue
         on_match(target)
 
 
 def clear_cache() -> None:
     """Drop all memoized indexes (test isolation)."""
-    _INDEX_CACHE.clear()
+    with _INDEX_LOCK:
+        _INDEX_CACHE.clear()

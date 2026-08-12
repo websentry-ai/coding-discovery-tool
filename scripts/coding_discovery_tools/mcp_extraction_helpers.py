@@ -743,6 +743,10 @@ def extract_mcp_from_dir_generic(
 
 # Distinct from the rules index id: the MCP prune adds is_home_dotdir_descendant,
 # which the Linux rules prune omits, so the two must not share a cached tree.
+# Every MCP caller uses the same prune (should_skip_path + should_skip_system_path
+# for the running OS), so they intentionally share this one id and its cached
+# walk. A caller with a DIFFERENT prune must pass a distinct skip_id, or it would
+# be served an index built under the wrong prune.
 _MCP_PROJECT_SKIP_ID = "mcp_project"
 
 
@@ -755,7 +759,8 @@ def walk_for_mcp_configs_generic(
     tool_name: str,
     global_tool_dir: Optional[Path],
     should_skip_func: Callable[[Path], bool],
-    current_depth: int = 0
+    current_depth: int = 0,
+    skip_id: str = _MCP_PROJECT_SKIP_ID,
 ) -> None:
     """
     Generic function to recursively walk directory tree looking for tool MCP config files.
@@ -792,7 +797,7 @@ def walk_for_mcp_configs_generic(
             logger.debug(f"Error processing {tool_dir}: {e}")
 
     dispatch_matches(
-        root_path, current_dir, prune, _MCP_PROJECT_SKIP_ID,
+        root_path, current_dir, prune, skip_id,
         lambda name: name.lower() == target, on_match,
     )
 

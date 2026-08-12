@@ -12,6 +12,7 @@ import shlex
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -1286,10 +1287,75 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
         return None
 
 
+def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
+    """Read the Claude subscription plan from ``<user_home>/.claude/.credentials.json``.
+
+    On Linux and Windows, Claude caches the plan as
+    ``claudeAiOauth.subscriptionType`` there. Reading it directly — like Cursor's
+    plan read — works cross-user in a privileged all-users scan, avoiding a CLI
+    run that would read the scanner's own session. Opens non-blocking and checks
+    the descriptor is a regular file, so a raced/planted FIFO can't stall the
+    scan. Returns None on any failure (including a ``null`` ``subscriptionType``),
+    so the caller falls back to the CLI.
+    """
+    path = os.path.join(str(user_home), ".claude", ".credentials.json")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None  # missing / no permission / symlink (O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None  # FIFO / device / dir — don't block or stream
+        # The opened file must resolve inside the home and be the file we opened
+        # (fd-anchored, so a redirect swapped in around open can't slip through).
+        real_home = os.path.realpath(str(user_home))
+        resolved = os.path.realpath(path)
+        if os.path.normcase(os.path.commonpath([resolved, real_home])) != os.path.normcase(real_home):
+            return None
+        rst = os.stat(resolved)
+        if (rst.st_ino, rst.st_dev) != (st.st_ino, st.st_dev):
+            return None
+        # Reject a hardlink (shares an inode, stays in-home, passing the checks
+        # above). rst is the validated stat; os.stat gives st_nlink on Windows too.
+        if rst.st_nlink > 1:
+            return None
+        # POSIX: also require the file to belong to the home's owner.
+        if hasattr(os, "geteuid"):
+            try:
+                if st.st_uid != os.stat(str(user_home)).st_uid:
+                    return None
+            except OSError:
+                return None
+        raw = os.read(fd, 1_000_000).decode("utf-8", "replace")  # tiny file; cap
+    except (OSError, ValueError) as e:
+        logger.debug("Could not read Claude credentials at %s: %s", path, e)
+        return None
+    finally:
+        os.close(fd)
+    try:
+        creds = json.loads(raw)
+    except (ValueError, RecursionError) as e:
+        # RecursionError (deeply nested JSON) isn't a ValueError; catch it too so
+        # a planted file can't propagate an exception out of the fast path.
+        logger.debug("Claude credentials at %s not parseable: %s", path, type(e).__name__)
+        return None
+    oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+    plan = oauth.get("subscriptionType") if isinstance(oauth, dict) else None
+    if isinstance(plan, str):
+        plan = plan.strip()
+        # The file is user-writable in an all-users scan; accept only a plain tier
+        # identifier so a crafted value can't inject into logs / the report field.
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", plan):
+            return plan
+    return None
+
+
 def get_claude_subscription_type(
     username: str,
     claude_binary: Optional[str] = None,
     diagnostics: Optional[List[Dict]] = None,
+    user_home: Optional[Path] = None,
 ) -> Optional[str]:
     """
     Get the Claude Code subscription type for a specific user.
@@ -1350,6 +1416,23 @@ def get_claude_subscription_type(
                 diagnostics.append({
                     "category": "keychain",
                     "message": f"Keychain result: {plan}" if plan else "Keychain returned None",
+                    "level": "info" if plan else "warning",
+                    "data": {"plan": plan},
+                })
+            if plan:
+                return plan
+
+        # Fast path: read the cached plan from <user_home>/.claude/.credentials.json
+        # (Linux/Windows only). A plain file read that works cross-user in an
+        # all-users scan, unlike the CLI below which would read the scanner's own
+        # session. Skipped on macOS: there the keychain above is the live source
+        # and this file is often stale/leftover, so it must not shadow the CLI.
+        if user_home is not None and platform.system() != "Darwin":
+            plan = _get_plan_from_credentials_file(user_home)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "credentials_file",
+                    "message": f"Credentials-file result: {plan}" if plan else "Credentials file returned None",
                     "level": "info" if plan else "warning",
                     "data": {"plan": plan},
                 })

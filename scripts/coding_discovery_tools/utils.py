@@ -1318,6 +1318,14 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
         rst = os.stat(resolved)
         if (rst.st_ino, rst.st_dev) != (st.st_ino, st.st_dev):
             return None
+        # POSIX: the file must be owned by the home's owner — rejects a hardlink
+        # to another user's credentials (shares an inode, stays in-home).
+        if hasattr(os, "geteuid"):
+            try:
+                if st.st_uid != os.stat(str(user_home)).st_uid:
+                    return None
+            except OSError:
+                return None
         raw = os.read(fd, 1_000_000).decode("utf-8", "replace")  # tiny file; cap
     except (OSError, ValueError) as e:
         logger.debug("Could not read Claude credentials at %s: %s", path, e)

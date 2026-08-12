@@ -833,6 +833,23 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         with patch(f"{_MOD}.os.stat", side_effect=fake_stat):
             self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
+    @unittest.skipIf(not hasattr(os, "geteuid"), "POSIX ownership")
+    def test_owner_mismatch_refused(self):
+        # The file must belong to the home's owner (rejects a hardlink to another
+        # user's credentials). Simulate a differing home owner.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        home_str = str(self.home)
+        real_stat = os.stat
+        def fake_stat(p, *a, **k):
+            st = real_stat(p, *a, **k)
+            if str(p) == home_str:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                       st.st_uid + 99999, st.st_gid, st.st_size,
+                                       int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+            return st
+        with patch(f"{_MOD}.os.stat", side_effect=fake_stat):
+            self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
     @patch(f"{_MOD}.platform.system", return_value="Linux")
     def test_used_as_fastpath_before_cli(self, _sys):
         # The file read resolves the plan cross-platform without touching the CLI.

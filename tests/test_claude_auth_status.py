@@ -807,6 +807,19 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         os.symlink(str(target), str(self.creds))
         self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
+    @unittest.skipIf(not hasattr(os, "symlink") or os.name == "nt", "POSIX symlink")
+    def test_creds_resolving_outside_home_refused(self):
+        # ~/.claude is a symlink/junction to a dir OUTSIDE this home; the file
+        # inside is a real regular file, so O_NOFOLLOW/S_ISREG pass — the
+        # containment check is what refuses the cross-user redirect.
+        outside = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        Path(outside, ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}), encoding="utf-8")
+        self.claude.rmdir()
+        os.symlink(outside, str(self.claude))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
     @patch(f"{_MOD}.platform.system", return_value="Linux")
     def test_used_as_fastpath_before_cli(self, _sys):
         # The file read resolves the plan cross-platform without touching the CLI.

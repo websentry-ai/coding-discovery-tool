@@ -1306,8 +1306,14 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None  # FIFO / device / dir — don't block or stream
+        # Refuse a redirect out of the user's home (e.g. a Windows junction, where
+        # O_NOFOLLOW is a no-op), so another user's plan isn't attributed here.
+        real_home = os.path.realpath(str(user_home))
+        resolved = os.path.realpath(path)
+        if os.path.normcase(os.path.commonpath([resolved, real_home])) != os.path.normcase(real_home):
+            return None
         raw = os.read(fd, 1_000_000).decode("utf-8", "replace")  # tiny file; cap
-    except OSError as e:
+    except (OSError, ValueError) as e:
         logger.debug("Could not read Claude credentials at %s: %s", path, e)
         return None
     finally:

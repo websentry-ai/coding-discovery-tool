@@ -845,6 +845,14 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         with patch(f"{_MOD}.os.stat", side_effect=fake_stat):
             self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
+    @unittest.skipIf(os.name == "nt", "hardlink creation perms differ on Windows CI")
+    def test_hardlinked_credentials_refused(self):
+        # A hardlink (st_nlink > 1) — the cross-user vector on Windows where the
+        # owner check can't apply — is refused cross-platform.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        os.link(str(self.creds), str(self.home / "second_link.json"))  # nlink -> 2
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
     @unittest.skipIf(not hasattr(os, "geteuid"), "POSIX ownership")
     def test_owner_mismatch_refused(self):
         # The file must belong to the home's owner (rejects a hardlink to another

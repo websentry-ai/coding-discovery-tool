@@ -11,12 +11,17 @@ from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple
 
 from ...coding_tool_base import BaseToolDetector
+from ...jetbrains_naming_helpers import (
+    JETBRAINS_IDE_NAME_MAPPING,
+    JETBRAINS_SKIP_FOLDERS,
+    detect_plan,
+    looks_like_ide_folder,
+    parse_ide_name_and_version,
+    should_skip_folder,
+)
 from ...xml_helpers import safe_xml_fromstring
 
 logger = logging.getLogger(__name__)
-
-# Maximum number of lines to read from idea.log for plan detection
-MAX_LOG_LINES = 2000
 
 
 class WindowsJetBrainsDetector(BaseToolDetector):
@@ -39,52 +44,10 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             return Path(appdata) / "JetBrains"
         return Path.home() / "AppData" / "Roaming" / "JetBrains"
 
-    @property
-    def jetbrains_local_dir(self) -> Path:
-        """
-        Dynamic Local Directory (Local - for logs).
-
-        Uses self.user_home if available (for scanning other users),
-        otherwise falls back to environment variables or Path.home().
-        """
-        if hasattr(self, 'user_home') and self.user_home:
-            return self.user_home / "AppData" / "Local" / "JetBrains"
-
-        # Fallback to environment variable
-        local = os.path.expandvars(r"%LOCALAPPDATA%")
-        if local and local != r"%LOCALAPPDATA%":
-            return Path(local) / "JetBrains"
-        return Path.home() / "AppData" / "Local" / "JetBrains"
-
-    IDE_PATTERNS = [
-        "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
-        "Rider", "CLion", "RustRover", "RubyMine", "DataGrip",
-        "DataSpell"
-    ]
-
-    IDE_NAME_MAPPING = {
-        "IntelliJIdea": "IntelliJ IDEA",
-        "IdeaIC": "IntelliJ IDEA Community",
-        "IdeaIE": "IntelliJ IDEA Educational",
-        "Aqua": "Aqua",
-        "PyCharm": "PyCharm",
-        "PyCharmCE": "PyCharm Community",
-        "WebStorm": "WebStorm",
-        "PhpStorm": "PhpStorm",
-        "GoLand": "GoLand",
-        "Rider": "Rider",
-        "CLion": "CLion",
-        "RustRover": "RustRover",
-        "RubyMine": "RubyMine",
-        "DataGrip": "DataGrip",
-        "DataSpell": "DataSpell",
-    }
+    IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
     # Folders to skip when scanning JetBrains directory
-    SKIP_FOLDERS = {
-        "consent", "DeviceId", "JetBrainsClient",
-        "consentOptions", "PrivacyPolicy", "Toolbox",
-    }
+    SKIP_FOLDERS = JETBRAINS_SKIP_FOLDERS
 
     PLUGIN_NAME_OVERRIDES = {
         "ml-llm": "JetBrains AI Assistant",
@@ -105,10 +68,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             List of dicts, each containing info for one IDE, or None if not found
         """
-        detected_ides = self._scan_for_ides(
-            self.jetbrains_config_dir,
-            self.jetbrains_local_dir
-        )
+        detected_ides = self._scan_for_ides(self.jetbrains_config_dir)
 
         if not detected_ides:
             return None
@@ -143,10 +103,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             Comma-separated list of detected IDEs with their plans
         """
-        detected_ides = self._scan_for_ides(
-            self.jetbrains_config_dir,
-            self.jetbrains_local_dir
-        )
+        detected_ides = self._scan_for_ides(self.jetbrains_config_dir)
 
         if not detected_ides:
             return None
@@ -156,17 +113,12 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             for ide in detected_ides
         )
 
-    def _scan_for_ides(
-        self,
-        config_dir: Path,
-        local_dir: Path
-    ) -> List[Dict]:
+    def _scan_for_ides(self, config_dir: Path) -> List[Dict]:
         """
         Scan JetBrains config directory for IDE installations.
 
         Args:
             config_dir: Path to JetBrains roaming config directory
-            local_dir: Path to JetBrains local directory (for logs)
 
         Returns:
             List of dicts containing IDE info
@@ -190,21 +142,18 @@ class WindowsJetBrainsDetector(BaseToolDetector):
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
-                if folder in self.SKIP_FOLDERS:
+                if should_skip_folder(folder, self.SKIP_FOLDERS):
                     continue
 
-                matches_name = any(pattern in folder for pattern in self.IDE_PATTERNS)
+                is_versioned = looks_like_ide_folder(folder)
                 has_structure = (folder_path / "plugins").exists() or (folder_path / "options").exists()
 
-                if not (matches_name or has_structure):
+                if not (is_versioned or has_structure):
                     continue
 
                 display_name, version = self._parse_ide_name_and_version(folder)
 
-                try:
-                    plan = self._detect_plan(folder, local_dir)
-                except Exception:
-                    plan = "Licensed"  # Fallback if log is locked
+                plan = self._detect_plan(folder)
 
                 detected_ides.append({
                     "folder_name": folder,
@@ -221,7 +170,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
 
         return self._filter_old_versions(detected_ides)
 
-    def _parse_ide_name_and_version(self, folder_name: str) -> tuple:
+    def _parse_ide_name_and_version(self, folder_name: str) -> Tuple[str, str]:
         """
         Parse IDE name and version from folder name.
 
@@ -231,41 +180,11 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             Tuple of (display_name, version)
         """
-        sorted_prefixes = sorted(self.IDE_NAME_MAPPING.keys(), key=len, reverse=True)
-        for prefix in sorted_prefixes:
-            if folder_name.startswith(prefix):
-                version = folder_name[len(prefix):]
-                display_name = self.IDE_NAME_MAPPING[prefix]
-                return display_name, version if version else "Unknown"
+        return parse_ide_name_and_version(folder_name, self.IDE_NAME_MAPPING)
 
-        return folder_name, "Unknown"
-
-    def _detect_plan(self, folder_name: str, local_dir: Path) -> str:
-        """
-        Detect plan type by checking folder name and idea.log.
-        """
-        # Check folder name for community/educational edition markers
-        if "IdeaIC" in folder_name or "IdeaIE" in folder_name or "PyCharmCE" in folder_name:
-            return "Community"
-
-        log_file = local_dir / folder_name / "log" / "idea.log"
-        if log_file.exists():
-            try:
-                with open(log_file, 'r', errors='ignore') as f:
-                    lines = []
-                    for i, line in enumerate(f):
-                        if i >= MAX_LOG_LINES:
-                            break
-                        lines.append(line)
-
-                    log_content = "".join(lines)
-                    if "Licensed to" in log_content:
-                        return "Professional"
-            except Exception as e:
-                logger.debug(f"Error reading idea.log for plan detection: {e}")
-
-        # Default to Licensed for non-community editions
-        return "Licensed"
+    @staticmethod
+    def _detect_plan(folder_name: str) -> str:
+        return detect_plan(folder_name)
 
     @staticmethod
     def _filter_old_versions(ide_list: List[Dict]) -> List[Dict]:

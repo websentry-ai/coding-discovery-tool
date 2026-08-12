@@ -24,7 +24,10 @@ from scripts.coding_discovery_tools.user_tool_detector import find_claude_binary
 from scripts.coding_discovery_tools.utils import (
     get_claude_subscription_type,
     _get_plan_from_keychain,
+    _get_plan_from_credentials_file,
 )
+
+_MOD = "scripts.coding_discovery_tools.utils"
 
 
 class TestGetPlanFromKeychain(unittest.TestCase):
@@ -751,6 +754,148 @@ class TestHelpers(unittest.TestCase):
         from scripts.coding_discovery_tools.utils import _get_compatible_shell
         mock_pwd.getpwnam.side_effect = KeyError("user not found")
         self.assertEqual(_get_compatible_shell("unknown"), "/bin/bash")
+
+
+class TestGetPlanFromCredentialsFile(unittest.TestCase):
+    """Reading the cached plan from <user_home>/.claude/.credentials.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.home = Path(self.tmp)
+        self.claude = self.home / ".claude"
+        self.claude.mkdir()
+        self.creds = self.claude / ".credentials.json"
+
+    def _write(self, obj):
+        self.creds.write_text(json.dumps(obj), encoding="utf-8")
+
+    def test_reads_subscription_type(self):
+        self._write({"claudeAiOauth": {"subscriptionType": "max", "accessToken": "x"}})
+        self.assertEqual(_get_plan_from_credentials_file(self.home), "max")
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    def test_null_subscription_type_returns_none(self):
+        # subscriptionType is legitimately null for unrecognized tiers -> fall back.
+        self._write({"claudeAiOauth": {"subscriptionType": None, "accessToken": "x"}})
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    def test_missing_oauth_blob_returns_none(self):
+        self._write({"mcpOAuth": {}})
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    def test_valid_tier_accepted(self):
+        for good in ("max", "pro", "enterprise", "api_key", "free"):
+            self._write({"claudeAiOauth": {"subscriptionType": good}})
+            self.assertEqual(_get_plan_from_credentials_file(self.home), good)
+
+    def test_malformed_subscription_type_rejected(self):
+        # User-writable file: reject anything but a plain tier identifier so a
+        # crafted value can't inject into logs / the report field.
+        for bad in ("has space", "max\ninject", "x" * 65, "<script>", "", "a;b"):
+            self._write({"claudeAiOauth": {"subscriptionType": bad}})
+            self.assertIsNone(_get_plan_from_credentials_file(self.home), bad)
+
+    def test_bad_json_returns_none(self):
+        self.creds.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    def test_deeply_nested_json_returns_none(self):
+        # Deeply nested JSON raises RecursionError (not ValueError); it must be
+        # caught and return None, not propagate out of the fast path.
+        self.creds.write_text("[" * 30000 + "]" * 30000, encoding="utf-8")
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "POSIX FIFO")
+    def test_fifo_returns_none_without_blocking(self):
+        # A raced/planted FIFO must be skipped (non-blocking open + S_ISREG),
+        # not block the scanner — this test would hang if the open blocked.
+        os.mkfifo(str(self.creds))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    @unittest.skipIf(not hasattr(os, "symlink") or os.name == "nt", "POSIX symlink")
+    def test_symlinked_creds_refused(self):
+        # O_NOFOLLOW refuses a symlinked credentials file (redirect into another
+        # user's home in the real attack).
+        target = self.home / "real.json"
+        target.write_text(
+            json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}), encoding="utf-8")
+        os.symlink(str(target), str(self.creds))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    @unittest.skipIf(not hasattr(os, "symlink") or os.name == "nt", "POSIX symlink")
+    def test_creds_resolving_outside_home_refused(self):
+        # ~/.claude is a symlink/junction to a dir OUTSIDE this home; the file
+        # inside is a real regular file, so O_NOFOLLOW/S_ISREG pass — the
+        # containment check is what refuses the cross-user redirect.
+        outside = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        Path(outside, ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}), encoding="utf-8")
+        self.claude.rmdir()
+        os.symlink(outside, str(self.claude))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    def test_identity_mismatch_refused(self):
+        # Simulate a TOCTOU swap: the containment-resolved path is a *different*
+        # file than the opened fd, so the read must be refused.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        real_stat = os.stat
+        def fake_stat(p, *a, **k):
+            st = real_stat(p, *a, **k)
+            return os.stat_result((st.st_mode, st.st_ino + 1, st.st_dev, st.st_nlink,
+                                   st.st_uid, st.st_gid, st.st_size,
+                                   int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+        with patch(f"{_MOD}.os.stat", side_effect=fake_stat):
+            self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    @unittest.skipIf(os.name == "nt", "hardlink creation perms differ on Windows CI")
+    def test_hardlinked_credentials_refused(self):
+        # A hardlink (st_nlink > 1) — the cross-user vector on Windows where the
+        # owner check can't apply — is refused cross-platform.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        os.link(str(self.creds), str(self.home / "second_link.json"))  # nlink -> 2
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    @unittest.skipIf(not hasattr(os, "geteuid"), "POSIX ownership")
+    def test_owner_mismatch_refused(self):
+        # The file must belong to the home's owner (rejects a hardlink to another
+        # user's credentials). Simulate a differing home owner.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        home_str = str(self.home)
+        real_stat = os.stat
+        def fake_stat(p, *a, **k):
+            st = real_stat(p, *a, **k)
+            if str(p) == home_str:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                       st.st_uid + 99999, st.st_gid, st.st_size,
+                                       int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+            return st
+        with patch(f"{_MOD}.os.stat", side_effect=fake_stat):
+            self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    def test_used_as_fastpath_before_cli(self, _sys):
+        # The file read resolves the plan cross-platform without touching the CLI.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        with patch(f"{_MOD}.subprocess.run") as mock_run:
+            self.assertEqual(
+                get_claude_subscription_type("alice", user_home=self.home), "max")
+            mock_run.assert_not_called()
+
+    @patch(f"{_MOD}.platform.system", return_value="Darwin")
+    @patch(f"{_MOD}._is_root", return_value=False)
+    @patch(f"{_MOD}._get_plan_from_keychain", return_value=None)
+    @patch(f"{_MOD}._get_plan_from_credentials_file")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_credentials_file_skipped_on_macos(self, mock_run, mock_file, _kc, _root, _sys):
+        # On macOS the keychain/CLI are authoritative; a stale credentials file
+        # must not shadow the CLI, so the file is not consulted at all.
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+        get_claude_subscription_type("alice", user_home=self.home)
+        mock_file.assert_not_called()
 
 
 if __name__ == "__main__":

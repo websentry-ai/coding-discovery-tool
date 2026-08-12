@@ -1335,8 +1335,10 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
         os.close(fd)
     try:
         creds = json.loads(raw)
-    except ValueError as e:
-        logger.debug("Claude credentials at %s not valid JSON: %s", path, e)
+    except (ValueError, RecursionError) as e:
+        # RecursionError (deeply nested JSON) isn't a ValueError; catch it too so
+        # a planted file can't propagate an exception out of the fast path.
+        logger.debug("Claude credentials at %s not parseable: %s", path, type(e).__name__)
         return None
     oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
     plan = oauth.get("subscriptionType") if isinstance(oauth, dict) else None

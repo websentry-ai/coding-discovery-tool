@@ -802,6 +802,12 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         self.creds.write_text("{not json", encoding="utf-8")
         self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
+    def test_deeply_nested_json_returns_none(self):
+        # Deeply nested JSON raises RecursionError (not ValueError); it must be
+        # caught and return None, not propagate out of the fast path.
+        self.creds.write_text("[" * 30000 + "]" * 30000, encoding="utf-8")
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
     @unittest.skipIf(not hasattr(os, "mkfifo"), "POSIX FIFO")
     def test_fifo_returns_none_without_blocking(self):
         # A raced/planted FIFO must be skipped (non-blocking open + S_ISREG),

@@ -1304,13 +1304,19 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
     except OSError:
         return None  # missing / no permission / symlink (O_NOFOLLOW)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             return None  # FIFO / device / dir — don't block or stream
         # Refuse a redirect out of the user's home (e.g. a Windows junction, where
-        # O_NOFOLLOW is a no-op), so another user's plan isn't attributed here.
+        # O_NOFOLLOW is a no-op), anchored to the opened fd so a swap between open
+        # and this check can't slip an outside-home file through: the resolved
+        # path must be inside the home AND be the very file we opened.
         real_home = os.path.realpath(str(user_home))
         resolved = os.path.realpath(path)
         if os.path.normcase(os.path.commonpath([resolved, real_home])) != os.path.normcase(real_home):
+            return None
+        rst = os.stat(resolved)
+        if (rst.st_ino, rst.st_dev) != (st.st_ino, st.st_dev):
             return None
         raw = os.read(fd, 1_000_000).decode("utf-8", "replace")  # tiny file; cap
     except (OSError, ValueError) as e:

@@ -820,6 +820,19 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         os.symlink(outside, str(self.claude))
         self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
+    def test_identity_mismatch_refused(self):
+        # Simulate a TOCTOU swap: the containment-resolved path is a *different*
+        # file than the opened fd, so the read must be refused.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        real_stat = os.stat
+        def fake_stat(p, *a, **k):
+            st = real_stat(p, *a, **k)
+            return os.stat_result((st.st_mode, st.st_ino + 1, st.st_dev, st.st_nlink,
+                                   st.st_uid, st.st_gid, st.st_size,
+                                   int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+        with patch(f"{_MOD}.os.stat", side_effect=fake_stat):
+            self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
     @patch(f"{_MOD}.platform.system", return_value="Linux")
     def test_used_as_fastpath_before_cli(self, _sys):
         # The file read resolves the plan cross-platform without touching the CLI.

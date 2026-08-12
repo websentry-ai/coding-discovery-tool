@@ -26,6 +26,19 @@ _INDEX_CACHE: Dict[tuple, Dict[str, List[Path]]] = {}
 _INDEX_LOCK = threading.Lock()
 
 
+def _is_dispatchable(path: Path) -> bool:
+    """True only if ``path`` is still a real directory (or a Windows junction),
+    not a symlink. Uses one ``lstat``: a symlink comes back ``S_IFLNK`` (so
+    ``S_ISDIR`` is False and it is rejected), while a junction is ``S_IFDIR``
+    with a reparse tag (so it is allowed, matching the old walk). Checked at
+    dispatch time so a dir swapped for a symlink after indexing is refused before
+    config is read through it. Never raises."""
+    try:
+        return stat.S_ISDIR(os.lstat(str(path)).st_mode)
+    except OSError:
+        return False
+
+
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> None:
@@ -35,8 +48,9 @@ def _collect(root_path: Path, current_dir: Path,
     Only hidden dirs are stored (all tool markers are hidden) to bound memory, but
     the walk still descends into non-hidden dirs. scandir gives is_dir/is_symlink
     without an extra stat. A dir is recorded before its children — outermost_only
-    relies on that. Symlinked dirs are neither recorded nor descended: a privileged
-    scan must not follow a user's symlink into config elsewhere.
+    relies on that. Symlinks and junctions are recorded (dispatch re-validates and
+    drops symlinks) but never descended into: a privileged scan must not follow a
+    user's link into another tree.
     """
     try:
         scan = os.scandir(current_dir)
@@ -54,11 +68,10 @@ def _collect(root_path: Path, current_dir: Path,
                     continue
                 if not entry.is_dir():  # follows symlinks, like Path.is_dir()
                     continue
-                if entry.is_symlink():
-                    continue  # never record or descend a symlinked dir
                 if entry.name.startswith("."):
                     index.setdefault(entry.name, []).append(item)
-                _collect(root_path, item, should_skip, index)
+                if not entry.is_symlink():  # never descend a link/junction
+                    _collect(root_path, item, should_skip, index)
             except (PermissionError, OSError, ValueError):
                 continue
             except Exception as e:  # one bad entry must not abort the walk
@@ -106,10 +119,11 @@ def _walk_direct(root_path: Path, current_dir: Path,
                  is_match: Callable[[str], bool],
                  on_match: Callable[[Path], None],
                  should_skip: Callable[[Path], bool]) -> None:
-    """Stateless per-tool walk used as the index fallback. Matches are dispatched
-    and not descended into; symlinked dirs are never dispatched or descended (same
-    as the index path). No shared state, so a failure here is contained to one
-    tool."""
+    """Stateless per-tool walk used as the index fallback and for callers whose
+    marker is not a hidden dir (the index stores only hidden dirs). Matches are
+    dispatched and not descended into; links/junctions are never descended. A
+    matched dir is re-validated the same way as the index path before dispatch.
+    No shared state, so a failure here is contained to one tool."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError):
@@ -124,12 +138,12 @@ def _walk_direct(root_path: Path, current_dir: Path,
                     continue
                 if not entry.is_dir():
                     continue
-                if entry.is_symlink():
-                    continue  # never dispatch or descend a symlinked dir
                 if is_match(entry.name):
-                    on_match(item)
+                    if _is_dispatchable(item):
+                        on_match(item)
                     continue
-                _walk_direct(root_path, item, is_match, on_match, should_skip)
+                if not entry.is_symlink():  # never descend a link/junction
+                    _walk_direct(root_path, item, is_match, on_match, should_skip)
             except (PermissionError, OSError, ValueError):
                 continue
             except Exception as e:
@@ -140,11 +154,20 @@ def _walk_direct(root_path: Path, current_dir: Path,
 def dispatch_matches(root_path: Path, current_dir: Path,
                      should_skip: Callable[[Path], bool], skip_id: str,
                      is_match: Callable[[str], bool],
-                     on_match: Callable[[Path], None]) -> None:
+                     on_match: Callable[[Path], None],
+                     markers_all_hidden: bool = True) -> None:
     """Dispatch matching dirs to ``on_match`` via the shared index, falling back to
     an independent walk if the index raises — so an index fault costs one tool, not
     the whole scan. ``on_match`` handles its own errors (a failure there is not an
-    index failure, so no re-walk / double dispatch)."""
+    index failure, so no re-walk / double dispatch).
+
+    The index stores only hidden dirs, so a caller matching a NON-hidden marker
+    must pass ``markers_all_hidden=False`` to route straight to the direct walk;
+    otherwise the marker would silently never match. All current markers are
+    hidden, hence the default."""
+    if not markers_all_hidden:
+        _walk_direct(root_path, current_dir, is_match, on_match, should_skip)
+        return
     try:
         index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
         matches = [d for name, dirs in index.items() if is_match(name) for d in dirs]
@@ -158,15 +181,11 @@ def dispatch_matches(root_path: Path, current_dir: Path,
         _walk_direct(root_path, current_dir, is_match, on_match, should_skip)
         return
     for target in targets:
-        # Re-validate at dispatch: the index recorded a real dir, but a user could
-        # have swapped it for a symlink since. Require it still be a real directory
-        # (lstat, not a symlink) before reading config through it.
-        try:
-            if not stat.S_ISDIR(os.lstat(str(target)).st_mode):
-                continue
-        except OSError:
-            continue
-        on_match(target)
+        # Re-validate: the index recorded a real dir, but a user could have swapped
+        # it for a symlink since. Junctions still pass (they are real dir trees);
+        # symlinks and vanished dirs are dropped before config is read through them.
+        if _is_dispatchable(target):
+            on_match(target)
 
 
 def clear_cache() -> None:

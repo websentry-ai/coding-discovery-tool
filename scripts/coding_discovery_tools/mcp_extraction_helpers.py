@@ -799,6 +799,9 @@ def walk_for_mcp_configs_generic(
     dispatch_matches(
         root_path, current_dir, prune, skip_id,
         lambda name: name.lower() == target, on_match,
+        # The shared index stores only hidden dirs; a non-hidden marker must use
+        # the direct walk or it would silently never match.
+        markers_all_hidden=tool_dir_name.startswith("."),
     )
 
 

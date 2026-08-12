@@ -117,16 +117,17 @@ class TestSubtreeIndex(unittest.TestCase):
         self.assertFalse(any("node_modules" in p for p in found))
 
     @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
-    def test_symlinked_dir_neither_recorded_nor_descended(self):
+    def test_symlinked_dir_recorded_but_not_descended(self):
         target = self.mk("real")
         (target / ".cursor").mkdir()
         link = self.root / ".link"  # a hidden symlink to a directory
         os.symlink(target, link)
         idx = get_subtree_index(self.root, self.root, _never_skip, "t")
-        # A privileged scan must not follow a user's symlink into config: the
-        # symlinked dir is not recorded by basename...
-        self.assertNotIn(".link", idx)
-        # ...and never descended, so its .cursor is not reached via the link.
+        # The symlinked dir is recorded by basename (dispatch re-validates and
+        # drops it before reading config)...
+        self.assertIn(".link", idx)
+        # ...but never descended, so its .cursor is not reached via the link — a
+        # privileged scan must not follow a user's symlink into another tree.
         via_link = [p for p in idx.get(".cursor", []) if ".link" in p.parts]
         self.assertEqual(via_link, [])
 
@@ -319,7 +320,7 @@ class TestReviewHardening(unittest.TestCase):
         from coding_discovery_tools import mcp_extraction_helpers as mh
         seen = []
         orig = mh.dispatch_matches
-        mh.dispatch_matches = lambda root, cur, prune, skip_id, m, om: seen.append(skip_id)
+        mh.dispatch_matches = lambda root, cur, prune, skip_id, m, om, **kw: seen.append(skip_id)
         try:
             mh.walk_for_mcp_configs_generic(
                 self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
@@ -330,6 +331,59 @@ class TestReviewHardening(unittest.TestCase):
         finally:
             mh.dispatch_matches = orig
         self.assertEqual(seen, ["mcp_project", "custom"])
+
+    def test_dispatch_allows_real_indexed_dir(self):
+        # Finding B guard, positive side: a real directory (and, by the same
+        # S_IFDIR lstat, a Windows junction) still dispatches — only symlinks and
+        # vanished dirs are dropped.
+        real = self.root / "proj" / ".cursor"
+        real.mkdir(parents=True)
+        index = {".cursor": [real]}
+        got = []
+        orig = pdi.get_subtree_index
+        pdi.get_subtree_index = lambda *a, **k: index
+        try:
+            dispatch_matches(self.root, self.root, _never_skip, "t",
+                             lambda n: n.lower() == ".cursor", got.append)
+        finally:
+            pdi.get_subtree_index = orig
+        self.assertEqual([str(p) for p in got], [str(real)])
+
+    def test_mcp_walker_flags_non_hidden_marker(self):
+        # Finding A: a non-hidden marker can't live in the hidden-only index, so
+        # the MCP walker must pass markers_all_hidden=False to route to the direct
+        # walk instead of silently matching nothing.
+        from coding_discovery_tools import mcp_extraction_helpers as mh
+        seen = {}
+        orig = mh.dispatch_matches
+
+        def capture(root, cur, prune, skip_id, m, om, markers_all_hidden=True):
+            seen["hidden"] = markers_all_hidden
+
+        mh.dispatch_matches = capture
+        try:
+            mh.walk_for_mcp_configs_generic(
+                self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
+                _never_skip)
+            hidden_flag = seen["hidden"]
+            mh.walk_for_mcp_configs_generic(
+                self.root, self.root, [], "AGENTS", "mcp.json", "X", None,
+                _never_skip)
+        finally:
+            mh.dispatch_matches = orig
+        self.assertTrue(hidden_flag)        # ".cursor" -> index path
+        self.assertFalse(seen["hidden"])    # "AGENTS"  -> direct walk
+
+    def test_non_hidden_marker_found_via_direct_route(self):
+        # Finding A end-to-end: with markers_all_hidden=False the non-hidden marker
+        # dir is dispatched, where the hidden-only index alone would miss it.
+        d = self.root / "proj" / "AGENTS"
+        d.mkdir(parents=True)
+        got = []
+        dispatch_matches(self.root, self.root, _never_skip, "t",
+                         lambda n: n == "AGENTS", got.append,
+                         markers_all_hidden=False)
+        self.assertEqual([str(p) for p in got], [str(d)])
 
     def test_skip_system_dirs_frozen_and_prefixes_in_sync(self):
         # Finding 5: source is immutable, so the import-time derived prefix tuple

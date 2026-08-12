@@ -1286,6 +1286,35 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
         return None
 
 
+def _get_plan_from_credentials_file(username: str) -> Optional[str]:
+    """Read the Claude subscription plan from the on-disk credentials file.
+
+    On Linux and Windows, Claude caches the plan as
+    ``claudeAiOauth.subscriptionType`` in ``~/.claude/.credentials.json``. Reading
+    it directly — like Cursor's plan read — works cross-user in a privileged
+    all-users scan, avoiding a CLI run that would read the scanner's own session
+    instead of the user's. Returns None on any failure (including a ``null``
+    ``subscriptionType``), so the caller falls back to the CLI.
+    """
+    real_home = _get_real_home(username)
+    if not real_home:
+        return None
+    path = os.path.join(real_home, ".claude", ".credentials.json")
+    if not os.path.isfile(path):  # skip a missing path / planted FIFO or dir
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            creds = json.loads(f.read(1_000_000))  # tiny file; cap the read
+    except (OSError, ValueError):
+        return None
+    oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+    plan = oauth.get("subscriptionType") if isinstance(oauth, dict) else None
+    if isinstance(plan, str) and plan.strip():
+        logger.debug(f"Credentials-file plan for {username}: {plan.strip()}")
+        return plan.strip()
+    return None
+
+
 def get_claude_subscription_type(
     username: str,
     claude_binary: Optional[str] = None,
@@ -1355,6 +1384,20 @@ def get_claude_subscription_type(
                 })
             if plan:
                 return plan
+
+        # Fast path: read the cached plan from ~/.claude/.credentials.json
+        # (Linux/Windows). A plain file read that works cross-user in an all-users
+        # scan, unlike the CLI below which would read the scanner's own session.
+        plan = _get_plan_from_credentials_file(username)
+        if diagnostics is not None:
+            diagnostics.append({
+                "category": "credentials_file",
+                "message": f"Credentials-file result: {plan}" if plan else "Credentials file returned None",
+                "level": "info" if plan else "warning",
+                "data": {"plan": plan},
+            })
+        if plan:
+            return plan
 
         # Build the auth command — full path when known, bare name otherwise
         if claude_binary:

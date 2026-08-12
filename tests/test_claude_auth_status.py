@@ -24,7 +24,10 @@ from scripts.coding_discovery_tools.user_tool_detector import find_claude_binary
 from scripts.coding_discovery_tools.utils import (
     get_claude_subscription_type,
     _get_plan_from_keychain,
+    _get_plan_from_credentials_file,
 )
+
+_MOD = "scripts.coding_discovery_tools.utils"
 
 
 class TestGetPlanFromKeychain(unittest.TestCase):
@@ -751,6 +754,63 @@ class TestHelpers(unittest.TestCase):
         from scripts.coding_discovery_tools.utils import _get_compatible_shell
         mock_pwd.getpwnam.side_effect = KeyError("user not found")
         self.assertEqual(_get_compatible_shell("unknown"), "/bin/bash")
+
+
+class TestGetPlanFromCredentialsFile(unittest.TestCase):
+    """Reading the cached plan from ~/.claude/.credentials.json (Linux/Windows)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.claude = os.path.join(self.tmp, ".claude")
+        os.makedirs(self.claude)
+        self.creds = os.path.join(self.claude, ".credentials.json")
+        p = patch(f"{_MOD}._get_real_home", return_value=self.tmp)
+        self.addCleanup(p.stop)
+        p.start()
+
+    def _write(self, obj):
+        with open(self.creds, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+
+    def test_reads_subscription_type(self):
+        self._write({"claudeAiOauth": {"subscriptionType": "max", "accessToken": "x"}})
+        self.assertEqual(_get_plan_from_credentials_file("alice"), "max")
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+
+    def test_null_subscription_type_returns_none(self):
+        # subscriptionType is legitimately null for unrecognized tiers -> fall back.
+        self._write({"claudeAiOauth": {"subscriptionType": None, "accessToken": "x"}})
+        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+
+    def test_missing_oauth_blob_returns_none(self):
+        self._write({"mcpOAuth": {}})
+        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+
+    def test_bad_json_returns_none(self):
+        with open(self.creds, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+
+    @patch(f"{_MOD}._get_real_home", return_value=None)
+    def test_no_home_returns_none(self, _home):
+        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "POSIX FIFO")
+    def test_fifo_returns_none_without_blocking(self):
+        # A planted FIFO must be skipped (isfile guard), not block the scanner.
+        os.mkfifo(self.creds)
+        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    def test_used_as_fastpath_before_cli(self, _sys):
+        # On Linux the file read resolves the plan without touching the CLI.
+        self._write({"claudeAiOauth": {"subscriptionType": "max"}})
+        with patch(f"{_MOD}.subprocess.run") as mock_run:
+            self.assertEqual(get_claude_subscription_type("alice"), "max")
+            mock_run.assert_not_called()
 
 
 if __name__ == "__main__":

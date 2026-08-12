@@ -786,6 +786,18 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         self._write({"mcpOAuth": {}})
         self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
+    def test_valid_tier_accepted(self):
+        for good in ("max", "pro", "enterprise", "api_key", "free"):
+            self._write({"claudeAiOauth": {"subscriptionType": good}})
+            self.assertEqual(_get_plan_from_credentials_file(self.home), good)
+
+    def test_malformed_subscription_type_rejected(self):
+        # User-writable file: reject anything but a plain tier identifier so a
+        # crafted value can't inject into logs / the report field.
+        for bad in ("has space", "max\ninject", "x" * 65, "<script>", "", "a;b"):
+            self._write({"claudeAiOauth": {"subscriptionType": bad}})
+            self.assertIsNone(_get_plan_from_credentials_file(self.home), bad)
+
     def test_bad_json_returns_none(self):
         self.creds.write_text("{not json", encoding="utf-8")
         self.assertIsNone(_get_plan_from_credentials_file(self.home))

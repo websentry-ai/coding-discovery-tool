@@ -1339,8 +1339,12 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
         return None
     oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
     plan = oauth.get("subscriptionType") if isinstance(oauth, dict) else None
-    if isinstance(plan, str) and plan.strip():
-        return plan.strip()
+    if isinstance(plan, str):
+        plan = plan.strip()
+        # The file is user-writable in an all-users scan; accept only a plain tier
+        # identifier so a crafted value can't inject into logs / the report field.
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", plan):
+            return plan
     return None
 
 

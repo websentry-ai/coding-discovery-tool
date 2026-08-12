@@ -12,6 +12,7 @@ import shlex
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -1286,31 +1287,39 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
         return None
 
 
-def _get_plan_from_credentials_file(username: str) -> Optional[str]:
-    """Read the Claude subscription plan from the on-disk credentials file.
+def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
+    """Read the Claude subscription plan from ``<user_home>/.claude/.credentials.json``.
 
     On Linux and Windows, Claude caches the plan as
-    ``claudeAiOauth.subscriptionType`` in ``~/.claude/.credentials.json``. Reading
-    it directly — like Cursor's plan read — works cross-user in a privileged
-    all-users scan, avoiding a CLI run that would read the scanner's own session
-    instead of the user's. Returns None on any failure (including a ``null``
-    ``subscriptionType``), so the caller falls back to the CLI.
+    ``claudeAiOauth.subscriptionType`` there. Reading it directly — like Cursor's
+    plan read — works cross-user in a privileged all-users scan, avoiding a CLI
+    run that would read the scanner's own session. Opens non-blocking and checks
+    the descriptor is a regular file, so a raced/planted FIFO can't stall the
+    scan. Returns None on any failure (including a ``null`` ``subscriptionType``),
+    so the caller falls back to the CLI.
     """
-    real_home = _get_real_home(username)
-    if not real_home:
-        return None
-    path = os.path.join(real_home, ".claude", ".credentials.json")
-    if not os.path.isfile(path):  # skip a missing path / planted FIFO or dir
-        return None
+    path = os.path.join(str(user_home), ".claude", ".credentials.json")
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            creds = json.loads(f.read(1_000_000))  # tiny file; cap the read
-    except (OSError, ValueError):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None  # missing / no permission / symlink (O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None  # FIFO / device / dir — don't block or stream
+        raw = os.read(fd, 1_000_000).decode("utf-8", "replace")  # tiny file; cap
+    except OSError as e:
+        logger.debug("Could not read Claude credentials at %s: %s", path, e)
+        return None
+    finally:
+        os.close(fd)
+    try:
+        creds = json.loads(raw)
+    except ValueError as e:
+        logger.debug("Claude credentials at %s not valid JSON: %s", path, e)
         return None
     oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
     plan = oauth.get("subscriptionType") if isinstance(oauth, dict) else None
     if isinstance(plan, str) and plan.strip():
-        logger.debug(f"Credentials-file plan for {username}: {plan.strip()}")
         return plan.strip()
     return None
 
@@ -1319,6 +1328,7 @@ def get_claude_subscription_type(
     username: str,
     claude_binary: Optional[str] = None,
     diagnostics: Optional[List[Dict]] = None,
+    user_home: Optional[Path] = None,
 ) -> Optional[str]:
     """
     Get the Claude Code subscription type for a specific user.
@@ -1385,19 +1395,20 @@ def get_claude_subscription_type(
             if plan:
                 return plan
 
-        # Fast path: read the cached plan from ~/.claude/.credentials.json
+        # Fast path: read the cached plan from <user_home>/.claude/.credentials.json
         # (Linux/Windows). A plain file read that works cross-user in an all-users
         # scan, unlike the CLI below which would read the scanner's own session.
-        plan = _get_plan_from_credentials_file(username)
-        if diagnostics is not None:
-            diagnostics.append({
-                "category": "credentials_file",
-                "message": f"Credentials-file result: {plan}" if plan else "Credentials file returned None",
-                "level": "info" if plan else "warning",
-                "data": {"plan": plan},
-            })
-        if plan:
-            return plan
+        if user_home is not None:
+            plan = _get_plan_from_credentials_file(user_home)
+            if diagnostics is not None:
+                diagnostics.append({
+                    "category": "credentials_file",
+                    "message": f"Credentials-file result: {plan}" if plan else "Credentials file returned None",
+                    "level": "info" if plan else "warning",
+                    "data": {"plan": plan},
+                })
+            if plan:
+                return plan
 
         # Build the auth command — full path when known, bare name otherwise
         if claude_binary:

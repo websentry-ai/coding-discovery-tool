@@ -757,59 +757,63 @@ class TestHelpers(unittest.TestCase):
 
 
 class TestGetPlanFromCredentialsFile(unittest.TestCase):
-    """Reading the cached plan from ~/.claude/.credentials.json (Linux/Windows)."""
+    """Reading the cached plan from <user_home>/.claude/.credentials.json."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
-        self.claude = os.path.join(self.tmp, ".claude")
-        os.makedirs(self.claude)
-        self.creds = os.path.join(self.claude, ".credentials.json")
-        p = patch(f"{_MOD}._get_real_home", return_value=self.tmp)
-        self.addCleanup(p.stop)
-        p.start()
+        self.home = Path(self.tmp)
+        self.claude = self.home / ".claude"
+        self.claude.mkdir()
+        self.creds = self.claude / ".credentials.json"
 
     def _write(self, obj):
-        with open(self.creds, "w", encoding="utf-8") as f:
-            json.dump(obj, f)
+        self.creds.write_text(json.dumps(obj), encoding="utf-8")
 
     def test_reads_subscription_type(self):
         self._write({"claudeAiOauth": {"subscriptionType": "max", "accessToken": "x"}})
-        self.assertEqual(_get_plan_from_credentials_file("alice"), "max")
+        self.assertEqual(_get_plan_from_credentials_file(self.home), "max")
 
     def test_missing_file_returns_none(self):
-        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
     def test_null_subscription_type_returns_none(self):
         # subscriptionType is legitimately null for unrecognized tiers -> fall back.
         self._write({"claudeAiOauth": {"subscriptionType": None, "accessToken": "x"}})
-        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
     def test_missing_oauth_blob_returns_none(self):
         self._write({"mcpOAuth": {}})
-        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
     def test_bad_json_returns_none(self):
-        with open(self.creds, "w", encoding="utf-8") as f:
-            f.write("{not json")
-        self.assertIsNone(_get_plan_from_credentials_file("alice"))
-
-    @patch(f"{_MOD}._get_real_home", return_value=None)
-    def test_no_home_returns_none(self, _home):
-        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+        self.creds.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
     @unittest.skipIf(not hasattr(os, "mkfifo"), "POSIX FIFO")
     def test_fifo_returns_none_without_blocking(self):
-        # A planted FIFO must be skipped (isfile guard), not block the scanner.
-        os.mkfifo(self.creds)
-        self.assertIsNone(_get_plan_from_credentials_file("alice"))
+        # A raced/planted FIFO must be skipped (non-blocking open + S_ISREG),
+        # not block the scanner — this test would hang if the open blocked.
+        os.mkfifo(str(self.creds))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
+
+    @unittest.skipIf(not hasattr(os, "symlink") or os.name == "nt", "POSIX symlink")
+    def test_symlinked_creds_refused(self):
+        # O_NOFOLLOW refuses a symlinked credentials file (redirect into another
+        # user's home in the real attack).
+        target = self.home / "real.json"
+        target.write_text(
+            json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}), encoding="utf-8")
+        os.symlink(str(target), str(self.creds))
+        self.assertIsNone(_get_plan_from_credentials_file(self.home))
 
     @patch(f"{_MOD}.platform.system", return_value="Linux")
     def test_used_as_fastpath_before_cli(self, _sys):
-        # On Linux the file read resolves the plan without touching the CLI.
+        # The file read resolves the plan cross-platform without touching the CLI.
         self._write({"claudeAiOauth": {"subscriptionType": "max"}})
         with patch(f"{_MOD}.subprocess.run") as mock_run:
-            self.assertEqual(get_claude_subscription_type("alice"), "max")
+            self.assertEqual(
+                get_claude_subscription_type("alice", user_home=self.home), "max")
             mock_run.assert_not_called()
 
 

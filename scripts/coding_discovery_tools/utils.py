@@ -1307,10 +1307,8 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None  # FIFO / device / dir — don't block or stream
-        # Refuse a redirect out of the user's home (e.g. a Windows junction, where
-        # O_NOFOLLOW is a no-op), anchored to the opened fd so a swap between open
-        # and this check can't slip an outside-home file through: the resolved
-        # path must be inside the home AND be the very file we opened.
+        # The opened file must resolve inside the home and be the file we opened
+        # (fd-anchored, so a redirect swapped in around open can't slip through).
         real_home = os.path.realpath(str(user_home))
         resolved = os.path.realpath(path)
         if os.path.normcase(os.path.commonpath([resolved, real_home])) != os.path.normcase(real_home):
@@ -1318,10 +1316,8 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
         rst = os.stat(resolved)
         if (rst.st_ino, rst.st_dev) != (st.st_ino, st.st_dev):
             return None
-        # A hardlink to another user's credentials shares an inode and stays
-        # in-home, so it passes containment + identity. Reject any extra link.
-        # Use the validated (post-containment) path stat: os.stat populates
-        # st_nlink cross-platform incl. Windows (unlike an open-time fstat).
+        # Reject a hardlink (shares an inode, stays in-home, passing the checks
+        # above). rst is the validated stat; os.stat gives st_nlink on Windows too.
         if rst.st_nlink > 1:
             return None
         # POSIX: also require the file to belong to the home's owner.

@@ -1416,9 +1416,11 @@ def get_claude_subscription_type(
                 return plan
 
         # Fast path: read the cached plan from <user_home>/.claude/.credentials.json
-        # (Linux/Windows). A plain file read that works cross-user in an all-users
-        # scan, unlike the CLI below which would read the scanner's own session.
-        if user_home is not None:
+        # (Linux/Windows only). A plain file read that works cross-user in an
+        # all-users scan, unlike the CLI below which would read the scanner's own
+        # session. Skipped on macOS: there the keychain above is the live source
+        # and this file is often stale/leftover, so it must not shadow the CLI.
+        if user_home is not None and platform.system() != "Darwin":
             plan = _get_plan_from_credentials_file(user_home)
             if diagnostics is not None:
                 diagnostics.append({

@@ -859,6 +859,18 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
                 get_claude_subscription_type("alice", user_home=self.home), "max")
             mock_run.assert_not_called()
 
+    @patch(f"{_MOD}.platform.system", return_value="Darwin")
+    @patch(f"{_MOD}._is_root", return_value=False)
+    @patch(f"{_MOD}._get_plan_from_keychain", return_value=None)
+    @patch(f"{_MOD}._get_plan_from_credentials_file")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_credentials_file_skipped_on_macos(self, mock_run, mock_file, _kc, _root, _sys):
+        # On macOS the keychain/CLI are authoritative; a stale credentials file
+        # must not shadow the CLI, so the file is not consulted at all.
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+        get_claude_subscription_type("alice", user_home=self.home)
+        mock_file.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1683,10 +1683,8 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
         if not stat.S_ISREG(st.st_mode):
             return None  # FIFO/device/dir — don't block or stream
         # The opened fd must be the exact file lstat saw before the open — same
-        # inode and device. This is what catches a symlink/junction swapped in
-        # around the open (Windows has no effective O_NOFOLLOW for junctions);
-        # unlike realpath it does not re-follow the very redirect we're guarding
-        # against, which is how a redirected target could otherwise validate.
+        # inode and device — which catches a symlink/junction swapped in around
+        # the open (Windows has no effective O_NOFOLLOW for junctions).
         if (st.st_ino, st.st_dev) != (lst.st_ino, lst.st_dev):
             return None
         # Defense in depth: the file must also resolve inside the owner's home.

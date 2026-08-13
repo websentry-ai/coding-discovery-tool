@@ -434,6 +434,7 @@ class TestReviewHardening(unittest.TestCase):
             self.assertTrue(hidden_flag, f"{mod.__name__}: hidden marker -> index")
             self.assertFalse(seen["hidden"], f"{mod.__name__}: non-hidden -> walk")
 
+    @unittest.skipUnless(os.name == "posix", "filesystem-root '/' sweep is POSIX-only")
     def test_within_scan_root_handles_filesystem_root(self):
         # A scan rooted at "/" (macOS sweeps from filesystem root) must still
         # contain its descendants — a naive root_real + os.sep would be "//" and

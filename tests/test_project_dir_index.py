@@ -434,6 +434,53 @@ class TestReviewHardening(unittest.TestCase):
             self.assertTrue(hidden_flag, f"{mod.__name__}: hidden marker -> index")
             self.assertFalse(seen["hidden"], f"{mod.__name__}: non-hidden -> walk")
 
+    def test_within_scan_root_handles_filesystem_root(self):
+        # A scan rooted at "/" (macOS sweeps from filesystem root) must still
+        # contain its descendants — a naive root_real + os.sep would be "//" and
+        # reject everything, silently losing all discovery on that path.
+        self.assertTrue(pdi._within_scan_root(Path("/Users/x/.cursor"), "/"))
+        self.assertTrue(pdi._within_scan_root(Path("/"), "/"))
+        # Real containment still holds: a sibling tree is not "under" the root.
+        self.assertFalse(pdi._within_scan_root(Path("/nope/x"), "/home/alice"))
+
+    def test_walk_direct_survives_iterator_fault(self):
+        # An OSError raised while ADVANCING the scandir iterator (not on one entry)
+        # must be caught so the tool's walk isn't aborted — entries seen before the
+        # fault are still dispatched, matching the old walker's resilience.
+        target = self.root / ".cursor"
+        target.mkdir()
+
+        class FakeEntry:
+            path = str(target)
+            name = ".cursor"
+
+            def is_dir(self, follow_symlinks=True):
+                return True
+
+            def is_symlink(self):
+                return False
+
+        class FaultyScan:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def __iter__(self):
+                yield FakeEntry()
+                raise OSError("iterator faulted mid-walk")
+
+        got = []
+        orig = os.scandir
+        os.scandir = lambda p: FaultyScan()
+        try:
+            pdi._walk_direct(self.root, self.root, lambda n: n == ".cursor",
+                             got.append, _never_skip)
+        finally:
+            os.scandir = orig
+        self.assertEqual([str(p) for p in got], [str(target)])
+
     def test_skip_system_dirs_frozen_and_prefixes_in_sync(self):
         # Finding 5: source is immutable, so the import-time derived prefix tuple
         # can't silently drift out of sync.

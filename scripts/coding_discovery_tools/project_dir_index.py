@@ -47,10 +47,16 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
     configs. ``realpath`` resolves the whole path; ``root_real`` is the caller's
     pre-resolved ``realpath(root_path)``. Never raises."""
     try:
-        real = os.path.realpath(str(target))
+        real = os.path.normcase(os.path.realpath(str(target)))
     except OSError:
         return False
-    return real == root_real or real.startswith(root_real + os.sep)
+    base = os.path.normcase(root_real)
+    if real == base:
+        return True
+    # Strip a trailing separator before re-appending one so a root that resolves
+    # to "/" (macOS sweeps from filesystem root) doesn't become "//" and reject
+    # every descendant. normcase folds case/separators on Windows.
+    return real.startswith(base.rstrip(os.sep) + os.sep)
 
 
 def _collect(root_path: Path, current_dir: Path,
@@ -73,24 +79,27 @@ def _collect(root_path: Path, current_dir: Path,
         return False
 
     with scan:
-        for entry in scan:
-            try:
-                item = Path(entry.path)
-                if should_skip(item):
+        try:
+            for entry in scan:
+                try:
+                    item = Path(entry.path)
+                    if should_skip(item):
+                        continue
+                    if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                        continue
+                    if not entry.is_dir():  # follows symlinks, like Path.is_dir()
+                        continue
+                    if entry.name.startswith("."):
+                        index.setdefault(entry.name, []).append(item)
+                    if not entry.is_symlink():  # never descend a link/junction
+                        _collect(root_path, item, should_skip, index)
+                except (PermissionError, OSError, ValueError):
                     continue
-                if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                except Exception as e:  # one bad entry must not abort the walk
+                    logger.debug("skipping %s: %s", entry.path, e)
                     continue
-                if not entry.is_dir():  # follows symlinks, like Path.is_dir()
-                    continue
-                if entry.name.startswith("."):
-                    index.setdefault(entry.name, []).append(item)
-                if not entry.is_symlink():  # never descend a link/junction
-                    _collect(root_path, item, should_skip, index)
-            except (PermissionError, OSError, ValueError):
-                continue
-            except Exception as e:  # one bad entry must not abort the walk
-                logger.debug("skipping %s: %s", entry.path, e)
-                continue
+        except (PermissionError, OSError) as e:  # iterator faulted mid-walk
+            logger.debug("iteration stopped for %s: %s", current_dir, e)
     return True
 
 
@@ -143,27 +152,30 @@ def _walk_direct(root_path: Path, current_dir: Path,
     except (PermissionError, OSError):
         return
     with scan:
-        for entry in scan:
-            try:
-                item = Path(entry.path)
-                if should_skip(item):
+        try:
+            for entry in scan:
+                try:
+                    item = Path(entry.path)
+                    if should_skip(item):
+                        continue
+                    if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                        continue
+                    if not entry.is_dir():
+                        continue
+                    if is_match(entry.name):
+                        root_real = os.path.realpath(str(root_path))
+                        if _is_dispatchable(item) and _within_scan_root(item, root_real):
+                            on_match(item)
+                        continue
+                    if not entry.is_symlink():  # never descend a link/junction
+                        _walk_direct(root_path, item, is_match, on_match, should_skip)
+                except (PermissionError, OSError, ValueError):
                     continue
-                if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                except Exception as e:
+                    logger.debug("skipping %s: %s", entry.path, e)
                     continue
-                if not entry.is_dir():
-                    continue
-                if is_match(entry.name):
-                    root_real = os.path.realpath(str(root_path))
-                    if _is_dispatchable(item) and _within_scan_root(item, root_real):
-                        on_match(item)
-                    continue
-                if not entry.is_symlink():  # never descend a link/junction
-                    _walk_direct(root_path, item, is_match, on_match, should_skip)
-            except (PermissionError, OSError, ValueError):
-                continue
-            except Exception as e:
-                logger.debug("skipping %s: %s", entry.path, e)
-                continue
+        except (PermissionError, OSError) as e:  # iterator faulted mid-walk
+            logger.debug("iteration stopped for %s: %s", current_dir, e)
 
 
 def dispatch_matches(root_path: Path, current_dir: Path,

@@ -100,6 +100,11 @@ class TestReadAuggieSession(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         self.home = Path(self.tmp)
+        # These exercise read/parse mechanics on a tmpdir; on Windows the read is
+        # gated to the scanning user's own home, so treat the tmpdir as a self-scan.
+        own = patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
+        self.addCleanup(own.stop)
+        own.start()
 
     def test_valid_session_returns_base_and_token(self):
         _write_session(self.home)
@@ -223,6 +228,16 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         p = patch(f"{_MOD}._trusted_curl", return_value=self.curl)
         self.addCleanup(p.stop)
         p.start()
+        # On Windows the session read is gated to the scanning user's own home;
+        # treat the tmpdir as a self-scan so these API/parse tests run there too.
+        own = patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
+        self.addCleanup(own.stop)
+        own.start()
+        # Isolate the billing-API path: keep the CLI fallback inert (no binary), so
+        # a self-scan tmpdir doesn't invoke the real auggie on the test machine.
+        w = patch(f"{_MOD}._which_no_cwd", return_value=None)
+        self.addCleanup(w.stop)
+        w.start()
 
     def test_none_home_returns_none(self):
         self.assertIsNone(get_auggie_subscription_type(None))
@@ -244,10 +259,12 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         mock_run.return_value = _proc(stdout=_BILLING_JSON)
         self.assertEqual(get_auggie_subscription_type(self.home), "Business Plan")
 
+    @unittest.skipUnless(hasattr(os, "geteuid"), "cross-user read is POSIX-only")
     @patch(f"{_MOD}.subprocess.run")
     def test_reads_any_users_home_cross_user(self, mock_run):
-        # The whole point: a home that is NOT the scanning user's still resolves,
-        # because it's a file read + HTTP call, not an execution.
+        # POSIX: a home that is NOT the scanning user's still resolves, because it's
+        # a file read (fd-owner verified) + HTTP call, not an execution. On Windows
+        # this is refused (no cheap fd-owner check) — covered separately.
         import tempfile
         with tempfile.TemporaryDirectory() as other:
             _write_session(Path(other), token="b" * 64)
@@ -460,7 +477,8 @@ class TestReadOwnRegularFileIdentity(unittest.TestCase):
             with patch(f"{_MOD}.os.fstat", return_value=os.stat_result(seq)):
                 self.assertIsNone(utils._read_own_regular_file(target, home, 1000))
 
-    def test_matching_identity_reads_normally(self):
+    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
+    def test_matching_identity_reads_normally(self, _own):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)

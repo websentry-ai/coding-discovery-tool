@@ -385,6 +385,55 @@ class TestReviewHardening(unittest.TestCase):
                          markers_all_hidden=False)
         self.assertEqual([str(p) for p in got], [str(d)])
 
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_dispatch_drops_leaf_when_ancestor_swapped_to_escaping_symlink(self):
+        # HIGH: only the leaf is lstat'd, so an indexed ANCESTOR swapped for a
+        # symlink pointing OUTSIDE the scan root must be caught by containment —
+        # the leaf itself is a real dir (reached through the symlink), so the type
+        # check passes and only the realpath containment stops it.
+        scan = self.root / "scan"
+        proj = scan / "proj"
+        (proj / ".cursor").mkdir(parents=True)
+        index = {".cursor": [proj / ".cursor"]}
+        outside = self.root / "outside"
+        (outside / ".cursor").mkdir(parents=True)
+        import shutil
+        shutil.rmtree(proj)
+        os.symlink(outside, proj)  # ancestor now escapes the scan root
+        got = []
+        orig = pdi.get_subtree_index
+        pdi.get_subtree_index = lambda *a, **k: index
+        try:
+            dispatch_matches(scan, scan, _never_skip, "t",
+                             lambda n: n.lower() == ".cursor", got.append)
+        finally:
+            pdi.get_subtree_index = orig
+        self.assertEqual(got, [])
+
+    def test_rules_walkers_flag_non_hidden_marker(self):
+        # TRIAGE: the macOS and Linux rules walkers must mirror the MCP walker and
+        # route a non-hidden marker to the direct walk, not the hidden-only index.
+        from coding_discovery_tools import macos_extraction_helpers as macos_h
+        from coding_discovery_tools import linux_extraction_helpers as linux_h
+        for mod in (macos_h, linux_h):
+            seen = {}
+            orig = mod.dispatch_matches
+
+            def capture(root, cur, prune, skip_id, m, om, markers_all_hidden=True):
+                seen["hidden"] = markers_all_hidden
+
+            mod.dispatch_matches = capture
+            try:
+                mod.walk_for_tool_directories(
+                    self.root, self.root, ".cursor", lambda d, p: None, {})
+                hidden_flag = seen["hidden"]
+                mod.walk_for_tool_directories(
+                    self.root, self.root, "AGENTS", lambda d, p: None, {})
+            finally:
+                mod.dispatch_matches = orig
+            self.assertTrue(hidden_flag, f"{mod.__name__}: hidden marker -> index")
+            self.assertFalse(seen["hidden"], f"{mod.__name__}: non-hidden -> walk")
+
     def test_skip_system_dirs_frozen_and_prefixes_in_sync(self):
         # Finding 5: source is immutable, so the import-time derived prefix tuple
         # can't silently drift out of sync.

@@ -39,6 +39,20 @@ def _is_dispatchable(path: Path) -> bool:
         return False
 
 
+def _within_scan_root(target: Path, root_real: str) -> bool:
+    """True if ``target`` fully resolves inside the scan root. The leaf ``lstat``
+    only sees the leaf, so an indexed ANCESTOR (e.g. ``~/proj``) swapped for a
+    symlink after indexing would leave the cached leaf resolving outside the
+    scanned tree — and a privileged multi-user scan must not read another user's
+    configs. ``realpath`` resolves the whole path; ``root_real`` is the caller's
+    pre-resolved ``realpath(root_path)``. Never raises."""
+    try:
+        real = os.path.realpath(str(target))
+    except OSError:
+        return False
+    return real == root_real or real.startswith(root_real + os.sep)
+
+
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> None:
@@ -139,7 +153,8 @@ def _walk_direct(root_path: Path, current_dir: Path,
                 if not entry.is_dir():
                     continue
                 if is_match(entry.name):
-                    if _is_dispatchable(item):
+                    root_real = os.path.realpath(str(root_path))
+                    if _is_dispatchable(item) and _within_scan_root(item, root_real):
                         on_match(item)
                     continue
                 if not entry.is_symlink():  # never descend a link/junction
@@ -180,11 +195,14 @@ def dispatch_matches(root_path: Path, current_dir: Path,
         logger.warning("shared index failed (%s); independent walk fallback", e)
         _walk_direct(root_path, current_dir, is_match, on_match, should_skip)
         return
+    # Resolve the scan root once for the containment re-check below.
+    root_real = os.path.realpath(str(root_path))
     for target in targets:
-        # Re-validate: the index recorded a real dir, but a user could have swapped
-        # it for a symlink since. Junctions still pass (they are real dir trees);
-        # symlinks and vanished dirs are dropped before config is read through them.
-        if _is_dispatchable(target):
+        # Re-validate before reading config through the path: the leaf must still be
+        # a real dir/junction (not a symlink swapped in since indexing — junctions
+        # pass, symlinks and vanished dirs are dropped), and it must still resolve
+        # inside the scan root (an ancestor swapped for a symlink would escape it).
+        if _is_dispatchable(target) and _within_scan_root(target, root_real):
             on_match(target)
 
 

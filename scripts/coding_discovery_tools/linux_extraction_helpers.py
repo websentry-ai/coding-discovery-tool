@@ -172,6 +172,9 @@ def walk_for_tool_directories(
     dispatch_matches(
         root_path, current_dir, _linux_project_skip, _LINUX_PROJECT_SKIP_ID,
         lambda name: name == tool_dir_name, on_match,
+        # The shared index stores only hidden dirs; a non-hidden marker must use
+        # the direct walk or it would silently never match.
+        markers_all_hidden=tool_dir_name.startswith("."),
     )
 
 

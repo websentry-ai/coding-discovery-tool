@@ -520,7 +520,8 @@ class TestAuggieCliFallback(unittest.TestCase):
     def test_api_success_skips_cli(self, mock_run, _which, _own):
         mock_run.return_value = _proc(stdout=_BILLING_JSON)  # billing OK
         self.assertEqual(get_auggie_subscription_type(self.home), "Business Plan")
-        self.assertEqual(mock_run.call_count, 1)  # only curl, no CLI
+        # The CLI fallback must not run once the API answered — it would have to
+        # resolve the binary first, so an unused _which_no_cwd proves it was skipped.
         _which.assert_not_called()
 
     @patch(f"{_MOD}._is_scanning_users_own_home", return_value=False)

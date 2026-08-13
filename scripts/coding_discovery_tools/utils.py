@@ -1660,9 +1660,11 @@ def _is_symlink_or_reparse(p: Path) -> bool:
 
 def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
     """Read up to ``max_bytes`` of ``path`` as a regular file owned by
-    ``owner_ref``'s owner, or None. Hardened for reading another user's file in an
-    all-users scan: refuses redirects and non-regular files, and requires the
-    file to resolve inside the home."""
+    ``owner_ref``'s owner, or None. Hardened for an all-users scan: refuses
+    redirects and non-regular files, and re-checks the opened fd. A cross-user read
+    is allowed on POSIX (the fd's own owner is verified) but not on Windows, where
+    the fd's owner can't be checked cheaply — there it reads only the scanning
+    user's own home."""
     # Refuse a redirect at the file or its parent dir, and capture the file's own
     # identity — lstat never follows — to compare against the opened fd below.
     if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
@@ -1687,16 +1689,16 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
         # the open (Windows has no effective O_NOFOLLOW for junctions).
         if (st.st_ino, st.st_dev) != (lst.st_ino, lst.st_dev):
             return None
-        # Defense in depth: the file must also resolve inside the owner's home.
-        try:
-            nc = os.path.normcase
-            real_home = os.path.realpath(str(owner_ref))
-            resolved = os.path.realpath(str(path))
-            if nc(os.path.commonpath([resolved, real_home])) != nc(real_home):
+        # The file must belong to the home's owner. A pathname re-check (realpath,
+        # stat) can't guarantee this: a parent junction can be swapped back before
+        # it runs, so only the fd is trusted.
+        if platform.system() == "Windows":
+            # No cheap fd-owner check on Windows, so read only our OWN home; a
+            # cross-user Windows plan lookup degrades rather than risk a redirect.
+            if not _is_scanning_users_own_home(Path(owner_ref)):
                 return None
-        except (OSError, ValueError):
-            return None
-        if hasattr(os, "geteuid"):  # POSIX: also require the passwd owner to match
+        else:
+            # POSIX: the fd's own owner can't be forged by a path swap.
             try:
                 if st.st_uid != os.stat(str(owner_ref)).st_uid:
                     return None

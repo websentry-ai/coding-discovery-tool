@@ -180,12 +180,13 @@ class TestReadAuggieSession(unittest.TestCase):
         os.symlink(str(victim), str(self.home / ".augment"))
         self.assertIsNone(_read_auggie_session(self.home))
 
-    @unittest.skipIf(not hasattr(os, "geteuid"), "POSIX ownership")
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX ownership")
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
     @patch(f"{_MOD}.os.fstat")
-    def test_owner_mismatch_refused(self, mock_fstat):
-        # The opened file's uid must match this home's owner, else refuse. Keep the
-        # real file identity (so the containment/identity check passes) and change
-        # only the uid, so the ownership barrier is what fires.
+    def test_owner_mismatch_refused(self, mock_fstat, _sys):
+        # POSIX: the opened fd's uid must match this home's owner, else refuse. Keep
+        # the real inode/device (so the identity check passes) and change only the
+        # uid, so the ownership barrier is what fires.
         _write_session(self.home)
         real = os.stat(str(self.home / ".augment" / "session.json"))
         mock_fstat.return_value = os.stat_result(
@@ -194,20 +195,20 @@ class TestReadAuggieSession(unittest.TestCase):
              int(real.st_atime), int(real.st_mtime), int(real.st_ctime)))
         self.assertIsNone(_read_auggie_session(self.home))
 
-    def test_resolved_outside_home_refused(self):
-        # Simulates a junction / TOCTOU: the opened file canonically resolves into
-        # another tree, outside this user's home — refused post-open.
-        import tempfile
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=False)
+    def test_windows_cross_user_read_refused(self, _own, _sys):
+        # Windows has no cheap fd-owner check, so a cross-user (not-own-home) read
+        # is refused outright — the junction swap-back can't be caught by pathname.
         _write_session(self.home)
-        other = tempfile.mkdtemp()
-        self.addCleanup(lambda: __import__("shutil").rmtree(other, ignore_errors=True))
-        sess = str(self.home / ".augment" / "session.json")
-        real_realpath = os.path.realpath
-        def fake(p, *a, **k):
-            return os.path.join(other, "session.json") if str(p) == sess \
-                else real_realpath(p, *a, **k)
-        with patch(f"{_MOD}.os.path.realpath", side_effect=fake):
-            self.assertIsNone(_read_auggie_session(self.home))
+        self.assertIsNone(_read_auggie_session(self.home))
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
+    def test_windows_own_home_read_allowed(self, _own, _sys):
+        # Windows self-scan (our own home) reads normally.
+        _write_session(self.home)
+        self.assertEqual(_read_auggie_session(self.home), (_TENANT, _TOKEN))
 
 
 class TestGetAuggieSubscriptionType(unittest.TestCase):

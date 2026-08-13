@@ -1663,8 +1663,15 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
     ``owner_ref``'s owner, or None. Hardened for reading another user's file in an
     all-users scan: refuses redirects and non-regular files, and requires the
     file to resolve inside the home."""
-    # Refuse a redirect at the file or its parent dir.
+    # Refuse a redirect at the file or its parent dir, and capture the file's own
+    # identity — lstat never follows — to compare against the opened fd below.
     if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
+        return None
+    try:
+        lst = os.lstat(str(path))
+    except OSError:
+        return None
+    if not stat.S_ISREG(lst.st_mode):
         return None
     try:
         fd = os.open(str(path),
@@ -1675,16 +1682,19 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None  # FIFO/device/dir — don't block or stream
-        # Post-open (TOCTOU-safe): the opened file must resolve inside the home
-        # and be that same file, catching a redirect swapped in around the open.
+        # The opened fd must be the exact file lstat saw before the open — same
+        # inode and device. This is what catches a symlink/junction swapped in
+        # around the open (Windows has no effective O_NOFOLLOW for junctions);
+        # unlike realpath it does not re-follow the very redirect we're guarding
+        # against, which is how a redirected target could otherwise validate.
+        if (st.st_ino, st.st_dev) != (lst.st_ino, lst.st_dev):
+            return None
+        # Defense in depth: the file must also resolve inside the owner's home.
         try:
             nc = os.path.normcase
             real_home = os.path.realpath(str(owner_ref))
             resolved = os.path.realpath(str(path))
             if nc(os.path.commonpath([resolved, real_home])) != nc(real_home):
-                return None
-            rst = os.stat(resolved)
-            if (rst.st_ino, rst.st_dev) != (st.st_ino, st.st_dev):
                 return None
         except (OSError, ValueError):
             return None
@@ -1754,16 +1764,65 @@ def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
     return "https://" + host + "/", token
 
 
+def _read_auggie_plan_via_cli(user_home: Path) -> Optional[str]:
+    """Fallback plan lookup: ask the user's own ``auggie`` CLI. Only runs in a
+    self-scan (``_is_scanning_users_own_home`` — same gate the detector uses), so
+    a privileged all-users scan never executes another user's binary. Used when the
+    stored token is expired/invalid and the billing API can't answer; the CLI reads
+    (and can refresh) its own session. ``auggie account status --json`` prints
+    ``planName``."""
+    if not _is_scanning_users_own_home(user_home):
+        return None
+    auggie = _which_no_cwd("auggie")
+    if auggie is None:
+        return None
+    try:
+        result = subprocess.run(
+            [auggie, "account", "status", "--json"],
+            capture_output=True, text=True, timeout=AUTH_STATUS_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("auggie account status fallback failed: %s", e)
+        return None
+    if result.returncode != 0:
+        logger.debug("auggie account status rc=%s", result.returncode)
+        return None
+    try:
+        parsed = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    plan = parsed.get("planName")
+    if not isinstance(plan, str):
+        return None
+    plan = plan.strip()
+    if not plan or len(plan) > 100 or not plan.isprintable():
+        return None
+    return plan
+
+
 def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
     """Get the Auggie (Augment) subscription plan for ``user_home``, or None.
 
-    Auggie keeps no plan on disk, so we read the session token from
-    ``~/.augment/session.json`` and query Augment's billing endpoint with curl —
-    a file read plus an HTTP call, never running the user's binary, so it works
-    for any user in an all-users scan. Best-effort, optional field.
+    Auggie keeps no plan on disk. Primary path: read the session token from
+    ``~/.augment/session.json`` and query Augment's billing endpoint with curl — a
+    file read plus an HTTP call, never running a binary, so it works for any user in
+    an all-users scan. If that can't answer (a dead/expired token, unreadable
+    session, no curl) and we're scanning our OWN home, fall back to the user's
+    ``auggie`` CLI. Best-effort, optional field.
     """
     if user_home is None:
         return None
+    plan = _auggie_plan_via_billing_api(user_home)
+    if plan is not None:
+        return plan
+    return _read_auggie_plan_via_cli(user_home)
+
+
+def _auggie_plan_via_billing_api(user_home: Path) -> Optional[str]:
+    """Query Augment's billing endpoint for the plan using the stored session
+    token, or None. See ``get_auggie_subscription_type`` for the overall flow."""
     # Trusted curl only, never PATH (see _trusted_curl).
     curl = _trusted_curl()
     if curl is None:

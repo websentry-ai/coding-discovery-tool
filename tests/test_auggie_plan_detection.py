@@ -439,5 +439,89 @@ class TestIsScanningUsersOwnHome(unittest.TestCase):
         self.assertTrue(_is_scanning_users_own_home(Path.home()))
 
 
+class TestReadOwnRegularFileIdentity(unittest.TestCase):
+    """The opened fd must be the exact file lstat saw, not a redirect swapped in
+    around the open (the Windows-junction case, where O_NOFOLLOW can't help)."""
+
+    def test_fd_identity_mismatch_is_rejected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / ".augment").mkdir()
+            target = home / ".augment" / "session.json"
+            target.write_text("{}", encoding="utf-8")
+            real = os.lstat(str(target))
+            # Simulate the open landing on a DIFFERENT file than lstat saw (as a
+            # junction/symlink swap would): fstat returns a mismatched inode/dev.
+            seq = list(real)
+            seq[1] = real.st_ino + 1  # st_ino
+            seq[2] = real.st_dev + 1  # st_dev
+            with patch(f"{_MOD}.os.fstat", return_value=os.stat_result(seq)):
+                self.assertIsNone(utils._read_own_regular_file(target, home, 1000))
+
+    def test_matching_identity_reads_normally(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / ".augment").mkdir()
+            target = home / ".augment" / "session.json"
+            target.write_text("hello", encoding="utf-8")
+            self.assertEqual(utils._read_own_regular_file(target, home, 1000), "hello")
+
+
+class TestAuggieCliFallback(unittest.TestCase):
+    """When the billing API can't answer and we're scanning our OWN home, fall
+    back to the user's auggie CLI; never run a binary in a cross-user scan."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.home = _write_session(Path(self.tmp))
+        p = patch(f"{_MOD}._trusted_curl", return_value="/usr/bin/curl")
+        self.addCleanup(p.stop)
+        p.start()
+
+    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
+    @patch(f"{_MOD}._which_no_cwd", return_value="/opt/auggie")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_falls_back_to_cli_on_token_failure(self, mock_run, _which, _own):
+        # Dead/expired token -> curl non-zero -> self-scan CLI reports planName.
+        mock_run.side_effect = [
+            _proc(returncode=22),  # curl billing call fails
+            _proc(stdout=json.dumps({"planName": "Business Plan"})),  # auggie CLI
+        ]
+        self.assertEqual(get_auggie_subscription_type(self.home), "Business Plan")
+        cli_argv = mock_run.call_args_list[1].args[0]
+        self.assertEqual(cli_argv, ["/opt/auggie", "account", "status", "--json"])
+
+    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
+    @patch(f"{_MOD}._which_no_cwd", return_value="/opt/auggie")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_api_success_skips_cli(self, mock_run, _which, _own):
+        mock_run.return_value = _proc(stdout=_BILLING_JSON)  # billing OK
+        self.assertEqual(get_auggie_subscription_type(self.home), "Business Plan")
+        self.assertEqual(mock_run.call_count, 1)  # only curl, no CLI
+        _which.assert_not_called()
+
+    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=False)
+    @patch(f"{_MOD}._which_no_cwd")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_no_cli_in_cross_user_scan(self, mock_run, _which, _own):
+        mock_run.return_value = _proc(returncode=22)  # billing fails
+        self.assertIsNone(get_auggie_subscription_type(self.home))
+        _which.assert_not_called()  # binary never even resolved off self-scan
+
+    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
+    @patch(f"{_MOD}._which_no_cwd", return_value="/opt/auggie")
+    @patch(f"{_MOD}.subprocess.run")
+    def test_cli_plan_is_bounded(self, mock_run, _which, _own):
+        mock_run.side_effect = [
+            _proc(returncode=22),
+            _proc(stdout=json.dumps({"planName": "x" * 101})),  # oversized
+        ]
+        self.assertIsNone(get_auggie_subscription_type(self.home))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,7 +89,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -156,7 +156,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -3471,6 +3471,20 @@ def main():
                                     logger.debug(f"    Could not detect Cursor plan for {user_name}")
                             except Exception as e:
                                 logger.warning(f"    Could not detect Cursor plan for {user_name}: {e}")
+
+                        # Auggie stores no plan on disk; read the session token and
+                        # query Augment's billing API (works for every user, no exec).
+                        if tool_name.lower() == "auggie cli":
+                            try:
+                                with time_step("detect_subscriptions", "process"):
+                                    subscription = get_auggie_subscription_type(user_home)
+                                if subscription:
+                                    tool_filtered["plan"] = subscription
+                                    logger.info(f"    Plan: {subscription}")
+                                else:
+                                    logger.debug(f"    Could not detect Auggie plan for {user_name}")
+                            except Exception as e:
+                                logger.warning(f"    Could not detect Auggie plan for {user_name}: {e}")
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)

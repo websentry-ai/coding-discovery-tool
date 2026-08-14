@@ -3455,7 +3455,7 @@ def main():
                                     logger.debug(f"    Claude binary not found for {user_name}, using shell resolution")
                                 plan_diagnostics = []
                                 with time_step("detect_subscriptions", "process"):
-                                    subscription = get_claude_subscription_type(user_name, claude_bin, diagnostics=plan_diagnostics)
+                                    subscription = get_claude_subscription_type(user_name, claude_bin, diagnostics=plan_diagnostics, user_home=user_home)
                                 if subscription:
                                     tool_filtered["plan"] = subscription
                                     logger.info(f"    Plan: {subscription}")

@@ -332,6 +332,13 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
 class TestWhichNoCwd(unittest.TestCase):
     """The PATH resolver (used by the detectors) must never return a CWD plant."""
 
+    def setUp(self):
+        # These cases exercise the CWD logic with which() pointing at paths that
+        # don't exist on the test box; isolate them from the safe-exec-path stat.
+        s = patch(f"{_MOD}._is_safe_exec_path", return_value=True)
+        self.addCleanup(s.stop)
+        s.start()
+
     @patch(f"{_MOD}.shutil.which", return_value=None)
     def test_none_when_not_found(self, _w):
         self.assertIsNone(_which_no_cwd("auggie"))
@@ -397,6 +404,41 @@ class TestWhichNoCwd(unittest.TestCase):
         # The root exemption is only for "cwd is an ancestor"; a binary planted
         # directly in a writable root cwd (e.g. D:\auggie) is still refused.
         self.assertIsNone(_which_no_cwd("auggie"))
+
+
+class TestSafeExecPath(unittest.TestCase):
+    """A resolved binary supplied by a shared-writable dir must not be executed."""
+
+    def _bin_in(self, dir_mode, bin_mode):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        os.chmod(d, dir_mode)
+        b = os.path.join(d, "auggie")
+        open(b, "w").close()
+        os.chmod(b, bin_mode)
+        return b
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership/mode model")
+    def test_user_owned_nonwritable_accepted(self):
+        self.assertTrue(utils._is_safe_exec_path(self._bin_in(0o755, 0o755)))
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership/mode model")
+    def test_world_writable_dir_rejected(self):
+        # Anyone can plant into the directory the binary was found in.
+        self.assertFalse(utils._is_safe_exec_path(self._bin_in(0o777, 0o755)))
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership/mode model")
+    def test_group_writable_binary_rejected(self):
+        self.assertFalse(utils._is_safe_exec_path(self._bin_in(0o755, 0o775)))
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership/mode model")
+    def test_missing_path_fails_closed(self):
+        self.assertFalse(utils._is_safe_exec_path("/nonexistent/auggie"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows has no POSIX mode check")
+    def test_windows_skips_check(self):
+        self.assertTrue(utils._is_safe_exec_path(r"C:\any\auggie"))
 
 
 class TestIsScanningUsersOwnHome(unittest.TestCase):

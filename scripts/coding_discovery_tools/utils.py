@@ -1593,13 +1593,38 @@ def _binary_in_cwd(path: str) -> bool:
         return True
 
 
+def _is_safe_exec_path(path: str) -> bool:
+    """True if a resolved binary at ``path`` is safe to execute during a scan — not
+    one another local account could have planted. POSIX: the binary and the
+    directory it was found in must be owned by the running user or root and not
+    group/world-writable, so a shared-writable PATH entry (e.g. a group-writable
+    ``/usr/local/bin``) can't supply it. Windows has no comparable cheap check, so
+    only the CWD guard applies there. Fails closed on any error."""
+    if os.name == "nt":
+        return True
+    try:
+        euid = os.geteuid()
+        for target in (path, os.path.dirname(path) or os.sep):
+            info = os.stat(target)
+            if info.st_uid not in (euid, 0):
+                return False
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+        return True
+    except OSError:
+        return False
+
+
 def _which_no_cwd(name: str) -> Optional[str]:
-    """``shutil.which`` that rejects a match planted directly in the CWD."""
+    """``shutil.which`` that rejects a match planted in the CWD or supplied by a
+    shared-writable directory another local account could plant into."""
     found = shutil.which(name)
     if not found:
         return None
     found = os.path.abspath(found)
-    return None if _binary_in_cwd(found) else found
+    if _binary_in_cwd(found) or not _is_safe_exec_path(found):
+        return None
+    return found
 
 
 def _is_scanning_users_own_home(user_home: Optional[Path]) -> bool:

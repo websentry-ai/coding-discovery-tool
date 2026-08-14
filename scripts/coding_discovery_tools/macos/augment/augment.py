@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
+from ...jetbrains_naming_helpers import plugin_entries
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from ...macos_extraction_helpers import is_running_as_root
 from ...utils import run_command, _which_no_cwd, _is_scanning_users_own_home
@@ -293,14 +294,17 @@ class MacOSAugmentDetector(BaseToolDetector):
 
         results: List[Dict] = []
         for ide in ides:
-            plugins = ide.get("plugins", [])
-            if not any(_JETBRAINS_PLUGIN_MATCH in str(name).lower() for name in plugins):
+            plugins = plugin_entries(ide)
+            plugin = next(
+                (p for p in plugins if _JETBRAINS_PLUGIN_MATCH in str(p.get("name", "")).lower()), None
+            )
+            if plugin is None:
                 continue
             ide_path = ide.get("config_path") or ide.get("install_path")
             owner_home = self._augment_owner_home_for_path(ide_path, candidate_homes)
             results.append({
                 "name": f"Augment ({ide['name']})",
-                "version": ide.get("version", "unknown"),
+                "version": plugin.get("version") or ide.get("version", "unknown"),
                 "publisher": "Augment Computer",
                 "ide": ide["name"],
                 "install_path": ide_path,

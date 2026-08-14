@@ -67,21 +67,35 @@ class WindowsJunieDetector(BaseToolDetector):
         junie_bin = find_junie_binary_for_user(user_home)
         install_path: Optional[str] = junie_bin
 
+        plugin_version: Optional[str] = None
         if not install_path:
             install_path = self._has_junie_jetbrains_plugin(user_home)
+            if install_path:
+                plugin_version = self._jetbrains_plugin_version(install_path)
 
         if not install_path:
             return None
 
         logger.debug(f"Detected Junie install signal at: {install_path}")
 
-        version = self._get_version_from_config(user_home / self.JUNIE_DIR_NAME)
+        version = plugin_version or self._get_version_from_config(user_home / self.JUNIE_DIR_NAME)
 
         return {
             "name": self.tool_name,
             "version": version or "Unknown",
             "install_path": install_path
         }
+
+    def _jetbrains_plugin_version(self, config_path: str) -> Optional[str]:
+        """Version of the Junie plugin installed under ``config_path``, or None."""
+        try:
+            plugins = WindowsJetBrainsDetector()._get_plugin_details(config_path)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Junie plugin version lookup failed under {config_path}: {e}")
+            return None
+        return next(
+            (p.get("version") for p in plugins if "junie" in str(p.get("name", "")).lower()), None
+        )
 
     def _has_junie_jetbrains_plugin(self, user_home: Path) -> Optional[str]:
         """Return an install_path if the Junie plugin is present in a JetBrains

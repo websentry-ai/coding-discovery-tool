@@ -1656,12 +1656,33 @@ _AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
 _SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
 
 
+def _windows_system_dir() -> Optional[str]:
+    """The real Windows system directory (e.g. ``C:\\Windows\\System32``) from the OS
+    via ``GetSystemDirectoryW``, not the ``%SystemRoot%`` env — so a caller-controlled
+    env can't steer a trusted-path lookup. None on failure. Windows only."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        k32.GetSystemDirectoryW.restype = wintypes.UINT
+        buf = ctypes.create_unicode_buffer(260)
+        n = k32.GetSystemDirectoryW(buf, 260)
+        if not n or n >= 260:
+            return None
+        return buf.value
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _trusted_curl() -> Optional[str]:
     """Absolute path to the system curl (trusted OS locations only, never PATH),
     or None. Keeps a privileged scan from handing the token to a planted curl."""
     if platform.system() == "Windows":
-        root = os.environ.get("SystemRoot") or r"C:\Windows"
-        candidates = [os.path.join(root, "System32", "curl.exe")]
+        sysdir = _windows_system_dir()
+        if not sysdir:
+            return None
+        candidates = [os.path.join(sysdir, "curl.exe")]
     else:
         candidates = ["/usr/bin/curl", "/bin/curl"]
     for c in candidates:

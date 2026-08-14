@@ -441,6 +441,29 @@ class TestSafeExecPath(unittest.TestCase):
         self.assertTrue(utils._is_safe_exec_path(r"C:\any\auggie"))
 
 
+class TestTrustedCurl(unittest.TestCase):
+    """curl is pinned to the OS system dir, never %SystemRoot% or PATH."""
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._windows_system_dir", return_value=r"C:\Windows\System32")
+    @patch(f"{_MOD}.os.path.isfile", return_value=True)
+    def test_windows_pins_to_system_dir(self, _isf, _sd, _sys):
+        # Resolved from GetSystemDirectoryW, not the env, so %SystemRoot% can't steer it.
+        self.assertEqual(utils._trusted_curl(),
+                         os.path.join(r"C:\Windows\System32", "curl.exe"))
+
+    @patch(f"{_MOD}.platform.system", return_value="Windows")
+    @patch(f"{_MOD}._windows_system_dir", return_value=None)
+    @patch(f"{_MOD}.os.path.isfile", return_value=True)
+    def test_windows_none_when_system_dir_unknown(self, _isf, _sd, _sys):
+        self.assertIsNone(utils._trusted_curl())
+
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.path.isfile", side_effect=lambda p: p == "/usr/bin/curl")
+    def test_posix_uses_fixed_paths(self, _isf, _sys):
+        self.assertEqual(utils._trusted_curl(), "/usr/bin/curl")
+
+
 class TestIsScanningUsersOwnHome(unittest.TestCase):
     """The shared own-home gate used by both detectors' PATH fallback."""
 

@@ -1741,12 +1741,16 @@ def _windows_final_path(fd: int) -> Optional[str]:
         return None
 
 
-def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
-    """Read up to ``max_bytes`` of ``path`` as a regular file inside ``owner_ref``'s
-    home, or None. Hardened for an all-users scan: refuses redirects and non-regular
-    files, and re-checks the opened fd. Cross-user reads are allowed on both
-    platforms — POSIX verifies the fd's own owner, Windows verifies the handle's
-    real path stays inside the home (ownership is unreliable there)."""
+def read_contained_text(path: Path, root: Path,
+                        max_bytes: int) -> Optional[Tuple[str, bool]]:
+    """Securely read up to ``max_bytes`` of UTF-8 text from a file that belongs to
+    ``root``, returning ``(text, truncated)`` or None. The shared guard for reading
+    another user's file in a privileged all-users scan: refuse a redirect at the file
+    or its parent, open with ``O_NOFOLLOW``, re-check the opened fd against a pre-open
+    ``lstat`` (so a symlink/junction swapped in around the open is caught), then
+    require the file to belong to ``root`` — POSIX by the fd's own owner, Windows by
+    the handle's real path staying inside ``root`` (ownership is unreliable there).
+    ``truncated`` is True when the file is larger than ``max_bytes``."""
     # Refuse a redirect at the file or its parent dir, and capture the file's own
     # identity — lstat never follows — to compare against the opened fd below.
     if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
@@ -1771,34 +1775,42 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
         # the open (Windows has no effective O_NOFOLLOW for junctions).
         if (st.st_ino, st.st_dev) != (lst.st_ino, lst.st_dev):
             return None
-        # The file must belong to the home's owner. A pathname re-check (realpath,
-        # stat) can't guarantee this: a parent junction can be swapped back before
-        # it runs, so only the fd is trusted.
+        # The file must belong to ``root``. A pathname re-check (realpath, stat)
+        # can't guarantee this: a parent junction can be swapped back before it
+        # runs, so only the fd is trusted.
         if platform.system() == "Windows":
             # Windows ownership is unreliable (elevated writes are Administrators-
-            # owned, not the user's), so verify the handle's REAL path instead:
-            # GetFinalPathNameByHandle resolves every junction/symlink from the open
-            # handle, so a redirect swapped in around the open resolves to its true
-            # target and is refused when it falls outside the owner's home.
+            # owned), so verify the handle's REAL path instead: GetFinalPathNameBy-
+            # Handle resolves every junction/symlink from the open handle, so a
+            # redirect resolves to its true target and is refused outside ``root``.
             final = _windows_final_path(fd)
             if final is None:
                 return None
             real = os.path.normcase(_strip_extended_prefix(final))
-            home = os.path.normcase(_strip_extended_prefix(os.path.realpath(str(owner_ref))))
-            if not (real == home or real.startswith(home.rstrip("\\") + "\\")):
+            base = os.path.normcase(_strip_extended_prefix(os.path.realpath(str(root))))
+            if not (real == base or real.startswith(base.rstrip("\\") + "\\")):
                 return None
         else:
             # POSIX: the fd's own owner can't be forged by a path swap.
             try:
-                if st.st_uid != os.stat(str(owner_ref)).st_uid:
+                if st.st_uid != os.stat(str(root)).st_uid:
                     return None
             except OSError:
                 return None
-        return os.read(fd, max_bytes).decode("utf-8", "replace")
+        data = os.read(fd, max_bytes + 1)
+        return data[:max_bytes].decode("utf-8", "replace"), len(data) > max_bytes
     except OSError:
         return None
     finally:
         os.close(fd)
+
+
+def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
+    """Read up to ``max_bytes`` of ``path`` as a regular file belonging to
+    ``owner_ref``, or None — a thin wrapper over ``read_contained_text`` for callers
+    (the Auggie session read) that only need the content."""
+    result = read_contained_text(path, owner_ref, max_bytes)
+    return result[0] if result is not None else None
 
 
 def _augment_tenant_host(url: str) -> Optional[str]:

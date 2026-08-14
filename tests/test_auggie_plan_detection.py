@@ -511,6 +511,46 @@ class TestIsScanningUsersOwnHome(unittest.TestCase):
         self.assertTrue(_is_scanning_users_own_home(Path.home()))
 
 
+class TestReadContainedText(unittest.TestCase):
+    """The shared fd-based read used by the Auggie, Cowork, and plugin readers."""
+
+    def _home_with(self, text):
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        (d / "sub").mkdir()
+        f = d / "sub" / "SKILL.md"
+        f.write_text(text, encoding="utf-8")
+        return d, f
+
+    def test_returns_text_and_not_truncated(self):
+        d, f = self._home_with("hello world")
+        self.assertEqual(utils.read_contained_text(f, d, 1000), ("hello world", False))
+
+    def test_truncation_flag_and_cap(self):
+        d, f = self._home_with("abcdefghij")
+        self.assertEqual(utils.read_contained_text(f, d, 4), ("abcd", True))
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name != "nt", "POSIX symlink")
+    def test_symlinked_file_refused(self):
+        d, f = self._home_with("x")
+        link = d / "sub" / "link.md"
+        os.symlink(str(f), str(link))
+        self.assertIsNone(utils.read_contained_text(link, d, 1000))
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX ownership")
+    @patch(f"{_MOD}.platform.system", return_value="Linux")
+    @patch(f"{_MOD}.os.fstat")
+    def test_foreign_owner_refused(self, mock_fstat, _sys):
+        d, f = self._home_with("x")
+        real = os.stat(str(f))
+        mock_fstat.return_value = os.stat_result(
+            (real.st_mode, real.st_ino, real.st_dev, real.st_nlink,
+             real.st_uid + 4242, real.st_gid, real.st_size,
+             int(real.st_atime), int(real.st_mtime), int(real.st_ctime)))
+        self.assertIsNone(utils.read_contained_text(f, d, 1000))
+
+
 class TestReadOwnRegularFileIdentity(unittest.TestCase):
     """The opened fd must be the exact file lstat saw, not a redirect swapped in
     around the open (the Windows-junction case, where O_NOFOLLOW can't help)."""

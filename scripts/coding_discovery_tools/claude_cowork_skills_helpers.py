@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE
+from .utils import read_contained_text
 
 logger = logging.getLogger(__name__)
 
@@ -35,21 +36,12 @@ def _get_file_metadata(md_path: Path) -> Dict:
     }
 
 
-def _read_file_content(md_path: Path, file_size: int) -> Tuple[str, bool]:
-    """Read file contents, truncating to MAX_CONFIG_FILE_SIZE if necessary."""
-    if file_size > MAX_CONFIG_FILE_SIZE:
-        logger.warning(
-            f"Cowork skill file {md_path} exceeds size limit "
-            f"({file_size} > {MAX_CONFIG_FILE_SIZE} bytes). Truncating."
-        )
-        try:
-            with md_path.open("rb") as fh:
-                chunk = fh.read(MAX_CONFIG_FILE_SIZE)
-            return chunk.decode("utf-8", errors="replace"), True
-        except Exception as e:
-            logger.warning(f"Error reading truncated Cowork skill {md_path}: {e}")
-            return "", True
-    return md_path.read_text(encoding="utf-8", errors="replace"), False
+def _read_file_content(md_path: Path, root: Path) -> Optional[Tuple[str, bool]]:
+    """Securely read the SKILL.md (truncating past MAX_CONFIG_FILE_SIZE), returning
+    (content, truncated) or None if it fails the cross-user read guard — the file is
+    read only if it belongs to ``root``, so a planted redirect into another user's
+    tree is refused (this runs under a privileged all-users scan)."""
+    return read_contained_text(md_path, root, MAX_CONFIG_FILE_SIZE)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -239,7 +231,10 @@ def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> 
             return None
 
         metadata = _get_file_metadata(md_path)
-        content, truncated = _read_file_content(md_path, metadata["size"])
+        read = _read_file_content(md_path, user_home or Path.home())
+        if read is None:
+            return None  # redirect / cross-user / unreadable -> skip the skill
+        content, truncated = read
         frontmatter = parse_skill_frontmatter(content) if content else {}
         skill_name = extract_skill_name(md_path, content, frontmatter).strip()
 

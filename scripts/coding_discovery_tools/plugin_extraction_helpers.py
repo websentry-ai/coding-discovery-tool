@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .utils import read_contained_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -535,10 +537,13 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                 try:
                     st = skill_file.stat()
                     file_size = st.st_size
-                    raw = skill_file.read_text(encoding="utf-8", errors="replace")
-                    raw_bytes = raw.encode("utf-8")
-                    truncated = len(raw_bytes) > MAX_SKILL_FILE_SIZE
-                    content = raw_bytes[:MAX_SKILL_FILE_SIZE].decode("utf-8", errors="ignore") if truncated else raw
+                    # Read only if the file really lives inside the plugin's install
+                    # dir — a planted redirect into another user's tree is refused
+                    # (this runs under a privileged all-users scan).
+                    read = read_contained_text(skill_file, Path(install_path), MAX_SKILL_FILE_SIZE)
+                    if read is None:
+                        continue
+                    content, truncated = read
                     last_modified = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
 
                     skills.append({

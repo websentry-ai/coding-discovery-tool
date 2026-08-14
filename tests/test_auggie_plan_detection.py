@@ -100,11 +100,6 @@ class TestReadAuggieSession(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         self.home = Path(self.tmp)
-        # These exercise read/parse mechanics on a tmpdir; on Windows the read is
-        # gated to the scanning user's own home, so treat the tmpdir as a self-scan.
-        own = patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
-        self.addCleanup(own.stop)
-        own.start()
 
     def test_valid_session_returns_base_and_token(self):
         _write_session(self.home)
@@ -201,17 +196,22 @@ class TestReadAuggieSession(unittest.TestCase):
         self.assertIsNone(_read_auggie_session(self.home))
 
     @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=False)
-    def test_windows_cross_user_read_refused(self, _own, _sys):
-        # Windows has no cheap fd-owner check, so a cross-user (not-own-home) read
-        # is refused outright — the junction swap-back can't be caught by pathname.
+    @patch(f"{_MOD}.os.path.realpath", return_value=r"C:\Users\alice")
+    @patch(f"{_MOD}._windows_final_path",
+           return_value=r"C:\Users\victim\.augment\session.json")
+    def test_windows_redirect_outside_home_refused(self, _final, _rp, _sys):
+        # A junction makes the fd's REAL path resolve outside the owner's home;
+        # GetFinalPathNameByHandle exposes the true target and it's refused.
         _write_session(self.home)
         self.assertIsNone(_read_auggie_session(self.home))
 
     @patch(f"{_MOD}.platform.system", return_value="Windows")
-    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
-    def test_windows_own_home_read_allowed(self, _own, _sys):
-        # Windows self-scan (our own home) reads normally.
+    @patch(f"{_MOD}.os.path.realpath", return_value=r"C:\Users\alice")
+    @patch(f"{_MOD}._windows_final_path",
+           return_value=r"C:\Users\alice\.augment\session.json")
+    def test_windows_contained_final_path_allowed(self, _final, _rp, _sys):
+        # The fd's real path stays inside the home (cross-user works on Windows now
+        # — it's location, not ownership, that's verified), so the read proceeds.
         _write_session(self.home)
         self.assertEqual(_read_auggie_session(self.home), (_TENANT, _TOKEN))
 
@@ -228,16 +228,6 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         p = patch(f"{_MOD}._trusted_curl", return_value=self.curl)
         self.addCleanup(p.stop)
         p.start()
-        # On Windows the session read is gated to the scanning user's own home;
-        # treat the tmpdir as a self-scan so these API/parse tests run there too.
-        own = patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
-        self.addCleanup(own.stop)
-        own.start()
-        # Isolate the billing-API path: keep the CLI fallback inert (no binary), so
-        # a self-scan tmpdir doesn't invoke the real auggie on the test machine.
-        w = patch(f"{_MOD}._which_no_cwd", return_value=None)
-        self.addCleanup(w.stop)
-        w.start()
 
     def test_none_home_returns_none(self):
         self.assertIsNone(get_auggie_subscription_type(None))
@@ -259,12 +249,11 @@ class TestGetAuggieSubscriptionType(unittest.TestCase):
         mock_run.return_value = _proc(stdout=_BILLING_JSON)
         self.assertEqual(get_auggie_subscription_type(self.home), "Business Plan")
 
-    @unittest.skipUnless(hasattr(os, "geteuid"), "cross-user read is POSIX-only")
     @patch(f"{_MOD}.subprocess.run")
     def test_reads_any_users_home_cross_user(self, mock_run):
-        # POSIX: a home that is NOT the scanning user's still resolves, because it's
-        # a file read (fd-owner verified) + HTTP call, not an execution. On Windows
-        # this is refused (no cheap fd-owner check) — covered separately.
+        # A home that is NOT the scanning user's still resolves — it's a guarded
+        # file read + HTTP call, not an execution. POSIX verifies the fd's owner,
+        # Windows verifies the fd's real path stays in the home.
         import tempfile
         with tempfile.TemporaryDirectory() as other:
             _write_session(Path(other), token="b" * 64)
@@ -477,8 +466,7 @@ class TestReadOwnRegularFileIdentity(unittest.TestCase):
             with patch(f"{_MOD}.os.fstat", return_value=os.stat_result(seq)):
                 self.assertIsNone(utils._read_own_regular_file(target, home, 1000))
 
-    @patch(f"{_MOD}._is_scanning_users_own_home", return_value=True)
-    def test_matching_identity_reads_normally(self, _own):
+    def test_matching_identity_reads_normally(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)

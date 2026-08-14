@@ -1658,13 +1658,49 @@ def _is_symlink_or_reparse(p: Path) -> bool:
     return bool(getattr(st, "st_file_attributes", 0) & reparse)
 
 
+def _strip_extended_prefix(p: str) -> str:
+    """Drop a Windows extended-length prefix (``\\\\?\\``, ``\\??\\``, ``\\\\?\\UNC\\``)
+    so a ``GetFinalPathNameByHandle`` result compares against a plain ``realpath``."""
+    if p.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + p[len("\\\\?\\UNC\\"):]
+    for pre in ("\\\\?\\", "\\??\\"):
+        if p.startswith(pre):
+            return p[len(pre):]
+    return p
+
+
+def _windows_final_path(fd: int) -> Optional[str]:
+    """The real filesystem path an open fd points to (junctions/symlinks resolved),
+    read from the handle so a later path swap can't change it. None on any failure.
+    Windows only; a privileged scan uses this instead of an owner check because
+    Windows file ownership is unreliable (elevated writes are owned by the
+    Administrators group, not the user)."""
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR,
+                                                  wintypes.DWORD, wintypes.DWORD]
+        k32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+        handle = msvcrt.get_osfhandle(fd)
+        needed = k32.GetFinalPathNameByHandleW(handle, None, 0, 0)  # NORMALIZED|DOS
+        if not needed:
+            return None
+        buf = ctypes.create_unicode_buffer(needed)
+        if not k32.GetFinalPathNameByHandleW(handle, buf, needed, 0):
+            return None
+        return buf.value
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
-    """Read up to ``max_bytes`` of ``path`` as a regular file owned by
-    ``owner_ref``'s owner, or None. Hardened for an all-users scan: refuses
-    redirects and non-regular files, and re-checks the opened fd. A cross-user read
-    is allowed on POSIX (the fd's own owner is verified) but not on Windows, where
-    the fd's owner can't be checked cheaply — there it reads only the scanning
-    user's own home."""
+    """Read up to ``max_bytes`` of ``path`` as a regular file inside ``owner_ref``'s
+    home, or None. Hardened for an all-users scan: refuses redirects and non-regular
+    files, and re-checks the opened fd. Cross-user reads are allowed on both
+    platforms — POSIX verifies the fd's own owner, Windows verifies the handle's
+    real path stays inside the home (ownership is unreliable there)."""
     # Refuse a redirect at the file or its parent dir, and capture the file's own
     # identity — lstat never follows — to compare against the opened fd below.
     if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
@@ -1693,9 +1729,17 @@ def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optio
         # stat) can't guarantee this: a parent junction can be swapped back before
         # it runs, so only the fd is trusted.
         if platform.system() == "Windows":
-            # No cheap fd-owner check on Windows, so read only our OWN home; a
-            # cross-user Windows plan lookup degrades rather than risk a redirect.
-            if not _is_scanning_users_own_home(Path(owner_ref)):
+            # Windows ownership is unreliable (elevated writes are Administrators-
+            # owned, not the user's), so verify the handle's REAL path instead:
+            # GetFinalPathNameByHandle resolves every junction/symlink from the open
+            # handle, so a redirect swapped in around the open resolves to its true
+            # target and is refused when it falls outside the owner's home.
+            final = _windows_final_path(fd)
+            if final is None:
+                return None
+            real = os.path.normcase(_strip_extended_prefix(final))
+            home = os.path.normcase(_strip_extended_prefix(os.path.realpath(str(owner_ref))))
+            if not (real == home or real.startswith(home.rstrip("\\") + "\\")):
                 return None
         else:
             # POSIX: the fd's own owner can't be forged by a path swap.

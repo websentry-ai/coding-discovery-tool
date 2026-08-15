@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import platform
+import re
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -23,6 +24,9 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Junie CLI version directories look like "1.4.2" / "v2025.1".
+_JUNIE_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*$")
 
 
 def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
@@ -393,6 +397,21 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     }
 
 
+def junie_version_from_binary(binary_path: str) -> Optional[str]:
+    """Read the Junie CLI version from its versioned install path.
+
+    The CLI installs to ``~/.local/share/junie/versions/<version>/junie``; the
+    ``~/.local/bin/junie`` shim is resolved first so a symlinked install also
+    yields its version. None when the path carries no version-shaped component.
+    """
+    try:
+        parts = Path(binary_path).resolve().parts
+        version = parts[parts.index("versions") + 1]
+    except (OSError, ValueError, IndexError):
+        return None
+    return version if _JUNIE_VERSION_DIR.match(version) else None
+
+
 def _junie_version_from_config(user_home: Path) -> Optional[str]:
     """Read the Junie version from ``~/.junie/config.json`` (or settings.json).
 
@@ -435,7 +454,9 @@ def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
     if junie_bin:
         return {
             "name": detector.tool_name,
-            "version": _junie_version_from_config(user_home) or "Unknown",
+            "version": junie_version_from_binary(junie_bin)
+            or _junie_version_from_config(user_home)
+            or "Unknown",
             "install_path": junie_bin,
         }
 

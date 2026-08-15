@@ -9,7 +9,7 @@ from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
 from ...linux_extraction_helpers import get_linux_user_homes
-from ...user_tool_detector import find_junie_binary_for_user
+from ...user_tool_detector import find_junie_binary_for_user, junie_version_from_binary
 from ..jetbrains.jetbrains import LinuxJetBrainsDetector
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,11 @@ class LinuxJunieDetector(BaseToolDetector):
 
         logger.debug(f"Detected Junie install signal at: {install_path}")
 
-        version = plugin_version or self._get_version_from_config(user_home / self.JUNIE_DIR_NAME)
+        version = (
+            plugin_version
+            or (junie_version_from_binary(junie_bin) if junie_bin else None)
+            or self._get_version_from_config(user_home / self.JUNIE_DIR_NAME)
+        )
 
         return {
             "name": self.tool_name,

@@ -106,14 +106,14 @@ class TestMacOSJunieDetector(unittest.TestCase):
     def test_residue_junie_dir_only_not_detected(self, mock_home, *_):
         mock_home.return_value = self.home
         (self.home / ".junie").mkdir()
-        with patch.object(MacOSJunieDetector, "_has_junie_jetbrains_plugin", return_value=None):
+        with patch.object(MacOSJunieDetector, "_junie_jetbrains_surfaces", return_value=[]):
             self.assertIsNone(MacOSJunieDetector().detect())
 
     @patch("scripts.coding_discovery_tools.macos.junie.junie.is_running_as_root", return_value=False)
     @patch("scripts.coding_discovery_tools.macos.junie.junie.Path.home")
     def test_returns_none_when_nothing_present(self, mock_home, _):
         mock_home.return_value = self.home
-        with patch.object(MacOSJunieDetector, "_has_junie_jetbrains_plugin", return_value=None):
+        with patch.object(MacOSJunieDetector, "_junie_jetbrains_surfaces", return_value=[]):
             self.assertIsNone(MacOSJunieDetector().detect())
 
     # --- real install signals: detected -----------------------------------
@@ -128,8 +128,8 @@ class TestMacOSJunieDetector(unittest.TestCase):
         junie_bin = _make_exec(self.home / ".local" / "bin" / "junie")
         result = MacOSJunieDetector().detect()
         self.assertIsNotNone(result)
-        self.assertEqual(result["name"], "Junie")
-        self.assertEqual(result["install_path"], str(junie_bin))
+        self.assertEqual(result[0]["name"], "Junie")
+        self.assertEqual(result[0]["install_path"], str(junie_bin))
 
     @patch(f"{_UTD}.run_command", return_value=None)
     @patch(f"{_UTD}.platform.system", return_value="Darwin")
@@ -139,10 +139,10 @@ class TestMacOSJunieDetector(unittest.TestCase):
     def test_detects_when_jetbrains_plugin_present(self, mock_home, *_):
         mock_home.return_value = self.home
         plugin_path = "/Users/test/Library/Application Support/JetBrains/PyCharm2024.1"
-        with patch.object(MacOSJunieDetector, "_has_junie_jetbrains_plugin", return_value=plugin_path):
+        with patch.object(MacOSJunieDetector, "_junie_jetbrains_surfaces", return_value=[("PyCharm", plugin_path, None)]):
             result = MacOSJunieDetector().detect()
         self.assertIsNotNone(result)
-        self.assertEqual(result["install_path"], plugin_path)
+        self.assertEqual(result[0]["install_path"], plugin_path)
 
     @patch(f"{_UTD}.run_command", return_value=None)
     @patch(f"{_UTD}.platform.system", return_value="Darwin")
@@ -155,7 +155,7 @@ class TestMacOSJunieDetector(unittest.TestCase):
         junie_dir = self.home / ".junie"
         junie_dir.mkdir()
         (junie_dir / "config.json").write_text(json.dumps({"version": "1.2.3"}))
-        self.assertEqual(MacOSJunieDetector().detect()["version"], "1.2.3")
+        self.assertEqual(MacOSJunieDetector().detect()[0]["version"], "1.2.3")
 
     def test_jetbrains_plugin_helper_matches_junie(self):
         """The plugin helper matches a real on-disk JetBrains IDE that has a
@@ -169,14 +169,14 @@ class TestMacOSJunieDetector(unittest.TestCase):
         _write_jetbrains_plugin(ide_dir, "github-copilot", "GitHub Copilot")
         # Junie-only present: matched, returns the scoped config path.
         _write_jetbrains_plugin(ide_dir, "intellij-junie", "Junie")
-        self.assertEqual(det._has_junie_jetbrains_plugin(self.home), str(ide_dir))
+        self.assertEqual([sf[1] for sf in det._junie_jetbrains_surfaces(self.home)], [str(ide_dir)])
 
     def test_jetbrains_plugin_helper_no_junie_returns_none(self):
         """A Copilot-only IDE (no Junie plugin) yields None."""
         det = MacOSJunieDetector()
         ide_dir = _macos_jetbrains_ide_dir(self.home, "PyCharm2024.1")
         _write_jetbrains_plugin(ide_dir, "github-copilot", "GitHub Copilot")
-        self.assertIsNone(det._has_junie_jetbrains_plugin(self.home))
+        self.assertEqual(det._junie_jetbrains_surfaces(self.home), [])
 
     @patch("scripts.coding_discovery_tools.macos.jetbrains.jetbrains.is_running_as_root", return_value=False)
     @patch("scripts.coding_discovery_tools.macos.jetbrains.jetbrains.Path.home")
@@ -210,9 +210,9 @@ class TestMacOSJunieDetector(unittest.TestCase):
 
         det = MacOSJunieDetector()
         # user B must NOT be credited with user A's Junie plugin.
-        self.assertIsNone(det._has_junie_jetbrains_plugin(user_b))
+        self.assertEqual(det._junie_jetbrains_surfaces(user_b), [])
         # user A is still correctly detected (no regression of the happy path).
-        self.assertEqual(det._has_junie_jetbrains_plugin(user_a), str(ide_a))
+        self.assertEqual([sf[1] for sf in det._junie_jetbrains_surfaces(user_a)], [str(ide_a)])
 
 
 class TestMacOSJunieRulesExtractor(unittest.TestCase):
@@ -281,7 +281,7 @@ class TestWindowsJunieDetector(unittest.TestCase):
 
         with patch("scripts.coding_discovery_tools.windows.junie.junie.scan_windows_user_directories", side_effect=fake_scan), \
              patch(f"{_UTD}.platform.system", return_value="Windows"), \
-             patch.object(WindowsJunieDetector, "_has_junie_jetbrains_plugin", return_value=None):
+             patch.object(WindowsJunieDetector, "_junie_jetbrains_surfaces", return_value=[]):
             result = WindowsJunieDetector().detect()
 
         self.assertIsNone(result)
@@ -300,8 +300,8 @@ class TestWindowsJunieDetector(unittest.TestCase):
             result = WindowsJunieDetector().detect()
 
         self.assertIsNotNone(result)
-        self.assertEqual(result["name"], "Junie")
-        self.assertEqual(result["install_path"], str(junie_bin))
+        self.assertEqual(result[0]["name"], "Junie")
+        self.assertEqual(result[0]["install_path"], str(junie_bin))
 
     def test_detect_via_scan_finds_user_with_plugin(self):
         """A Junie JetBrains plugin (no binary) -> detected."""
@@ -310,11 +310,11 @@ class TestWindowsJunieDetector(unittest.TestCase):
 
         with patch("scripts.coding_discovery_tools.windows.junie.junie.scan_windows_user_directories", side_effect=fake_scan), \
              patch(f"{_UTD}.platform.system", return_value="Windows"), \
-             patch.object(WindowsJunieDetector, "_has_junie_jetbrains_plugin", return_value="C:\\cfg\\PyCharm"):
+             patch.object(WindowsJunieDetector, "_junie_jetbrains_surfaces", return_value=[("PyCharm", "C:\\cfg\\PyCharm", None)]):
             result = WindowsJunieDetector().detect()
 
         self.assertIsNotNone(result)
-        self.assertEqual(result["install_path"], "C:\\cfg\\PyCharm")
+        self.assertEqual(result[0]["install_path"], "C:\\cfg\\PyCharm")
 
     def test_jetbrains_plugin_helper_matches_junie(self):
         """The helper matches a real on-disk JetBrains IDE with a 'Junie' plugin
@@ -327,14 +327,14 @@ class TestWindowsJunieDetector(unittest.TestCase):
         ide_dir = _windows_jetbrains_ide_dir(self.home, "PyCharm2024.1")
         _write_jetbrains_plugin(ide_dir, "github-copilot", "GitHub Copilot")
         _write_jetbrains_plugin(ide_dir, "intellij-junie", "Junie")
-        self.assertEqual(det._has_junie_jetbrains_plugin(self.home), str(ide_dir))
+        self.assertEqual([sf[1] for sf in det._junie_jetbrains_surfaces(self.home)], [str(ide_dir)])
 
     def test_jetbrains_plugin_helper_no_junie_returns_none(self):
         """A Copilot-only IDE (no Junie plugin) yields None."""
         det = WindowsJunieDetector()
         ide_dir = _windows_jetbrains_ide_dir(self.home, "PyCharm2024.1")
         _write_jetbrains_plugin(ide_dir, "github-copilot", "GitHub Copilot")
-        self.assertIsNone(det._has_junie_jetbrains_plugin(self.home))
+        self.assertEqual(det._junie_jetbrains_surfaces(self.home), [])
 
     def test_cross_user_scan_not_misattributed(self):
         """REGRESSION (cross-user FP): user A has the Junie plugin, user B does
@@ -352,8 +352,8 @@ class TestWindowsJunieDetector(unittest.TestCase):
         _write_jetbrains_plugin(ide_b, "github-copilot", "GitHub Copilot")
 
         det = WindowsJunieDetector()
-        self.assertIsNone(det._has_junie_jetbrains_plugin(user_b))
-        self.assertEqual(det._has_junie_jetbrains_plugin(user_a), str(ide_a))
+        self.assertEqual(det._junie_jetbrains_surfaces(user_b), [])
+        self.assertEqual([sf[1] for sf in det._junie_jetbrains_surfaces(user_a)], [str(ide_a)])
 
 
 class TestWindowsJunieRulesExtractor(unittest.TestCase):

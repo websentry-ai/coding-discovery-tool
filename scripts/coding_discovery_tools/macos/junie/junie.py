@@ -4,7 +4,7 @@ Junie detection for macOS.
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
@@ -26,84 +26,70 @@ class MacOSJunieDetector(BaseToolDetector):
         """Return the name of the tool being detected."""
         return "Junie"
 
-    def detect(self) -> Optional[Dict]:
+    def detect(self) -> Optional[List[Dict]]:
         """
-        Detect Junie installation on macOS.
+        Detect Junie installations on macOS.
         """
         if is_running_as_root():
+            results: List[Dict] = []
             users_dir = Path("/Users")
             if users_dir.exists():
                 for user_dir in users_dir.iterdir():
                     if user_dir.is_dir() and not user_dir.name.startswith('.'):
                         try:
-                            result = self._detect_junie_for_user(user_dir)
-                            if result:
-                                return result
+                            results.extend(self._detect_junie_for_user(user_dir))
                         except (PermissionError, OSError) as e:
                             logger.debug(f"Skipping user directory {user_dir}: {e}")
                             continue
-            return None
-        else:
-            return self._detect_junie_for_user(Path.home())
+            return results or None
+        return self._detect_junie_for_user(Path.home()) or None
 
     def get_version(self) -> Optional[str]:
         """
         Extract Junie version.
         """
-        result = self.detect()
-        if result:
-            return result.get('version')
-        return None
+        results = self.detect()
+        return results[0].get('version') if results else None
 
-    def _detect_junie_for_user(self, user_home: Path) -> Optional[Dict]:
+    def _detect_junie_for_user(self, user_home: Path) -> List[Dict]:
         """
-        Detect Junie installation for a specific user.
+        Detect every Junie surface for a specific user: the CLI and each JetBrains
+        IDE carrying the plugin, one row each (mirroring Augment / GitHub Copilot).
 
-        Gates on a real install signal — the Junie CLI binary OR the Junie
-        plugin in a JetBrains IDE — not on the ``~/.junie`` directory, which is
-        user-authored guidelines residue that survives uninstall. The plugin's own
-        version wins; ``~/.junie`` remains the fallback version source.
+        Gates on a real install signal — the CLI binary or the plugin — not on the
+        ``~/.junie`` directory, which is user-authored guidelines residue that
+        survives uninstall. Each surface reports its own version; ``~/.junie``
+        remains the fallback source.
         """
+        rows: List[Dict] = []
+        config_dir = str(user_home / self.JUNIE_DIR_NAME)
+        config_version = self._get_version_from_config(user_home / self.JUNIE_DIR_NAME)
+
         junie_bin = find_junie_binary_for_user(user_home)
-        install_path: Optional[str] = junie_bin
+        if junie_bin:
+            logger.debug(f"Detected Junie CLI at: {junie_bin}")
+            rows.append({
+                "name": self.tool_name,
+                "version": junie_version_from_binary(junie_bin) or config_version or "Unknown",
+                "install_path": junie_bin,
+                "_config_path": config_dir,
+            })
 
-        plugin_version: Optional[str] = None
-        if not install_path:
-            install_path = self._has_junie_jetbrains_plugin(user_home)
-            if install_path:
-                plugin_version = self._jetbrains_plugin_version(install_path)
+        for ide_name, ide_config_path, plugin_version in self._junie_jetbrains_surfaces(user_home):
+            logger.debug(f"Detected Junie plugin in {ide_name} at: {ide_config_path}")
+            rows.append({
+                "name": f"{self.tool_name} ({ide_name})",
+                "version": plugin_version or config_version or "Unknown",
+                "ide": ide_name,
+                "install_path": ide_config_path,
+                "_config_path": config_dir,
+            })
 
-        if not install_path:
-            return None
+        return rows
 
-        logger.debug(f"Detected Junie install signal at: {install_path}")
-
-        version = (
-            plugin_version
-            or (junie_version_from_binary(junie_bin) if junie_bin else None)
-            or self._get_version_from_config(user_home / self.JUNIE_DIR_NAME)
-        )
-
-        return {
-            "name": self.tool_name,
-            "version": version or "Unknown",
-            "install_path": install_path
-        }
-
-    def _jetbrains_plugin_version(self, config_path: str) -> Optional[str]:
-        """Version of the Junie plugin installed under ``config_path``, or None."""
-        try:
-            plugins = MacOSJetBrainsDetector()._get_plugin_details(config_path)
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Junie plugin version lookup failed under {config_path}: {e}")
-            return None
-        return next(
-            (p.get("version") for p in plugins if "junie" in str(p.get("name", "")).lower()), None
-        )
-
-    def _has_junie_jetbrains_plugin(self, user_home: Path) -> Optional[str]:
-        """Return an install_path if the Junie plugin is present in a JetBrains
-        IDE belonging to ``user_home``, else None.
+    def _junie_jetbrains_surfaces(self, user_home: Path) -> List[Tuple[str, str, Optional[str]]]:
+        """Return ``(ide_name, config_path, plugin_version)`` for every JetBrains IDE
+        belonging to ``user_home`` that carries the Junie plugin.
 
         Scoping matters: ``MacOSJetBrainsDetector.detect()`` ignores ``user_home``
         and, under root, scans every user under ``/Users``. Calling it here would
@@ -113,26 +99,28 @@ class MacOSJunieDetector(BaseToolDetector):
         with plugins. The JetBrains detector itself is never modified — only its
         existing per-user methods are reused read-only.
         """
+        surfaces: List[Tuple[str, str, Optional[str]]] = []
         try:
             jetbrains_detector = MacOSJetBrainsDetector()
             scoped_ides = jetbrains_detector._scan_jetbrains_config_dir(user_home)
         except (PermissionError, OSError) as e:
             logger.debug(f"JetBrains scan for Junie failed under {user_home}: {e}")
-            return None
+            return surfaces
 
         for ide in scoped_ides:
             config_path = ide.get("config_path")
             if not self._path_under_user_home(config_path, user_home):
                 continue
             try:
-                plugins = jetbrains_detector._get_plugins(config_path)
+                plugins = jetbrains_detector._get_plugin_details(config_path)
             except (PermissionError, OSError) as e:
                 logger.debug(f"Plugin scan for Junie failed under {config_path}: {e}")
                 continue
-            for plugin_name in plugins:
-                if "junie" in plugin_name.lower():
-                    return config_path
-        return None
+            for plugin in plugins:
+                if "junie" in str(plugin.get("name", "")).lower():
+                    surfaces.append((ide["display_name"], config_path, plugin.get("version")))
+                    break
+        return surfaces
 
     @staticmethod
     def _path_under_user_home(config_path: Optional[str], user_home: Path) -> bool:

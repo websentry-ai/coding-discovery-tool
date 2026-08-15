@@ -102,7 +102,7 @@ def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional
     if claude_bin:
         return {
             "name": detector.tool_name,
-            "version": detector.get_version(),
+            "version": detector.get_version(claude_bin),
             "install_path": claude_bin
         }
 

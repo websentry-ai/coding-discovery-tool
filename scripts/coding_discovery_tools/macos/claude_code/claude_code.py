@@ -42,16 +42,25 @@ class MacOSClaudeDetector(BaseToolDetector):
 
         return {
             "name": self.tool_name,
-            "version": self.get_version(),
+            "version": self.get_version(claude_bin),
             "install_path": str(claude_bin)
         }
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """Extract Claude Code version.
 
-        Tries user-specific binary paths first (does not rely on PATH),
-        then falls back to bare 'claude' command via PATH lookup.
+        Probes ``binary`` when detection already resolved one, so the reported
+        version belongs to the install being reported. Otherwise tries
+        user-specific binary paths, then bare 'claude' via PATH lookup.
         """
+        if binary is not None:
+            try:
+                output = run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                return extract_version_number(output) if output else None
+            except Exception as e:
+                logger.debug(f"Could not extract Claude Code version from {binary}: {e}")
+                return None
+
         try:
             # Always try system-wide absolute paths first (works in daemon containers / MDM)
             system_paths = [

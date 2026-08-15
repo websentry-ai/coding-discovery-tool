@@ -43,11 +43,21 @@ class LinuxClaudeDetector(BaseToolDetector):
 
         return {
             "name": self.tool_name,
-            "version": self.get_version(),
+            "version": self.get_version(claude_bin),
             "install_path": str(claude_bin),
         }
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
+        """Probes ``binary`` when detection already resolved one, so the reported
+        version belongs to the install being reported."""
+        if binary is not None:
+            try:
+                out = run_command([str(binary), "--version"], VERSION_TIMEOUT)
+                return extract_version_number(out) if out else None
+            except Exception as e:
+                logger.debug(f"Could not extract Claude Code version from {binary}: {e}")
+                return None
+
         # System-wide paths first
         for binary in _SYSTEM_PATHS:
             try:

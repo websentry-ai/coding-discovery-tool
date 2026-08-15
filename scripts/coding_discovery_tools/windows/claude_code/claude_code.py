@@ -46,7 +46,7 @@ class WindowsClaudeDetector(BaseToolDetector):
 
         return None
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """Extract Claude Code version."""
         # Try cmd.exe
         output = run_command(["cmd", "/c", "claude", "--version"], VERSION_TIMEOUT)

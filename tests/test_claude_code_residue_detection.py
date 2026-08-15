@@ -483,6 +483,18 @@ class TestClaudeCodeDetectorPosix(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(binary))
 
+    @unittest.skipIf(os.name == "nt", "shell shim is POSIX-only")
+    def test_version_comes_from_the_detected_binary(self):
+        """The reported version must belong to the binary detection found, not to
+        whichever claude an independent search happens to reach first."""
+        binary = self.home / ".local" / "bin" / "claude"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\necho '9.9.9 (Claude Code)'\n")
+        os.chmod(binary, 0o755)
+        result = self._detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "9.9.9")
+
 
 class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
     """Windows: ``platform.system() == 'Windows'`` candidate list."""

@@ -51,6 +51,20 @@ def _stat_for_uid(target: Path, uid: int):
     return fake_stat
 
 
+def _absent_unless_under(home: Path):
+    """Path.exists side_effect hiding machine-global candidates, so a real
+    system-wide claude on the test host can't satisfy a user-scoped case."""
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        try:
+            return real_exists(self, *args, **kwargs) and self.is_relative_to(home)
+        except (OSError, ValueError):
+            return False
+
+    return fake_exists
+
+
 def _stat_raises_for(target: Path, exc: OSError = None):
     """os.stat side_effect: raise for ``target`` only, pass through otherwise.
     A real stat failure is per-file, not global — scoping it keeps unrelated
@@ -433,6 +447,41 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertIsNone(result)
+
+
+class TestClaudeCodeDetectorPosix(unittest.TestCase):
+    """The OS detector's own ``detect()`` — the single-user path, which used to
+    fall back to ``~/.claude`` while ``_detect_claude_code`` already gated on the
+    binary."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _detect(self):
+        from scripts.coding_discovery_tools.macos.claude_code.claude_code import MacOSClaudeDetector
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch("pathlib.Path.home", return_value=self.home), \
+             patch(f"{_MOD}.run_command", return_value=None), \
+             patch.object(Path, "exists", _absent_unless_under(self.home)):
+            return MacOSClaudeDetector().detect()
+
+    def test_residue_claude_dir_only_not_detected(self):
+        (self.home / ".claude").mkdir()
+        self.assertIsNone(self._detect())
+
+    def test_local_bin_binary_detected(self):
+        binary = self.home / ".local" / "bin" / "claude"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        os.chmod(binary, 0o755)
+        (self.home / ".claude").mkdir()
+        result = self._detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
 
 
 class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):

@@ -8,6 +8,7 @@ from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...utils import run_command, extract_version_number
 from ...linux_extraction_helpers import scan_user_directories, get_linux_user_homes
+from ...user_tool_detector import find_claude_binary_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -32,32 +33,19 @@ class LinuxClaudeDetector(BaseToolDetector):
         return "Claude Code"
 
     def detect(self) -> Optional[Dict]:
-        # 1. Fastest: check PATH via `which`
-        result = self._check_in_path()
-        if result:
-            return result
+        """Gates on the claude binary, not the ``~/.claude`` config directory, which
+        survives uninstall (residue) and is created by other Claude surfaces.
+        ``~/.claude`` remains the rules/MCP/skills source once detected here."""
+        claude_bin = scan_user_directories(find_claude_binary_for_user) \
+            or find_claude_binary_for_user(Path.home())
+        if not claude_bin:
+            return None
 
-        # 2. When running as root, check every user home
-        user_home = scan_user_directories(
-            lambda d: d / ".claude" if (d / ".claude").exists() else None
-        )
-        if user_home:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": str(user_home),
-            }
-
-        # 3. Current user's ~/.claude
-        claude_dir = Path.home() / ".claude"
-        if claude_dir.exists():
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": str(claude_dir),
-            }
-
-        return None
+        return {
+            "name": self.tool_name,
+            "version": self.get_version(),
+            "install_path": str(claude_bin),
+        }
 
     def get_version(self) -> Optional[str]:
         # System-wide paths first
@@ -88,16 +76,6 @@ class LinuxClaudeDetector(BaseToolDetector):
             return extract_version_number(out) if out else None
         except Exception:
             pass
-        return None
-
-    def _check_in_path(self) -> Optional[Dict]:
-        out = run_command(["which", "claude"], VERSION_TIMEOUT)
-        if out:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": out.strip(),
-            }
         return None
 
     def extract_all_claude_rules(self) -> List[Dict]:

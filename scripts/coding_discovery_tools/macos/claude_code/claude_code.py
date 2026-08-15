@@ -10,6 +10,7 @@ from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...utils import run_command, extract_version_number
 from ...macos_extraction_helpers import scan_user_directories
+from ...user_tool_detector import find_claude_binary_for_user
 from .claude_rules_extractor import MacOSClaudeRulesExtractor
 
 logger = logging.getLogger(__name__)
@@ -26,36 +27,24 @@ class MacOSClaudeDetector(BaseToolDetector):
     def detect(self) -> Optional[Dict]:
         """
         Detect Claude Code installation on macOS.
-        
+
+        Gates on the claude binary, not the ``~/.claude`` config directory, which
+        survives uninstall (residue) and is created by other Claude surfaces.
+        ``~/.claude`` remains the rules/MCP/skills source once detected here.
+
         Returns:
             Dict with tool info or None if not found
         """
-        # Check PATH first (works for both regular users and root)
-        claude_info = self._check_in_path()
-        if claude_info:
-            return claude_info
+        claude_bin = scan_user_directories(find_claude_binary_for_user) \
+            or find_claude_binary_for_user(Path.home())
+        if not claude_bin:
+            return None
 
-        # When running as root, scan user directories first
-        user_claude_dir = scan_user_directories(
-            lambda user_dir: user_dir / ".claude" if (user_dir / ".claude").exists() else None
-        )
-        if user_claude_dir:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": str(user_claude_dir)
-            }
-        
-        # Check current user's home directory (works for both root and regular users)
-        claude_dir = Path.home() / ".claude"
-        if claude_dir.exists():
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": str(claude_dir)
-            }
-
-        return None
+        return {
+            "name": self.tool_name,
+            "version": self.get_version(),
+            "install_path": str(claude_bin)
+        }
 
     def get_version(self) -> Optional[str]:
         """Extract Claude Code version.
@@ -90,17 +79,6 @@ class MacOSClaudeDetector(BaseToolDetector):
             return extract_version_number(output) if output else None
         except Exception as e:
             logger.warning(f"Could not extract Claude Code version: {e}")
-        return None
-
-    def _check_in_path(self) -> Optional[Dict]:
-        """Check if claude is in PATH."""
-        output = run_command(["which", "claude"], VERSION_TIMEOUT)
-        if output:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": output
-            }
         return None
 
     def extract_all_claude_rules(self) -> List[Dict]:

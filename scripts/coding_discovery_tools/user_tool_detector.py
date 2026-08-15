@@ -426,10 +426,10 @@ def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
     gating on it produced false positives. ``~/.junie`` remains the version
     source and the rules/MCP extraction source.
 
-    The JetBrains plugin check is delegated to the OS detector's
-    ``_has_junie_jetbrains_plugin`` (keeps the OS-specific JetBrains detector
-    choice in the OS module, mirroring the ``_find_install_dir`` delegation used
-    for Claude Cowork).
+    The JetBrains plugin check and its version lookup are delegated to the OS
+    detector's ``_has_junie_jetbrains_plugin`` / ``_jetbrains_plugin_version``
+    (keeps the OS-specific JetBrains detector choice in the OS module, mirroring
+    the ``_find_install_dir`` delegation used for Claude Cowork).
     """
     junie_bin = find_junie_binary_for_user(user_home)
     if junie_bin:
@@ -449,11 +449,25 @@ def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
         if plugin_path:
             return {
                 "name": detector.tool_name,
-                "version": _junie_version_from_config(user_home) or "Unknown",
+                "version": _junie_plugin_version(detector, plugin_path)
+                or _junie_version_from_config(user_home)
+                or "Unknown",
                 "install_path": plugin_path,
             }
 
     return None
+
+
+def _junie_plugin_version(detector: BaseToolDetector, plugin_path: str) -> Optional[str]:
+    """Version of the Junie JetBrains plugin installed under ``plugin_path``, or None."""
+    version_lookup = getattr(detector, "_jetbrains_plugin_version", None)
+    if not callable(version_lookup):
+        return None
+    try:
+        return version_lookup(plugin_path)
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Junie plugin version lookup failed for {plugin_path}: {e}")
+        return None
 
 
 def find_junie_binary_for_user(user_home: Path) -> Optional[str]:

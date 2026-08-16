@@ -47,7 +47,21 @@ class WindowsClaudeDetector(BaseToolDetector):
         return None
 
     def get_version(self, binary: Optional[str] = None) -> Optional[str]:
-        """Extract Claude Code version."""
+        """Extract Claude Code version.
+
+        Probes ``binary`` when detection already resolved one, so the reported
+        version belongs to the install being reported. An absolute path also
+        avoids ``cmd /c claude`` resolving a claude in the current directory
+        ahead of PATH. ``.cmd``/``.bat`` shims still need ``cmd``; CreateProcess
+        cannot execute them directly.
+        """
+        if binary is not None:
+            path = str(binary)
+            command = ["cmd", "/c", path, "--version"] \
+                if path.lower().endswith((".cmd", ".bat")) else [path, "--version"]
+            output = run_command(command, VERSION_TIMEOUT)
+            return extract_version_number(output) if output else None
+
         # Try cmd.exe
         output = run_command(["cmd", "/c", "claude", "--version"], VERSION_TIMEOUT)
         if output:

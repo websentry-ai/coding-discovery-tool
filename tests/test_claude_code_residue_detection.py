@@ -496,6 +496,29 @@ class TestClaudeCodeDetectorPosix(unittest.TestCase):
         self.assertEqual(result["version"], "9.9.9")
 
 
+class TestWindowsClaudeVersionProbe(unittest.TestCase):
+    """Windows get_version must probe the resolved binary, not re-search PATH."""
+
+    def _command_for(self, binary):
+        from scripts.coding_discovery_tools.windows.claude_code import claude_code as mod
+        with patch.object(mod, "run_command", return_value="1.2.3") as run:
+            mod.WindowsClaudeDetector().get_version(binary)
+        return run.call_args.args[0]
+
+    def test_exe_is_invoked_directly(self):
+        self.assertEqual(self._command_for(r"C:\p\claude.exe"), [r"C:\p\claude.exe", "--version"])
+
+    def test_cmd_shim_goes_through_cmd_by_absolute_path(self):
+        """CreateProcess can't run .cmd directly; the absolute path also stops
+        ``cmd`` resolving a claude in the current directory ahead of PATH."""
+        self.assertEqual(
+            self._command_for(r"C:\p\claude.cmd"), ["cmd", "/c", r"C:\p\claude.cmd", "--version"]
+        )
+
+    def test_no_binary_keeps_the_path_search(self):
+        self.assertEqual(self._command_for(None), ["cmd", "/c", "claude", "--version"])
+
+
 class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
     """Windows: ``platform.system() == 'Windows'`` candidate list."""
 

@@ -2,8 +2,6 @@
 
 import os
 import logging
-import re
-import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple
@@ -15,10 +13,10 @@ from ...jetbrains_naming_helpers import (
     detect_plan,
     looks_like_ide_folder,
     parse_ide_name_and_version,
+    parse_plugin_metadata,
     should_skip_folder,
 )
 from ...linux_extraction_helpers import get_linux_user_homes
-from ...xml_helpers import safe_xml_fromstring
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +52,10 @@ class LinuxJetBrainsDetector(BaseToolDetector):
                 "_ide_folder": ide["folder_name"],
                 "_config_path": ide["config_path"],
             }
-            plugins = self._get_plugins(ide["config_path"])
-            if plugins:
-                tool_info["plugins"] = plugins
+            plugin_details = self._get_plugin_details(ide["config_path"])
+            if plugin_details:
+                tool_info["plugins"] = [plugin["name"] for plugin in plugin_details]
+                tool_info["_plugin_details"] = plugin_details
             tools.append(tool_info)
 
         return tools
@@ -161,27 +160,10 @@ class LinuxJetBrainsDetector(BaseToolDetector):
             logger.warning(f"Error reading disabled_plugins.txt: {e}")
         return disabled
 
-    def _parse_plugin_xml(self, xml_content: str) -> Tuple[Optional[str], Optional[str]]:
-        plugin_id = None
-        plugin_name = None
-        try:
-            xml_content_clean = re.sub(r'\sxmlns[^"]*"[^"]*"', "", xml_content)
-            root = safe_xml_fromstring(xml_content_clean)
-            id_elem = root.find(".//id")
-            if id_elem is not None and id_elem.text:
-                plugin_id = id_elem.text.strip()
-            name_elem = root.find(".//name")
-            if name_elem is not None and name_elem.text:
-                plugin_name = name_elem.text.strip()
-            if not plugin_id:
-                plugin_id = root.get("id")
-        except ET.ParseError as e:
-            logger.debug(f"Failed to parse plugin.xml: {e}")
-        except Exception as e:
-            logger.debug(f"Error parsing plugin.xml: {e}")
-        return plugin_id, plugin_name
+    def _parse_plugin_xml(self, xml_content: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        return parse_plugin_metadata(xml_content)
 
-    def _extract_plugin_info_from_dir(self, plugin_dir: Path) -> Tuple[Optional[str], Optional[str]]:
+    def _extract_plugin_info_from_dir(self, plugin_dir: Path) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         plugin_xml = plugin_dir / "META-INF" / "plugin.xml"
         if not plugin_xml.exists():
             lib_dir = plugin_dir / "lib"
@@ -190,15 +172,15 @@ class LinuxJetBrainsDetector(BaseToolDetector):
                     result = self._extract_plugin_info_from_jar(jar_file)
                     if result[0] or result[1]:
                         return result
-            return None, None
+            return None, None, None
         try:
             xml_content = plugin_xml.read_text(encoding="utf-8", errors="ignore")
             return self._parse_plugin_xml(xml_content)
         except Exception as e:
             logger.debug(f"Error reading plugin.xml from {plugin_dir}: {e}")
-            return None, None
+            return None, None, None
 
-    def _extract_plugin_info_from_jar(self, jar_path: Path) -> Tuple[Optional[str], Optional[str]]:
+    def _extract_plugin_info_from_jar(self, jar_path: Path) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         try:
             with zipfile.ZipFile(jar_path, "r") as zf:
                 if "META-INF/plugin.xml" in zf.namelist():
@@ -208,14 +190,14 @@ class LinuxJetBrainsDetector(BaseToolDetector):
             logger.debug(f"Invalid JAR file: {jar_path}")
         except Exception as e:
             logger.debug(f"Error reading plugin.xml from JAR {jar_path}: {e}")
-        return None, None
+        return None, None, None
 
     def _transform_plugin_name(self, plugin_id: Optional[str], plugin_name: Optional[str]) -> Optional[str]:
         if plugin_id and plugin_id in self.PLUGIN_NAME_OVERRIDES:
             return self.PLUGIN_NAME_OVERRIDES[plugin_id]
         return plugin_name
 
-    def _get_plugins(self, config_path: str) -> List[str]:
+    def _get_plugin_details(self, config_path: str) -> List[Dict]:
         plugins_dir = Path(config_path) / "plugins"
         plugins = []
         if not plugins_dir.exists():
@@ -226,12 +208,10 @@ class LinuxJetBrainsDetector(BaseToolDetector):
             items = [i for i in os.listdir(plugins_dir) if not i.startswith(".")]
             for item in items:
                 item_path = plugins_dir / item
-                plugin_id = None
-                plugin_name = None
                 if item_path.is_dir():
-                    plugin_id, plugin_name = self._extract_plugin_info_from_dir(item_path)
+                    plugin_id, plugin_name, plugin_version = self._extract_plugin_info_from_dir(item_path)
                 elif item.endswith(".jar"):
-                    plugin_id, plugin_name = self._extract_plugin_info_from_jar(item_path)
+                    plugin_id, plugin_name, plugin_version = self._extract_plugin_info_from_jar(item_path)
                 else:
                     continue
 
@@ -241,8 +221,12 @@ class LinuxJetBrainsDetector(BaseToolDetector):
                 final_name = self._transform_plugin_name(plugin_id, plugin_name)
                 if not final_name:
                     final_name = item[:-4] if item.endswith(".jar") else item
-                plugins.append(final_name)
+                plugins.append({"name": final_name, "version": plugin_version})
         except Exception as e:
             logger.warning(f"Error scanning plugins directory {plugins_dir}: {e}")
 
-        return sorted(plugins)
+        return sorted(plugins, key=lambda plugin: plugin["name"])
+
+    def _get_plugins(self, config_path: str) -> List[str]:
+        """Plugin display names for a JetBrains IDE, as reported in the payload."""
+        return [plugin["name"] for plugin in self._get_plugin_details(config_path)]

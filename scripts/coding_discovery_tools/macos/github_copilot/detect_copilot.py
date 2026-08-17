@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseCopilotDetector as BaseCopilotDetectorBase
+from ...jetbrains_naming_helpers import plugin_entries
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from ...macos_extraction_helpers import is_running_as_root
 
@@ -233,13 +234,13 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         all_ides = jetbrains_detector.detect() or []
 
         for ide in all_ides:
-            plugins = ide.get("plugins", [])
+            plugins = plugin_entries(ide)
 
-            for plugin_name in plugins:
-                if "copilot" in plugin_name.lower():
+            for plugin in plugins:
+                if "copilot" in plugin["name"].lower():
                     detected_results.append({
                         "name": f"GitHub Copilot ({ide['name']})",
-                        "version": ide.get("version", "unknown"),
+                        "version": plugin.get("version") or ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide['name'],
                         "install_path": ide.get("config_path") or ide.get("install_path")

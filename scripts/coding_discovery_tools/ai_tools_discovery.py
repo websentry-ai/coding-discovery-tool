@@ -398,6 +398,7 @@ class AIToolsDetector:
             # for EACH user independently (user A's CLI doesn't steal canonical
             # status from user B who only has VS Code).
             self._canonical_augment_surface_by_config: Dict[str, str] = {}
+            self._canonical_junie_surface_by_config: Dict[str, str] = {}
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -2155,6 +2156,24 @@ class AIToolsDetector:
             if (chosen := self._pick_canonical_augment_name(names_lower)) is not None
         }
 
+    def _set_canonical_junie_surface(self, tools: List[Dict]) -> None:
+        """Pick, per user's ``~/.junie``, the one Junie surface that carries the shared
+        config. The CLI wins, else the first JetBrains surface. Keyed by
+        ``_config_path`` so a root multi-user scan picks a winner for EACH user.
+        """
+        names_by_config: Dict[str, List[str]] = {}
+        for tool in tools:
+            name_lower = tool.get("name", "").lower()
+            if not name_lower.startswith("junie"):
+                continue
+            names_by_config.setdefault(tool.get("_config_path") or "", []).append(name_lower)
+
+        self._canonical_junie_surface_by_config = {
+            cfg: next((n for n in names if n == "junie"), names[0])
+            for cfg, names in names_by_config.items()
+            if names
+        }
+
     def _process_augment_tool(self, tool: Dict) -> Dict:
         """
         Process an Augment Code surface row.
@@ -2721,15 +2740,21 @@ class AIToolsDetector:
                 extract_skills_func=self.extract_all_opencode_skills,
             )
 
-        elif tool_name.lower() == "junie":
-            projects_dict = self._process_tool_with_rules_and_mcp(
-                tool,
-                self._junie_rules_extractor,
-                self._junie_mcp_extractor,
-                self.extract_all_junie_rules,
-                skills_extractor=self._junie_skills_extractor,
-                extract_skills_func=self.extract_all_junie_skills,
-            )
+        elif tool_name.lower().startswith("junie"):
+            if tool_name.lower() != self._canonical_junie_surface_by_config.get(
+                tool.get("_config_path") or ""
+            ):
+                logger.info(f"  {tool.get('name')} is a non-canonical Junie surface; emitting bare row")
+                projects_dict = {}
+            else:
+                projects_dict = self._process_tool_with_rules_and_mcp(
+                    tool,
+                    self._junie_rules_extractor,
+                    self._junie_mcp_extractor,
+                    self.extract_all_junie_rules,
+                    skills_extractor=self._junie_skills_extractor,
+                    extract_skills_func=self.extract_all_junie_skills,
+                )
 
         elif tool_name.lower() == "cursor cli":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -2875,6 +2900,7 @@ class AIToolsDetector:
         tools = self.detect_all_tools()
         self._set_canonical_vscode_copilot(tools)
         self._set_canonical_augment_surface(tools)
+        self._set_canonical_junie_surface(tools)
 
         tools_with_projects = []
         for tool in tools:
@@ -3328,6 +3354,8 @@ def main():
         detector._set_canonical_vscode_copilot(tools)
         # Pick the single Augment surface that should carry the shared config.
         detector._set_canonical_augment_surface(tools)
+        # Pick the single Junie surface that should carry the shared config.
+        detector._set_canonical_junie_surface(tools)
 
         # Resume observability: how many tools had their processing fully skipped.
         resume_tools_skipped = 0

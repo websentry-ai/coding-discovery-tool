@@ -497,26 +497,44 @@ class TestClaudeCodeDetectorPosix(unittest.TestCase):
 
 
 class TestWindowsClaudeVersionProbe(unittest.TestCase):
-    """Windows get_version must probe the resolved binary, not re-search PATH."""
+    """Windows get_version must probe the resolved binary, and must never hand a
+    shim path to cmd.exe, which re-parses the command line."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
 
     def _command_for(self, binary):
         from scripts.coding_discovery_tools.windows.claude_code import claude_code as mod
         with patch.object(mod, "run_command", return_value="1.2.3") as run:
             mod.WindowsClaudeDetector().get_version(binary)
-        return run.call_args.args[0]
+        return run.call_args.args[0] if run.call_args else None
 
     def test_exe_is_invoked_directly(self):
         self.assertEqual(self._command_for(r"C:\p\claude.exe"), [r"C:\p\claude.exe", "--version"])
 
-    def test_cmd_shim_goes_through_cmd_by_absolute_path(self):
-        """CreateProcess can't run .cmd directly; the absolute path also stops
-        ``cmd`` resolving a claude in the current directory ahead of PATH."""
-        self.assertEqual(
-            self._command_for(r"C:\p\claude.cmd"), ["cmd", "/c", r"C:\p\claude.cmd", "--version"]
-        )
-
     def test_no_binary_keeps_the_path_search(self):
         self.assertEqual(self._command_for(None), ["cmd", "/c", "claude", "--version"])
+
+    def test_shim_is_never_executed(self):
+        """A profile dir may contain a cmd metacharacter (``C:\\Users\\a&b``), so a
+        shim path must never reach a shell — no subprocess at all."""
+        self.assertIsNone(self._command_for(r"C:\Users\a&b\npm\claude.cmd"))
+
+    def test_shim_version_read_from_package_json(self):
+        from scripts.coding_discovery_tools.windows.claude_code.claude_code import WindowsClaudeDetector
+        shim = Path(self.tmp.name) / "a&b" / "npm" / "claude.cmd"
+        pkg = shim.parent / "node_modules" / "@anthropic-ai" / "claude-code"
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text('{"version": "3.2.1"}', encoding="utf-8")
+        self.assertEqual(WindowsClaudeDetector().get_version(str(shim)), "3.2.1")
+
+    def test_shim_without_metadata_is_unknown(self):
+        from scripts.coding_discovery_tools.windows.claude_code.claude_code import WindowsClaudeDetector
+        shim = Path(self.tmp.name) / "npm" / "claude.cmd"
+        shim.parent.mkdir(parents=True)
+        self.assertIsNone(WindowsClaudeDetector().get_version(str(shim)))
 
 
 class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):

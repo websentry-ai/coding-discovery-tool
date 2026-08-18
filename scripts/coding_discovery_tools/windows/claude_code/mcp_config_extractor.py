@@ -39,7 +39,8 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         2. User/local scope configs from .claude.json and .claude/mcp.json
         3. Project-scope configs from .mcp.json files at project roots
         4. Plugin MCP servers from ~/.claude/plugins/
-        5. Cloud-synced MCP server names from ~/.claude/mcp-needs-auth-cache.json
+        5. claude.ai native connectors from ~/.claude/mcp-needs-auth-cache.json
+           and ~/.claude.json, with tool lists from the desktop session files
 
         Uses parallel processing for filesystem scanning.
 

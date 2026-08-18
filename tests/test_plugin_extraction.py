@@ -505,13 +505,15 @@ class TestMcpProvenanceTagging(unittest.TestCase):
         self.assertEqual(result["plugin_id"], "slack@official")
 
     def test_mcp_from_plugin_json_gets_provenance(self):
-        """extract_plugin_mcp_from_plugin_json tags MCP entries with plugin provenance."""
-        from scripts.coding_discovery_tools.mcp_extraction_helpers import extract_plugin_mcp_from_plugin_json
+        """A .claude-plugin/plugin.json server map is tagged with plugin provenance."""
+        from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+            _append_plugin_project,
+            _plugin_mcp_server_map,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             install_path = os.path.join(tmpdir, "cache", "official", "slack", "1.0.0")
-            plugin_json_path = Path(install_path) / ".claude-plugin" / "plugin.json"
-            _write_json(plugin_json_path, {
+            _write_json(Path(install_path) / ".claude-plugin" / "plugin.json", {
                 "name": "slack",
                 "mcpServers": {"slack-mcp": {"command": "npx", "args": ["slack-mcp"]}},
             })
@@ -526,7 +528,10 @@ class TestMcpProvenanceTagging(unittest.TestCase):
             }
 
             projects = []
-            extract_plugin_mcp_from_plugin_json(plugin_json_path, projects, plugin_lookup=plugin_lookup)
+            servers = _plugin_mcp_server_map(Path(install_path))
+            _append_plugin_project(
+                Path(install_path), "slack", servers, projects, plugin_lookup=plugin_lookup,
+            )
 
             self.assertEqual(len(projects), 1)
             self.assertEqual(projects[0]["source"], "plugin")
@@ -534,13 +539,15 @@ class TestMcpProvenanceTagging(unittest.TestCase):
             self.assertEqual(projects[0]["marketplace_name"], "official")
 
     def test_mcp_from_dot_mcp_json_gets_provenance(self):
-        """_extract_plugin_mcp_from_dot_mcp_json tags MCP entries with plugin provenance."""
-        from scripts.coding_discovery_tools.mcp_extraction_helpers import _extract_plugin_mcp_from_dot_mcp_json
+        """A .mcp.json server map is tagged with plugin provenance."""
+        from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+            _append_plugin_project,
+            _plugin_mcp_server_map,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             install_path = os.path.join(tmpdir, "cache", "official", "slack", "1.0.0")
-            mcp_json_path = Path(install_path) / ".mcp.json"
-            _write_json(mcp_json_path, {
+            _write_json(Path(install_path) / ".mcp.json", {
                 "mcpServers": {"slack-mcp": {"command": "npx", "args": ["slack-mcp"]}},
             })
 
@@ -554,8 +561,9 @@ class TestMcpProvenanceTagging(unittest.TestCase):
             }
 
             projects = []
-            _extract_plugin_mcp_from_dot_mcp_json(
-                mcp_json_path, "slack", projects, plugin_lookup=plugin_lookup,
+            servers = _plugin_mcp_server_map(Path(install_path))
+            _append_plugin_project(
+                Path(install_path), "slack", servers, projects, plugin_lookup=plugin_lookup,
             )
 
             self.assertEqual(len(projects), 1)
@@ -585,13 +593,15 @@ class TestMcpProvenanceTagging(unittest.TestCase):
 
     def test_non_cache_plugin_json_gets_provenance(self):
         """Non-cache plugin.json (plugins/<name>/plugin.json) gets correct plugin_root."""
-        from scripts.coding_discovery_tools.mcp_extraction_helpers import extract_plugin_mcp_from_plugin_json
+        from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+            _append_plugin_project,
+            _plugin_mcp_server_map,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Non-cache layout: plugins/<plugin>/plugin.json (no .claude-plugin subdir)
             plugin_dir = os.path.join(tmpdir, "plugins", "my-plugin")
-            plugin_json_path = Path(plugin_dir) / "plugin.json"
-            _write_json(plugin_json_path, {
+            _write_json(Path(plugin_dir) / "plugin.json", {
                 "name": "my-plugin",
                 "mcpServers": {"my-mcp": {"command": "npx", "args": ["my-mcp"]}},
             })
@@ -606,7 +616,10 @@ class TestMcpProvenanceTagging(unittest.TestCase):
             }
 
             projects = []
-            extract_plugin_mcp_from_plugin_json(plugin_json_path, projects, plugin_lookup=plugin_lookup)
+            servers = _plugin_mcp_server_map(Path(plugin_dir))
+            _append_plugin_project(
+                Path(plugin_dir), "my-plugin", servers, projects, plugin_lookup=plugin_lookup,
+            )
 
             self.assertEqual(len(projects), 1)
             self.assertEqual(projects[0]["path"], plugin_dir)

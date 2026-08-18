@@ -19,11 +19,9 @@ from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 
 from .constants import MAX_SEARCH_DEPTH
+from .mcp_script_hash import augment_script_fields
 
 logger = logging.getLogger(__name__)
-
-# Directory names used by plugin metadata inside cache dirs
-_PLUGIN_METADATA_DIRS = frozenset({".claude-plugin", ".cursor-plugin"})
 
 
 def is_claude_plugins_path(path: Path) -> bool:
@@ -673,6 +671,7 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
                 **{field_name: field_value for field_name, field_value in server_config.items()
                     if field_name not in excluded_fields}
             }
+            augment_script_fields(server_obj)
             server_obj["scan"] = scan_results.get(server_name) or batch_error
             servers_array.append(server_obj)
 
@@ -1740,56 +1739,190 @@ def extract_managed_mcp_config(projects: List[Dict]) -> None:
         logger.warning(f"Error reading managed MCP config {managed_path}: {e}")
 
 
+CLAUDEAI_NAME_PREFIX = "claude.ai "
+
+# Session folders holding `remoteMcpServersConfig` — the only local record of a
+# claude.ai connector's tool list. Written by the desktop app (both the Claude
+# Code it hosts and Cowork); the terminal CLI never writes them, so a CLI-only
+# device yields names with no tools.
+_CLAUDE_SESSION_SUBDIRS = ("claude-code-sessions", "local-agent-mode-sessions")
+
+
+def _claude_app_support_dir(home: Path) -> Path:
+    """Claude's application-support directory for a given user's home."""
+    system = platform.system()
+    if system == "Darwin":
+        return home / "Library" / "Application Support" / "Claude"
+    if system == "Windows":
+        return home / "AppData" / "Roaming" / "Claude"
+    return home / ".config" / "Claude"
+
+
+def _read_json_dict(path: Path) -> Dict[str, Any]:
+    """Parse `path` as a JSON object, or return {} for anything unreadable."""
+    try:
+        parsed = json.loads(path.read_text(encoding='utf-8', errors='replace'))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        logger.debug(f"Invalid JSON in {path}: {e}")
+        return {}
+    except PermissionError as e:
+        logger.debug(f"Permission denied reading {path}: {e}")
+        return {}
+    except Exception as e:
+        logger.debug(f"Error reading {path}: {e}")
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _claudeai_names(values) -> List[str]:
+    return [v for v in values
+            if isinstance(v, str) and v.startswith(CLAUDEAI_NAME_PREFIX)]
+
+
+def _claudeai_names_from_auth_cache(claude_dir: Path) -> List[str]:
+    """Connector names from ~/.claude/mcp-needs-auth-cache.json. Only holds the
+    connectors pending authentication, so it misses every one the user has
+    already signed into."""
+    return _claudeai_names(_read_json_dict(claude_dir / "mcp-needs-auth-cache.json"))
+
+
+def _claudeai_names_from_config(home: Path) -> List[str]:
+    """Connector names from ~/.claude.json's `claudeAiMcpEverConnected`, which
+    the CLI maintains for every claude.ai connector it has connected to —
+    authenticated ones included. Ever-connected, so a since-disconnected
+    connector still appears."""
+    ever_connected = _read_json_dict(home / ".claude.json").get("claudeAiMcpEverConnected")
+    return _claudeai_names(ever_connected) if isinstance(ever_connected, list) else []
+
+
+def _claudeai_session_tools(home: Path) -> Dict[str, Dict[str, Any]]:
+    """Map lowercased connector name -> {"tools", "observed_at"} read from the
+    Claude session files under `home`.
+
+    Files are walked newest-first and the first sighting of a name wins, so a
+    stale session never overwrites a connector's current tool list.
+    `observed_at` is the session file's mtime — when the tools were actually
+    seen, not when discovery ran.
+
+    The session `url` is deliberately not collected. A claude.ai server
+    fingerprints by name (`claudeai:<name>`), and compute_fingerprint's url
+    branch runs first, so carrying a url would split this row away from the
+    hook-reported one for the same connector.
+    """
+    base = _claude_app_support_dir(home)
+    files: List[Path] = []
+    for sub in _CLAUDE_SESSION_SUBDIRS:
+        folder = base / sub
+        try:
+            if folder.is_dir():
+                files.extend(folder.glob("**/local_*.json"))
+        except OSError as e:
+            logger.debug(f"Error listing Claude session folder {folder}: {e}")
+
+    stamped: List[Tuple[float, Path]] = []
+    for f in files:
+        try:
+            stamped.append((f.stat().st_mtime, f))
+        except OSError:
+            continue
+    stamped.sort(key=lambda pair: pair[0], reverse=True)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for mtime, f in stamped:
+        try:
+            data = json.loads(f.read_text(encoding='utf-8', errors='replace'))
+        except (OSError, ValueError) as e:
+            logger.debug(f"Error reading Claude session file {f}: {e}")
+            continue
+        if not isinstance(data, dict):
+            continue
+        for entry in (data.get("remoteMcpServersConfig") or []):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            tools = entry.get("tools")
+            if not isinstance(name, str) or not name or not isinstance(tools, list):
+                continue
+            key = name.strip().lower()
+            if key in out:
+                continue
+            out[key] = {
+                "tools": tools,
+                "observed_at": (
+                    datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+                    .replace(microsecond=0).isoformat()
+                ),
+            }
+    return out
+
+
 def extract_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None:
     """
-    Extract cloud-synced MCP server names from claude.ai auth cache.
+    Extract claude.ai native connectors (Gmail, Notion, ...) for one user.
 
-    Reads ~/.claude/mcp-needs-auth-cache.json and extracts server names
-    prefixed with "claude.ai ". These are cloud-synced MCP servers whose
-    full config lives server-side; only names are available locally.
+    Names come from two files, unioned — neither is complete on its own:
+      - ~/.claude/mcp-needs-auth-cache.json: only connectors pending auth.
+      - ~/.claude.json `claudeAiMcpEverConnected`: every connector the CLI has
+        connected to, authenticated included.
+
+    The full config lives server-side, so a name is all that identifies these.
+    When the desktop app has left a session file naming the same connector, its
+    tool list is attached as a `scan` block; otherwise the server is reported
+    with the name alone.
 
     Args:
         claude_dir: Path to the .claude directory (e.g., ~/.claude)
         projects: List to append results to
     """
-    cache_file = claude_dir / "mcp-needs-auth-cache.json"
-    if not cache_file.exists() or not cache_file.is_file():
+    home = claude_dir.parent
+
+    names: List[str] = []
+    seen = set()
+    for name in _claudeai_names_from_auth_cache(claude_dir) + _claudeai_names_from_config(home):
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
+            names.append(name)
+
+    if not names:
         return
 
     try:
-        content = cache_file.read_text(encoding='utf-8', errors='replace')
-        cache_data = json.loads(content)
-
-        if not isinstance(cache_data, dict):
-            return
-
-        servers = [
-            {"name": key, "scope": "claudeai"}
-            for key in cache_data
-            if key.startswith("claude.ai ")
-        ]
-
-        if servers:
-            projects.append({
-                "path": str(claude_dir),
-                "mcpServers": servers,
-                "scope": "claudeai"
-            })
-    except json.JSONDecodeError as e:
-        logger.debug(f"Invalid JSON in claude.ai auth cache {cache_file}: {e}")
-    except PermissionError as e:
-        logger.debug(f"Permission denied reading claude.ai auth cache {cache_file}: {e}")
+        tools_by_name = _claudeai_session_tools(home)
     except Exception as e:
-        logger.debug(f"Error reading claude.ai auth cache {cache_file}: {e}")
+        logger.debug(f"Error collecting claude.ai session tools under {home}: {e}")
+        tools_by_name = {}
+
+    servers = []
+    for name in names:
+        server = {"name": name, "scope": "claudeai"}
+        observed = tools_by_name.get(name[len(CLAUDEAI_NAME_PREFIX):].strip().lower())
+        if observed:
+            trimmed = _trim_tools(observed["tools"])
+            server["scan"] = {
+                "scanned_at": observed["observed_at"],
+                "tools": trimmed,
+                "tool_count": len(trimmed) if trimmed else 0,
+                "server_info": None,
+                "error": None,
+            }
+        servers.append(server)
+
+    projects.append({
+        "path": str(claude_dir),
+        "mcpServers": servers,
+        "scope": "claudeai"
+    })
 
 
 def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None:
     """
-    Extract cloud-synced MCP server names with root user support.
+    Extract claude.ai native connectors with root user support.
 
-    When running as root/admin, scans all user directories for
-    ~/.claude/mcp-needs-auth-cache.json. Otherwise checks only
-    the current user's home directory.
+    When running as root/admin, scans all user directories. Otherwise checks
+    only the current user's home directory.
     """
     import platform
 
@@ -1826,12 +1959,14 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
     admin_homes = _iter_admin_user_homes(is_admin, users_dir)
     if admin_homes:
         for user_dir in admin_homes:
-            claude_dir = user_dir / ".claude"
-            if claude_dir.exists() and claude_dir.is_dir():
-                try:
-                    extract_claudeai_mcp_servers(claude_dir, projects)
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
+            # No ~/.claude/ precondition: one of the two name sources is
+            # ~/.claude.json, which sits beside that directory rather than in
+            # it, so gating on the directory would skip a user whose only
+            # source is the config file. Both readers tolerate absent files.
+            try:
+                extract_claudeai_mcp_servers(user_dir / ".claude", projects)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
         # On Darwin also scan the admin's own home (/var/root, not under /Users).
         # On Windows the admin's home is already in admin_homes — skip to avoid
@@ -1852,51 +1987,277 @@ def _lookup_plugin_provenance(
     return find_plugin_provenance_by_path(path_str, plugin_lookup)
 
 
-def extract_plugin_mcp_from_plugin_json(
-    plugin_json_path: Path,
+def _is_contained(path: Path, root: Path) -> bool:
+    """True when ``path`` stays inside ``root`` once symlinks are followed."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError, RuntimeError):
+        return False
+    return True
+
+
+def _read_plugin_json(path: Path) -> Optional[Any]:
+    """Parse a plugin JSON file. None when absent, unreadable or malformed."""
+    try:
+        if path.is_file():
+            return json.loads(path.read_text(encoding='utf-8', errors='replace'))
+    except (json.JSONDecodeError, PermissionError, OSError) as exc:
+        logger.debug(f"Plugin MCP source unreadable {path}: {exc}")
+    except Exception as exc:
+        logger.debug(f"Unexpected error reading plugin MCP source {path}: {exc}")
+    return None
+
+
+def _server_entries_from_root_map(data: Dict) -> Dict:
+    """Server entries from an unwrapped ``.mcp.json``.
+
+    Needs a string ``command`` or ``url``, else ``$schema`` and ``inputs``
+    blocks get reported and live-scanned as phantom servers.
+    """
+    return {
+        key: entry
+        for key, entry in data.items()
+        if isinstance(entry, dict)
+        and (isinstance(entry.get('command'), str) or isinstance(entry.get('url'), str))
+    }
+
+
+def _resolve_relative_mcp_servers(value: str, plugin_dir: Path) -> Optional[Dict]:
+    """Follow a ``mcpServers`` that names another file instead of inlining a map."""
+    candidate = plugin_dir / value
+    if not _is_contained(candidate, plugin_dir):
+        return None
+    data = _read_plugin_json(candidate)
+    servers = data.get('mcpServers') if isinstance(data, dict) else None
+    return servers if isinstance(servers, dict) else None
+
+
+def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
+    """``{server_name: config}`` declared by the plugin rooted at ``plugin_dir``.
+
+    First source to declare a name wins. The bare root ``plugin.json`` is not
+    one the hook reads; it is kept because the sweep read it before.
+    """
+    servers: Dict = {}
+    sources = (
+        plugin_dir / ".mcp.json",
+        plugin_dir / ".claude-plugin" / "plugin.json",
+        plugin_dir / "plugin.json",
+    )
+    for source in sources:
+        if not _is_contained(source, plugin_dir):
+            logger.debug(f"Plugin MCP source escapes its plugin dir: {source}")
+            continue
+        data = _read_plugin_json(source)
+        if not isinstance(data, dict):
+            continue
+
+        mcp_servers = data.get('mcpServers')
+        # Falsy, not `is None`: `"mcpServers": {}` alongside root-level servers
+        # must still read the root map, as the sweep did before.
+        if not mcp_servers and source.name == '.mcp.json':
+            mcp_servers = _server_entries_from_root_map(data) or None
+        if isinstance(mcp_servers, str):
+            mcp_servers = _resolve_relative_mcp_servers(mcp_servers, plugin_dir)
+
+        if isinstance(mcp_servers, dict):
+            for key, entry in mcp_servers.items():
+                servers.setdefault(key, entry)
+    return servers
+
+
+def _select_plugin_version_dir(plugin_dir: Path) -> Optional[Path]:
+    """The live version dir of a cached plugin: ``.in_use``, else newest.
+
+    Reading every version dir reports stale copies as live servers.
+    """
+    try:
+        version_dirs = [d for d in plugin_dir.iterdir() if d.is_dir()]
+        if not version_dirs:
+            return None
+        in_use = [d for d in version_dirs if (d / ".in_use").exists()]
+        candidates = in_use or version_dirs
+        return max(candidates, key=lambda d: (d.stat().st_mtime, d.name))
+    except (PermissionError, OSError) as exc:
+        logger.debug(f"Cannot select version dir for {plugin_dir}: {exc}")
+        return None
+
+
+def _installed_plugins_registry(plugins_root: Path) -> Optional[Dict]:
+    """The ``plugins`` map, ``None`` when the file is missing or malformed.
+
+    An empty map means every plugin was uninstalled, not "no registry" — the
+    latter would resurrect the cache's leftovers. ``version`` is not gated on:
+    a bumped file would otherwise drop every plugin.
+    """
+    data = _read_plugin_json(plugins_root / "installed_plugins.json")
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    return plugins if isinstance(plugins, dict) else None
+
+
+def _marketplace_registry(plugins_root: Path) -> Dict:
+    """``known_marketplaces.json`` keyed by marketplace name."""
+    data = _read_plugin_json(plugins_root / "known_marketplaces.json")
+    return data if isinstance(data, dict) else {}
+
+
+def _directory_marketplace_plugin_dir(location: Path, plugin: str) -> Optional[Path]:
+    """The dir a directory-source marketplace's manifest assigns to ``plugin``."""
+    manifest = _read_plugin_json(location / ".claude-plugin" / "marketplace.json")
+    if not isinstance(manifest, dict):
+        return None
+    for entry in (manifest.get("plugins") or []):
+        if not isinstance(entry, dict) or entry.get("name") != plugin:
+            continue
+        source = entry.get("source")
+        relative = source if isinstance(source, str) else (
+            source.get("path") if isinstance(source, dict) else None
+        )
+        if not isinstance(relative, str) or not relative:
+            return None
+        try:
+            candidate = (location / relative).resolve()
+            candidate.relative_to(location.resolve())
+        except (ValueError, OSError, RuntimeError):
+            return None
+        return candidate
+    return None
+
+
+def _authoritative_plugin_dirs(
+    plugin: str,
+    marketplace_info: Dict,
+    installed_entries: List,
+) -> List[Path]:
+    """Every dir that may hold ``plugin``, most authoritative first.
+
+    Directory-source marketplaces install outside the cache, so their
+    ``installLocation`` layouts come first, then ``installPath``. The plugin
+    name is a registry key, joined on only when it is one path component —
+    ``../../etc@mkt`` would otherwise reach outside the marketplace.
+    """
+    dirs: List[Path] = []
+
+    source = marketplace_info.get("source") if isinstance(marketplace_info, dict) else None
+    source_type = source.get("source") if isinstance(source, dict) else None
+    install_location = (
+        marketplace_info.get("installLocation") if isinstance(marketplace_info, dict) else None
+    )
+
+    safe_name = plugin != ".." and Path(plugin).name == plugin
+    if source_type == "directory" and install_location and safe_name:
+        location = Path(install_location)
+        for candidate in (
+            location / "plugins" / plugin,
+            location / plugin,
+            _directory_marketplace_plugin_dir(location, plugin),
+        ):
+            if candidate is not None and candidate not in dirs:
+                dirs.append(candidate)
+
+    for entry in (installed_entries or []):
+        install_path = entry.get("installPath") if isinstance(entry, dict) else None
+        if install_path:
+            candidate = Path(install_path)
+            if candidate not in dirs:
+                dirs.append(candidate)
+
+    return dirs
+
+
+_MCP_TOKEN_UNSAFE_RE = re.compile(r'[^A-Za-z0-9_-]')
+
+
+def _mangle_mcp_token(token: Optional[str]) -> str:
+    """Claude Code's sanitisation of one segment of an MCP server name."""
+    return _MCP_TOKEN_UNSAFE_RE.sub('_', token or '')
+
+
+def _claude_plugin_server_names(plugin_name: str, servers: Dict) -> Dict:
+    """Re-key a plugin's server map to the names Claude Code exposes.
+
+    A plugin server is ``plugin_<plugin>_<key>`` at the tool-call layer, which
+    is what the hook reports; the bare key would file it under a second
+    identity. Punctuation collapses to ``_``, so two keys can collide — the
+    loser keeps its raw key rather than vanishing.
+    """
+    renamed: Dict = {}
+    prefix = "plugin_%s_" % _mangle_mcp_token(plugin_name)
+    for key, config in servers.items():
+        name = prefix + _mangle_mcp_token(key)
+        if name in renamed:
+            name = key
+        if name in renamed:
+            logger.debug(f"Plugin MCP name collision for {plugin_name}: dropping {key}")
+            continue
+        renamed[name] = config
+    return renamed
+
+
+def _append_plugin_project(
+    plugin_dir: Path,
+    plugin_name: str,
+    servers: Dict,
     projects: List[Dict],
     plugin_lookup: Optional[Dict[str, Dict]] = None,
-) -> None:
+) -> bool:
+    """Emit one project entry for a plugin's server map. False when it yields
+    no reportable servers, so the caller can try the next candidate dir."""
+    servers_array = transform_mcp_servers_to_array(
+        _claude_plugin_server_names(plugin_name, servers)
+    )
+    if not servers_array:
+        return False
+
+    path_str = str(plugin_dir)
+    project_entry = {
+        "path": path_str,
+        "mcpServers": servers_array,
+        "scope": "plugin",
+        "pluginName": plugin_name,
+    }
+    if plugin_lookup:
+        provenance = _lookup_plugin_provenance(path_str, plugin_lookup)
+        if provenance:
+            provenance["source"] = "plugin"
+            project_entry.update(provenance)
+    projects.append(project_entry)
+    return True
+
+
+def _extract_registered_plugin_mcp(
+    plugins_root: Path,
+    projects: List[Dict],
+    plugin_lookup: Optional[Dict[str, Dict]] = None,
+) -> bool:
+    """Resolve plugin MCP servers through the installed-plugins registry.
+
+    False when the registry is unusable, so the caller falls back to disk.
     """
-    Extract MCP config from a plugin's plugin.json file.
-    """
-    if not plugin_json_path.exists() or not plugin_json_path.is_file():
-        return
+    installed = _installed_plugins_registry(plugins_root)
+    if installed is None:
+        return False
 
-    try:
-        parent_dir = plugin_json_path.parent
-        # Cache layout: cache/<mkt>/<plugin>/<ver>/.claude-plugin/plugin.json → go up one level
-        # Non-cache layout: plugins/<plugin>/plugin.json → parent IS the plugin root
-        plugin_root = parent_dir.parent if parent_dir.name in _PLUGIN_METADATA_DIRS else parent_dir
-        content = plugin_json_path.read_text(encoding='utf-8', errors='replace')
-        config_data = json.loads(content)
+    marketplaces = _marketplace_registry(plugins_root)
 
-        mcp_servers_obj = config_data.get("mcpServers", {})
-        if not mcp_servers_obj:
-            return
+    for plugin_id, entries in installed.items():
+        plugin, _, marketplace = str(plugin_id).partition('@')
+        if not plugin:
+            continue
+        marketplace_info = marketplaces.get(marketplace) or {}
+        entry_list = entries if isinstance(entries, list) else []
 
-        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
+        for plugin_dir in _authoritative_plugin_dirs(plugin, marketplace_info, entry_list):
+            servers = _plugin_mcp_server_map(plugin_dir)
+            if not servers:
+                continue
+            # First dir that declares the servers wins; later ones repeat them.
+            if _append_plugin_project(
+                plugin_dir, plugin, servers, projects, plugin_lookup=plugin_lookup
+            ):
+                break
 
-        if mcp_servers_array:
-            plugin_name = config_data.get("name", plugin_root.name)
-            project_entry = {
-                "path": str(plugin_root),
-                "mcpServers": mcp_servers_array,
-                "scope": "plugin",
-                "pluginName": plugin_name,
-            }
-            if plugin_lookup:
-                provenance = _lookup_plugin_provenance(str(plugin_root), plugin_lookup)
-                if provenance:
-                    provenance["source"] = "plugin"
-                    project_entry.update(provenance)
-            projects.append(project_entry)
-    except json.JSONDecodeError as e:
-        logger.debug(f"Invalid JSON in plugin.json {plugin_json_path}: {e}")
-    except PermissionError as e:
-        logger.debug(f"Permission denied reading plugin.json {plugin_json_path}: {e}")
-    except Exception as e:
-        logger.debug(f"Error reading plugin.json {plugin_json_path}: {e}")
+    return True
 
 
 def _scan_plugin_cache_dir(
@@ -1907,9 +2268,8 @@ def _scan_plugin_cache_dir(
     """
     Scan the plugin cache directory for MCP configs.
 
-    Handles the nested structure:
-        cache/<marketplace>/<plugin>/<version>/.mcp.json
-        cache/<marketplace>/<plugin>/<version>/.claude-plugin/plugin.json
+    Handles the nested structure ``cache/<marketplace>/<plugin>/<version>/``,
+    reading only the live version dir.
 
     Args:
         cache_dir: Path to ~/.claude/plugins/cache
@@ -1927,26 +2287,15 @@ def _scan_plugin_cache_dir(
                 for plugin_dir in marketplace_dir.iterdir():
                     if not plugin_dir.is_dir():
                         continue
-                    try:
-                        for version_dir in plugin_dir.iterdir():
-                            if not version_dir.is_dir():
-                                continue
-
-                            mcp_file = version_dir / ".mcp.json"
-                            if mcp_file.exists() and mcp_file.is_file():
-                                _extract_plugin_mcp_from_dot_mcp_json(
-                                    mcp_file, plugin_dir.name, projects,
-                                    plugin_lookup=plugin_lookup,
-                                )
-
-                            claude_plugin_json = version_dir / ".claude-plugin" / "plugin.json"
-                            if claude_plugin_json.exists():
-                                extract_plugin_mcp_from_plugin_json(
-                                    claude_plugin_json, projects,
-                                    plugin_lookup=plugin_lookup,
-                                )
-                    except (PermissionError, OSError):
+                    version_dir = _select_plugin_version_dir(plugin_dir)
+                    if version_dir is None:
                         continue
+                    servers = _plugin_mcp_server_map(version_dir)
+                    if servers:
+                        _append_plugin_project(
+                            version_dir, plugin_dir.name, servers, projects,
+                            plugin_lookup=plugin_lookup,
+                        )
             except (PermissionError, OSError):
                 continue
     except (PermissionError, OSError) as e:
@@ -1955,53 +2304,40 @@ def _scan_plugin_cache_dir(
         logger.debug(f"Error extracting plugin cache MCP configs: {e}")
 
 
-def _extract_plugin_mcp_from_dot_mcp_json(
-    mcp_json_path: Path,
-    plugin_name: str,
+def _extract_plugin_mcp_for_dir(
+    plugins_dir: Path,
     projects: List[Dict],
     plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
-    Extract MCP config from a plugin's .mcp.json file in the cache directory.
+    Extract MCP configs from one ``.claude/plugins`` directory.
 
-    Args:
-        mcp_json_path: Path to the .mcp.json file
-        plugin_name: Name of the plugin (directory name)
-        projects: List to append results to
-        plugin_lookup: Optional dict mapping plugin install paths to provenance metadata
+    Mirrors the hook: the registry is authoritative, being the only source that
+    knows about plugins installed outside the cache (directory-source
+    marketplaces, dev installs). The disk scan runs only when it is unusable.
     """
+    if not plugins_dir.exists() or not plugins_dir.is_dir():
+        return
+
+    if _extract_registered_plugin_mcp(plugins_dir, projects, plugin_lookup=plugin_lookup):
+        return
+
     try:
-        content = mcp_json_path.read_text(encoding='utf-8', errors='replace')
-        config_data = json.loads(content)
-
-        mcp_servers_obj = config_data.get("mcpServers")
-        if not mcp_servers_obj:
-            mcp_servers_obj = {k: v for k, v in config_data.items() if isinstance(v, dict)}
-        if not mcp_servers_obj:
-            return
-
-        mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-
-        if mcp_servers_array:
-            parent_path = str(mcp_json_path.parent)
-            project_entry = {
-                "path": parent_path,
-                "mcpServers": mcp_servers_array,
-                "scope": "plugin",
-                "pluginName": plugin_name,
-            }
-            if plugin_lookup:
-                provenance = _lookup_plugin_provenance(parent_path, plugin_lookup)
-                if provenance:
-                    provenance["source"] = "plugin"
-                    project_entry.update(provenance)
-            projects.append(project_entry)
-    except json.JSONDecodeError as e:
-        logger.debug(f"Invalid JSON in plugin .mcp.json {mcp_json_path}: {e}")
-    except PermissionError as e:
-        logger.debug(f"Permission denied reading plugin .mcp.json {mcp_json_path}: {e}")
+        for plugin_dir in plugins_dir.iterdir():
+            if not plugin_dir.is_dir():
+                continue
+            servers = _plugin_mcp_server_map(plugin_dir)
+            if servers:
+                _append_plugin_project(
+                    plugin_dir, plugin_dir.name, servers, projects,
+                    plugin_lookup=plugin_lookup,
+                )
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Error scanning plugins directory {plugins_dir}: {e}")
     except Exception as e:
-        logger.debug(f"Error reading plugin .mcp.json {mcp_json_path}: {e}")
+        logger.debug(f"Error extracting plugin MCP configs: {e}")
+
+    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
 
 
 def extract_claude_plugin_mcp_configs(
@@ -2009,26 +2345,11 @@ def extract_claude_plugin_mcp_configs(
     plugin_lookup: Optional[Dict[str, Dict]] = None,
 ) -> None:
     """
-    Extract MCP configs from Claude Code plugins.
+    Extract MCP configs from the current user's Claude Code plugins.
     """
-    plugins_dir = Path.home() / ".claude" / "plugins"
-    if not plugins_dir.exists() or not plugins_dir.is_dir():
-        return
-
-    try:
-        for plugin_dir in plugins_dir.iterdir():
-            if not plugin_dir.is_dir():
-                continue
-
-            plugin_json = plugin_dir / "plugin.json"
-            if plugin_json.exists():
-                extract_plugin_mcp_from_plugin_json(plugin_json, projects, plugin_lookup=plugin_lookup)
-    except (PermissionError, OSError) as e:
-        logger.debug(f"Error scanning plugins directory {plugins_dir}: {e}")
-    except Exception as e:
-        logger.debug(f"Error extracting plugin MCP configs: {e}")
-
-    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
+    _extract_plugin_mcp_for_dir(
+        Path.home() / ".claude" / "plugins", projects, plugin_lookup=plugin_lookup
+    )
 
 
 def extract_claude_plugin_mcp_configs_with_root_support(
@@ -2073,21 +2394,12 @@ def extract_claude_plugin_mcp_configs_with_root_support(
     admin_homes = _iter_admin_user_homes(is_admin, users_dir)
     if admin_homes:
         for user_dir in admin_homes:
-            plugins_dir = user_dir / ".claude" / "plugins"
-            if plugins_dir.exists() and plugins_dir.is_dir():
-                try:
-                    for plugin_dir in plugins_dir.iterdir():
-                        if not plugin_dir.is_dir():
-                            continue
-                        plugin_json = plugin_dir / "plugin.json"
-                        if plugin_json.exists():
-                            extract_plugin_mcp_from_plugin_json(
-                                plugin_json, projects, plugin_lookup=plugin_lookup
-                            )
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
-
-                _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
+            try:
+                _extract_plugin_mcp_for_dir(
+                    user_dir / ".claude" / "plugins", projects, plugin_lookup=plugin_lookup
+                )
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Error scanning plugins for user {user_dir.name}: {e}")
 
         # On Darwin also scan the admin's own home plugins (not under /Users).
         # On Windows the admin's home is already in admin_homes — skip to avoid

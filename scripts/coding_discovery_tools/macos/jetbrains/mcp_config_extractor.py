@@ -5,13 +5,14 @@ MCP config extraction for JetBrains IDEs on macOS systems.
 import json
 import logging
 import os
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
 from ...mcp_extraction_helpers import extract_ide_global_configs_with_root_support
+from ...xml_helpers import safe_xml_parse
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,8 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                 if folder.startswith('.') or not folder_path.is_dir():
                     continue
 
+                if should_skip_folder(folder, JETBRAINS_SKIP_FOLDERS):
+                    continue
                 if not any(pattern in folder for pattern in self.IDE_PATTERNS):
                     continue
 
@@ -141,7 +144,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """Extract project paths from JetBrains XML file."""
         paths = set()
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             root = tree.getroot()
             for el in root.iter():
                 for attr in ["value", "key", "path", "projectPath"]:
@@ -198,7 +201,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """Simplified 2025.x MCP XML parser."""
         servers = []
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             for node in tree.findall(".//McpServerConfigurationProperties"):
 
                 def get_opt(n, name):

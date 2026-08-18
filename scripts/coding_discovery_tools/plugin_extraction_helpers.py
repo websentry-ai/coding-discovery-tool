@@ -361,10 +361,12 @@ def extract_claude_code_plugins(plugins_dir: Path) -> List[Dict]:
     if not installed_data:
         return []
 
+    # The `version` field is read but not gated on: the plugins map has been
+    # {plugin_id: [entries]} throughout, so bailing on an unrecognised version
+    # would silently drop every plugin rather than degrade.
     version = installed_data.get("version")
     if version != 2:
-        logger.warning("Unsupported installed_plugins.json version: %s (expected 2); skipping plugin extraction", version)
-        return []
+        logger.warning("Unexpected installed_plugins.json version: %s (expected 2); reading anyway", version)
 
     plugins_map = installed_data.get("plugins", {})
     if not isinstance(plugins_map, dict):

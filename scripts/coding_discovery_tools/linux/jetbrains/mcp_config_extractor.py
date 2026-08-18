@@ -3,13 +3,14 @@
 import json
 import logging
 import os
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
 from ...linux_extraction_helpers import get_linux_user_homes
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
+from ...xml_helpers import safe_xml_parse
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,8 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             for folder in os.listdir(jetbrains_root):
                 folder_path = jetbrains_root / folder
                 if folder.startswith(".") or not folder_path.is_dir():
+                    continue
+                if should_skip_folder(folder, JETBRAINS_SKIP_FOLDERS):
                     continue
                 if not any(pattern in folder for pattern in self.IDE_PATTERNS):
                     continue
@@ -110,7 +113,7 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _extract_project_paths_from_xml(self, xml_path: Path) -> set:
         paths = set()
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             root = tree.getroot()
             for el in root.iter():
                 for attr in ["value", "key", "path", "projectPath"]:
@@ -158,7 +161,7 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     def _parse_mcp_xml(self, xml_path: Path) -> List[Dict]:
         servers = []
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             for node in tree.findall(".//McpServerConfigurationProperties"):
                 def get_opt(n, name):
                     if n is None:

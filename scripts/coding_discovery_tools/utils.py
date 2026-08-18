@@ -1791,13 +1791,27 @@ def read_contained_text(path: Path, root: Path,
             if not (real == base or real.startswith(base.rstrip("\\") + "\\")):
                 return None
         else:
-            # POSIX: the fd's own owner can't be forged by a path swap.
+            # POSIX: the fd's own owner can't be forged by a path swap. This is the
+            # cross-user guarantee — a redirect into another user's file is caught
+            # because that file's owner differs from root's owner. (A same-owner
+            # redirect stays inside the owner's own content, so it is not a
+            # cross-user leak.)
             try:
                 if st.st_uid != os.stat(str(root)).st_uid:
                     return None
             except OSError:
                 return None
-        data = os.read(fd, max_bytes + 1)
+        # Read in a loop: a single os.read may return fewer bytes than requested
+        # even for a regular file, which would misreport the content or truncation.
+        chunks = []
+        remaining = max_bytes + 1  # +1 so a file exactly at the cap isn't marked truncated
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
         return data[:max_bytes].decode("utf-8", "replace"), len(data) > max_bytes
     except OSError:
         return None

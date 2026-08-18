@@ -531,6 +531,17 @@ class TestReadContainedText(unittest.TestCase):
         d, f = self._home_with("abcdefghij")
         self.assertEqual(utils.read_contained_text(f, d, 4), ("abcd", True))
 
+    def test_short_reads_are_reassembled(self):
+        # os.read may return fewer bytes than requested; the loop must reassemble
+        # the full content and compute truncation from the total, not one read.
+        d, f = self._home_with("abcdefghij")
+        real_read = os.read
+        choppy = lambda fd, n: real_read(fd, min(n, 3))  # <=3 bytes per call
+        with patch(f"{_MOD}.os.read", side_effect=choppy):
+            self.assertEqual(utils.read_contained_text(f, d, 100), ("abcdefghij", False))
+        with patch(f"{_MOD}.os.read", side_effect=choppy):
+            self.assertEqual(utils.read_contained_text(f, d, 4), ("abcd", True))
+
     @unittest.skipUnless(hasattr(os, "symlink") and os.name != "nt", "POSIX symlink")
     def test_symlinked_file_refused(self):
         d, f = self._home_with("x")

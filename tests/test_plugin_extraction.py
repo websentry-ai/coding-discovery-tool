@@ -709,6 +709,64 @@ class TestCodexPluginEnumeration(unittest.TestCase):
         self.assertFalse([s for s in us if "PRIVATE KEY" in (s.get("content") or "")])
         self.assertNotIn("x", [s.get("skill_name") for s in us])
 
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_symlinked_codex_home_ancestor_is_rejected(self):
+        # A symlinked ~/.codex redirecting the whole boundary into another tree must
+        # be refused before traversal, so realpath containment can't be fooled.
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        victim = self.tmp / "victim"
+        self._mk_plugin(victim, "openai-curated", "linear", "linear")
+        self._enable(victim, "linear@openai-curated")
+        home = self.tmp / "alice"
+        home.mkdir()
+        os.symlink(victim, home / ".codex")
+        self.assertEqual(extract_codex_plugins(home / ".codex"), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_symlinked_plugins_dir_ancestor_is_rejected(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        victim = self.tmp / "victim"
+        self._mk_plugin(victim, "openai-curated", "linear", "linear")
+        codex = self.tmp / ".codex"
+        codex.mkdir(parents=True)
+        self._enable(codex, "linear@openai-curated")
+        os.symlink(victim / "plugins", codex / "plugins")
+        self.assertEqual(extract_codex_plugins(codex), [])
+
+    def _one_plugin(self, install):
+        return [{"install_path": str(install), "has_skills": True,
+                 "plugin_id": "p@m", "marketplace_name": "m"}]
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_plugin_skill_symlink_refused_by_fd_read(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_plugin_skills
+        inst = self.tmp / "inst"
+        (inst / "skills" / "x").mkdir(parents=True)
+        secret = self.tmp / "secret.txt"
+        secret.write_text("SECRET", encoding="utf-8")
+        os.symlink(secret, inst / "skills" / "x" / "SKILL.md")  # O_NOFOLLOW refuses at open
+        self.assertEqual(extract_plugin_skills(self._one_plugin(inst)), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX hardlink semantics")
+    def test_plugin_skill_hardlink_refused_by_fd_read(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_plugin_skills
+        inst = self.tmp / "inst2"
+        (inst / "skills" / "y").mkdir(parents=True)
+        other = self.tmp / "other.txt"
+        other.write_text("OTHER", encoding="utf-8")
+        os.link(other, inst / "skills" / "y" / "SKILL.md")  # st_nlink == 2 -> fstat refuses
+        self.assertEqual(extract_plugin_skills(self._one_plugin(inst)), [])
+
+    def test_plugin_skill_legit_read(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_plugin_skills
+        inst = self.tmp / "inst3"
+        (inst / "skills" / "z").mkdir(parents=True)
+        (inst / "skills" / "z" / "SKILL.md").write_text("# Hello", encoding="utf-8")
+        got = extract_plugin_skills(self._one_plugin(inst))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["content"], "# Hello")
+        self.assertFalse(got[0]["truncated"])
+
     def test_multiline_string_cannot_false_disable_plugin(self):
         """An `enabled = false` embedded in a TOML multiline string must not disable a
         real plugin (Codex is enabled-unless-disabled, so only genuine records count)."""

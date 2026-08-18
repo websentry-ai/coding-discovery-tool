@@ -9,6 +9,7 @@ detection. Uses functional composition — no classes.
 import json
 import logging
 import os
+import stat
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -198,6 +199,14 @@ def extract_codex_plugins(codex_home: Path) -> List[Dict]:
     layout cannot redirect reads outside the owning user's tree.
     """
     plugins: List[Dict] = []
+    # Reject symlinked ancestors before resolving the cache. A symlinked
+    # ``~/.codex`` or ``~/.codex/plugins`` would redirect the whole boundary into
+    # another user's tree, so the realpath containment below (which resolves the
+    # boundary too) could pass against the wrong root. With every ancestor confirmed
+    # real, that containment can no longer be fooled. (cache, marketplace, and plugin
+    # dirs are each rejected below.)
+    if is_symlink_or_junction(codex_home) or is_symlink_or_junction(codex_home / "plugins"):
+        return plugins
     cache = codex_home / "plugins" / "cache"
     if not cache.is_dir() or is_symlink_or_junction(cache):
         return plugins
@@ -690,7 +699,6 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
     Returns:
         List of skill dicts ready to merge into user_skills.
     """
-    from .claude_code_skills_helpers import _is_foreign_hardlink  # local: avoid import cycle
     skills: List[Dict] = []
     for plugin in plugins:
         install_path = plugin.get("install_path")
@@ -708,20 +716,26 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                 if not entry.is_dir() or is_symlink_or_junction(entry):
                     continue
                 skill_file = entry / "SKILL.md"
-                # Reject symlinks (leaf may point elsewhere) and foreign hardlinks
-                # (st_nlink > 1 -> a second link could be another user's file) before
-                # reading, so a crafted plugin can't smuggle off-plugin content in.
-                if (not skill_file.is_file()
-                        or is_symlink_or_junction(skill_file)
-                        or _is_foreign_hardlink(skill_file)):
+                # Open with O_NOFOLLOW and validate the OPEN fd, never the path: a
+                # symlinked SKILL.md is refused at open, and a non-regular file or a
+                # hardlink (st_nlink > 1 — a second link could be another user's file)
+                # is refused via fstat. Reading from the fd closes the check-then-read
+                # gap: the leaf can't be swapped for a link between the guard and the
+                # read.
+                try:
+                    fd = os.open(str(skill_file),
+                                 os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+                except OSError:
                     continue
                 try:
-                    st = skill_file.stat()
+                    st = os.fstat(fd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                        continue
                     file_size = st.st_size
-                    raw = skill_file.read_text(encoding="utf-8", errors="replace")
-                    raw_bytes = raw.encode("utf-8")
+                    raw_bytes = os.read(fd, MAX_SKILL_FILE_SIZE + 1)
                     truncated = len(raw_bytes) > MAX_SKILL_FILE_SIZE
-                    content = raw_bytes[:MAX_SKILL_FILE_SIZE].decode("utf-8", errors="ignore") if truncated else raw
+                    content = raw_bytes[:MAX_SKILL_FILE_SIZE].decode(
+                        "utf-8", errors="ignore" if truncated else "replace")
                     last_modified = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
 
                     skills.append({
@@ -742,6 +756,8 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                     })
                 except (PermissionError, OSError, UnicodeDecodeError):
                     continue
+                finally:
+                    os.close(fd)
         except (PermissionError, OSError):
             continue
     return skills

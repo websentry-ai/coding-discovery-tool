@@ -196,14 +196,14 @@ class TestBuildCoworkSkillDict(unittest.TestCase):
                 skill_dir,
                 "---\nname: my-skill\ndescription: does a thing\n---\n# My Skill\nbody\n",
             )
-            result = build_cowork_skill_dict(skill_file)
+            result = build_cowork_skill_dict(skill_file, user_home=Path(tmp))
 
         self.assertIsNotNone(result)
         self.assertEqual(result["file_name"], "SKILL.md")
         self.assertEqual(result["scope"], "user")
         self.assertEqual(result["type"], "skill")
         self.assertEqual(result["skill_name"], "my-skill")
-        self.assertEqual(result["project_path"], str(Path.home()))
+        self.assertEqual(result["project_path"], str(Path(tmp)))
         self.assertFalse(result["truncated"])
         self.assertIn("My Skill", result["content"])
 
@@ -211,13 +211,21 @@ class TestBuildCoworkSkillDict(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / "skills" / "context"
             skill_file = _write_skill(skill_dir, "---\nname: context\n---\nbody\n")
-            self.assertIsNone(build_cowork_skill_dict(skill_file))
+            self.assertIsNone(build_cowork_skill_dict(skill_file, user_home=Path(tmp)))
+
+    def test_requires_user_home(self):
+        # Under an all-users scan the owning home must be supplied; without it the
+        # read would bind containment to the scanner's Path.home(), so skip instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skills" / "s"
+            skill_file = _write_skill(skill_dir, "---\nname: s\n---\nbody\n")
+            self.assertIsNone(build_cowork_skill_dict(skill_file, user_home=None))
 
     def test_uses_folder_name_when_no_frontmatter(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / "skills" / "folder-named-skill"
             skill_file = _write_skill(skill_dir, "body with no frontmatter or heading")
-            result = build_cowork_skill_dict(skill_file)
+            result = build_cowork_skill_dict(skill_file, user_home=Path(tmp))
         self.assertIsNotNone(result)
         self.assertEqual(result["skill_name"], "folder-named-skill")
 
@@ -235,7 +243,7 @@ class TestBuildCoworkSkillDict(unittest.TestCase):
                 skill_dir,
                 "---\nname: my-skill\n---\n# my-skill\nbody\n",
             )
-            result = build_cowork_skill_dict(skill_file)
+            result = build_cowork_skill_dict(skill_file, user_home=Path(tmp))
 
         self.assertIsNotNone(result)
         self.assertEqual(result["scope"], "user")

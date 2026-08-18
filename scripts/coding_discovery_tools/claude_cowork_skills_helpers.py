@@ -230,8 +230,13 @@ def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> 
         if not md_path.exists() or not md_path.is_file():
             return None
 
+        # The containment root must be the OWNING user's home, never the scanning
+        # process's Path.home() — under an all-users scan that would bind the check
+        # to root/SYSTEM and accept the wrong tree. Require it; skip if absent.
+        if user_home is None:
+            return None
         metadata = _get_file_metadata(md_path)
-        read = _read_file_content(md_path, user_home or Path.home())
+        read = _read_file_content(md_path, user_home)
         if read is None:
             return None  # redirect / cross-user / unreadable -> skip the skill
         content, truncated = read
@@ -246,7 +251,7 @@ def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> 
         return {
             "file_path": str(md_path),
             "file_name": md_path.name,
-            "project_path": str(user_home or Path.home()),
+            "project_path": str(user_home),
             "content": content,
             "size": metadata["size"],
             "last_modified": metadata["last_modified"],

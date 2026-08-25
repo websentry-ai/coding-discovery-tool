@@ -1638,6 +1638,429 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
+def _windows_process_is_elevated() -> bool:
+    """True if the process is elevated, or on any error (fail closed)."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True
+
+
+def _binary_in_cwd(path: str) -> bool:
+    """True if ``path`` is inside the current working directory (a possible
+    planted binary). A binary directly in the cwd counts even at a filesystem
+    root; the nested-subtree check is skipped for a root cwd so real PATH installs
+    aren't rejected. Case-folded for Windows. Fails closed on error."""
+    try:
+        nc = os.path.normcase  # case-fold on Windows; no-op on POSIX
+        real_cwd = os.path.realpath(os.getcwd())
+        cwd_is_root = os.path.dirname(real_cwd) == real_cwd
+        abs_parent = os.path.dirname(os.path.abspath(path))
+        # Check the parent lexically (catches a leaf like <cwd>/auggie) and
+        # resolved (catches symlinks that would escape the tree).
+        for parent, base in ((abs_parent, os.path.abspath(os.getcwd())),
+                             (os.path.realpath(abs_parent), real_cwd)):
+            parent, base = nc(parent), nc(base)
+            if parent == base:
+                return True
+            if not cwd_is_root:
+                try:
+                    if os.path.commonpath([parent, base]) == base:
+                        return True
+                except ValueError:
+                    pass  # different drive -> not under this cwd
+        return False
+    except OSError:
+        return True
+
+
+def _is_safe_exec_path(path: str) -> bool:
+    """True if a resolved binary at ``path`` is safe to execute during a scan — not
+    one another local account could have planted. POSIX: the binary and the
+    directory it was found in must be owned by the running user or root and not
+    group/world-writable, so a shared-writable PATH entry (e.g. a group-writable
+    ``/usr/local/bin``) can't supply it. Windows has no comparable cheap check, so
+    only the CWD guard applies there. Fails closed on any error."""
+    if os.name == "nt":
+        return True
+    try:
+        euid = os.geteuid()
+        for target in (path, os.path.dirname(path) or os.sep):
+            info = os.stat(target)
+            if info.st_uid not in (euid, 0):
+                return False
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+        return True
+    except OSError:
+        return False
+
+
+def _which_no_cwd(name: str) -> Optional[str]:
+    """``shutil.which`` that rejects a match planted in the CWD or supplied by a
+    shared-writable directory another local account could plant into."""
+    found = shutil.which(name)
+    if not found:
+        return None
+    found = os.path.abspath(found)
+    if _binary_in_cwd(found) or not _is_safe_exec_path(found):
+        return None
+    return found
+
+
+def _is_scanning_users_own_home(user_home: Optional[Path]) -> bool:
+    """True only if ``user_home`` is the scanning account's own home and the
+    process isn't privileged. Both the plan probe and the detector PATH fallbacks
+    gate on this so they can't drift. POSIX refuses ``euid == 0`` and compares the
+    passwd home (not the spoofable ``$HOME``); Windows refuses an admin token and
+    compares ``Path.home()``. Fails closed on any error."""
+    if user_home is None:
+        return False
+    try:
+        if platform.system() == "Windows":
+            if _windows_process_is_elevated():
+                return False
+            own_home = Path.home()
+        else:
+            if not hasattr(os, "geteuid") or os.geteuid() == 0:
+                return False
+            try:
+                own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
+            except (KeyError, OSError):
+                return False  # arbitrary UID with no passwd entry — soft-fail
+        return Path(user_home).resolve() == own_home.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+_AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
+_SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
+
+
+def _windows_system_dir() -> Optional[str]:
+    """The real Windows system directory (e.g. ``C:\\Windows\\System32``) from the OS
+    via ``GetSystemDirectoryW``, not the ``%SystemRoot%`` env — so a caller-controlled
+    env can't steer a trusted-path lookup. None on failure. Windows only."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        k32.GetSystemDirectoryW.restype = wintypes.UINT
+        buf = ctypes.create_unicode_buffer(260)
+        n = k32.GetSystemDirectoryW(buf, 260)
+        if not n or n >= 260:
+            return None
+        return buf.value
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _trusted_curl() -> Optional[str]:
+    """Absolute path to the system curl (trusted OS locations only, never PATH),
+    or None. Keeps a privileged scan from handing the token to a planted curl."""
+    if platform.system() == "Windows":
+        sysdir = _windows_system_dir()
+        if not sysdir:
+            return None
+        candidates = [os.path.join(sysdir, "curl.exe")]
+    else:
+        candidates = ["/usr/bin/curl", "/bin/curl"]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _is_symlink_or_reparse(p: Path) -> bool:
+    """True if ``p`` is a symlink or a Windows reparse point (junction), which
+    could redirect a read elsewhere. Fails closed (True) if undetermined."""
+    try:
+        st = os.lstat(str(p))
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(st, "st_file_attributes", 0) & reparse)
+
+
+def _strip_extended_prefix(p: str) -> str:
+    """Drop a Windows extended-length prefix (``\\\\?\\``, ``\\??\\``, ``\\\\?\\UNC\\``)
+    so a ``GetFinalPathNameByHandle`` result compares against a plain ``realpath``."""
+    if p.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + p[len("\\\\?\\UNC\\"):]
+    for pre in ("\\\\?\\", "\\??\\"):
+        if p.startswith(pre):
+            return p[len(pre):]
+    return p
+
+
+def _windows_final_path(fd: int) -> Optional[str]:
+    """The real filesystem path an open fd points to (junctions/symlinks resolved),
+    read from the handle so a later path swap can't change it. None on any failure.
+    Windows only; a privileged scan uses this instead of an owner check because
+    Windows file ownership is unreliable (elevated writes are owned by the
+    Administrators group, not the user)."""
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR,
+                                                  wintypes.DWORD, wintypes.DWORD]
+        k32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+        handle = msvcrt.get_osfhandle(fd)
+        needed = k32.GetFinalPathNameByHandleW(handle, None, 0, 0)  # NORMALIZED|DOS
+        if not needed:
+            return None
+        buf = ctypes.create_unicode_buffer(needed)
+        if not k32.GetFinalPathNameByHandleW(handle, buf, needed, 0):
+            return None
+        return buf.value
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
+    """Read up to ``max_bytes`` of ``path`` as a regular file inside ``owner_ref``'s
+    home, or None. Hardened for an all-users scan: refuses redirects and non-regular
+    files, and re-checks the opened fd. Cross-user reads are allowed on both
+    platforms — POSIX verifies the fd's own owner, Windows verifies the handle's
+    real path stays inside the home (ownership is unreliable there)."""
+    # Refuse a redirect at the file or its parent dir, and capture the file's own
+    # identity — lstat never follows — to compare against the opened fd below.
+    if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
+        return None
+    try:
+        lst = os.lstat(str(path))
+    except OSError:
+        return None
+    if not stat.S_ISREG(lst.st_mode):
+        return None
+    try:
+        fd = os.open(str(path),
+                     os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None  # FIFO/device/dir — don't block or stream
+        # The opened fd must be the exact file lstat saw before the open — same
+        # inode and device — which catches a symlink/junction swapped in around
+        # the open (Windows has no effective O_NOFOLLOW for junctions).
+        if (st.st_ino, st.st_dev) != (lst.st_ino, lst.st_dev):
+            return None
+        # The file must belong to the home's owner. A pathname re-check (realpath,
+        # stat) can't guarantee this: a parent junction can be swapped back before
+        # it runs, so only the fd is trusted.
+        if platform.system() == "Windows":
+            # Windows ownership is unreliable (elevated writes are Administrators-
+            # owned, not the user's), so verify the handle's REAL path instead:
+            # GetFinalPathNameByHandle resolves every junction/symlink from the open
+            # handle, so a redirect swapped in around the open resolves to its true
+            # target and is refused when it falls outside the owner's home.
+            final = _windows_final_path(fd)
+            if final is None:
+                return None
+            real = os.path.normcase(_strip_extended_prefix(final))
+            home = os.path.normcase(_strip_extended_prefix(os.path.realpath(str(owner_ref))))
+            if not (real == home or real.startswith(home.rstrip("\\") + "\\")):
+                return None
+        else:
+            # POSIX: the fd's own owner can't be forged by a path swap.
+            try:
+                if st.st_uid != os.stat(str(owner_ref)).st_uid:
+                    return None
+            except OSError:
+                return None
+        return os.read(fd, max_bytes).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _augment_tenant_host(url: str) -> Optional[str]:
+    """Return the host if ``url`` is an ``https://…augmentcode.com`` tenant URL,
+    else None. The only gate on where the token is sent, so it rejects anything
+    that could resolve elsewhere or break the curl config. String parsing only
+    (no urllib, for Zscaler)."""
+    if not url or "://" not in url:
+        return None
+    # Reject spaces/control chars — they'd break the config line built from this.
+    if any(ord(c) <= 32 or ord(c) == 127 for c in url):
+        return None
+    scheme, rest = url.split("://", 1)
+    if scheme.lower() != "https":
+        return None
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in host:                      # strip user:pass@ credentials
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):             # IPv6 literal — never an Augment tenant
+        return None
+    host = host.split(":", 1)[0].lower()   # strip :port
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", host):   # real host chars only
+        return None
+    if host == "augmentcode.com" or host.endswith(_AUGMENT_TENANT_HOST_SUFFIX):
+        return host
+    return None
+
+
+def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
+    """Return ``(tenant_base_url, access_token)`` from ``~/.augment/session.json``,
+    or None. A plain file read, so it works for any user's home in an all-users
+    scan; the base URL is rebuilt from the validated host only."""
+    home = Path(user_home)
+    raw = _read_own_regular_file(home / ".augment" / "session.json", home, _SESSION_MAX_BYTES)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = data.get("accessToken")
+    tenant = data.get("tenantURL")
+    if not isinstance(token, str) or not isinstance(tenant, str):
+        return None
+    # Usable as a header value: bounded, no control chars.
+    if not 0 < len(token) <= 4096 or any(ord(c) < 32 or ord(c) == 127 for c in token):
+        return None
+    host = _augment_tenant_host(tenant)
+    if host is None:
+        return None
+    return "https://" + host + "/", token
+
+
+def _read_auggie_plan_via_cli(user_home: Path) -> Optional[str]:
+    """Fallback plan lookup: ask the user's own ``auggie`` CLI. Only runs in a
+    self-scan (``_is_scanning_users_own_home`` — same gate the detector uses), so
+    a privileged all-users scan never executes another user's binary. Used when the
+    stored token is expired/invalid and the billing API can't answer; the CLI reads
+    (and can refresh) its own session. ``auggie account status --json`` prints
+    ``planName``."""
+    if not _is_scanning_users_own_home(user_home):
+        return None
+    auggie = _which_no_cwd("auggie")
+    if auggie is None:
+        return None
+    try:
+        result = subprocess.run(
+            [auggie, "account", "status", "--json"],
+            capture_output=True, text=True, timeout=AUTH_STATUS_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("auggie account status fallback failed: %s", e)
+        return None
+    if result.returncode != 0:
+        logger.debug("auggie account status rc=%s", result.returncode)
+        return None
+    try:
+        parsed = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    plan = parsed.get("planName")
+    if not isinstance(plan, str):
+        return None
+    plan = plan.strip()
+    if not plan or len(plan) > 100 or not plan.isprintable():
+        return None
+    return plan
+
+
+def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
+    """Get the Auggie (Augment) subscription plan for ``user_home``, or None.
+
+    Auggie keeps no plan on disk. Primary path: read the session token from
+    ``~/.augment/session.json`` and query Augment's billing endpoint with curl — a
+    file read plus an HTTP call, never running a binary, so it works for any user in
+    an all-users scan. If that can't answer (a dead/expired token, unreadable
+    session, no curl) and we're scanning our OWN home, fall back to the user's
+    ``auggie`` CLI. Best-effort, optional field.
+    """
+    if user_home is None:
+        return None
+    plan = _auggie_plan_via_billing_api(user_home)
+    if plan is not None:
+        return plan
+    return _read_auggie_plan_via_cli(user_home)
+
+
+def _auggie_plan_via_billing_api(user_home: Path) -> Optional[str]:
+    """Query Augment's billing endpoint for the plan using the stored session
+    token, or None. See ``get_auggie_subscription_type`` for the overall flow."""
+    # Trusted curl only, never PATH (see _trusted_curl).
+    curl = _trusted_curl()
+    if curl is None:
+        logger.debug("no trusted curl found; skipping auggie plan lookup")
+        return None
+    session = _read_auggie_session(user_home)
+    if session is None:
+        return None
+    base_url, token = session
+
+    # Token goes via the stdin config, never argv (not ps-visible). curl (not
+    # urllib) uses the system cert store, for customer VPN/proxy CAs (Zscaler).
+    def _cfg_quote(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+    config = (
+        'silent\n'
+        'fail\n'                 # non-2xx -> non-zero exit, no error body to parse
+        'proto = "=https"\n'     # https only, even if the URL were somehow rewritten
+        'max-filesize = %d\n'    # bound the response so it can't inflate memory
+        'request = "POST"\n'
+        'header = "Authorization: Bearer %s"\n'
+        'header = "Content-Type: application/json"\n'
+        'data = "{}"\n'
+        'max-time = %d\n'
+        'url = "%s"\n'
+    ) % (_SESSION_MAX_BYTES, _cfg_quote(token), AUTH_STATUS_TIMEOUT,
+         _cfg_quote(base_url + "get-billing-summary"))
+
+    try:
+        result = subprocess.run(
+            # -q: ignore any ambient ~/.curlrc on this token-bearing request.
+            [curl, "-q", "--config", "-"],
+            input=config,
+            capture_output=True,
+            text=True,
+            timeout=AUTH_STATUS_TIMEOUT + 5,
+        )
+    except subprocess.TimeoutExpired:
+        logger.debug("auggie billing lookup timed out")
+        return None
+    except OSError as e:
+        logger.debug("Could not run auggie billing lookup: %s", e)
+        return None
+
+    if result.returncode != 0:
+        # Log the code only — curl output can carry account details.
+        logger.debug("auggie billing lookup curl rc=%s", result.returncode)
+        return None
+    try:
+        parsed = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        logger.debug("auggie billing lookup returned non-JSON")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    plan = parsed.get("plan_name")
+    if not isinstance(plan, str):
+        return None
+    plan = plan.strip()
+    # Bound it before it enters logs/report: printable only (rejects control
+    # chars, DEL, and line/paragraph separators that could smear a log line).
+    if not plan or len(plan) > 100 or not plan.isprintable():
+        return None
+    return plan
+
+
 # ---------------------------------------------------------------------------
 # Sentry error reporting via raw HTTP (no SDK dependency)
 # ---------------------------------------------------------------------------

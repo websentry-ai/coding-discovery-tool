@@ -6,9 +6,15 @@ e.g. `IntelliJIdea2025.2`. These rules were duplicated across the macos/, linux/
 and windows/ detectors and drifted; they live here so all three agree.
 """
 
+import logging
 import re
+import xml.etree.ElementTree as ET
 from types import MappingProxyType
-from typing import FrozenSet, Iterable, Mapping, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
+
+from .xml_helpers import safe_xml_fromstring
+
+logger = logging.getLogger(__name__)
 
 # Prefix-matched, because several are version-suffixed on disk, e.g. "JetBrainsClient241.18034.62".
 JETBRAINS_SKIP_FOLDERS: FrozenSet[str] = frozenset({
@@ -88,3 +94,39 @@ def parse_ide_name_and_version(folder_name: str, mapping: Mapping[str, str]) -> 
         return match.group(1).rstrip(" ._-"), match.group(2)
 
     return folder_name, "Unknown"
+
+
+def plugin_entries(ide: Mapping) -> List[Dict[str, Optional[str]]]:
+    """
+    Plugin entries of a detected IDE as ``{name, version}`` dicts.
+
+    Falls back to the names-only ``plugins`` list so a caller that supplies just names
+    still matches its plugin (with an unknown version) instead of detecting nothing.
+    """
+    details = ide.get("_plugin_details")
+    if details:
+        return details
+    return [{"name": name, "version": None} for name in ide.get("plugins", [])]
+
+
+def parse_plugin_metadata(xml_content: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Derive (plugin_id, plugin_name, plugin_version) from a plugin.xml document.
+
+    Parsed as-is: modular plugins declare `xmlns:xi` and use `<xi:include>`, so stripping
+    the declaration leaves an unbound prefix and the whole document fails to parse.
+    """
+    try:
+        root = safe_xml_fromstring(xml_content)
+    except ET.ParseError as exc:
+        logger.debug(f"Failed to parse plugin.xml: {exc}")
+        return None, None, None
+    except Exception as exc:
+        logger.debug(f"Error parsing plugin.xml: {exc}")
+        return None, None, None
+
+    def text(tag: str) -> Optional[str]:
+        element = root.find(f".//{tag}")
+        return element.text.strip() if element is not None and element.text else None
+
+    return text("id") or root.get("id"), text("name"), text("version")

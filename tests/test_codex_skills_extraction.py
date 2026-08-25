@@ -164,6 +164,64 @@ class TestCodexHelperExtraction(unittest.TestCase):
         self.assertIn("mine", names)
         self.assertNotIn("skill-creator", names)
 
+    # --- plugin-bundled skills (aligns Codex with Claude Code / Cursor) ----------
+    def _install_codex_plugin(self, home: Path, marketplace: str, plugin: str,
+                              skill: str, enabled: bool = True):
+        """Mimic `codex plugin add`: a skill under
+        ~/.codex/plugins/cache/<mkt>/<plugin>/<hash>/skills/<skill>/SKILL.md, plus the
+        config.toml enablement record."""
+        cache = home / ".codex" / "plugins" / "cache" / marketplace / plugin / "hash1"
+        sk = cache / "skills" / skill
+        sk.mkdir(parents=True)
+        (sk / "SKILL.md").write_text(
+            f"---\nname: {skill}\ndescription: {skill} desc\n---\nbody", encoding="utf-8"
+        )
+        cfg = home / ".codex" / "config.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        with cfg.open("a", encoding="utf-8") as fh:
+            fh.write(f'[plugins."{plugin}@{marketplace}"]\nenabled = {"true" if enabled else "false"}\n')
+
+    def test_user_extraction_includes_enabled_plugin_skill(self):
+        # Codex installs skills bundled inside marketplace plugins; report them the
+        # same way Claude Code / Cursor plugin skills are reported (source="plugin").
+        home = self.tmp / "Users" / "alice"
+        self._install_codex_plugin(home, "openai-curated", "linear", "linear")
+        user_skills = []
+        extract_codex_user_level_items(home, user_skills, extract_single_rule_file, CODEX_ITEM_CONFIGS)
+        plug = [s for s in user_skills if s["skill_name"] == "linear"]
+        self.assertEqual(len(plug), 1)
+        s = plug[0]
+        self.assertEqual(s["source"], "plugin")
+        self.assertEqual(s["plugin_id"], "linear@openai-curated")
+        self.assertEqual(s["marketplace_name"], "openai-curated")
+        self.assertTrue(s["is_official"])
+        self.assertEqual(s["scope"], "user")
+        # must be attributed to the owning home, else the merge drops it
+        self.assertEqual(s["project_path"], str(home))
+
+    def test_user_extraction_skips_disabled_plugin_skill(self):
+        home = self.tmp / "Users" / "alice"
+        self._install_codex_plugin(home, "openai-curated", "slack", "slack", enabled=False)
+        user_skills = []
+        extract_codex_user_level_items(home, user_skills, extract_single_rule_file, CODEX_ITEM_CONFIGS)
+        self.assertNotIn("slack", [s["skill_name"] for s in user_skills])
+
+    def test_plugin_skill_and_standalone_and_system_coexist(self):
+        # The alignment must not disturb the existing rules: standalone user skills are
+        # still found, .system built-ins are still excluded, and now plugin skills show.
+        home = self.tmp / "Users" / "alice"
+        self._write_skill(home / ".codex", "mine")                         # standalone
+        sysdir = home / ".codex" / "skills" / ".system" / "imagegen"       # builtin
+        sysdir.mkdir(parents=True)
+        (sysdir / "SKILL.md").write_text("---\nname: imagegen\ndescription: d\n---\nb", encoding="utf-8")
+        self._install_codex_plugin(home, "openai-curated", "linear", "linear")  # plugin
+        user_skills = []
+        extract_codex_user_level_items(home, user_skills, extract_single_rule_file, CODEX_ITEM_CONFIGS)
+        by = {s["skill_name"]: s.get("source") for s in user_skills}
+        self.assertEqual(by.get("mine"), "standalone")
+        self.assertEqual(by.get("linear"), "plugin")
+        self.assertNotIn("imagegen", by)
+
     def test_user_extraction_no_agents_dir_is_empty(self):
         home = self.tmp / "Users" / "bob"
         home.mkdir(parents=True)

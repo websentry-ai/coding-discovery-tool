@@ -49,296 +49,6 @@ from .coding_tool_base import (
     BaseWindsurfSkillsExtractor,
 )
 
-# macOS - Shared
-from .macos import MacOSDeviceIdExtractor, MacOSCursorDetector, MacOSClaudeDetector
-from .macos import MacOSClaudeCoworkDetector, MacOSClaudeCoworkSkillsExtractor
-
-# macOS - Cursor
-from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
-from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
-from .macos.cursor.settings_extractor import MacOSCursorSettingsExtractor
-
-# macOS - Claude Code
-from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
-from .macos.claude_code.mcp_config_extractor import MacOSClaudeMCPConfigExtractor
-from .macos.claude_code.settings_extractor import MacOSClaudeSettingsExtractor
-from .macos.claude_code.skills_extractor import MacOSClaudeSkillsExtractor
-from .macos.cursor.skills_extractor import MacOSCursorSkillsExtractor
-
-# macOS - Windsurf
-from .macos.windsurf.windsurf import MacOSWindsurfDetector
-from .macos.windsurf.windsurf_rules_extractor import MacOSWindsurfRulesExtractor
-from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
-from .macos.windsurf.skills_extractor import MacOSWindsurfSkillsExtractor
-
-# macOS - Roo Code
-from .macos.roo_code.roo_code import MacOSRooDetector
-from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
-from .macos.roo_code.skills_extractor import MacOSRooSkillsExtractor
-from .macos.roo_code.roo_code_rules_extractor import MacOSRooRulesExtractor
-
-# Windows - Roo Code
-from .windows.roo_code.roo_code import WindowsRooDetector
-from .windows.roo_code.mcp_config_extractor import WindowsRooMCPConfigExtractor
-from .windows.roo_code.skills_extractor import WindowsRooSkillsExtractor
-from .windows.roo_code.roo_code_rules_extractor import WindowsRooRulesExtractor
-
-# macOS - Cline
-from .macos.cline.cline import MacOSClineDetector
-from .macos.cline.cline_rules_extractor import MacOSClineRulesExtractor
-from .macos.cline.mcp_config_extractor import MacOSClineMCPConfigExtractor
-from .macos.cline.skills_extractor import MacOSClineSkillsExtractor
-
-# macOS - Antigravity
-from .macos.antigravity.antigravity import MacOSAntigravityDetector
-from .macos.antigravity.antigravity_rules_extractor import MacOSAntigravityRulesExtractor
-from .macos.antigravity.mcp_config_extractor import MacOSAntigravityMCPConfigExtractor
-
-# macOS - Kilo Code
-from .macos.kilocode.kilocode import MacOSKiloCodeDetector
-from .macos.kilocode.kilocode_rules_extractor import MacOSKiloCodeRulesExtractor
-from .macos.kilocode.mcp_config_extractor import MacOSKiloCodeMCPConfigExtractor
-from .macos.kilocode.skills_extractor import MacOSKiloCodeSkillsExtractor
-
-# macOS - Gemini CLI
-from .macos.gemini_cli.gemini_cli import MacOSGeminiCliDetector
-from .macos.gemini_cli.gemini_cli_rules_extractor import MacOSGeminiCliRulesExtractor
-from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtractor
-from .macos.gemini_cli.skills_extractor import MacOSGeminiCliSkillsExtractor
-
-# macOS - Cursor CLI
-from .macos.cursor_cli.cursor_cli import MacOSCursorCliDetector
-from .macos.cursor_cli.cursor_cli_rules_extractor import MacOSCursorCliRulesExtractor
-from .macos.cursor_cli.settings_extractor import MacOSCursorCliSettingsExtractor
-from .macos.cursor_cli.mcp_config_extractor import MacOSCursorCliMCPConfigExtractor
-
-# macOS - Codex
-from .macos.codex.codex import MacOSCodexDetector
-from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
-from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
-from .macos.codex.skills_extractor import MacOSCodexSkillsExtractor
-
-# macOS - Replit
-from .macos.replit.replit import MacOSReplitDetector
-from .macos.replit.skills_extractor import MacOSReplitSkillsExtractor
-
-# macOS - OpenClaw
-from .macos.openclaw.detect_openclaw import MacOSOpenClawDetector
-
-# Windows - OpenClaw
-from .windows.openclaw.detect_openclaw import WindowsOpenClawDetector
-
-# macOS - Copilot
-from .macos.github_copilot.detect_copilot import MacOSCopilotDetector
-from .macos.github_copilot.mcp_config_extractor import MacOSGitHubCopilotMCPConfigExtractor
-from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRulesExtractor
-
-# macOS - Copilot CLI (standalone @github/copilot agentic terminal tool)
-from .macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
-from .macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
-from .macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
-from .macos.copilot_cli.copilot_cli_settings_extractor import MacOSCopilotCliSettingsExtractor
-from .macos.copilot_cli.copilot_cli_skills_extractor import MacOSCopilotCliSkillsExtractor
-
-# macOS - Augment Code (Auggie CLI + VS Code + JetBrains surfaces; ~/.augment)
-from .macos.augment.augment import MacOSAugmentDetector
-from .macos.augment.augment_mcp_config_extractor import MacOSAugmentMCPConfigExtractor
-from .macos.augment.augment_rules_extractor import MacOSAugmentRulesExtractor
-from .macos.augment.augment_settings_extractor import MacOSAugmentSettingsExtractor
-from .macos.augment.augment_skills_extractor import MacOSAugmentSkillsExtractor
-
-# Windows - Copilot
-from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
-from .windows.github_copilot.mcp_config_extractor import WindowsGitHubCopilotMCPConfigExtractor
-from .windows.github_copilot.copilot_rules_extractor import WindowsGitHubCopilotRulesExtractor
-
-# Windows - Copilot CLI (standalone @github/copilot agentic terminal tool)
-from .windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
-from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
-from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
-from .windows.copilot_cli.copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
-from .windows.copilot_cli.copilot_cli_skills_extractor import WindowsCopilotCliSkillsExtractor
-
-# Windows - Augment Code
-from .windows.augment.augment import WindowsAugmentDetector
-from .windows.augment.augment_mcp_config_extractor import WindowsAugmentMCPConfigExtractor
-from .windows.augment.augment_rules_extractor import WindowsAugmentRulesExtractor
-from .windows.augment.augment_settings_extractor import WindowsAugmentSettingsExtractor
-from .windows.augment.augment_skills_extractor import WindowsAugmentSkillsExtractor
-
-# Windows - Replit
-from .windows.replit.replit import WindowsReplitDetector
-from .windows.replit.skills_extractor import WindowsReplitSkillsExtractor
-# Windows - Codex
-from .windows.codex.codex import WindowsCodexDetector
-from .windows.codex.codex_rules_extractor import WindowsCodexRulesExtractor
-from .windows.codex.mcp_config_extractor import WindowsCodexMCPConfigExtractor
-from .windows.codex.skills_extractor import WindowsCodexSkillsExtractor
-
-# macOS - OpenCode
-from .macos.opencode.opencode import MacOSOpenCodeDetector
-from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
-from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
-from .macos.opencode.skills_extractor import MacOSOpenCodeSkillsExtractor
-
-# macOS - JetBrains
-from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
-from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
-
-# macOS - Junie
-from .macos.junie.junie import MacOSJunieDetector
-from .macos.junie.mcp_config_extractor import MacOSJunieMCPConfigExtractor
-from .macos.junie.skills_extractor import MacOSJunieSkillsExtractor
-from .macos.junie.junie_rules_extractor import MacOSJunieRulesExtractor
-
-# Windows - Junie
-from .windows.junie.junie import WindowsJunieDetector
-from .windows.junie.mcp_config_extractor import WindowsJunieMCPConfigExtractor
-from .windows.junie.skills_extractor import WindowsJunieSkillsExtractor
-from .windows.junie.junie_rules_extractor import WindowsJunieRulesExtractor
-
-# Windows - JetBrains
-from .windows.jetbrains.jetbrains import WindowsJetBrainsDetector
-from .windows.jetbrains.mcp_config_extractor import WindowsJetBrainsMCPConfigExtractor
-
-# Windows - OpenCode
-from .windows.opencode.opencode import WindowsOpenCodeDetector
-from .windows.opencode.opencode_rules_extractor import WindowsOpenCodeRulesExtractor
-from .windows.opencode.mcp_config_extractor import WindowsOpenCodeMCPConfigExtractor
-from .windows.opencode.skills_extractor import WindowsOpenCodeSkillsExtractor
-
-# Windows - Gemini CLI
-from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
-from .windows.gemini_cli.gemini_cli_rules_extractor import WindowsGeminiCliRulesExtractor
-from .windows.gemini_cli.mcp_config_extractor import WindowsGeminiCliMCPConfigExtractor
-from .windows.gemini_cli.skills_extractor import WindowsGeminiCliSkillsExtractor
-
-# Windows - Cursor CLI
-from .windows.cursor_cli.cursor_cli import WindowsCursorCliDetector
-from .windows.cursor_cli.cursor_cli_rules_extractor import WindowsCursorCliRulesExtractor
-from .windows.cursor_cli.settings_extractor import WindowsCursorCliSettingsExtractor
-from .windows.cursor_cli.mcp_config_extractor import WindowsCursorCliMCPConfigExtractor
-
-# Windows - Shared
-from .windows import WindowsDeviceIdExtractor, WindowsCursorDetector, WindowsClaudeDetector
-from .windows import WindowsClaudeCoworkDetector, WindowsClaudeCoworkSkillsExtractor
-
-# Linux - Shared
-from .linux import (
-    LinuxDeviceIdExtractor,
-    LinuxClaudeDetector,
-    LinuxClaudeSettingsExtractor,
-    LinuxClaudeSkillsExtractor,
-    LinuxCursorDetector,
-    LinuxCursorSettingsExtractor,
-    LinuxCursorSkillsExtractor,
-    LinuxWindsurfDetector,
-    LinuxRooDetector,
-    LinuxRooRulesExtractor,
-    LinuxRooMCPConfigExtractor,
-    LinuxClineDetector,
-    LinuxClineRulesExtractor,
-    LinuxClineMCPConfigExtractor,
-    LinuxClineSkillsExtractor,
-    LinuxCodexSkillsExtractor,
-    LinuxAntigravityDetector,
-    LinuxAntigravityRulesExtractor,
-    LinuxAntigravityMCPConfigExtractor,
-    LinuxKiloCodeDetector,
-    LinuxKiloCodeRulesExtractor,
-    LinuxKiloCodeMCPConfigExtractor,
-    LinuxGeminiCliDetector,
-    LinuxGeminiCliRulesExtractor,
-    LinuxGeminiCliMCPConfigExtractor,
-    LinuxCursorCliDetector,
-    LinuxCursorCliRulesExtractor,
-    LinuxCursorCliMCPConfigExtractor,
-    LinuxCursorCliSettingsExtractor,
-    LinuxCopilotCliDetector,
-    LinuxCopilotCliMCPConfigExtractor,
-    LinuxCopilotCliRulesExtractor,
-    LinuxCopilotCliSettingsExtractor,
-    LinuxCopilotCliSkillsExtractor,
-    LinuxAugmentDetector,
-    LinuxAugmentMCPConfigExtractor,
-    LinuxAugmentRulesExtractor,
-    LinuxAugmentSettingsExtractor,
-    LinuxAugmentSkillsExtractor,
-    LinuxCodexDetector,
-    LinuxCodexRulesExtractor,
-    LinuxCodexMCPConfigExtractor,
-    LinuxOpenCodeDetector,
-    LinuxOpenCodeRulesExtractor,
-    LinuxOpenCodeMCPConfigExtractor,
-    LinuxOpenCodeSkillsExtractor,
-    LinuxOpenClawDetector,
-    LinuxReplitDetector,
-    LinuxReplitSkillsExtractor,
-    LinuxGeminiCliSkillsExtractor,
-    LinuxJunieSkillsExtractor,
-    LinuxKiloCodeSkillsExtractor,
-    LinuxRooSkillsExtractor,
-    LinuxWindsurfSkillsExtractor,
-    LinuxJetBrainsDetector,
-    LinuxJetBrainsMCPConfigExtractor,
-    LinuxCopilotDetector,
-    LinuxGitHubCopilotRulesExtractor,
-    LinuxGitHubCopilotMCPConfigExtractor,
-    LinuxClaudeCoworkDetector,
-    LinuxClaudeCoworkSkillsExtractor,
-    LinuxJunieDetector,
-    LinuxJunieRulesExtractor,
-    LinuxJunieMCPConfigExtractor,
-)
-
-# Linux - Claude Code
-from .linux.claude_code.claude_rules_extractor import LinuxClaudeRulesExtractor
-from .linux.claude_code.mcp_config_extractor import LinuxClaudeMCPConfigExtractor
-
-# Linux - Cursor
-from .linux.cursor.cursor_rules_extractor import LinuxCursorRulesExtractor
-from .linux.cursor.mcp_config_extractor import LinuxCursorMCPConfigExtractor
-
-# Linux - Windsurf
-from .linux.windsurf.windsurf_rules_extractor import LinuxWindsurfRulesExtractor
-from .linux.windsurf.mcp_config_extractor import LinuxWindsurfMCPConfigExtractor
-
-# Windows - Cursor
-from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
-from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
-from .windows.cursor.settings_extractor import WindowsCursorSettingsExtractor
-
-# Windows - Claude Code
-from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
-from .windows.claude_code.mcp_config_extractor import WindowsClaudeMCPConfigExtractor
-from .windows.claude_code.settings_extractor import WindowsClaudeSettingsExtractor
-from .windows.claude_code.skills_extractor import WindowsClaudeSkillsExtractor
-from .windows.cursor.skills_extractor import WindowsCursorSkillsExtractor
-
-# Windows - Windsurf
-from .windows.windsurf.windsurf import WindowsWindsurfDetector
-from .windows.windsurf.windsurf_rules_extractor import WindowsWindsurfRulesExtractor
-from .windows.windsurf.mcp_config_extractor import WindowsWindsurfMCPConfigExtractor
-from .windows.windsurf.skills_extractor import WindowsWindsurfSkillsExtractor
-
-# Windows - Antigravity
-from .windows.antigravity.antigravity import WindowsAntigravityDetector
-from .windows.antigravity.antigravity_rules_extractor import WindowsAntigravityRulesExtractor
-from .windows.antigravity.mcp_config_extractor import WindowsAntigravityMCPConfigExtractor
-
-# Windows - Cline
-from .windows.cline.cline import WindowsClineDetector
-from .windows.cline.cline_rules_extractor import WindowsClineRulesExtractor
-from .windows.cline.mcp_config_extractor import WindowsClineMCPConfigExtractor
-from .windows.cline.skills_extractor import WindowsClineSkillsExtractor
-
-# Windows - Kilo Code
-from .windows.kilocode.kilocode import WindowsKiloCodeDetector
-from .windows.kilocode.kilocode_rules_extractor import WindowsKiloCodeRulesExtractor
-from .windows.kilocode.mcp_config_extractor import WindowsKiloCodeMCPConfigExtractor
-from .windows.kilocode.skills_extractor import WindowsKiloCodeSkillsExtractor
-
-
 class DeviceIdExtractorFactory:
     """Factory for creating OS-specific device ID extractors."""
 
@@ -360,10 +70,13 @@ class DeviceIdExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos import MacOSDeviceIdExtractor
             return MacOSDeviceIdExtractor()
         elif os_name == "Windows":
+            from .windows import WindowsDeviceIdExtractor
             return WindowsDeviceIdExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxDeviceIdExtractor
             return LinuxDeviceIdExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -390,10 +103,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos import MacOSCursorDetector
             return MacOSCursorDetector()
         elif os_name == "Windows":
+            from .windows import WindowsCursorDetector
             return WindowsCursorDetector()
         elif os_name == "Linux":
+            from .linux import LinuxCursorDetector
             return LinuxCursorDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -416,10 +132,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos import MacOSClaudeDetector
             return MacOSClaudeDetector()
         elif os_name == "Windows":
+            from .windows import WindowsClaudeDetector
             return WindowsClaudeDetector()
         elif os_name == "Linux":
+            from .linux import LinuxClaudeDetector
             return LinuxClaudeDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -439,10 +158,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos import MacOSClaudeCoworkDetector
             return MacOSClaudeCoworkDetector()
         elif os_name == "Windows":
+            from .windows import WindowsClaudeCoworkDetector
             return WindowsClaudeCoworkDetector()
         elif os_name == "Linux":
+            from .linux import LinuxClaudeCoworkDetector
             return LinuxClaudeCoworkDetector()
         else:
             return None
@@ -465,10 +187,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.windsurf.windsurf import MacOSWindsurfDetector
             return MacOSWindsurfDetector()
         elif os_name == "Windows":
+            from .windows.windsurf.windsurf import WindowsWindsurfDetector
             return WindowsWindsurfDetector()
         elif os_name == "Linux":
+            from .linux import LinuxWindsurfDetector
             return LinuxWindsurfDetector()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -488,10 +213,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.roo_code.roo_code import MacOSRooDetector
             return MacOSRooDetector()
         elif os_name == "Windows":
+            from .windows.roo_code.roo_code import WindowsRooDetector
             return WindowsRooDetector()
         elif os_name == "Linux":
+            from .linux import LinuxRooDetector
             return LinuxRooDetector()
         else:
             return None
@@ -511,10 +239,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cline.cline import MacOSClineDetector
             return MacOSClineDetector()
         elif os_name == "Windows":
+            from .windows.cline.cline import WindowsClineDetector
             return WindowsClineDetector()
         elif os_name == "Linux":
+            from .linux import LinuxClineDetector
             return LinuxClineDetector()
         else:
             return None
@@ -534,10 +265,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.antigravity.antigravity import MacOSAntigravityDetector
             return MacOSAntigravityDetector()
         elif os_name == "Windows":
+            from .windows.antigravity.antigravity import WindowsAntigravityDetector
             return WindowsAntigravityDetector()
         elif os_name == "Linux":
+            from .linux import LinuxAntigravityDetector
             return LinuxAntigravityDetector()
         else:
             return None
@@ -557,10 +291,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.kilocode.kilocode import MacOSKiloCodeDetector
             return MacOSKiloCodeDetector()
         elif os_name == "Windows":
+            from .windows.kilocode.kilocode import WindowsKiloCodeDetector
             return WindowsKiloCodeDetector()
         elif os_name == "Linux":
+            from .linux import LinuxKiloCodeDetector
             return LinuxKiloCodeDetector()
         else:
             return None
@@ -580,10 +317,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.gemini_cli.gemini_cli import MacOSGeminiCliDetector
             return MacOSGeminiCliDetector()
         elif os_name == "Windows":
+            from .windows.gemini_cli.gemini_cli import WindowsGeminiCliDetector
             return WindowsGeminiCliDetector()
         elif os_name == "Linux":
+            from .linux import LinuxGeminiCliDetector
             return LinuxGeminiCliDetector()
         else:
             return None
@@ -603,10 +343,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor_cli.cursor_cli import MacOSCursorCliDetector
             return MacOSCursorCliDetector()
         elif os_name == "Windows":
+            from .windows.cursor_cli.cursor_cli import WindowsCursorCliDetector
             return WindowsCursorCliDetector()
         elif os_name == "Linux":
+            from .linux import LinuxCursorCliDetector
             return LinuxCursorCliDetector()
         else:
             return None
@@ -626,10 +369,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.codex.codex import MacOSCodexDetector
             return MacOSCodexDetector()
         elif os_name == "Windows":
+            from .windows.codex.codex import WindowsCodexDetector
             return WindowsCodexDetector()
         elif os_name == "Linux":
+            from .linux import LinuxCodexDetector
             return LinuxCodexDetector()
         else:
             return None
@@ -649,10 +395,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.replit.replit import MacOSReplitDetector
             return MacOSReplitDetector()
         elif os_name == "Windows":
+            from .windows.replit.replit import WindowsReplitDetector
             return WindowsReplitDetector()
         elif os_name == "Linux":
+            from .linux import LinuxReplitDetector
             return LinuxReplitDetector()
         else:
             return None
@@ -672,10 +421,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.opencode.opencode import MacOSOpenCodeDetector
             return MacOSOpenCodeDetector()
         elif os_name == "Windows":
+            from .windows.opencode.opencode import WindowsOpenCodeDetector
             return WindowsOpenCodeDetector()
         elif os_name == "Linux":
+            from .linux import LinuxOpenCodeDetector
             return LinuxOpenCodeDetector()
         else:
             return None
@@ -689,10 +441,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.openclaw.detect_openclaw import MacOSOpenClawDetector
             return MacOSOpenClawDetector()
         elif os_name == "Windows":
+            from .windows.openclaw.detect_openclaw import WindowsOpenClawDetector
             return WindowsOpenClawDetector()
         elif os_name == "Linux":
+            from .linux import LinuxOpenClawDetector
             return LinuxOpenClawDetector()
         else:
             return None
@@ -705,10 +460,13 @@ class ToolDetectorFactory:
         if os_name is None:
             os_name = platform.system()
         if os_name == "Darwin":
+            from .macos.github_copilot.detect_copilot import MacOSCopilotDetector
             return MacOSCopilotDetector()
         elif os_name == "Windows":
+            from .windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
             return WindowsGitHubCopilotDetector()
         elif os_name == "Linux":
+            from .linux import LinuxCopilotDetector
             return LinuxCopilotDetector()
         else:
             return None
@@ -721,10 +479,13 @@ class ToolDetectorFactory:
         if os_name is None:
             os_name = platform.system()
         if os_name == "Darwin":
+            from .macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector
             return MacOSCopilotCliDetector()
         elif os_name == "Windows":
+            from .windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
             return WindowsCopilotCliDetector()
         elif os_name == "Linux":
+            from .linux import LinuxCopilotCliDetector
             return LinuxCopilotCliDetector()
         else:
             return None
@@ -737,10 +498,13 @@ class ToolDetectorFactory:
         if os_name is None:
             os_name = platform.system()
         if os_name == "Darwin":
+            from .macos.augment.augment import MacOSAugmentDetector
             return MacOSAugmentDetector()
         elif os_name == "Windows":
+            from .windows.augment.augment import WindowsAugmentDetector
             return WindowsAugmentDetector()
         elif os_name == "Linux":
+            from .linux import LinuxAugmentDetector
             return LinuxAugmentDetector()
         else:
             return None
@@ -760,10 +524,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.jetbrains.jetbrains import MacOSJetBrainsDetector
             return MacOSJetBrainsDetector()
         elif os_name == "Windows":
+            from .windows.jetbrains.jetbrains import WindowsJetBrainsDetector
             return WindowsJetBrainsDetector()
         elif os_name == "Linux":
+            from .linux import LinuxJetBrainsDetector
             return LinuxJetBrainsDetector()
         else:
             return None
@@ -777,10 +544,13 @@ class ToolDetectorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.junie.junie import MacOSJunieDetector
             return MacOSJunieDetector()
         elif os_name == "Linux":
+            from .linux import LinuxJunieDetector
             return LinuxJunieDetector()
         elif os_name == "Windows":
+            from .windows.junie.junie import WindowsJunieDetector
             return WindowsJunieDetector()
         else:
             return None
@@ -902,10 +672,13 @@ class CursorRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor.cursor_rules_extractor import MacOSCursorRulesExtractor
             return MacOSCursorRulesExtractor()
         elif os_name == "Windows":
+            from .windows.cursor.cursor_rules_extractor import WindowsCursorRulesExtractor
             return WindowsCursorRulesExtractor()
         elif os_name == "Linux":
+            from .linux.cursor.cursor_rules_extractor import LinuxCursorRulesExtractor
             return LinuxCursorRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -932,10 +705,13 @@ class ClaudeRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.claude_code.claude_rules_extractor import MacOSClaudeRulesExtractor
             return MacOSClaudeRulesExtractor()
         elif os_name == "Windows":
+            from .windows.claude_code.claude_rules_extractor import WindowsClaudeRulesExtractor
             return WindowsClaudeRulesExtractor()
         elif os_name == "Linux":
+            from .linux.claude_code.claude_rules_extractor import LinuxClaudeRulesExtractor
             return LinuxClaudeRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -962,10 +738,13 @@ class CursorMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor.mcp_config_extractor import MacOSCursorMCPConfigExtractor
             return MacOSCursorMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.cursor.mcp_config_extractor import WindowsCursorMCPConfigExtractor
             return WindowsCursorMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux.cursor.mcp_config_extractor import LinuxCursorMCPConfigExtractor
             return LinuxCursorMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -992,10 +771,13 @@ class ClaudeMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.claude_code.mcp_config_extractor import MacOSClaudeMCPConfigExtractor
             return MacOSClaudeMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.claude_code.mcp_config_extractor import WindowsClaudeMCPConfigExtractor
             return WindowsClaudeMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux.claude_code.mcp_config_extractor import LinuxClaudeMCPConfigExtractor
             return LinuxClaudeMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -1022,10 +804,13 @@ class ClaudeSettingsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.claude_code.settings_extractor import MacOSClaudeSettingsExtractor
             return MacOSClaudeSettingsExtractor()
         elif os_name == "Windows":
+            from .windows.claude_code.settings_extractor import WindowsClaudeSettingsExtractor
             return WindowsClaudeSettingsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxClaudeSettingsExtractor
             return LinuxClaudeSettingsExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -1043,10 +828,13 @@ class CursorSettingsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor.settings_extractor import MacOSCursorSettingsExtractor
             return MacOSCursorSettingsExtractor()
         elif os_name == "Windows":
+            from .windows.cursor.settings_extractor import WindowsCursorSettingsExtractor
             return WindowsCursorSettingsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCursorSettingsExtractor
             return LinuxCursorSettingsExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -1073,10 +861,13 @@ class WindsurfRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.windsurf.windsurf_rules_extractor import MacOSWindsurfRulesExtractor
             return MacOSWindsurfRulesExtractor()
         elif os_name == "Windows":
+            from .windows.windsurf.windsurf_rules_extractor import WindowsWindsurfRulesExtractor
             return WindowsWindsurfRulesExtractor()
         elif os_name == "Linux":
+            from .linux.windsurf.windsurf_rules_extractor import LinuxWindsurfRulesExtractor
             return LinuxWindsurfRulesExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -1103,10 +894,13 @@ class WindsurfMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.windsurf.mcp_config_extractor import MacOSWindsurfMCPConfigExtractor
             return MacOSWindsurfMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.windsurf.mcp_config_extractor import WindowsWindsurfMCPConfigExtractor
             return WindowsWindsurfMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux.windsurf.mcp_config_extractor import LinuxWindsurfMCPConfigExtractor
             return LinuxWindsurfMCPConfigExtractor()
         else:
             raise ValueError(f"Unsupported operating system: {os_name}")
@@ -1130,10 +924,13 @@ class RooMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.roo_code.mcp_config_extractor import MacOSRooMCPConfigExtractor
             return MacOSRooMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.roo_code.mcp_config_extractor import WindowsRooMCPConfigExtractor
             return WindowsRooMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxRooMCPConfigExtractor
             return LinuxRooMCPConfigExtractor()
         else:
             return None
@@ -1151,10 +948,13 @@ class RooRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.roo_code.roo_code_rules_extractor import MacOSRooRulesExtractor
             return MacOSRooRulesExtractor()
         elif os_name == "Windows":
+            from .windows.roo_code.roo_code_rules_extractor import WindowsRooRulesExtractor
             return WindowsRooRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxRooRulesExtractor
             return LinuxRooRulesExtractor()
         else:
             return None
@@ -1178,10 +978,13 @@ class ClineRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cline.cline_rules_extractor import MacOSClineRulesExtractor
             return MacOSClineRulesExtractor()
         elif os_name == "Windows":
+            from .windows.cline.cline_rules_extractor import WindowsClineRulesExtractor
             return WindowsClineRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxClineRulesExtractor
             return LinuxClineRulesExtractor()
         else:
             return None
@@ -1205,10 +1008,13 @@ class ClineMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cline.mcp_config_extractor import MacOSClineMCPConfigExtractor
             return MacOSClineMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.cline.mcp_config_extractor import WindowsClineMCPConfigExtractor
             return WindowsClineMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxClineMCPConfigExtractor
             return LinuxClineMCPConfigExtractor()
         else:
             return None
@@ -1232,10 +1038,13 @@ class AntigravityRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.antigravity.antigravity_rules_extractor import MacOSAntigravityRulesExtractor
             return MacOSAntigravityRulesExtractor()
         elif os_name == "Windows":
+            from .windows.antigravity.antigravity_rules_extractor import WindowsAntigravityRulesExtractor
             return WindowsAntigravityRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxAntigravityRulesExtractor
             return LinuxAntigravityRulesExtractor()
         else:
             return None
@@ -1259,10 +1068,13 @@ class AntigravityMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.antigravity.mcp_config_extractor import MacOSAntigravityMCPConfigExtractor
             return MacOSAntigravityMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.antigravity.mcp_config_extractor import WindowsAntigravityMCPConfigExtractor
             return WindowsAntigravityMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxAntigravityMCPConfigExtractor
             return LinuxAntigravityMCPConfigExtractor()
         else:
             return None
@@ -1286,10 +1098,13 @@ class KiloCodeRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.kilocode.kilocode_rules_extractor import MacOSKiloCodeRulesExtractor
             return MacOSKiloCodeRulesExtractor()
         elif os_name == "Windows":
+            from .windows.kilocode.kilocode_rules_extractor import WindowsKiloCodeRulesExtractor
             return WindowsKiloCodeRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxKiloCodeRulesExtractor
             return LinuxKiloCodeRulesExtractor()
         else:
             return None
@@ -1313,10 +1128,13 @@ class KiloCodeMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.kilocode.mcp_config_extractor import MacOSKiloCodeMCPConfigExtractor
             return MacOSKiloCodeMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.kilocode.mcp_config_extractor import WindowsKiloCodeMCPConfigExtractor
             return WindowsKiloCodeMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxKiloCodeMCPConfigExtractor
             return LinuxKiloCodeMCPConfigExtractor()
         else:
             return None
@@ -1340,10 +1158,13 @@ class GeminiCliRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.gemini_cli.gemini_cli_rules_extractor import MacOSGeminiCliRulesExtractor
             return MacOSGeminiCliRulesExtractor()
         elif os_name == "Windows":
+            from .windows.gemini_cli.gemini_cli_rules_extractor import WindowsGeminiCliRulesExtractor
             return WindowsGeminiCliRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxGeminiCliRulesExtractor
             return LinuxGeminiCliRulesExtractor()
         else:
             return None
@@ -1367,10 +1188,13 @@ class GeminiCliMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.gemini_cli.mcp_config_extractor import MacOSGeminiCliMCPConfigExtractor
             return MacOSGeminiCliMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.gemini_cli.mcp_config_extractor import WindowsGeminiCliMCPConfigExtractor
             return WindowsGeminiCliMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxGeminiCliMCPConfigExtractor
             return LinuxGeminiCliMCPConfigExtractor()
         else:
             return None
@@ -1394,10 +1218,13 @@ class CodexRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.codex.codex_rules_extractor import MacOSCodexRulesExtractor
             return MacOSCodexRulesExtractor()
         elif os_name == "Windows":
+            from .windows.codex.codex_rules_extractor import WindowsCodexRulesExtractor
             return WindowsCodexRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCodexRulesExtractor
             return LinuxCodexRulesExtractor()
         else:
             return None
@@ -1421,10 +1248,13 @@ class CodexMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.codex.mcp_config_extractor import MacOSCodexMCPConfigExtractor
             return MacOSCodexMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.codex.mcp_config_extractor import WindowsCodexMCPConfigExtractor
             return WindowsCodexMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCodexMCPConfigExtractor
             return LinuxCodexMCPConfigExtractor()
         else:
             return None
@@ -1448,10 +1278,13 @@ class OpenCodeRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.opencode.opencode_rules_extractor import MacOSOpenCodeRulesExtractor
             return MacOSOpenCodeRulesExtractor()
         elif os_name == "Windows":
+            from .windows.opencode.opencode_rules_extractor import WindowsOpenCodeRulesExtractor
             return WindowsOpenCodeRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxOpenCodeRulesExtractor
             return LinuxOpenCodeRulesExtractor()
         else:
             return None
@@ -1475,10 +1308,13 @@ class OpenCodeMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.opencode.mcp_config_extractor import MacOSOpenCodeMCPConfigExtractor
             return MacOSOpenCodeMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.opencode.mcp_config_extractor import WindowsOpenCodeMCPConfigExtractor
             return WindowsOpenCodeMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxOpenCodeMCPConfigExtractor
             return LinuxOpenCodeMCPConfigExtractor()
         else:
             return None
@@ -1502,10 +1338,13 @@ class JetBrainsMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.jetbrains.mcp_config_extractor import MacOSJetBrainsMCPConfigExtractor
             return MacOSJetBrainsMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.jetbrains.mcp_config_extractor import WindowsJetBrainsMCPConfigExtractor
             return WindowsJetBrainsMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxJetBrainsMCPConfigExtractor
             return LinuxJetBrainsMCPConfigExtractor()
         else:
             return None
@@ -1523,10 +1362,13 @@ class GitHubCopilotMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.github_copilot.mcp_config_extractor import MacOSGitHubCopilotMCPConfigExtractor
             return MacOSGitHubCopilotMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.github_copilot.mcp_config_extractor import WindowsGitHubCopilotMCPConfigExtractor
             return WindowsGitHubCopilotMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxGitHubCopilotMCPConfigExtractor
             return LinuxGitHubCopilotMCPConfigExtractor()
         else:
             return None
@@ -1548,10 +1390,13 @@ class CopilotCliMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.copilot_cli.mcp_config_extractor import MacOSCopilotCliMCPConfigExtractor
             return MacOSCopilotCliMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.copilot_cli.mcp_config_extractor import WindowsCopilotCliMCPConfigExtractor
             return WindowsCopilotCliMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCopilotCliMCPConfigExtractor
             return LinuxCopilotCliMCPConfigExtractor()
         else:
             return None
@@ -1574,10 +1419,13 @@ class CopilotCliRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.copilot_cli.copilot_cli_rules_extractor import MacOSCopilotCliRulesExtractor
             return MacOSCopilotCliRulesExtractor()
         elif os_name == "Windows":
+            from .windows.copilot_cli.copilot_cli_rules_extractor import WindowsCopilotCliRulesExtractor
             return WindowsCopilotCliRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCopilotCliRulesExtractor
             return LinuxCopilotCliRulesExtractor()
         else:
             return None
@@ -1599,10 +1447,13 @@ class CopilotCliSettingsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.copilot_cli.copilot_cli_settings_extractor import MacOSCopilotCliSettingsExtractor
             return MacOSCopilotCliSettingsExtractor()
         elif os_name == "Windows":
+            from .windows.copilot_cli.copilot_cli_settings_extractor import WindowsCopilotCliSettingsExtractor
             return WindowsCopilotCliSettingsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCopilotCliSettingsExtractor
             return LinuxCopilotCliSettingsExtractor()
         else:
             return None
@@ -1624,10 +1475,13 @@ class CopilotCliSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.copilot_cli.copilot_cli_skills_extractor import MacOSCopilotCliSkillsExtractor
             return MacOSCopilotCliSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.copilot_cli.copilot_cli_skills_extractor import WindowsCopilotCliSkillsExtractor
             return WindowsCopilotCliSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCopilotCliSkillsExtractor
             return LinuxCopilotCliSkillsExtractor()
         else:
             return None
@@ -1648,10 +1502,13 @@ class AugmentMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.augment.augment_mcp_config_extractor import MacOSAugmentMCPConfigExtractor
             return MacOSAugmentMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.augment.augment_mcp_config_extractor import WindowsAugmentMCPConfigExtractor
             return WindowsAugmentMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxAugmentMCPConfigExtractor
             return LinuxAugmentMCPConfigExtractor()
         else:
             return None
@@ -1672,10 +1529,13 @@ class AugmentRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.augment.augment_rules_extractor import MacOSAugmentRulesExtractor
             return MacOSAugmentRulesExtractor()
         elif os_name == "Windows":
+            from .windows.augment.augment_rules_extractor import WindowsAugmentRulesExtractor
             return WindowsAugmentRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxAugmentRulesExtractor
             return LinuxAugmentRulesExtractor()
         else:
             return None
@@ -1697,10 +1557,13 @@ class AugmentSettingsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.augment.augment_settings_extractor import MacOSAugmentSettingsExtractor
             return MacOSAugmentSettingsExtractor()
         elif os_name == "Windows":
+            from .windows.augment.augment_settings_extractor import WindowsAugmentSettingsExtractor
             return WindowsAugmentSettingsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxAugmentSettingsExtractor
             return LinuxAugmentSettingsExtractor()
         else:
             return None
@@ -1721,10 +1584,13 @@ class AugmentSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.augment.augment_skills_extractor import MacOSAugmentSkillsExtractor
             return MacOSAugmentSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.augment.augment_skills_extractor import WindowsAugmentSkillsExtractor
             return WindowsAugmentSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxAugmentSkillsExtractor
             return LinuxAugmentSkillsExtractor()
         else:
             return None
@@ -1742,10 +1608,13 @@ class GitHubCopilotRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.github_copilot.copilot_rules_extractor import MacOSGitHubCopilotRulesExtractor
             return MacOSGitHubCopilotRulesExtractor()
         elif os_name == "Windows":
+            from .windows.github_copilot.copilot_rules_extractor import WindowsGitHubCopilotRulesExtractor
             return WindowsGitHubCopilotRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxGitHubCopilotRulesExtractor
             return LinuxGitHubCopilotRulesExtractor()
         else:
             return None
@@ -1769,10 +1638,13 @@ class JunieMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.junie.mcp_config_extractor import MacOSJunieMCPConfigExtractor
             return MacOSJunieMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxJunieMCPConfigExtractor
             return LinuxJunieMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.junie.mcp_config_extractor import WindowsJunieMCPConfigExtractor
             return WindowsJunieMCPConfigExtractor()
         else:
             return None
@@ -1796,10 +1668,13 @@ class JunieRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.junie.junie_rules_extractor import MacOSJunieRulesExtractor
             return MacOSJunieRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxJunieRulesExtractor
             return LinuxJunieRulesExtractor()
         elif os_name == "Windows":
+            from .windows.junie.junie_rules_extractor import WindowsJunieRulesExtractor
             return WindowsJunieRulesExtractor()
         else:
             return None
@@ -1823,10 +1698,13 @@ class CursorCliSettingsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor_cli.settings_extractor import MacOSCursorCliSettingsExtractor
             return MacOSCursorCliSettingsExtractor()
         elif os_name == "Windows":
+            from .windows.cursor_cli.settings_extractor import WindowsCursorCliSettingsExtractor
             return WindowsCursorCliSettingsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCursorCliSettingsExtractor
             return LinuxCursorCliSettingsExtractor()
         else:
             return None
@@ -1850,10 +1728,13 @@ class CursorCliMCPConfigExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor_cli.mcp_config_extractor import MacOSCursorCliMCPConfigExtractor
             return MacOSCursorCliMCPConfigExtractor()
         elif os_name == "Windows":
+            from .windows.cursor_cli.mcp_config_extractor import WindowsCursorCliMCPConfigExtractor
             return WindowsCursorCliMCPConfigExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCursorCliMCPConfigExtractor
             return LinuxCursorCliMCPConfigExtractor()
         else:
             return None
@@ -1871,10 +1752,13 @@ class CursorCliRulesExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor_cli.cursor_cli_rules_extractor import MacOSCursorCliRulesExtractor
             return MacOSCursorCliRulesExtractor()
         elif os_name == "Windows":
+            from .windows.cursor_cli.cursor_cli_rules_extractor import WindowsCursorCliRulesExtractor
             return WindowsCursorCliRulesExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCursorCliRulesExtractor
             return LinuxCursorCliRulesExtractor()
         else:
             return None
@@ -1898,10 +1782,13 @@ class ClaudeSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.claude_code.skills_extractor import MacOSClaudeSkillsExtractor
             return MacOSClaudeSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.claude_code.skills_extractor import WindowsClaudeSkillsExtractor
             return WindowsClaudeSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxClaudeSkillsExtractor
             return LinuxClaudeSkillsExtractor()
         else:
             return None
@@ -1925,10 +1812,13 @@ class CursorSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cursor.skills_extractor import MacOSCursorSkillsExtractor
             return MacOSCursorSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.cursor.skills_extractor import WindowsCursorSkillsExtractor
             return WindowsCursorSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCursorSkillsExtractor
             return LinuxCursorSkillsExtractor()
         else:
             return None
@@ -1952,10 +1842,13 @@ class ClineSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.cline.skills_extractor import MacOSClineSkillsExtractor
             return MacOSClineSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.cline.skills_extractor import WindowsClineSkillsExtractor
             return WindowsClineSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxClineSkillsExtractor
             return LinuxClineSkillsExtractor()
         else:
             return None
@@ -1971,10 +1864,13 @@ class CodexSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.codex.skills_extractor import MacOSCodexSkillsExtractor
             return MacOSCodexSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.codex.skills_extractor import WindowsCodexSkillsExtractor
             return WindowsCodexSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxCodexSkillsExtractor
             return LinuxCodexSkillsExtractor()
         else:
             return None
@@ -1990,10 +1886,13 @@ class GeminiCliSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.gemini_cli.skills_extractor import MacOSGeminiCliSkillsExtractor
             return MacOSGeminiCliSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.gemini_cli.skills_extractor import WindowsGeminiCliSkillsExtractor
             return WindowsGeminiCliSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxGeminiCliSkillsExtractor
             return LinuxGeminiCliSkillsExtractor()
         else:
             return None
@@ -2009,10 +1908,13 @@ class JunieSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.junie.skills_extractor import MacOSJunieSkillsExtractor
             return MacOSJunieSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.junie.skills_extractor import WindowsJunieSkillsExtractor
             return WindowsJunieSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxJunieSkillsExtractor
             return LinuxJunieSkillsExtractor()
         else:
             return None
@@ -2028,10 +1930,13 @@ class KiloCodeSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.kilocode.skills_extractor import MacOSKiloCodeSkillsExtractor
             return MacOSKiloCodeSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.kilocode.skills_extractor import WindowsKiloCodeSkillsExtractor
             return WindowsKiloCodeSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxKiloCodeSkillsExtractor
             return LinuxKiloCodeSkillsExtractor()
         else:
             return None
@@ -2047,10 +1952,13 @@ class OpenCodeSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.opencode.skills_extractor import MacOSOpenCodeSkillsExtractor
             return MacOSOpenCodeSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.opencode.skills_extractor import WindowsOpenCodeSkillsExtractor
             return WindowsOpenCodeSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxOpenCodeSkillsExtractor
             return LinuxOpenCodeSkillsExtractor()
         else:
             return None
@@ -2066,10 +1974,13 @@ class RooSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.roo_code.skills_extractor import MacOSRooSkillsExtractor
             return MacOSRooSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.roo_code.skills_extractor import WindowsRooSkillsExtractor
             return WindowsRooSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxRooSkillsExtractor
             return LinuxRooSkillsExtractor()
         else:
             return None
@@ -2085,10 +1996,13 @@ class ReplitSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.replit.skills_extractor import MacOSReplitSkillsExtractor
             return MacOSReplitSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.replit.skills_extractor import WindowsReplitSkillsExtractor
             return WindowsReplitSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxReplitSkillsExtractor
             return LinuxReplitSkillsExtractor()
         else:
             return None
@@ -2104,10 +2018,13 @@ class WindsurfSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos.windsurf.skills_extractor import MacOSWindsurfSkillsExtractor
             return MacOSWindsurfSkillsExtractor()
         elif os_name == "Windows":
+            from .windows.windsurf.skills_extractor import WindowsWindsurfSkillsExtractor
             return WindowsWindsurfSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxWindsurfSkillsExtractor
             return LinuxWindsurfSkillsExtractor()
         else:
             return None
@@ -2131,10 +2048,13 @@ class ClaudeCoworkSkillsExtractorFactory:
             os_name = platform.system()
 
         if os_name == "Darwin":
+            from .macos import MacOSClaudeCoworkSkillsExtractor
             return MacOSClaudeCoworkSkillsExtractor()
         elif os_name == "Windows":
+            from .windows import WindowsClaudeCoworkSkillsExtractor
             return WindowsClaudeCoworkSkillsExtractor()
         elif os_name == "Linux":
+            from .linux import LinuxClaudeCoworkSkillsExtractor
             return LinuxClaudeCoworkSkillsExtractor()
         else:
             return None

@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
+from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
 from ...windows_extraction_helpers import get_file_metadata, read_file_content
+from ...xml_helpers import safe_xml_parse
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         ".vscode/mcp.json",
     ]
 
-    SKIP_FOLDERS = {"consent", "DeviceId", "JetBrainsClient"}
+    SKIP_FOLDERS = JETBRAINS_SKIP_FOLDERS
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
@@ -57,7 +59,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                     continue
 
                 # Skip system folders
-                if any(skip in folder for skip in self.SKIP_FOLDERS):
+                if should_skip_folder(folder, self.SKIP_FOLDERS):
                     continue
 
                 # Check if folder matches any IDE pattern
@@ -174,7 +176,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         servers = []
 
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             root = tree.getroot()
 
             for server_node in root.findall(".//McpServerConfigurationProperties"):
@@ -284,7 +286,7 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         paths = set()
 
         try:
-            tree = ET.parse(xml_path)
+            tree = safe_xml_parse(xml_path)
             root = tree.getroot()
 
             # Various path formats used by JetBrains

@@ -479,7 +479,8 @@ def _curl_request(
     args = ["curl", "-sS", "-i", "-X", method, "--max-time", str(timeout), "-K", "-"]
     if body is not None:
         args += ["--data-binary", body]
-    args.append(url)
+    # `--` ends option parsing so a config-supplied URL starting with `-` can't inject curl options.
+    args += ["--", url]
 
     config = "".join(
         f'header = "{_curl_config_quote(f"{k}: {v}")}"\n'

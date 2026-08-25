@@ -8,9 +8,14 @@ detection. Uses functional composition — no classes.
 
 import json
 import logging
+import os
+import stat
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from .constants import is_symlink_or_junction
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +88,183 @@ _OFFICIAL_CURSOR_MARKETPLACES = frozenset({
 def _is_official_cursor_marketplace(marketplace_name: str) -> bool:
     """Check if a marketplace is an official Cursor marketplace."""
     return marketplace_name.lower() in _OFFICIAL_CURSOR_MARKETPLACES
+
+
+_OFFICIAL_CODEX_MARKETPLACES = frozenset({
+    "openai-curated",
+})
+
+
+def _is_official_codex_marketplace(marketplace_name: str) -> bool:
+    """Check if a marketplace is the official Codex (OpenAI) marketplace."""
+    return marketplace_name.lower() in _OFFICIAL_CODEX_MARKETPLACES
+
+
+# Header tolerates surrounding whitespace: `[ plugins."id" ]`. The enabled value is
+# captured up to whitespace/`#`, so a trailing comment (`enabled = false  # off`) and
+# case (`False`) are handled.
+_CODEX_PLUGIN_HEADER_RE = re.compile(r'^\s*\[\s*plugins\.\s*"([^"]+)"\s*\]\s*$')
+_CODEX_ENABLED_RE = re.compile(r'^\s*enabled\s*=\s*([^\s#]+)')
+
+
+def _codex_disabled_plugin_ids(codex_home: Path) -> set:
+    """Set of ``<plugin>@<marketplace>`` ids EXPLICITLY disabled in ``~/.codex/config.toml``.
+
+    Codex treats an installed plugin as **enabled unless it is turned off**, so callers
+    skip only these ids — a missing/unreadable config, a plugin with no table, or an
+    unparseable ``enabled`` value all fail OPEN (the plugin is reported). Parsed with a
+    tiny line scanner rather than a TOML library on purpose (``tomllib`` is 3.11+; this
+    codebase targets 3.9); comment-, whitespace- and case-tolerant, and multiline-string
+    aware so a fake record embedded in string content can't disable a real plugin.
+    """
+    disabled: set = set()
+    config = codex_home / "config.toml"
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except (OSError, PermissionError):
+        return disabled  # fail open -> caller reports the plugin
+    current: Optional[str] = None
+    in_multiline: Optional[str] = None  # the ''' or \"\"\" delimiter we are inside, if any
+    for line in text.splitlines():
+        if in_multiline:
+            if line.count(in_multiline) % 2 == 1:
+                in_multiline = None
+            continue
+        for delim in ('"""', "'''"):
+            if line.count(delim) % 2 == 1:
+                in_multiline = delim
+                break
+        if in_multiline:
+            continue
+        header = _CODEX_PLUGIN_HEADER_RE.match(line)
+        if header:
+            current = header.group(1)
+            continue
+        if line.lstrip().startswith("["):          # any other table ends the block
+            current = None
+            continue
+        if current:
+            m = _CODEX_ENABLED_RE.match(line)
+            if m and m.group(1).strip().strip('"').lower() == "false":
+                disabled.add(current)
+    return disabled
+
+
+def _codex_plugin_version_key(hash_dir: Path):
+    """Sort key for choosing a plugin's active install dir: (version_tuple, mtime).
+
+    Codex resolves the active install by highest ``version`` (from the plugin's
+    ``.codex-plugin/plugin.json``), so we prefer that; ``mtime`` only breaks ties or
+    fills in when the manifest has no parseable version. Best-effort — never raises.
+    """
+    version_tuple = (-1,)
+    try:
+        manifest = _read_json_file(hash_dir / ".codex-plugin" / "plugin.json") or {}
+        raw = str(manifest.get("version", ""))
+        parts = tuple(int(p) for p in re.split(r"[.\-+]", raw) if p.isdigit())
+        if parts:
+            version_tuple = parts
+    except Exception:  # pragma: no cover - version parsing is advisory only
+        pass
+    try:
+        mtime = hash_dir.stat().st_mtime
+    except (OSError, PermissionError):
+        mtime = 0.0
+    return (version_tuple, mtime)
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """True if `child` resolves to a path inside `parent` (symlink-escape guard)."""
+    try:
+        child_real = Path(os.path.realpath(str(child)))
+        parent_real = Path(os.path.realpath(str(parent)))
+        return child_real == parent_real or parent_real in child_real.parents
+    except (OSError, ValueError):
+        return False
+
+
+def extract_codex_plugins(codex_home: Path) -> List[Dict]:
+    """Enumerate installed Codex marketplace plugins.
+
+    Codex installs plugins (``codex plugin add <plugin>@<marketplace>``) under
+    ``<codex_home>/plugins/cache/<marketplace>/<plugin>/<hash>/`` and each plugin can
+    bundle skills at ``<hash>/skills/<name>/SKILL.md`` — the Codex analogue of the
+    plugin-bundled skills already reported for Claude Code and Cursor. Returns dicts in
+    the shape :func:`extract_plugin_skills` consumes. Disabled plugins (per
+    ``config.toml``) are skipped.
+
+    Robust by construction: a filesystem error in one marketplace/plugin skips only that
+    entry and keeps scanning the rest, symlinked cache entries are rejected, and every
+    chosen install path is confirmed to resolve inside ``codex_home`` so a crafted cache
+    layout cannot redirect reads outside the owning user's tree.
+    """
+    plugins: List[Dict] = []
+    # Reject symlinked ancestors before resolving the cache. A symlinked
+    # ``~/.codex`` or ``~/.codex/plugins`` would redirect the whole boundary into
+    # another user's tree, so the realpath containment below (which resolves the
+    # boundary too) could pass against the wrong root. With every ancestor confirmed
+    # real, that containment can no longer be fooled. (cache, marketplace, and plugin
+    # dirs are each rejected below.)
+    if is_symlink_or_junction(codex_home) or is_symlink_or_junction(codex_home / "plugins"):
+        return plugins
+    cache = codex_home / "plugins" / "cache"
+    if not cache.is_dir() or is_symlink_or_junction(cache):
+        return plugins
+
+    disabled_ids = _codex_disabled_plugin_ids(codex_home)  # Codex: enabled unless turned off
+    try:
+        marketplaces = list(cache.iterdir())
+    except (OSError, PermissionError) as exc:
+        logger.debug("Error listing Codex plugin cache %s: %s", cache, exc)
+        return plugins
+
+    for marketplace_dir in marketplaces:
+        try:
+            if not marketplace_dir.is_dir() or is_symlink_or_junction(marketplace_dir):
+                continue
+            marketplace_name = marketplace_dir.name
+            for plugin_dir in marketplace_dir.iterdir():
+                try:
+                    if not plugin_dir.is_dir() or is_symlink_or_junction(plugin_dir):
+                        continue
+                    plugin_name = plugin_dir.name
+                    plugin_id = f"{plugin_name}@{marketplace_name}"
+                    if plugin_id in disabled_ids:
+                        continue  # explicitly disabled in config.toml
+
+                    # Multiple content-hash install dirs can accumulate after updates;
+                    # pick the one Codex would load — highest version, mtime as tiebreak —
+                    # among the non-symlinked dirs that actually carry a skills/ payload.
+                    candidates = [
+                        d for d in plugin_dir.iterdir()
+                        if d.is_dir() and not is_symlink_or_junction(d)
+                        and (d / "skills").is_dir()
+                    ]
+                    if not candidates:
+                        continue
+                    install_path = max(candidates, key=_codex_plugin_version_key)
+
+                    # Containment guard: the chosen dir must resolve inside codex_home.
+                    if not _is_within(install_path, codex_home):
+                        logger.debug("Skipping Codex plugin dir outside home: %s", install_path)
+                        continue
+
+                    plugins.append({
+                        "plugin_id": plugin_id,
+                        "plugin_name": plugin_name,
+                        "marketplace_name": marketplace_name,
+                        "install_path": str(install_path),
+                        "has_skills": True,
+                        "source_type": "marketplace",
+                        "is_official": _is_official_codex_marketplace(marketplace_name),
+                    })
+                except (OSError, PermissionError) as exc:
+                    logger.debug("Skipping unreadable Codex plugin %s: %s", plugin_dir, exc)
+                    continue
+        except (OSError, PermissionError) as exc:
+            logger.debug("Skipping unreadable Codex marketplace %s: %s", marketplace_dir, exc)
+            continue
+    return plugins
 
 
 def _construct_source_url(source_type: str, source_repo: Optional[str]) -> Optional[str]:
@@ -188,10 +370,12 @@ def extract_claude_code_plugins(plugins_dir: Path) -> List[Dict]:
     if not installed_data:
         return []
 
+    # The `version` field is read but not gated on: the plugins map has been
+    # {plugin_id: [entries]} throughout, so bailing on an unrecognised version
+    # would silently drop every plugin rather than degrade.
     version = installed_data.get("version")
     if version != 2:
-        logger.warning("Unsupported installed_plugins.json version: %s (expected 2); skipping plugin extraction", version)
-        return []
+        logger.warning("Unexpected installed_plugins.json version: %s (expected 2); reading anyway", version)
 
     plugins_map = installed_data.get("plugins", {})
     if not isinstance(plugins_map, dict):
@@ -522,21 +706,36 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
             continue
         skills_dir = Path(install_path) / "skills"
         try:
-            if not skills_dir.is_dir():
+            if not skills_dir.is_dir() or is_symlink_or_junction(skills_dir):
                 continue
             for entry in skills_dir.iterdir():
-                if not entry.is_dir():
+                # Reject symlinked entries and a symlinked SKILL.md before reading: a
+                # crafted plugin could point skills/<name>/SKILL.md at another file
+                # (e.g. ~/.ssh/id_ed25519) even within the same home, and is_file()
+                # follows the link. Rejecting the link means we never read the target.
+                if not entry.is_dir() or is_symlink_or_junction(entry):
                     continue
                 skill_file = entry / "SKILL.md"
-                if not skill_file.is_file():
+                # Open with O_NOFOLLOW and validate the OPEN fd, never the path: a
+                # symlinked SKILL.md is refused at open, and a non-regular file or a
+                # hardlink (st_nlink > 1 — a second link could be another user's file)
+                # is refused via fstat. Reading from the fd closes the check-then-read
+                # gap: the leaf can't be swapped for a link between the guard and the
+                # read.
+                try:
+                    fd = os.open(str(skill_file),
+                                 os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+                except OSError:
                     continue
                 try:
-                    st = skill_file.stat()
+                    st = os.fstat(fd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                        continue
                     file_size = st.st_size
-                    raw = skill_file.read_text(encoding="utf-8", errors="replace")
-                    raw_bytes = raw.encode("utf-8")
+                    raw_bytes = os.read(fd, MAX_SKILL_FILE_SIZE + 1)
                     truncated = len(raw_bytes) > MAX_SKILL_FILE_SIZE
-                    content = raw_bytes[:MAX_SKILL_FILE_SIZE].decode("utf-8", errors="ignore") if truncated else raw
+                    content = raw_bytes[:MAX_SKILL_FILE_SIZE].decode(
+                        "utf-8", errors="ignore" if truncated else "replace")
                     last_modified = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
 
                     skills.append({
@@ -557,6 +756,8 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                     })
                 except (PermissionError, OSError, UnicodeDecodeError):
                     continue
+                finally:
+                    os.close(fd)
         except (PermissionError, OSError):
             continue
     return skills

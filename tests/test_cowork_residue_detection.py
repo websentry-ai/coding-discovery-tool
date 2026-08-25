@@ -17,6 +17,7 @@ Both routing entry points are covered:
 """
 
 import os
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -344,6 +345,32 @@ class TestMacOSCoworkDetect(unittest.TestCase):
              patch(f"{_MAC_MOD}.Path.home", return_value=self.scanner_home):
             result = _detect_claude_cowork(self.Detector(), self.home)
         self.assertIsNone(result)
+
+    def _write_bundle(self, home, version):
+        plist = home / "Applications" / "Claude.app" / "Contents" / "Info.plist"
+        plist.parent.mkdir(parents=True)
+        with plist.open("wb") as fh:
+            plistlib.dump({"CFBundleShortVersionString": version}, fh)
+
+    def test_version_comes_from_scanned_users_bundle_not_scanner(self):
+        """Version must be read from the scanned user's bundle, not the scanner's."""
+        self._make_sessions()
+        self._write_bundle(self.home, "ALICE-9.9.9")
+        self._write_bundle(self.scanner_home, "SCANNER-0.0.1")
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MAC_MOD}.Path.home", return_value=self.scanner_home):
+            result = _detect_claude_cowork(self.Detector(), self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "ALICE-9.9.9")
+
+    def test_non_directory_bundle_not_detected(self):
+        """A stale alias/file named Claude.app is residue, not an install."""
+        self._make_sessions()
+        app = self.home / "Applications" / "Claude.app"
+        app.parent.mkdir(parents=True)
+        app.write_text("stale finder alias")
+        with patch(f"{_MAC_MOD}.Path.home", return_value=self.home):
+            self.assertIsNone(self.Detector().detect())
 
 
 if __name__ == "__main__":

@@ -86,12 +86,14 @@ class LinuxClaudeCoworkDetector(BaseToolDetector):
             }
         return None
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, app_install: Optional[Path] = None) -> Optional[str]:
         """Best-effort version detection.
 
         Claude Desktop on Linux has no stable, documented version-metadata
         location, so rather than guessing wrong we return None and let the
         backend treat the version as unknown — matching the Windows detector.
+        ``app_install`` is accepted for a uniform call signature with the
+        central path; it is unused here.
         """
         return None
 

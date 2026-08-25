@@ -85,14 +85,14 @@ class MacOSClaudeCoworkDetector(BaseToolDetector):
             "install_path": str(sessions_dir),
         }
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, app_install: Optional[Path] = None) -> Optional[str]:
         """
         Read CFBundleShortVersionString from Claude Desktop's Info.plist.
         Returns None on any error — version is informational and must not
         block detection.
         """
         try:
-            app_bundle = self._find_install_dir()
+            app_bundle = app_install or self._find_install_dir()
             if app_bundle is None:
                 return None
             info_plist = app_bundle / "Contents" / "Info.plist"

@@ -373,6 +373,7 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     except (PermissionError, OSError):
         return None
 
+    app_install = None
     if require_install_dir:
         find_install_dir = getattr(detector, "_find_install_dir", None)
         if not callable(find_install_dir):
@@ -380,14 +381,17 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         try:
             # Pass the scanned user's home so an admin/MDM multi-user scan probes
             # THIS user's per-user install dir, not the scanner's (Windows).
-            if find_install_dir(user_home) is None:
-                return None
+            app_install = find_install_dir(user_home)
         except (PermissionError, OSError):
+            return None
+        if app_install is None:
             return None
 
     return {
         "name": detector.tool_name,
-        "version": detector.get_version(),
+        # Probe the resolved bundle directly: get_version() with no arg falls back
+        # to the scanner's home, so a root/MDM scan would report root's version.
+        "version": detector.get_version(app_install),
         "install_path": str(sessions_dir)
     }
 

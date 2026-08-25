@@ -352,9 +352,7 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     survives uninstall (anthropics/claude-code#25013), so gating on the sessions
     dir alone produced false positives. All three OSes AND-require an install dir
     resolved by the OS detector's ``_find_install_dir`` (keeping the install-dir
-    candidate lists in the OS modules — one source of truth). macOS previously
-    hard-coded ``/Applications/Claude.app`` here, which missed the per-user
-    ``~/Applications/Claude.app`` a non-admin user gets on a managed Mac.
+    candidate lists in the OS modules — one source of truth).
     """
     system = platform.system()
     if system == "Darwin":
@@ -389,8 +387,7 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
 
     return {
         "name": detector.tool_name,
-        # Probe the resolved bundle directly: get_version() with no arg falls back
-        # to the scanner's home, so a root/MDM scan would report root's version.
+        # Probe the resolved bundle: get_version() with no arg uses the scanner's home.
         "version": detector.get_version(app_install),
         "install_path": str(sessions_dir)
     }

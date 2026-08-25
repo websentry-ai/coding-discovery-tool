@@ -349,22 +349,17 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
 
     Requires BOTH the on-disk Cowork sessions tree AND a present Claude Desktop
     install. The per-user Claude config tree (which holds the sessions dir)
-    survives uninstall (anthropics/claude-code#25013), so on Linux/Windows
-    gating on the sessions dir alone produced false positives. macOS already
-    AND-requires ``/Applications/Claude.app``; Linux/Windows now AND-require an
-    install dir resolved by the OS detector's ``_find_install_dir`` (keeping the
-    install-dir candidate lists in the OS modules — one source of truth).
+    survives uninstall (anthropics/claude-code#25013), so gating on the sessions
+    dir alone produced false positives. All three OSes AND-require an install dir
+    resolved by the OS detector's ``_find_install_dir`` (keeping the install-dir
+    candidate lists in the OS modules — one source of truth). macOS previously
+    hard-coded ``/Applications/Claude.app`` here, which missed the per-user
+    ``~/Applications/Claude.app`` a non-admin user gets on a managed Mac.
     """
     system = platform.system()
     if system == "Darwin":
-        app_path = Path("/Applications/Claude.app")
-        try:
-            if not app_path.exists():
-                return None
-        except OSError:
-            return None
         sessions_dir = user_home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
-        require_install_dir = False
+        require_install_dir = True
     elif system == "Linux":
         sessions_dir = user_home / ".config" / "Claude" / COWORK_SESSIONS_DIR
         require_install_dir = True

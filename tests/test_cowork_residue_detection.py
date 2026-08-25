@@ -5,8 +5,8 @@ session tree (``<config>/Claude/local-agent-mode-sessions/``) existed. But the
 per-user Claude config tree survives an uninstall (anthropics/claude-code#25013),
 so the sessions dir alone is residue and produced false positives. Detection now
 AND-requires a present Claude Desktop install (resolved by the OS detector's
-``_find_install_dir``). macOS already AND-required ``/Applications/Claude.app``
-and is unchanged.
+``_find_install_dir``). macOS resolves its bundle the same way, so a per-user
+``~/Applications/Claude.app`` (a non-admin install on a managed Mac) is found too.
 
 Both routing entry points are covered:
 
@@ -121,9 +121,9 @@ class TestCentralCoworkWindows(unittest.TestCase):
         self.assertEqual(result["install_path"], str(sdir))
 
 
-class TestCentralCoworkMacUnchanged(unittest.TestCase):
-    """macOS branch is unchanged: it AND-gates ``/Applications/Claude.app`` and
-    does NOT consult ``_find_install_dir``."""
+class TestCentralCoworkMac(unittest.TestCase):
+    """macOS resolves its install dir through ``_find_install_dir``, like Win/Linux,
+    so a per-user ``~/Applications/Claude.app`` is not missed."""
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
@@ -141,35 +141,35 @@ class TestCentralCoworkMacUnchanged(unittest.TestCase):
     def test_app_absent_not_detected(self):
         self._make_sessions()
         det = _make_detector(install_dir=None)
-        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
-             patch(f"{_MOD}.Path.exists", return_value=False):
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"):
             result = _detect_claude_cowork(det, self.home)
         self.assertIsNone(result)
 
     @unittest.skipIf(os.name == "nt", "POSIX-only: macOS /Applications/Claude.app path semantics (backslash on Windows)")
-    def test_app_present_and_sessions_detected_without_find_install_dir(self):
+    def test_system_app_detected_via_find_install_dir(self):
         sdir = self._make_sessions()
-        det = _make_detector(install_dir=None)
-        real_exists = Path.exists
-
-        def fake_exists(self):
-            if str(self) == "/Applications/Claude.app":
-                return True
-            return real_exists(self)
-
-        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
-             patch("pathlib.Path.exists", fake_exists):
+        det = _make_detector(install_dir=Path("/Applications/Claude.app"))
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"):
             result = _detect_claude_cowork(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(sdir))
-        # macOS path never consults the install-dir delegate.
-        det._find_install_dir.assert_not_called()
+        det._find_install_dir.assert_called_once_with(self.home)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: macOS ~/Applications path semantics")
+    def test_per_user_applications_install_detected(self):
+        sdir = self._make_sessions()
+        det = _make_detector(install_dir=self.home / "Applications" / "Claude.app")
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"):
+            result = _detect_claude_cowork(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(sdir))
 
 
 # ── OS detect() modules ──────────────────────────────────────────────────────
 
 _WIN_MOD = "scripts.coding_discovery_tools.windows.claude_cowork.claude_cowork"
 _LINUX_MOD = "scripts.coding_discovery_tools.linux.claude_cowork.claude_cowork"
+_MAC_MOD = "scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork"
 
 
 class TestWindowsCoworkDetect(unittest.TestCase):
@@ -283,6 +283,67 @@ class TestLinuxCoworkDetect(unittest.TestCase):
         with patch(f"{_LINUX_MOD}.get_linux_user_homes", return_value=[self.home, home2]), \
              patch.object(self.Detector, "_find_install_dir", return_value=None):
             self.assertIsNone(self.Detector().detect())
+
+
+@unittest.skipIf(os.name == "nt", "POSIX-only: macOS .app bundle path semantics")
+class TestMacOSCoworkDetect(unittest.TestCase):
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        self.Detector = MacOSClaudeCoworkDetector
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_scanner = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.scanner_home = Path(self.tmp_scanner.name)
+        # Neutralise any real /Applications/Claude.app on the machine running the suite.
+        patcher = patch(f"{_MAC_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.tmp_scanner.cleanup()
+
+    def _make_sessions(self, home=None):
+        sdir = (home or self.home) / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        sdir.mkdir(parents=True)
+        return sdir
+
+    def test_residue_sessions_only_not_detected(self):
+        """Sessions present, no app bundle anywhere -> not detected (FP fix holds)."""
+        self._make_sessions()
+        with patch(f"{_MAC_MOD}.Path.home", return_value=self.home):
+            self.assertIsNone(self.Detector().detect())
+
+    def test_per_user_applications_install_detected(self):
+        """Regression (FN): a non-admin ~/Applications install must be detected."""
+        sdir = self._make_sessions()
+        (self.home / "Applications" / "Claude.app").mkdir(parents=True)
+        with patch(f"{_MAC_MOD}.Path.home", return_value=self.home):
+            result = self.Detector().detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(sdir))
+
+    def test_central_scan_uses_scanned_user_home_not_scanner(self):
+        """Central path resolves the install under the SCANNED user's home."""
+        b_sessions = self._make_sessions()
+        (self.home / "Applications" / "Claude.app").mkdir(parents=True)
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MAC_MOD}.Path.home", return_value=self.scanner_home):
+            result = _detect_claude_cowork(self.Detector(), self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(b_sessions))
+
+    def test_central_scan_scanner_install_not_attributed_to_other_user(self):
+        """Inverse: the scanner's own ~/Applications install must not leak to user B."""
+        self._make_sessions()
+        (self.scanner_home / "Applications" / "Claude.app").mkdir(parents=True)
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MAC_MOD}.Path.home", return_value=self.scanner_home):
+            result = _detect_claude_cowork(self.Detector(), self.home)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

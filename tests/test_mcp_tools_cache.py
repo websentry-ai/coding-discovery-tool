@@ -2,7 +2,7 @@
 Tests for the MCP tool risk-scoring client pieces:
 
 - content-hash canonicalization (fixed vectors shared with the Django copy)
-- the name-inclusive config-hash cache keying, which must stay byte-identical
+- the canonical MCP fingerprint cache keying, which must stay byte-identical
   with the five setup-hook copies
 - mcp-tools-cache.json write/replace/error-preserve semantics
 - the every-run cache refresh (fires even when the upload is hash-deduped)
@@ -83,46 +83,43 @@ class TestContentHash(unittest.TestCase):
 
 
 class TestCacheKey(unittest.TestCase):
-    """The single name-inclusive config-hash rule. Fixed vectors are the sync
+    """Canonical fingerprint vectors. Fixed vectors are the sync
     contract with the five setup-hook copies — if one changes, the copies have
     diverged."""
 
-    def test_name_only_vector(self):
-        # Empty-config servers (connectors, claude.ai integrations, IntelliJ
-        # builtins) are distinguished by name alone.
+    def test_claude_connector_vector(self):
         self.assertEqual(
-            compute_cache_key(name="Gmail", url=None, command=None, args=None),
-            "67be714035576093daf9109a762e3ef01b5aa876bfccbda3c843410c01e83e5f",
+            compute_cache_key(
+                name="Gmail", url=None, command=None, args=None,
+                additional_data={"scope": "claude-connector"},
+            ),
+            "claude-connector:gmail",
         )
 
     def test_name_plus_command_vector(self):
         self.assertEqual(
             compute_cache_key(name="gh", url=None, command="builtin", args=None),
-            "49eb0a055d05ce5b97ee5d138a7853f70f30102e4f15bb1969d3648b95af4ee1",
+            "intellij:gh",
         )
 
     def test_full_config_vector(self):
         self.assertEqual(
             compute_cache_key(name="gh", url="https://mcp.linear.app/sse",
                               command="npx", args=["-y", "@modelcontextprotocol/server-github"]),
-            "14302c83eb0276b4aa5aa4b9867d1338253a31ae323f0eb3a5e5aa1c54afbec7",
+            "url:mcp.linear.app/sse",
         )
 
-    def test_canonical_json_form_pinned(self):
-        # The exact encoding is the contract: non-empty subset of
-        # {name, url, command, args}, sort_keys, compact separators, sha256 hex.
-        import hashlib as _hl
-        expected = _hl.sha256(
-            '{"args":["x"],"command":"npx","name":"s","url":"https://a.example.com"}'
-            .encode("utf-8")
-        ).hexdigest()
+    def test_url_credentials_query_and_fragment_do_not_change_key(self):
         self.assertEqual(
-            compute_cache_key(name="s", url="https://a.example.com", command="npx", args=["x"]),
-            expected,
+            compute_cache_key(
+                name="s", url="https://user:pass@A.EXAMPLE.com:443/path/?token=x#frag",
+                command=None, args=None,
+            ),
+            "url:a.example.com/path",
         )
 
-    def test_name_changes_key(self):
-        self.assertNotEqual(
+    def test_name_does_not_change_package_identity(self):
+        self.assertEqual(
             compute_cache_key(name="a", url=None, command="npx", args=["x"]),
             compute_cache_key(name="b", url=None, command="npx", args=["x"]),
         )
@@ -133,22 +130,21 @@ class TestCacheKey(unittest.TestCase):
             compute_cache_key(name="s", url=None, command="npx", args=["pkg-b"]),
         )
 
-    def test_strings_stripped_before_hashing(self):
+    def test_url_whitespace_is_normalized(self):
         self.assertEqual(
-            compute_cache_key(name="  Gmail  ", url="", command=None, args=None),
-            compute_cache_key(name="Gmail", url=None, command=None, args=None),
+            compute_cache_key(name="a", url="  https://a.example.com/mcp  ", command=None, args=None),
+            compute_cache_key(name="b", url="https://a.example.com/mcp", command=None, args=None),
         )
 
-    def test_empty_and_whitespace_fields_omitted(self):
-        # url="" / command="  " / args=[] are all "empty" -> same subset as name-only.
+    def test_claude_builtin_name_variants_collapse(self):
         self.assertEqual(
-            compute_cache_key(name="Gmail", url="   ", command="", args=[]),
-            "67be714035576093daf9109a762e3ef01b5aa876bfccbda3c843410c01e83e5f",
+            compute_cache_key(name="claude_in_chrome", url=None, command=None, args=None),
+            "claude-builtin:claude-in-chrome",
         )
 
     def test_all_empty_not_cached(self):
         self.assertIsNone(compute_cache_key(name=None, url=None, command=None, args=None))
-        self.assertIsNone(compute_cache_key(name="  ", url="", command="   ", args=[]))
+        self.assertIsNone(compute_cache_key(name="ordinary-name", url="", command="", args=[]))
         self.assertIsNone(compute_cache_key(name=3, url=None, command=None, args="not-a-list"))
 
 
@@ -246,7 +242,7 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
         data = self._read_file()
         self.assertEqual(data["tools"]["Claude Code"]["alice"], {
             "kA": {"read": "h1"},
-            "kB": {"t": "h2-new"},
+            "kB": {"t": ["h2", "h2-new"]},
         })
 
     def test_upsert_skips_when_no_cache_file_exists(self):
@@ -274,22 +270,19 @@ class TestCollectServerEntries(_CacheDirMixin, unittest.TestCase):
         ]}]
         entries, errored = mcp_tools_cache.collect_server_entries(projects)
         self.assertEqual(entries, {
-            "8b42a87f44d405b3bba610d4ff77316ebd44db54732e3a51939f6c9301786016":
+            "npm:@modelcontextprotocol/server-github":
                 {"read": compute_tool_content_hash(tool)},
         })
         self.assertEqual(errored, set())
 
-    def test_empty_config_server_keyed_by_name(self):
-        # Connector-style servers (empty config) are keyed by name alone;
-        # extra fields like additional_data never affect the key.
+    def test_empty_config_connector_uses_connector_fingerprint(self):
         tool = {"name": "send", "description": "Sends mail"}
         projects = [{"path": "/p", "mcpServers": [
             self._server("Gmail", scan_tools=[tool],
                          additional_data={"scope": "claude-connector"}),
         ]}]
         entries, _ = mcp_tools_cache.collect_server_entries(projects)
-        self.assertEqual(list(entries),
-                         ["67be714035576093daf9109a762e3ef01b5aa876bfccbda3c843410c01e83e5f"])
+        self.assertEqual(list(entries), ["claude-connector:gmail"])
 
     def test_scan_error_lands_in_errored_set(self):
         projects = [{"path": "/p", "mcpServers": [
@@ -298,8 +291,7 @@ class TestCollectServerEntries(_CacheDirMixin, unittest.TestCase):
         ]}]
         entries, errored = mcp_tools_cache.collect_server_entries(projects)
         self.assertEqual(entries, {})
-        self.assertEqual(errored,
-                         {"3cd440c1c08386ecbb9c4f47b305d73d3b983ab364ead6eb7f451acdb6c287ce"})
+        self.assertEqual(errored, {"url:mcp.linear.app/sse"})
 
     def test_no_cache_key_or_no_tools_skipped(self):
         projects = [{"path": "/p", "mcpServers": [
@@ -320,11 +312,29 @@ class TestCollectServerEntries(_CacheDirMixin, unittest.TestCase):
             {"path": "/p2", "mcpServers": [self._server("lin", scan_tools=[tool], url=url)]},
         ]
         entries, errored = mcp_tools_cache.collect_server_entries(projects)
-        self.assertIn("3cd440c1c08386ecbb9c4f47b305d73d3b983ab364ead6eb7f451acdb6c287ce", entries)
+        self.assertIn("url:mcp.linear.app/sse", entries)
         self.assertEqual(errored, set())
         # Same outcome regardless of project order.
         entries2, errored2 = mcp_tools_cache.collect_server_entries(list(reversed(projects)))
         self.assertEqual((entries, errored), (entries2, errored2))
+
+    def test_conflicting_hashes_for_one_fingerprint_are_marked_ambiguous(self):
+        projects = [
+            {"mcpServers": [self._server(
+                "linear-a", url="https://mcp.linear.app/mcp",
+                scan_tools=[{"name": "query", "description": "version a"}],
+            )]},
+            {"mcpServers": [self._server(
+                "linear-b", url="https://mcp.linear.app/mcp?tenant=b",
+                scan_tools=[{"name": "query", "description": "version b"}],
+            )]},
+        ]
+
+        entries, _ = mcp_tools_cache.collect_server_entries(projects)
+
+        observed = entries["url:mcp.linear.app/mcp"]["query"]
+        self.assertIsInstance(observed, list)
+        self.assertEqual(len(observed), 2)
 
     def test_malformed_shapes_are_ignored(self):
         projects = [None, "junk", {"path": 3, "mcpServers": [None, "x", {"scan": "bad"}]}]
@@ -336,9 +346,9 @@ class TestCollectServerEntries(_CacheDirMixin, unittest.TestCase):
         # A keyable server whose scan block is junk is error-shaped: preserve
         # its previous cache entry rather than evicting it.
         entries, errored = mcp_tools_cache.collect_server_entries(
-            [{"mcpServers": [{"name": "n", "scan": "bad"}]}])
+            [{"mcpServers": [{"name": "n", "url": "https://n.example/mcp", "scan": "bad"}]}])
         self.assertEqual(entries, {})
-        self.assertEqual(errored, {compute_cache_key(name="n", url=None, command=None, args=None)})
+        self.assertEqual(errored, {"url:n.example/mcp"})
 
 
 class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
@@ -351,7 +361,7 @@ class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
         "scan": {"scanned_at": "t", "tools": [{"name": "t", "description": "d"}],
                  "tool_count": 1, "server_info": None, "error": None},
     }]}]
-    _EXPECTED_KEY = "3cd440c1c08386ecbb9c4f47b305d73d3b983ab364ead6eb7f451acdb6c287ce"
+    _EXPECTED_KEY = "url:mcp.linear.app/sse"
 
     def test_refresh_writes_cache_even_when_payload_hash_matches(self):
         # Simulate the dedup-skip state: discovery-cache already holds the
@@ -400,7 +410,7 @@ class TestSingleServerScanCacheUpsert(_CacheDirMixin, unittest.TestCase):
         "scan": {"scanned_at": "t", "tools": [{"name": "t", "description": "d"}],
                  "tool_count": 1, "server_info": None, "error": None},
     }
-    _EXPECTED_KEY = "3cd440c1c08386ecbb9c4f47b305d73d3b983ab364ead6eb7f451acdb6c287ce"
+    _EXPECTED_KEY = "url:mcp.linear.app/sse"
 
     def _seed_existing_cache(self):
         # A single-server scan only augments an existing cache; seed one first
@@ -424,11 +434,43 @@ class TestSingleServerScanCacheUpsert(_CacheDirMixin, unittest.TestCase):
         data = self._read_file()
         self.assertIn(self._EXPECTED_KEY, data["tools"]["Claude Code"][Path.home().name])
 
+    def test_upsert_resolves_the_fallback_state_directory(self):
+        fallback_dir = Path(self._tmp) / "fallback"
+        fallback_dir.mkdir(mode=0o700)
+        cache_file = fallback_dir / "mcp-tools-cache.json"
+        cache_file.write_text(
+            json.dumps({"tools": {"seed": {"seed": {"k": {"t": "h"}}}}}),
+            encoding="utf-8",
+        )
+        unresolved_home = Path(self._tmp) / "unresolved-home"
+
+        with (
+            patch.object(cache, "UNBOUND_DIR", unresolved_home),
+            patch.object(cache, "_state_dir_candidates", return_value=[(fallback_dir, True)]),
+        ):
+            scan_single_mcp_server.update_local_tools_cache(self._SERVER_OBJ)
+
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        entry = data["tools"]["Claude Code"][Path.home().name]
+        self.assertIn(self._EXPECTED_KEY, entry)
+        self.assertFalse((unresolved_home / "mcp-tools-cache.json").exists())
+
     def test_errored_scan_writes_nothing(self):
         server_obj = {
             "name": "lin", "url": "https://mcp.linear.app/sse",
             "scan": {"scanned_at": "t", "tools": None, "tool_count": None,
                      "server_info": None, "error": {"code": "http_401", "details": None}},
+        }
+        scan_single_mcp_server.update_local_tools_cache(server_obj)
+        self.assertFalse((self.unbound_dir / "mcp-tools-cache.json").exists())
+
+    def test_errored_scan_ignores_stale_tools(self):
+        server_obj = {
+            "name": "lin", "url": "https://mcp.linear.app/sse",
+            "scan": {
+                "tools": [{"name": "stale", "description": "old"}],
+                "error": {"code": "http_401", "details": None},
+            },
         }
         scan_single_mcp_server.update_local_tools_cache(server_obj)
         self.assertFalse((self.unbound_dir / "mcp-tools-cache.json").exists())

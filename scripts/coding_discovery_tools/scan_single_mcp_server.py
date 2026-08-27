@@ -26,7 +26,7 @@ REPORT_PATH = "/api/v1/ai-tools/mcp-server-scan/"
 
 def _coding_tool_name():
     """The cache's coding-tool key. The dispatching PreToolUse hooks
-    (claude-code, codex, augment, cursor — setup repo, _dispatch_mcp_server_scan)
+    (claude-code, codex, copilot, augment, cursor — setup repo, _dispatch_mcp_server_scan)
     pass their discovery-report name via UNBOUND_CODING_TOOL; fall back to
     "Claude Code" for older hooks that don't set it."""
     return os.environ.get("UNBOUND_CODING_TOOL") or "Claude Code"
@@ -64,8 +64,6 @@ def update_local_tools_cache(server_obj):
         tool_hashes = mcp_tools_cache.tool_hashes_from_scan(server_obj.get("scan"))
         if not tool_hashes:
             return
-        # home_user matches the discovery run's key: the home-directory basename
-        # of the user this config belongs to (the hook runs as that user).
         mcp_tools_cache.upsert_server_entry(
             _coding_tool_name(), Path.home().name, cache_key, tool_hashes
         )
@@ -145,8 +143,6 @@ def main():
         print(f"error: scan produced no result [{ctx}]", file=sys.stderr)
         return 1
 
-    # Upsert the local hot-path cache after a successful scan, independent of
-    # the report POST below (the hashes are valid either way).
     update_local_tools_cache(server_obj)
 
     try:

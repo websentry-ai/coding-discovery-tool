@@ -14,7 +14,9 @@ File shape::
       "tools": {
         "<coding_tool_name>": {
           "<home_user>": {
-            "<cache_key>": { "<tool_name>": "<content_hash>", ... }
+            "<cache_key>": {
+              "<tool_name>": "<content_hash>" | ["<content_hash>", ...], ...
+            }
           }
         }
       }
@@ -26,7 +28,6 @@ hardcoded). Writes are atomic (mkstemp + os.replace) with the same
 fallback-dir symlink guard as ``cache.atomic_write_cache``. Corrupt/missing
 file on read is treated as ``{}``.
 """
-import hashlib
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from . import cache as _state
 from .content_hash import compute_tool_content_hash
+from .mcp_fingerprint import compute_fingerprint
 from .utils import report_to_sentry
 
 logger = logging.getLogger(__name__)
@@ -49,7 +51,7 @@ def _cache_path():
 
 
 # ---------------------------------------------------------------------------
-# <cache_key> — name-inclusive config hash
+# <cache_key> — canonical MCP server fingerprint
 #
 # ⚠️ KEEP IN SYNC: this keying is duplicated in all five setup hooks —
 #   setup/claude-code/hooks/unbound.py
@@ -58,40 +60,41 @@ def _cache_path():
 #   setup/copilot/hooks/unbound.py
 #   setup/cursor/unbound.py
 # The hooks compute the same key at PreToolUse time to look entries up in the
-# cache written here, so the logic MUST stay byte-identical across all six
-# copies. Reviewers / the code-review bot: flag PRs that touch one without the
-# others.
+# cache written here, so fingerprint output MUST stay identical across all
+# implementations. Reviewers / the code-review bot: flag PRs that touch one
+# without the others.
 #
-# ONE rule: sha256 over the canonical JSON of the non-empty subset of
-# {name, url, command, args} (strings stripped; args as-is). Including the
-# name is what distinguishes empty-config servers (connectors, claude.ai
-# integrations, IntelliJ builtins). All four empty -> None -> not cached, the
-# hook attaches nothing. Failure modes are all cache-miss-shaped (rename until
-# next scan) — never a wrong score, since the relayed content_hash is itself
-# the score identity.
+# The backend owns the canonical fingerprint rules. This module and the setup
+# hooks carry stdlib-only ports so discovery and PreToolUse resolve the same
+# server identity without retaining credentials or query parameters.
 # ---------------------------------------------------------------------------
 
 def compute_cache_key(name: Optional[str], url: Optional[str], command: Optional[str],
-                      args: Optional[List]) -> Optional[str]:
-    """The mcp-tools-cache key for one server config, or None (-> not cached)."""
-    subset = {}
-    if isinstance(name, str) and name.strip():
-        subset["name"] = name.strip()
-    if isinstance(url, str) and url.strip():
-        subset["url"] = url.strip()
-    if isinstance(command, str) and command.strip():
-        subset["command"] = command.strip()
-    if isinstance(args, list) and args:
-        subset["args"] = args
-    if not subset:
+                      args: Optional[List], additional_data=None,
+                      script_hash=None) -> Optional[str]:
+    """Canonical fingerprint used as the local tool-cache key."""
+    if name is not None and not isinstance(name, str):
         return None
-    encoded = json.dumps(subset, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if url is not None and not isinstance(url, str):
+        return None
+    if command is not None and not isinstance(command, str):
+        return None
+    if args is not None and (
+        not isinstance(args, list)
+        or any(not isinstance(arg, str) for arg in args)
+    ):
+        return None
+    if additional_data is not None and not isinstance(additional_data, dict):
+        return None
+    return compute_fingerprint(
+        name=name,
+        command=command,
+        url=url,
+        args=args,
+        additional_data=additional_data,
+        script_hash=script_hash,
+    )
 
-
-# ---------------------------------------------------------------------------
-# Entry collection from a per-(tool, user) report
-# ---------------------------------------------------------------------------
 
 def cache_key_for_server(server: Dict) -> Optional[str]:
     """Cache key for one server object as produced by
@@ -103,6 +106,8 @@ def cache_key_for_server(server: Dict) -> Optional[str]:
             url=server.get("url"),
             command=server.get("command"),
             args=server.get("args"),
+            additional_data=server.get("additional_data"),
+            script_hash=server.get("scriptHash"),
         )
     except Exception as e:
         logger.debug(f"cache key computation failed for server {server.get('name')!r}: {e}")
@@ -112,7 +117,7 @@ def cache_key_for_server(server: Dict) -> Optional[str]:
 def tool_hashes_from_scan(scan: Optional[Dict]) -> Optional[Dict[str, str]]:
     """{tool_name: content_hash} from a server's `scan` block, or None when the
     scan errored / produced no tools."""
-    if not isinstance(scan, dict):
+    if not isinstance(scan, dict) or scan.get("error") is not None:
         return None
     tools = scan.get("tools")
     if not isinstance(tools, list):
@@ -127,7 +132,7 @@ def tool_hashes_from_scan(scan: Optional[Dict]) -> Optional[Dict[str, str]]:
     return hashes or None
 
 
-def collect_server_entries(projects: Optional[List[Dict]]) -> Tuple[Dict[str, Dict[str, str]], Set[str]]:
+def collect_server_entries(projects: Optional[List[Dict]]) -> Tuple[Dict[str, Dict], Set[str]]:
     """Derive cache entries from a report's ``projects[].mcpServers[]``.
 
     Returns ``(server_entries, errored_cache_keys)``:
@@ -136,11 +141,12 @@ def collect_server_entries(projects: Optional[List[Dict]]) -> Tuple[Dict[str, Di
       - errored_cache_keys: keys whose scan errored (their previous cache
         entry should be preserved, not deleted).
 
-    Servers with no cache key or no tools are skipped. The same key can appear
-    in multiple projects; a successful scan always wins over an errored one,
-    otherwise last-one-wins.
+    Servers with no cache key or no tools are skipped. A successful scan wins
+    over an errored one. Conflicting successful tool hashes are retained as an
+    ambiguity list.
     """
-    entries: Dict[str, Dict[str, str]] = {}
+    observations: Dict[str, Dict[str, Set[str]]] = {}
+    successful_keys: Set[str] = set()
     errored: Set[str] = set()
     for project in projects or []:
         if not isinstance(project, dict):
@@ -158,16 +164,23 @@ def collect_server_entries(projects: Optional[List[Dict]]) -> Tuple[Dict[str, Di
                 continue
             hashes = tool_hashes_from_scan(scan)
             if hashes:
-                entries[cache_key] = hashes
+                successful_keys.add(cache_key)
+                by_tool = observations.setdefault(cache_key, {})
+                for tool_name, content_hash in hashes.items():
+                    by_tool.setdefault(tool_name, set()).add(content_hash)
+    entries = {
+        cache_key: {
+            tool_name: next(iter(content_hashes))
+            if len(content_hashes) == 1 else sorted(content_hashes)
+            for tool_name, content_hashes in by_tool.items()
+        }
+        for cache_key, by_tool in observations.items()
+    }
     # A key that both errored (one project) and succeeded (another) keeps the
     # successful entry.
-    errored.difference_update(entries)
+    errored.difference_update(successful_keys)
     return entries, errored
 
-
-# ---------------------------------------------------------------------------
-# Read / write
-# ---------------------------------------------------------------------------
 
 def read_mcp_tools_cache() -> Dict:
     path = _cache_path()
@@ -218,7 +231,7 @@ def _get_subtree(parent: Dict, key: str) -> Dict:
 
 
 def update_user_entries(coding_tool: str, home_user: str,
-                        server_entries: Dict[str, Dict[str, str]],
+                        server_entries: Dict[str, Dict],
                         errored_cache_keys: Optional[Set[str]] = None) -> None:
     """Replace the (coding_tool, home_user) subtree with `server_entries`.
 
@@ -255,6 +268,8 @@ def upsert_server_entry(coding_tool: str, home_user: str, cache_key: str,
     left untouched)."""
     if not cache_key or not tool_hashes:
         return
+    if not _state._ensure_state_dir():
+        return
     # Only augment an existing cache — never create one from a single-server
     # scan. The full discovery run owns the file's existence; a reactive scan
     # on a device that never ran discovery leaves no stray cache behind.
@@ -264,6 +279,23 @@ def upsert_server_entry(coding_tool: str, home_user: str, cache_key: str,
     tools = _get_subtree(data, "tools")
     by_user = _get_subtree(tools, coding_tool)
     user_entries = _get_subtree(by_user, home_user)
-    user_entries[cache_key] = tool_hashes
+    current = user_entries.get(cache_key)
+    current = current if isinstance(current, dict) else {}
+    merged = dict(current)
+    for tool_name, content_hash in tool_hashes.items():
+        observed = merged.get(tool_name)
+        if isinstance(observed, str):
+            merged[tool_name] = (
+                observed if observed == content_hash
+                else sorted({observed, content_hash})
+            )
+        elif isinstance(observed, list):
+            merged[tool_name] = sorted({
+                value for value in [*observed, content_hash]
+                if isinstance(value, str)
+            })
+        else:
+            merged[tool_name] = content_hash
+    user_entries[cache_key] = merged
     data["updated_at"] = _state._now_iso()
     _atomic_write(data)

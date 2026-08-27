@@ -268,34 +268,38 @@ def upsert_server_entry(coding_tool: str, home_user: str, cache_key: str,
     left untouched)."""
     if not cache_key or not tool_hashes:
         return
-    if not _state._ensure_state_dir():
+    lock_status = _state.acquire_lock()
+    if lock_status != "acquired":
         return
-    # Only augment an existing cache — never create one from a single-server
-    # scan. The full discovery run owns the file's existence; a reactive scan
-    # on a device that never ran discovery leaves no stray cache behind.
-    if not _cache_path().exists():
-        return
-    data = read_mcp_tools_cache()
-    tools = _get_subtree(data, "tools")
-    by_user = _get_subtree(tools, coding_tool)
-    user_entries = _get_subtree(by_user, home_user)
-    current = user_entries.get(cache_key)
-    current = current if isinstance(current, dict) else {}
-    merged = dict(current)
-    for tool_name, content_hash in tool_hashes.items():
-        observed = merged.get(tool_name)
-        if isinstance(observed, str):
-            merged[tool_name] = (
-                observed if observed == content_hash
-                else sorted({observed, content_hash})
-            )
-        elif isinstance(observed, list):
-            merged[tool_name] = sorted({
-                value for value in [*observed, content_hash]
-                if isinstance(value, str)
-            })
-        else:
-            merged[tool_name] = content_hash
-    user_entries[cache_key] = merged
-    data["updated_at"] = _state._now_iso()
-    _atomic_write(data)
+    try:
+        # Only augment an existing cache — never create one from a single-server
+        # scan. The full discovery run owns the file's existence; a reactive scan
+        # on a device that never ran discovery leaves no stray cache behind.
+        if not _cache_path().exists():
+            return
+        data = read_mcp_tools_cache()
+        tools = _get_subtree(data, "tools")
+        by_user = _get_subtree(tools, coding_tool)
+        user_entries = _get_subtree(by_user, home_user)
+        current = user_entries.get(cache_key)
+        current = current if isinstance(current, dict) else {}
+        merged = dict(current)
+        for tool_name, content_hash in tool_hashes.items():
+            observed = merged.get(tool_name)
+            if isinstance(observed, str):
+                merged[tool_name] = (
+                    observed if observed == content_hash
+                    else sorted({observed, content_hash})
+                )
+            elif isinstance(observed, list):
+                merged[tool_name] = sorted({
+                    value for value in [*observed, content_hash]
+                    if isinstance(value, str)
+                })
+            else:
+                merged[tool_name] = content_hash
+        user_entries[cache_key] = merged
+        data["updated_at"] = _state._now_iso()
+        _atomic_write(data)
+    finally:
+        _state.release_lock()

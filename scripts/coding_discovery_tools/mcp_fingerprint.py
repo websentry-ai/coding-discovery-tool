@@ -451,8 +451,8 @@ def compute_fingerprint(
         if len(identities) > 1:
             logger.warning(
                 "MCP fingerprint ambiguity (multiple URLs in args) for server '%s'. "
-                "identities=%s args=%s.",
-                name, identities, args,
+                "identities=%s.",
+                name, identities,
             )
             return None
 

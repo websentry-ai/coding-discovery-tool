@@ -23,6 +23,7 @@ from scripts.coding_discovery_tools import ai_tools_discovery
 from scripts.coding_discovery_tools import mcp_tools_cache
 from scripts.coding_discovery_tools import scan_single_mcp_server
 from scripts.coding_discovery_tools.content_hash import compute_tool_content_hash
+from scripts.coding_discovery_tools.mcp_fingerprint import compute_fingerprint
 from scripts.coding_discovery_tools.mcp_tools_cache import compute_cache_key
 
 
@@ -147,6 +148,21 @@ class TestCacheKey(unittest.TestCase):
         self.assertIsNone(compute_cache_key(name="ordinary-name", url="", command="", args=[]))
         self.assertIsNone(compute_cache_key(name=3, url=None, command=None, args="not-a-list"))
 
+    def test_ambiguous_url_warning_does_not_log_raw_args(self):
+        secret = "do-not-log-this-token"
+        with self.assertLogs(
+            "scripts.coding_discovery_tools.mcp_fingerprint", level="WARNING"
+        ) as captured:
+            result = compute_fingerprint(
+                name="ambiguous",
+                command="npx",
+                url=None,
+                args=["https://one.example/mcp", "https://two.example/mcp", secret],
+                additional_data=None,
+            )
+        self.assertIsNone(result)
+        self.assertNotIn(secret, "\n".join(captured.output))
+
 
 class _CacheDirMixin:
     """Patch the resolved state dir (cache.UNBOUND_DIR & friends) to a temp dir,
@@ -251,6 +267,20 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
         self.assertFalse(mcp_tools_cache._cache_path().exists())
         mcp_tools_cache.upsert_server_entry("Claude Code", "alice", "kB", {"t": "h2"})
         self.assertFalse(mcp_tools_cache._cache_path().exists())
+
+    def test_upsert_does_not_race_a_full_discovery_writer(self):
+        mcp_tools_cache.update_user_entries(
+            "Claude Code", "alice", {"full": {"t": "full-hash"}}, set()
+        )
+        with patch.object(cache, "acquire_lock", return_value="contended") as acquire:
+            mcp_tools_cache.upsert_server_entry(
+                "Claude Code", "alice", "single", {"t": "single-hash"}
+            )
+        acquire.assert_called_once_with()
+        self.assertEqual(
+            self._read_file()["tools"]["Claude Code"]["alice"],
+            {"full": {"t": "full-hash"}},
+        )
 
 
 class TestCollectServerEntries(_CacheDirMixin, unittest.TestCase):

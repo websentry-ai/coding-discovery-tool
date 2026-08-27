@@ -277,18 +277,21 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
         mcp_tools_cache.upsert_server_entry("Claude Code", "alice", "kB", {"t": "h2"})
         self.assertFalse(mcp_tools_cache._cache_path().exists())
 
-    def test_upsert_does_not_race_a_full_discovery_writer(self):
+    def test_upsert_waits_for_a_full_discovery_writer(self):
         mcp_tools_cache.update_user_entries(
             "Claude Code", "alice", {"full": {"t": "full-hash"}}, set()
         )
-        with patch.object(cache, "acquire_lock", return_value="contended") as acquire:
+        with patch.object(
+            cache, "acquire_lock", side_effect=["contended", "acquired"]
+        ) as acquire, patch.object(mcp_tools_cache.time, "sleep") as sleep:
             mcp_tools_cache.upsert_server_entry(
                 "Claude Code", "alice", "single", {"t": "single-hash"}
             )
-        acquire.assert_called_once_with()
+        self.assertEqual(acquire.call_count, 2)
+        sleep.assert_called_once_with(0.1)
         self.assertEqual(
             self._read_file()["tools"]["Claude Code"]["alice"],
-            {"full": {"t": "full-hash"}},
+            {"full": {"t": "full-hash"}, "single": {"t": "single-hash"}},
         )
 
 

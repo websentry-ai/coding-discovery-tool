@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from typing import Dict, List, Optional, Set, Tuple
 
 from . import cache as _state
@@ -269,6 +270,9 @@ def upsert_server_entry(coding_tool: str, home_user: str, cache_key: str,
     if not cache_key or not tool_hashes:
         return
     lock_status = _state.acquire_lock()
+    while lock_status == "contended":
+        time.sleep(0.1)
+        lock_status = _state.acquire_lock()
     if lock_status != "acquired":
         return
     try:

@@ -179,11 +179,23 @@ class TestCacheKey(unittest.TestCase):
             compute_cache_key(name="b", url="https://a.example.com/mcp", command=None, args=None),
         )
 
-    def test_claude_builtin_name_variants_collapse(self):
-        self.assertEqual(
-            compute_cache_key(name="claude_in_chrome", url=None, command=None, args=None),
-            "claude-builtin:claude-in-chrome",
-        )
+    def test_claude_builtins_keep_independent_cache_keys(self):
+        expected = {
+            "computer-use": "claude-builtin:computer-use",
+            "claude_in_chrome": "claude-builtin:claude-in-chrome",
+            "claude_browser": "claude-builtin:claude-browser",
+            "claude_preview": "claude-builtin:claude-preview",
+            "claude_design": "claude-builtin:claude-design",
+            "ccd_session": "claude-builtin:ccd-session",
+            "ccd_session_mgmt": "claude-builtin:ccd-session-mgmt",
+            "ide": "claude-builtin:ide",
+        }
+        for name, fingerprint in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    compute_cache_key(name=name, url=None, command=None, args=None),
+                    fingerprint,
+                )
 
     def test_all_empty_not_cached(self):
         self.assertIsNone(compute_cache_key(name=None, url=None, command=None, args=None))

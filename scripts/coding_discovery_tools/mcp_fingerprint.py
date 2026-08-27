@@ -247,7 +247,7 @@ def _git_identity(spec: str) -> Optional[str]:
     if s.startswith('git+'):
         s = s[4:]
     s = re.sub(r'^(https?|ssh|git)://', '', s)
-    s = re.sub(r'^git@', '', s).replace(':', '/', 1)
+    s = re.sub(r'^[^/]*@', '', s).replace(':', '/', 1)
     s = re.sub(r'\.git(@.*)?$', '', s)
     s = re.sub(r'@[^/]*$', '', s)
     parts = [p for p in s.split('/') if p]

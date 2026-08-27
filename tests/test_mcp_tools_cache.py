@@ -119,6 +119,15 @@ class TestCacheKey(unittest.TestCase):
             "url:a.example.com/path",
         )
 
+    def test_git_credentials_are_not_in_cache_key(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="s", url=None, command="npx",
+                args=["git+https://user:secret@github.com/owner/repo.git"],
+            ),
+            "git:github.com/owner/repo",
+        )
+
     def test_name_does_not_change_package_identity(self):
         self.assertEqual(
             compute_cache_key(name="a", url=None, command="npx", args=["x"]),

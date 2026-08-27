@@ -170,7 +170,10 @@ def _extract_url_identity(url_value: str) -> Optional[str]:
 
     # Drop the scheme's default port so `https://h:443/x` and `https://h/x`
     # share one identity (matches JS `new URL().port`, which omits defaults).
-    port = parsed.port
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
     if port is not None and _DEFAULT_PORTS.get((parsed.scheme or '').lower()) == port:
         port = None
     host_port = f'{host}:{port}' if port else host

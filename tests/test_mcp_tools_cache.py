@@ -122,6 +122,14 @@ class TestCacheKey(unittest.TestCase):
             "url:a.example.com/path",
         )
 
+    def test_invalid_port_has_no_fingerprint(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="broken", url="https://mcp.example.com:99999/mcp",
+                command=None, args=None,
+            )
+        )
+
     def test_git_credentials_are_not_in_cache_key(self):
         self.assertEqual(
             compute_cache_key(
@@ -317,6 +325,22 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
         self.assertEqual(
             self._read_file()["tools"]["Claude Code"]["alice"],
             {"full": {"t": "full-hash"}, "single": {"t": "single-hash"}},
+        )
+
+    def test_upsert_stops_waiting_for_a_contended_lock(self):
+        mcp_tools_cache.update_user_entries(
+            "Claude Code", "alice", {"full": {"t": "full-hash"}}, set()
+        )
+        with patch.object(cache, "acquire_lock", return_value="contended"), patch.object(
+            mcp_tools_cache.time, "monotonic", side_effect=[0, 6]
+        ), patch.object(mcp_tools_cache.time, "sleep") as sleep:
+            mcp_tools_cache.upsert_server_entry(
+                "Claude Code", "alice", "single", {"t": "single-hash"}
+            )
+        sleep.assert_not_called()
+        self.assertEqual(
+            self._read_file()["tools"]["Claude Code"]["alice"],
+            {"full": {"t": "full-hash"}},
         )
 
 

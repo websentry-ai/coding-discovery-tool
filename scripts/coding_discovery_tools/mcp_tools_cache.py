@@ -43,6 +43,7 @@ from .utils import report_to_sentry
 logger = logging.getLogger(__name__)
 
 MCP_TOOLS_CACHE_FILENAME = "mcp-tools-cache.json"
+MCP_TOOLS_CACHE_LOCK_WAIT_SECONDS = 5
 
 
 def _cache_path():
@@ -270,7 +271,11 @@ def upsert_server_entry(coding_tool: str, home_user: str, cache_key: str,
     if not cache_key or not tool_hashes:
         return
     lock_status = _state.acquire_lock()
+    lock_deadline = time.monotonic() + MCP_TOOLS_CACHE_LOCK_WAIT_SECONDS
     while lock_status == "contended":
+        if time.monotonic() >= lock_deadline:
+            logger.warning("mcp-tools-cache update skipped: discovery lock remained contended")
+            return
         time.sleep(0.1)
         lock_status = _state.acquire_lock()
     if lock_status != "acquired":

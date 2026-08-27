@@ -615,8 +615,8 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     """
     Transform mcpServers from object format to array format.
 
-    Excludes 'env' and 'headers' fields from server configs as they're not
-    needed in the output. Each server is also scanned for its live tool list
+    Excludes credentials and internal identity fields from server configs.
+    Each server is also scanned for its live tool list
     (parallel, memoized across calls) and a `scan` field is attached:
 
       - on success: { "scanned_at", "tools": [...], "tool_count", "server_info", "error": null }
@@ -638,8 +638,9 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     if not isinstance(mcp_servers, dict):
         return []
 
-    # Fields to exclude from server configs
-    excluded_fields = {"env", "headers"}
+    excluded_fields = {
+        "env", "headers", "additional_data", "scriptHash", "script_content",
+    }
 
     # Scan each server for its tool list before we strip credentials.
     scan_results: Dict[str, Dict[str, Any]] = {}
@@ -665,7 +666,6 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     servers_array = []
     for server_name, server_config in mcp_servers.items():
         if isinstance(server_config, dict):
-            # Create server object excluding 'env' and 'headers' fields
             server_obj = {
                 "name": server_name,
                 **{field_name: field_value for field_name, field_value in server_config.items()
@@ -2409,4 +2409,3 @@ def extract_claude_plugin_mcp_configs_with_root_support(
             extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
     else:
         extract_claude_plugin_mcp_configs(projects, plugin_lookup=plugin_lookup)
-

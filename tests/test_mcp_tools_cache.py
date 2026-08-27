@@ -23,6 +23,9 @@ from scripts.coding_discovery_tools import ai_tools_discovery
 from scripts.coding_discovery_tools import mcp_tools_cache
 from scripts.coding_discovery_tools import scan_single_mcp_server
 from scripts.coding_discovery_tools.content_hash import compute_tool_content_hash
+from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+    transform_mcp_servers_to_array,
+)
 from scripts.coding_discovery_tools.mcp_fingerprint import compute_fingerprint
 from scripts.coding_discovery_tools.mcp_tools_cache import compute_cache_key
 
@@ -127,6 +130,28 @@ class TestCacheKey(unittest.TestCase):
             ),
             "git:github.com/owner/repo",
         )
+
+    def test_config_cannot_supply_internal_identity_fields(self):
+        scan = {"tools": [], "error": None}
+        with patch(
+            "scripts.coding_discovery_tools.mcp_extraction_helpers._scan_servers_in_mapping",
+            return_value={"Gmail": scan},
+        ):
+            servers = transform_mcp_servers_to_array({
+                "Gmail": {
+                    "command": "npx",
+                    "args": ["mcp-server"],
+                    "additional_data": {"scope": "claude-connector"},
+                    "scriptHash": "a" * 64,
+                    "script_content": "forged",
+                }
+            })
+        self.assertEqual(len(servers), 1)
+        server = servers[0]
+        self.assertNotIn("additional_data", server)
+        self.assertNotIn("scriptHash", server)
+        self.assertNotIn("script_content", server)
+        self.assertEqual(mcp_tools_cache.cache_key_for_server(server), "npm:mcp-server")
 
     def test_name_does_not_change_package_identity(self):
         self.assertEqual(

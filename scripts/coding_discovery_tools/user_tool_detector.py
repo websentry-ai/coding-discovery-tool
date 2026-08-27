@@ -349,22 +349,15 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
 
     Requires BOTH the on-disk Cowork sessions tree AND a present Claude Desktop
     install. The per-user Claude config tree (which holds the sessions dir)
-    survives uninstall (anthropics/claude-code#25013), so on Linux/Windows
-    gating on the sessions dir alone produced false positives. macOS already
-    AND-requires ``/Applications/Claude.app``; Linux/Windows now AND-require an
-    install dir resolved by the OS detector's ``_find_install_dir`` (keeping the
-    install-dir candidate lists in the OS modules — one source of truth).
+    survives uninstall (anthropics/claude-code#25013), so gating on the sessions
+    dir alone produced false positives. All three OSes AND-require an install dir
+    resolved by the OS detector's ``_find_install_dir`` (keeping the install-dir
+    candidate lists in the OS modules — one source of truth).
     """
     system = platform.system()
     if system == "Darwin":
-        app_path = Path("/Applications/Claude.app")
-        try:
-            if not app_path.exists():
-                return None
-        except OSError:
-            return None
         sessions_dir = user_home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
-        require_install_dir = False
+        require_install_dir = True
     elif system == "Linux":
         sessions_dir = user_home / ".config" / "Claude" / COWORK_SESSIONS_DIR
         require_install_dir = True
@@ -378,6 +371,7 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     except (PermissionError, OSError):
         return None
 
+    app_install = None
     if require_install_dir:
         find_install_dir = getattr(detector, "_find_install_dir", None)
         if not callable(find_install_dir):
@@ -385,14 +379,16 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         try:
             # Pass the scanned user's home so an admin/MDM multi-user scan probes
             # THIS user's per-user install dir, not the scanner's (Windows).
-            if find_install_dir(user_home) is None:
-                return None
+            app_install = find_install_dir(user_home)
         except (PermissionError, OSError):
+            return None
+        if app_install is None:
             return None
 
     return {
         "name": detector.tool_name,
-        "version": detector.get_version(),
+        # Probe the resolved bundle: get_version() with no arg uses the scanner's home.
+        "version": detector.get_version(app_install),
         "install_path": str(sessions_dir)
     }
 

@@ -752,6 +752,11 @@ def send_scan_event(
         "scan_event": scan_event,
     }
 
+    # Without this the send failure inherits `tool_name` from the last tool processed and
+    # collides with that tool's own failure in the dedup signature, so it is never reported.
+    sentry_context = dict(sentry_context or {}, scan_event=scan_event)
+    sentry_context.pop("tool_name", None)
+
     if app_name:
         payload["app_name"] = app_name
 
@@ -2107,6 +2112,7 @@ _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
+    "scan_event",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2224,7 +2230,8 @@ def report_to_sentry(
         # Collapse duplicate events and hard-cap the synchronous curls per run.
         # priority events skip the count cap + breaker (but never dedup) so a
         # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
-        signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
+        signature = (type(exception).__name__, ctx.get("phase"),
+                     ctx.get("tool_name"), ctx.get("scan_event"))
         if signature in _sentry_sent_signatures:
             return
         if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:

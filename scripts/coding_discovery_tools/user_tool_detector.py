@@ -215,8 +215,10 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Op
     nvm_versions = user_home / ".nvm" / "versions" / "node"
     try:
         nvm_present = nvm_versions.exists()
-    except OSError:
+    except OSError as e:
         nvm_present = False
+        if failures is not None and not is_absence_error(e):
+            failures.add(detector.tool_name)
     if nvm_present:
         try:
             for version_dir in nvm_versions.iterdir():
@@ -270,7 +272,9 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Op
                         "version": detector.get_version() or "Unknown",
                         "install_path": str(candidate)
                     }
-            except OSError:
+            except OSError as e:
+                if failures is not None and not is_absence_error(e):
+                    failures.add(detector.tool_name)
                 continue
     else:
         # Check common user binary locations the nvm/bun scans miss.
@@ -301,7 +305,9 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Op
                         "version": detector.get_version() or "Unknown",
                         "install_path": str(candidate)
                     }
-            except OSError:
+            except OSError as e:
+                if failures is not None and not is_absence_error(e):
+                    failures.add(detector.tool_name)
                 continue
 
         # Resolve the npm global prefix (Homebrew node / nvm / pnpm vary) and
@@ -320,8 +326,10 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Op
     bun_bin = user_home / ".bun" / "bin" / "gemini"
     try:
         bun_present = bun_bin.exists()
-    except OSError:
+    except OSError as e:
         bun_present = False
+        if failures is not None and not is_absence_error(e):
+            failures.add(detector.tool_name)
     if bun_present:
         return {
             "name": detector.tool_name,

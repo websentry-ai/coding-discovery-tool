@@ -519,6 +519,7 @@ TOOL_CONFIG_DIRS: FrozenSet[str] = frozenset({
     ".antigravity", ".augment", ".claude", ".cline", ".codeium", ".codex",
     ".copilot", ".cursor", ".gemini", ".junie", ".kilocode", ".roo",
     ".vscode", ".windsurf",
+    ".config/github-copilot", ".config/opencode",
 })
 
 
@@ -529,10 +530,10 @@ def probe_profile(home_user: str, user_home: Path) -> Dict:
     the profile was unreadable. ``readable``/``entries`` separate those two, and
     ``config_dirs`` flags a tool whose binary sits outside the candidate paths.
 
-    Presence comes from the single directory listing rather than ``Path.exists()``,
+    Markers are gated on the single directory listing rather than ``Path.exists()``,
     which reports an unreachable path (ENOTDIR/ELOOP, or Windows ERROR_NOT_READY on
-    an unmounted profile container) as plainly absent. Each listed marker is then
-    stat'd: it is known to exist, so any error there is denied access, never absence.
+    an unmounted profile container) as plainly absent, then confirmed with ``os.stat``
+    so a denied marker is recorded instead of read as a clean profile.
     """
     probe: Dict = {
         "home_user": home_user,
@@ -550,12 +551,16 @@ def probe_profile(home_user: str, user_home: Path) -> Dict:
     probe["readable"] = True
     probe["entries"] = len(names)
 
-    for name in sorted(names & TOOL_CONFIG_DIRS):
+    for marker in sorted(TOOL_CONFIG_DIRS):
+        parts = marker.split("/")
+        if parts[0] not in names:
+            continue
         try:
-            os.stat(user_home / name)
-            probe["config_dirs"].append(name)
+            os.stat(user_home.joinpath(*parts))
+            probe["config_dirs"].append(marker)
         except OSError as e:
-            probe["error"] = probe["error"] or type(e).__name__
+            if not is_absence_error(e):
+                probe["error"] = probe["error"] or type(e).__name__
     return probe
 
 

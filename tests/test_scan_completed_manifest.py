@@ -491,6 +491,15 @@ class TestProfileProbe(unittest.TestCase):
         self.assertEqual(probe["config_dirs"], [".claude"])
         self.assertFalse(profile_unreadable(probe))
 
+    def test_nested_config_dir_is_reported(self):
+        # .config/opencode and .config/github-copilot are the only nested markers; a flat
+        # name intersection cannot see them, so those tools would look absent on a profile
+        # that has them.
+        (self.home / ".config" / "opencode").mkdir(parents=True)
+        probe = probe_profile("alice", self.home)
+        self.assertIn(".config/opencode", probe["config_dirs"])
+        self.assertIsNone(probe["error"], "a .config dir without the tool is not an error")
+
     def test_absent_home_is_not_unreadable(self):
         probe = probe_profile("ghost", self.home / "nope")
         self.assertFalse(probe["readable"])
@@ -542,6 +551,21 @@ class TestDetectorDenialMarksIncomplete(unittest.TestCase):
             self.utd._detect_claude_code(self.detector, Path(tempfile.mkdtemp()), failures)
         )
         self.assertEqual(failures, set(), "absence must not be reported as a failure")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    def test_gemini_denied_nvm_records_failure(self):
+        # Gemini's probes catch bare OSError and fall through to "not present", so a denied
+        # ~/.nvm read used to leave the failure set empty and let the scan prune.
+        self.detector.tool_name = "Gemini CLI"
+        self.detector.detect.return_value = None
+        home = Path(tempfile.mkdtemp())
+        (home / ".nvm" / "versions").mkdir(parents=True)
+        os.chmod(home / ".nvm", 0o000)
+        self.addCleanup(os.chmod, home / ".nvm", 0o755)
+
+        failures = set()
+        self.utd._detect_gemini_cli(self.detector, home, failures)
+        self.assertEqual(failures, {"Gemini CLI"})
 
     @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
     def test_denied_candidate_records_failure(self):

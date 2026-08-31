@@ -518,6 +518,44 @@ class TestProfileProbe(unittest.TestCase):
         self.assertTrue(profile_unreadable(probe))
 
 
+class TestDetectorDenialMarksIncomplete(unittest.TestCase):
+    """A detector that could not read a candidate path reports the tool as unknown, so
+    the scan sends no manifest. A detector that simply found nothing must stay silent —
+    recording absence as a failure would suppress pruning on every healthy machine."""
+
+    def setUp(self):
+        from unittest.mock import Mock
+        import scripts.coding_discovery_tools.user_tool_detector as utd
+
+        self.utd = utd
+        self.detector = Mock()
+        self.detector.tool_name = "Claude Code"
+        self.detector.get_version.return_value = "1.0"
+        # Windows branch: no machine-global candidates, so only the user's paths are probed.
+        patcher = patch.object(utd.platform, "system", return_value="Windows")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_clean_home_records_no_failure(self):
+        failures = set()
+        self.assertIsNone(
+            self.utd._detect_claude_code(self.detector, Path(tempfile.mkdtemp()), failures)
+        )
+        self.assertEqual(failures, set(), "absence must not be reported as a failure")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    def test_denied_candidate_records_failure(self):
+        home = Path(tempfile.mkdtemp())
+        (home / ".local" / "bin").mkdir(parents=True)
+        (home / ".local" / "bin" / "claude.exe").write_text("x")
+        os.chmod(home / ".local" / "bin", 0o000)
+        self.addCleanup(os.chmod, home / ".local" / "bin", 0o755)
+
+        failures = set()
+        self.assertIsNone(self.utd._detect_claude_code(self.detector, home, failures))
+        self.assertEqual(failures, {"Claude Code"})
+
+
 class TestExtensionDetectorPerUserScoping(unittest.TestCase):
     """Extension detectors must scope to the per-user home set by detect_tool_for_user, so an
     elevated multi-user scan can't attribute one user's extension to another (phantom ownership)."""

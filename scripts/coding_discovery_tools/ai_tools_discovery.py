@@ -462,7 +462,7 @@ class AIToolsDetector:
             try:
                 # If user_home is provided, check user-specific paths first
                 if user_home:
-                    tool_info = detect_tool_for_user(detector, user_home)
+                    tool_info = detect_tool_for_user(detector, user_home, failures)
                 else:
                     tool_info = detector.detect()
                 

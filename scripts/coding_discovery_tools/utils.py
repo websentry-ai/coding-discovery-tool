@@ -559,8 +559,13 @@ def probe_profile(home_user: str, user_home: Path) -> Dict:
     return probe
 
 
-# A home that isn't there is genuinely absent, not unreadable, so it must not block prune.
+# A path that isn't there is genuinely absent, not unreadable, so it must not block prune.
 _ABSENT_PROFILE_ERRORS: FrozenSet[str] = frozenset({"FileNotFoundError", "NotADirectoryError"})
+
+
+def is_absence_error(exc: OSError) -> bool:
+    """True when the error means the path is not there, rather than not readable."""
+    return type(exc).__name__ in _ABSENT_PROFILE_ERRORS
 
 
 def profile_unreadable(probe: Dict) -> bool:

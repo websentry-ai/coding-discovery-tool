@@ -69,7 +69,7 @@ class WindowsCursorDetector(BaseToolDetector):
         Returns:
             List of Path objects
         """
-        user_home = Path.home()
+        user_home = getattr(self, "user_home", None) or Path.home()
         return [
             user_home / "AppData" / "Local" / "Programs" / "cursor",
             user_home / "AppData" / "Local" / "Programs" / "Cursor",

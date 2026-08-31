@@ -752,8 +752,7 @@ def send_scan_event(
         "scan_event": scan_event,
     }
 
-    # Without this the send failure inherits `tool_name` from the last tool processed and
-    # collides with that tool's own failure in the dedup signature, so it is never reported.
+    # A stale `tool_name` collides with that tool's own failure in the dedup signature.
     sentry_context = dict(sentry_context or {}, scan_event=scan_event)
     sentry_context.pop("tool_name", None)
 

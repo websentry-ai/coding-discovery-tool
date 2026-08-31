@@ -34,7 +34,7 @@ DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 
 SCRIPT_VERSION = "1.1.0"
 
-# Enough to tell an empty profile from a populated one without walking a large home.
+# Enough to tell an empty profile from a populated one.
 PROFILE_ENTRY_PROBE_CAP = 1
 
 try:
@@ -3349,10 +3349,7 @@ def main():
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             try:
-                # Bounds entries read, not time: iterdir() can still block opening a
-                # disconnected network home. Detection below already blocks unbounded on
-                # the same profile, so this adds no new risk class -- time-bounding the
-                # whole per-profile pass is its own change.
+                # Bounds entries read, not time; detection below already blocks unbounded here.
                 if not any(islice(user_home.iterdir(), PROFILE_ENTRY_PROBE_CAP)):
                     profiles_empty += 1
             except (FileNotFoundError, NotADirectoryError):

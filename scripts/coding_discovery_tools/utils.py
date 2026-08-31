@@ -945,6 +945,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                     return (False, True)
 
+            except OSError as e:
+                # curl missing or not executable: local, not transient, so sleeping cannot help.
+                logger.error(f"Cannot execute curl: {e}")
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
+
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
                 if attempt < MAX_ATTEMPTS:

@@ -89,7 +89,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
+    from .utils import send_report_to_backend, send_scan_event, probe_profile, profile_unreadable, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -157,7 +157,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
+    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, probe_profile, profile_unreadable, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -3243,6 +3243,8 @@ def main():
         scanned_manifest = set()
         # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
         incomplete_reasons = []
+        # What each profile actually exposed to the scan; sent on "completed" for diagnosis.
+        profile_probes = []
 
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
@@ -3341,6 +3343,11 @@ def main():
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
+            probe = probe_profile(user, user_home)
+            profile_probes.append(probe)
+            # Unreadable profile = presence unknown -> incomplete, no prune.
+            if profile_unreadable(probe):
+                incomplete_reasons.append(f"profile unreadable for user {user}")
             with time_step("detect_tools", "detect"):
                 user_detect_failures = set()
                 user_tools = detector.detect_all_tools(
@@ -3822,6 +3829,7 @@ def main():
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
             manifest=manifest, covered_home_users=covered,
+            probe_summary=profile_probes,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

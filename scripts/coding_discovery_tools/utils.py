@@ -514,6 +514,51 @@ _NON_HUMAN_USERS: FrozenSet[str] = frozenset(
 # these is a service account, never a human end-user.
 _NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
 
+# Home-relative config dirs that survive on disk wherever a tool is installed from.
+TOOL_CONFIG_DIRS: Tuple[str, ...] = (
+    ".claude", ".cursor", ".gemini", ".windsurf",
+    ".junie", ".copilot", ".codeium", ".augment",
+)
+
+
+def probe_profile(home_user: str, user_home: Path) -> Dict:
+    """Record what the scan could actually see in one profile.
+
+    A detector that finds nothing looks identical whether the machine is clean or
+    the profile was unreadable. ``readable``/``entries`` separate those two, and
+    ``config_dirs`` flags a tool whose binary sits outside the candidate paths.
+    """
+    probe: Dict = {
+        "home_user": home_user,
+        "readable": False,
+        "entries": 0,
+        "config_dirs": [],
+        "error": None,
+    }
+    try:
+        probe["entries"] = sum(1 for _ in user_home.iterdir())
+        probe["readable"] = True
+    except (PermissionError, OSError) as e:
+        probe["error"] = type(e).__name__
+        return probe
+
+    for name in TOOL_CONFIG_DIRS:
+        try:
+            if (user_home / name).exists():
+                probe["config_dirs"].append(name)
+        except (PermissionError, OSError):
+            continue
+    return probe
+
+
+# A home that isn't there is genuinely absent, not unreadable, so it must not block prune.
+_ABSENT_PROFILE_ERRORS: FrozenSet[str] = frozenset({"FileNotFoundError", "NotADirectoryError"})
+
+
+def profile_unreadable(probe: Dict) -> bool:
+    """True when a profile is on disk but the scan could not inspect it."""
+    return bool(probe["error"]) and probe["error"] not in _ABSENT_PROFILE_ERRORS
+
 
 def _strip_windows_domain(name: str) -> str:
     """Return the bare username from a Windows ``DOMAIN\\username`` string.
@@ -721,6 +766,7 @@ def send_scan_event(
     system_user: Optional[str] = None,
     manifest: Optional[List[Dict]] = None,
     covered_home_users: Optional[List[str]] = None,
+    probe_summary: Optional[List[Dict]] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -742,6 +788,8 @@ def send_scan_event(
             "completed" so the backend set-diffs it to prune the rest.
         covered_home_users: Optional home users covered; sent only on "completed" to
             bound the prune scope.
+        probe_summary: Optional per-profile probe results; sent on "completed" so an
+            empty manifest can be told apart from an unreadable machine.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -769,6 +817,9 @@ def send_scan_event(
 
     if covered_home_users is not None:
         payload["covered_home_users"] = covered_home_users
+
+    if probe_summary is not None:
+        payload["probe_summary"] = probe_summary
 
     return send_report_to_backend(
         backend_url,

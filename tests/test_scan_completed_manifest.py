@@ -506,6 +506,17 @@ class TestProfileProbe(unittest.TestCase):
         self.assertEqual(probe["error"], "PermissionError")
         self.assertTrue(profile_unreadable(probe))
 
+    @unittest.skipIf(os.geteuid() == 0, "root can traverse a 0o600 dir")
+    def test_listable_home_with_denied_tool_dir_is_unreadable(self):
+        # A home we can list but whose tool dirs we cannot stat is still an unknown:
+        # treating it as empty would send a manifest and prune the user's real tools.
+        os.chmod(self.home, 0o600)
+        self.addCleanup(os.chmod, self.home, 0o755)
+        probe = probe_profile("alice", self.home)
+        self.assertTrue(probe["readable"])
+        self.assertEqual(probe["error"], "PermissionError")
+        self.assertTrue(profile_unreadable(probe))
+
 
 class TestExtensionDetectorPerUserScoping(unittest.TestCase):
     """Extension detectors must scope to the per-user home set by detect_tool_for_user, so an

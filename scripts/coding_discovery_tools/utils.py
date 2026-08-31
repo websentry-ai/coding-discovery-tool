@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import random
 import re
 import shlex
 import shutil
@@ -778,6 +779,11 @@ def send_scan_event(
     )
 
 
+MAX_ATTEMPTS = 8
+BACKOFF_BASE_SECONDS = 2
+BACKOFF_CAP_SECONDS = 60
+
+
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.
@@ -803,8 +809,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
     NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
-    MAX_ATTEMPTS = 3
-    BACKOFF_SECONDS = [2, 4]
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     ctx = sentry_context or {}
@@ -890,7 +894,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
                     if attempt < MAX_ATTEMPTS:
-                        _backoff(attempt, BACKOFF_SECONDS)
+                        _backoff(attempt)
                         continue
                     try:
                         raise RuntimeError(error_msg)
@@ -919,7 +923,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     return (False, False)
 
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     try:
                         error_detail = f"HTTP {http_code}"
@@ -933,7 +937,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             except subprocess.TimeoutExpired:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     try:
                         raise RuntimeError("curl timeout")
@@ -944,7 +948,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                     return (False, True)
@@ -970,10 +974,12 @@ def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
         logger.error(f"Backend response: {error_body}")
 
 
-def _backoff(attempt: int, delays: List[int]) -> None:
-    """Sleep for the backoff duration corresponding to the given attempt."""
-    wait = delays[attempt - 1]
-    logger.info(f"  Retrying in {wait}s...")
+
+def _backoff(attempt: int) -> None:
+    """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed together from retrying together."""
+    ceiling = min(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), BACKOFF_CAP_SECONDS)
+    wait = random.uniform(ceiling / 2, ceiling)
+    logger.info(f"  Retrying in {wait:.1f}s...")
     time.sleep(wait)
 
 

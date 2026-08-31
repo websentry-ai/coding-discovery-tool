@@ -124,7 +124,7 @@ class TestSendReport(unittest.TestCase):
 
         self.assertFalse(success)
         self.assertTrue(retryable)
-        self.assertEqual(len(self.server.requests), 3)
+        self.assertEqual(len(self.server.requests), utils_mod.MAX_ATTEMPTS)
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
@@ -172,7 +172,7 @@ class TestSendReport(unittest.TestCase):
         # Cloudflare 403 with "1010" in body is treated as transient -> retries
         self.assertFalse(success)
         self.assertTrue(retryable)
-        self.assertEqual(len(self.server.requests), 3)
+        self.assertEqual(len(self.server.requests), utils_mod.MAX_ATTEMPTS)
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")

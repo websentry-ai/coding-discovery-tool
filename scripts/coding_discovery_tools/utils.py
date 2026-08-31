@@ -514,10 +514,11 @@ _NON_HUMAN_USERS: FrozenSet[str] = frozenset(
 # these is a service account, never a human end-user.
 _NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
 
-# Home-relative config dirs that survive on disk wherever a tool is installed from.
+# Home-relative config dirs that identify a tool wherever its binary was installed from.
 TOOL_CONFIG_DIRS: Tuple[str, ...] = (
-    ".claude", ".cursor", ".gemini", ".windsurf",
-    ".junie", ".copilot", ".codeium", ".augment",
+    ".antigravity", ".augment", ".claude", ".cline", ".codeium", ".codex",
+    ".copilot", ".cursor", ".gemini", ".junie", ".kilocode", ".roo",
+    ".vscode", ".windsurf",
 )
 
 
@@ -546,8 +547,9 @@ def probe_profile(home_user: str, user_home: Path) -> Dict:
         try:
             if (user_home / name).exists():
                 probe["config_dirs"].append(name)
-        except (PermissionError, OSError):
-            continue
+        except (PermissionError, OSError) as e:
+            # A listable home whose tool dirs are denied is still unknown, not empty.
+            probe["error"] = probe["error"] or type(e).__name__
     return probe
 
 

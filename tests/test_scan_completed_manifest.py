@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
-from scripts.coding_discovery_tools.utils import send_scan_event
+from scripts.coding_discovery_tools.utils import probe_profile, profile_unreadable, send_scan_event
 from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -100,6 +100,20 @@ class TestSendScanEventManifest(_ServerTestCase):
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_completed_event_carries_probe_summary(self, _sleep):
+        probes = [{"home_user": "alice", "readable": True, "entries": 12,
+                   "config_dirs": [".claude"], "error": None}]
+
+        success, _retryable = send_scan_event(
+            self.base_url, "test-key", "DEV-1", "run-1", "completed",
+            manifest=[], covered_home_users=["alice"], probe_summary=probes,
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(self.server.requests[0]["probe_summary"], probes)
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_legacy_call_omits_both_keys(self, _sleep):
         # No manifest / covered_home_users supplied -> neither key may appear
         # in the payload (backward compatibility with the old call sites).
@@ -112,6 +126,7 @@ class TestSendScanEventManifest(_ServerTestCase):
         body = self.server.requests[0]
         self.assertNotIn("manifest", body)
         self.assertNotIn("covered_home_users", body)
+        self.assertNotIn("probe_summary", body)
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
@@ -458,6 +473,111 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertEqual(pairs, {("alice", "ToolA"), ("bob", "ToolB")})
         self.assertNotIn(("bob", "ToolA"), pairs)
         self.assertNotIn(("alice", "ToolB"), pairs)
+
+
+class TestProfileProbe(unittest.TestCase):
+    """probe_profile separates "nothing installed" from "could not look", and only the
+    latter blocks the manifest — an absent home must never disable pruning fleet-wide."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        (self.home / ".claude").mkdir()
+        (self.home / "notes.txt").write_text("x")
+
+    def test_readable_profile_lists_config_dirs(self):
+        probe = probe_profile("alice", self.home)
+        self.assertTrue(probe["readable"])
+        self.assertEqual(probe["entries"], 2)
+        self.assertEqual(probe["config_dirs"], [".claude"])
+        self.assertFalse(profile_unreadable(probe))
+
+    def test_nested_config_dir_is_reported(self):
+        # .config/opencode and .config/github-copilot are the only nested markers; a flat
+        # name intersection cannot see them, so those tools would look absent on a profile
+        # that has them.
+        (self.home / ".config" / "opencode").mkdir(parents=True)
+        probe = probe_profile("alice", self.home)
+        self.assertIn(".config/opencode", probe["config_dirs"])
+        self.assertIsNone(probe["error"], "a .config dir without the tool is not an error")
+
+    def test_absent_home_is_not_unreadable(self):
+        probe = probe_profile("ghost", self.home / "nope")
+        self.assertFalse(probe["readable"])
+        self.assertEqual(probe["error"], "FileNotFoundError")
+        self.assertFalse(profile_unreadable(probe), "an absent home must not block prune")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    def test_denied_profile_is_unreadable(self):
+        denied = Path(tempfile.mkdtemp())
+        os.chmod(denied, 0o000)
+        self.addCleanup(os.chmod, denied, 0o755)
+        probe = probe_profile("locked", denied)
+        self.assertEqual(probe["error"], "PermissionError")
+        self.assertTrue(profile_unreadable(probe))
+
+    @unittest.skipIf(os.geteuid() == 0, "root can traverse a 0o600 dir")
+    def test_listable_home_with_denied_tool_dir_is_unreadable(self):
+        # A home we can list but whose tool dirs we cannot stat is still an unknown:
+        # treating it as empty would send a manifest and prune the user's real tools.
+        os.chmod(self.home, 0o600)
+        self.addCleanup(os.chmod, self.home, 0o755)
+        probe = probe_profile("alice", self.home)
+        self.assertTrue(probe["readable"])
+        self.assertEqual(probe["error"], "PermissionError")
+        self.assertTrue(profile_unreadable(probe))
+
+
+class TestDetectorDenialMarksIncomplete(unittest.TestCase):
+    """A detector that could not read a candidate path reports the tool as unknown, so
+    the scan sends no manifest. A detector that simply found nothing must stay silent —
+    recording absence as a failure would suppress pruning on every healthy machine."""
+
+    def setUp(self):
+        from unittest.mock import Mock
+        import scripts.coding_discovery_tools.user_tool_detector as utd
+
+        self.utd = utd
+        self.detector = Mock()
+        self.detector.tool_name = "Claude Code"
+        self.detector.get_version.return_value = "1.0"
+        # Windows branch: no machine-global candidates, so only the user's paths are probed.
+        patcher = patch.object(utd.platform, "system", return_value="Windows")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_clean_home_records_no_failure(self):
+        failures = set()
+        self.assertIsNone(
+            self.utd._detect_claude_code(self.detector, Path(tempfile.mkdtemp()), failures)
+        )
+        self.assertEqual(failures, set(), "absence must not be reported as a failure")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    def test_gemini_denied_nvm_records_failure(self):
+        # Gemini's probes catch bare OSError and fall through to "not present", so a denied
+        # ~/.nvm read used to leave the failure set empty and let the scan prune.
+        self.detector.tool_name = "Gemini CLI"
+        self.detector.detect.return_value = None
+        home = Path(tempfile.mkdtemp())
+        (home / ".nvm" / "versions").mkdir(parents=True)
+        os.chmod(home / ".nvm", 0o000)
+        self.addCleanup(os.chmod, home / ".nvm", 0o755)
+
+        failures = set()
+        self.utd._detect_gemini_cli(self.detector, home, failures)
+        self.assertEqual(failures, {"Gemini CLI"})
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    def test_denied_candidate_records_failure(self):
+        home = Path(tempfile.mkdtemp())
+        (home / ".local" / "bin").mkdir(parents=True)
+        (home / ".local" / "bin" / "claude.exe").write_text("x")
+        os.chmod(home / ".local" / "bin", 0o000)
+        self.addCleanup(os.chmod, home / ".local" / "bin", 0o755)
+
+        failures = set()
+        self.assertIsNone(self.utd._detect_claude_code(self.detector, home, failures))
+        self.assertEqual(failures, {"Claude Code"})
 
 
 class TestExtensionDetectorPerUserScoping(unittest.TestCase):

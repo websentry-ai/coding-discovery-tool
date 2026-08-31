@@ -980,7 +980,6 @@ def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
         logger.error(f"Backend response: {error_body}")
 
 
-
 def _backoff(attempt: int) -> None:
     """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed together from retrying together."""
     ceiling = min(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), BACKOFF_CAP_SECONDS)

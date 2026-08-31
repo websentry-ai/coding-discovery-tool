@@ -515,11 +515,11 @@ _NON_HUMAN_USERS: FrozenSet[str] = frozenset(
 _NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
 
 # Home-relative config dirs that identify a tool wherever its binary was installed from.
-TOOL_CONFIG_DIRS: Tuple[str, ...] = (
+TOOL_CONFIG_DIRS: FrozenSet[str] = frozenset({
     ".antigravity", ".augment", ".claude", ".cline", ".codeium", ".codex",
     ".copilot", ".cursor", ".gemini", ".junie", ".kilocode", ".roo",
     ".vscode", ".windsurf",
-)
+})
 
 
 def probe_profile(home_user: str, user_home: Path) -> Dict:
@@ -528,6 +528,11 @@ def probe_profile(home_user: str, user_home: Path) -> Dict:
     A detector that finds nothing looks identical whether the machine is clean or
     the profile was unreadable. ``readable``/``entries`` separate those two, and
     ``config_dirs`` flags a tool whose binary sits outside the candidate paths.
+
+    Presence comes from the single directory listing rather than ``Path.exists()``,
+    which reports an unreachable path (ENOTDIR/ELOOP, or Windows ERROR_NOT_READY on
+    an unmounted profile container) as plainly absent. Each listed marker is then
+    stat'd: it is known to exist, so any error there is denied access, never absence.
     """
     probe: Dict = {
         "home_user": home_user,
@@ -537,18 +542,19 @@ def probe_profile(home_user: str, user_home: Path) -> Dict:
         "error": None,
     }
     try:
-        probe["entries"] = sum(1 for _ in user_home.iterdir())
-        probe["readable"] = True
-    except (PermissionError, OSError) as e:
+        names = {entry.name for entry in user_home.iterdir()}
+    except OSError as e:
         probe["error"] = type(e).__name__
         return probe
 
-    for name in TOOL_CONFIG_DIRS:
+    probe["readable"] = True
+    probe["entries"] = len(names)
+
+    for name in sorted(names & TOOL_CONFIG_DIRS):
         try:
-            if (user_home / name).exists():
-                probe["config_dirs"].append(name)
-        except (PermissionError, OSError) as e:
-            # A listable home whose tool dirs are denied is still unknown, not empty.
+            os.stat(user_home / name)
+            probe["config_dirs"].append(name)
+        except OSError as e:
             probe["error"] = probe["error"] or type(e).__name__
     return probe
 

@@ -779,9 +779,9 @@ def send_scan_event(
     )
 
 
-MAX_ATTEMPTS = 8
-BACKOFF_BASE_SECONDS = 2
-BACKOFF_CAP_SECONDS = 60
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_SECONDS = 15
+BACKOFF_CAP_SECONDS = 120
 
 
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:

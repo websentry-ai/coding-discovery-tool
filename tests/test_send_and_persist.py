@@ -573,7 +573,7 @@ class TestSentryPriorityBypassesCap(unittest.TestCase):
 class TestBackoffPolicy(unittest.TestCase):
     """The retry curve itself: an outage longer than the window loses the device."""
 
-    CEILINGS = [2, 4, 8, 16, 32, 60, 60]
+    CEILINGS = [15, 30, 60, 120]
 
     def _waits(self):
         with patch("time.sleep") as sleep:

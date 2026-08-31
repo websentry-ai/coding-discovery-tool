@@ -26,7 +26,9 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, WINDOWS_SKIP_USER_DIRS
+from scripts.coding_discovery_tools.macos_extraction_helpers import SKIP_PATTERN as SKIPDIR_PATTERN
+
+from ...constants import MAX_SEARCH_DEPTH, WINDOWS_SKIP_USER_DIRS
 from ...windows_extraction_helpers import (
     is_running_as_admin,
     read_file_content,
@@ -182,7 +184,7 @@ class WindowsCursorCliSettingsExtractor:
                 if not entry.is_dir():
                     continue
 
-                if entry.name in SKIP_DIRS or entry.name in system_dirs:
+                if SKIPDIR_PATTERN.search(entry.name) is not None or entry.name in system_dirs:
                     continue
 
                 if entry.name == self.CURSOR_DIR_NAME:

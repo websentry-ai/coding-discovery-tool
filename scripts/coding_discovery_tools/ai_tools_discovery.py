@@ -3349,8 +3349,10 @@ def main():
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             try:
-                # Capped: a network or redirected home can block per entry, and a slow
-                # listing here would push the run past the backend heartbeat window.
+                # Bounds entries read, not time: iterdir() can still block opening a
+                # disconnected network home. Detection below already blocks unbounded on
+                # the same profile, so this adds no new risk class -- time-bounding the
+                # whole per-profile pass is its own change.
                 if not any(islice(user_home.iterdir(), PROFILE_ENTRY_PROBE_CAP)):
                     profiles_empty += 1
             except (FileNotFoundError, NotADirectoryError):

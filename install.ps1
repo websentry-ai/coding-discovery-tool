@@ -94,6 +94,9 @@ function Get-RepositoryWithArchive {
         Get-ChildItem -Path $root.FullName -Force | Move-Item -Destination $TEMP_DIR -Force
         return (Test-RepositoryDownloaded)
     } catch {
+        # Say which step failed so certificate, proxy, extraction and disk
+        # problems are distinguishable from the log alone.
+        Write-Warning ("Archive download failed: " + $_.Exception.Message)
         return $false
     } finally {
         Remove-Item -Path $zipPath, $extractDir -Recurse -Force -ErrorAction SilentlyContinue

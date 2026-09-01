@@ -68,7 +68,7 @@ class WindowsWindsurfDetector(BaseToolDetector):
         Returns:
             List of Path objects
         """
-        user_home = Path.home()
+        user_home = getattr(self, "user_home", None) or Path.home()
         return [
             user_home / "AppData" / "Local" / "Programs" / "Windsurf",
             user_home / "AppData" / "Local" / "Programs" / "windsurf",

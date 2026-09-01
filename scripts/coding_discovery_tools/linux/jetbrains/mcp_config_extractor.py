@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import unquote
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
@@ -134,6 +135,8 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _normalize_path(self, path: str, user_home: Path) -> str:
         home_str = str(user_home)
+        # recentProjects.xml URL-encodes the path (a space -> %20); decode it.
+        path = unquote(path)
         path = path.replace("$USER_HOME$", home_str)
         path = path.replace("$HOME$", home_str)
         if path.startswith("~"):

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import unquote
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
@@ -169,6 +170,8 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         home_str = str(user_home)
 
+        # recentProjects.xml URL-encodes the path (a space -> %20); decode it.
+        path = unquote(path)
         path = path.replace("$USER_HOME$", home_str)
         path = path.replace("$HOME$", home_str)
         # Only replace ~ at the start of the path to avoid corrupting paths

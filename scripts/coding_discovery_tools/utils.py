@@ -752,9 +752,8 @@ def send_scan_event(
         "scan_event": scan_event,
     }
 
-    # A stale `tool_name` collides with that tool's own failure in the dedup signature.
+    # Differentiates a lifecycle-send failure from a per-tool one in the dedup signature.
     sentry_context = dict(sentry_context or {}, scan_event=scan_event)
-    sentry_context.pop("tool_name", None)
 
     if app_name:
         payload["app_name"] = app_name

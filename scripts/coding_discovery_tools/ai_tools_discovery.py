@@ -3735,6 +3735,9 @@ def main():
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
+        # Per-tool key, stale from here on; later events inherit this dict.
+        sentry_ctx.pop("tool_name", None)
+
         # --- Persist any failed reports for the next run ---
         with time_step("persist_failed_reports", "queue"):
             if failed_reports:

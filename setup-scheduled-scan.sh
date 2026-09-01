@@ -17,7 +17,7 @@ set -euo pipefail
 #   ./setup-scheduled-scan.sh --command discover --api-key <key> --domain <url>
 #
 #   # Onboard scheduled run
-#   ./setup-scheduled-scan.sh --command onboard --api-key <key> --discovery-key <key> [--domain <url>]
+#   ./setup-scheduled-scan.sh --command onboard --api-key <key> [--domain <url>]
 #
 #   # Uninstall
 #   ./setup-scheduled-scan.sh --uninstall
@@ -72,8 +72,9 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --command <name>     Subcommand to schedule: 'discover' (default) or 'onboard'"
-    echo "  --api-key <key>      User API key (or discovery key when --command discover)"
-    echo "  --discovery-key <k>  Org discovery key (optional; only for sudo/MDM all-users scans)"
+    echo "  --api-key <key>      API key (user key, or admin key for sudo/MDM all-users scans)"
+    echo "  --discovery-key <k>  Deprecated and ignored by current CLIs; the device owner is"
+    echo "                       resolved from the hardware serial. Accepted for back-compat."
     echo "  --domain <url>       Backend URL (e.g., https://backend.getunbound.ai)"
     echo "  --uninstall          Remove the scheduled job"
     echo "  --help               Show this help message"
@@ -649,9 +650,10 @@ if [ -z "$API_KEY" ]; then
     echo "Error: --api-key is required"
     usage
 fi
-# --discovery-key is optional for onboard: per-user onboarding scans with the
-# user's own API key (WEB-4891). It is only needed for sudo/MDM (all-users)
-# enrollment, which is scheduled via --command discover, not onboard.
+# --discovery-key is deprecated and optional. Per-user onboarding scans with the
+# user's own API key; sudo/MDM all-users scans (scheduled via --command discover)
+# resolve the device owner from the hardware serial. Still accepted, and forwarded
+# when present, so older CLIs that pass it keep working.
 if [ "$COMMAND" = "discover" ] && [ -z "$DOMAIN" ]; then
     echo "Error: --domain is required when --command discover"
     usage

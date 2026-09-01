@@ -1652,13 +1652,14 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
-def _windows_process_is_elevated() -> bool:
-    """True if the process is elevated, or on any error (fail closed)."""
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return True
+def _windows_process_is_elevated():
+    """True/False, or None when the check could not run.
+
+    Shares one probe with the detectors so telemetry can never report a
+    privilege the scan did not actually have.
+    """
+    from .windows_extraction_helpers import windows_admin_state
+    return windows_admin_state()
 
 
 def _binary_in_cwd(path: str) -> bool:

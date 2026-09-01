@@ -292,6 +292,16 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     return owns_install
 
 
+def _decode_project_path(path):
+    """VS Code / Copilot-family tools store a project folder with spaces as a
+    percent-encoded path (e.g. "FHA%20Asset%20Optimizer"); decode the space escape
+    so analytics shows the real name. Only %20 is touched, so a path that
+    legitimately contains a literal "%" (or an encoded slash) is left intact."""
+    if isinstance(path, str) and "%20" in path:
+        return path.replace("%20", " ")
+    return path
+
+
 class AIToolsDetector:
     """
     Detector for AI coding tools on macOS and Windows.
@@ -2327,6 +2337,16 @@ class AIToolsDetector:
         return result
 
     def process_single_tool(self, tool: Dict) -> Dict:
+        """Discover a single tool, then normalise reported project paths at this
+        one chokepoint that every tool routes through."""
+        result = self._process_single_tool_raw(tool)
+        if isinstance(result, dict):
+            for proj in result.get("projects") or []:
+                if isinstance(proj, dict) and isinstance(proj.get("path"), str):
+                    proj["path"] = _decode_project_path(proj["path"])
+        return result
+
+    def _process_single_tool_raw(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
 

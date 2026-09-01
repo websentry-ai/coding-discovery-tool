@@ -124,7 +124,7 @@ class TestSendReport(unittest.TestCase):
 
         self.assertFalse(success)
         self.assertTrue(retryable)
-        self.assertEqual(len(self.server.requests), 3)
+        self.assertEqual(len(self.server.requests), utils_mod.MAX_ATTEMPTS)
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
@@ -161,6 +161,18 @@ class TestSendReport(unittest.TestCase):
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_missing_curl_fails_fast_without_backoff(self, sleep):
+        with patch("subprocess.run", side_effect=FileNotFoundError("curl")):
+            success, retryable = send_report_to_backend(
+                self.base_url, "test-key", self.report
+            )
+
+        self.assertFalse(success)
+        self.assertTrue(retryable)
+        sleep.assert_not_called()
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_cloudflare_403_retries(self, _sleep):
         self.server.default_code = 403
         self.server.response_body = b"<html>Error 1010: Access denied</html>"
@@ -172,7 +184,7 @@ class TestSendReport(unittest.TestCase):
         # Cloudflare 403 with "1010" in body is treated as transient -> retries
         self.assertFalse(success)
         self.assertTrue(retryable)
-        self.assertEqual(len(self.server.requests), 3)
+        self.assertEqual(len(self.server.requests), utils_mod.MAX_ATTEMPTS)
 
     @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
@@ -556,6 +568,32 @@ class TestSentryPriorityBypassesCap(unittest.TestCase):
             {"phase": "no_tools_found"}, priority=True,
         )
         self.assertEqual(mock_subprocess.run.call_count, 1)
+
+
+class TestBackoffPolicy(unittest.TestCase):
+    """The retry curve itself: an outage longer than the window loses the device."""
+
+    CEILINGS = [15, 30, 60, 120]
+
+    def _waits(self):
+        with patch("time.sleep") as sleep:
+            for attempt in range(1, utils_mod.MAX_ATTEMPTS):
+                utils_mod._backoff(attempt)
+        return [c.args[0] for c in sleep.call_args_list]
+
+    def test_doubles_then_holds_at_the_cap(self):
+        waits = self._waits()
+        self.assertEqual(len(waits), len(self.CEILINGS))
+        for wait, ceiling in zip(waits, self.CEILINGS):
+            self.assertGreaterEqual(wait, ceiling / 2)
+            self.assertLessEqual(wait, ceiling)
+
+    def test_window_outlasts_the_outage_that_caused_this(self):
+        # 2026-08-26: 100s of origin 503s; a shorter window loses the device outright.
+        self.assertGreaterEqual(sum(self._waits()), 100)
+
+    def test_jitter_desynchronises_two_clients(self):
+        self.assertNotEqual(self._waits(), self._waits())
 
 
 if __name__ == "__main__":

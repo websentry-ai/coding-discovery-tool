@@ -28,8 +28,8 @@ from typing import Dict, Iterator, List, Optional, Callable
 # killed — a SIGKILL leaves a fresh-mtime lock that would otherwise block the next
 # run. Kept in sync with the parent timeouts in setup/mdm/onboard.py and
 # unbound-cli's discover.js (which pass --timeout and use a larger kill backstop).
-# 150 minutes. Pass --timeout <=0 to disable.
-DEFAULT_RUN_TIMEOUT_SECONDS = 9000
+# 200 minutes. Pass --timeout <=0 to disable.
+DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 
 SCRIPT_VERSION = "1.1.0"
 
@@ -89,7 +89,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -97,6 +97,7 @@ try:
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
     from . import cache as discovery_cache
+    from . import mcp_tools_cache
     from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
@@ -156,7 +157,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -164,6 +165,7 @@ except ImportError:
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools import cache as discovery_cache
+    from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
 logger = logging.getLogger(__name__)
@@ -208,6 +210,28 @@ def _normalise_path(p: str) -> str:
         n = n[0].upper() + n[1:]
     n = n.rstrip('/')
     return n
+
+
+def _refresh_mcp_tools_cache(tool_name: str, user_name: str, projects: List[Dict],
+                             sentry_ctx: Optional[Dict] = None) -> None:
+    """Refresh the local MCP tools cache (mcp-tools-cache.json) for one
+    (tool, user) from the report's projects[].mcpServers[].
+
+    Runs on EVERY discovery run — including when the payload-hash dedup skips
+    the upload — because the cache is a hot-path artifact for the PreToolUse
+    hook, independent of upload dedup. Never raises: a cache failure must not
+    break the run (log + Sentry warning, continue).
+    """
+    try:
+        server_entries, errored_cache_keys = mcp_tools_cache.collect_server_entries(projects)
+        mcp_tools_cache.update_user_entries(tool_name, user_name, server_entries, errored_cache_keys)
+    except Exception as e:
+        logger.warning(f"  Could not update MCP tools cache for {tool_name}/{user_name}: {e}")
+        report_to_sentry(
+            e,
+            {**(sentry_ctx or {}), "phase": "mcp_tools_cache", "tool_name": tool_name, "user": user_name},
+            level="warning",
+        )
 
 
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
@@ -3600,6 +3624,12 @@ def main():
                             payload_logger.info("  " + "=" * 70)
                             payload_logger.info("")
 
+                        # Refresh ~/.unbound/mcp-tools-cache.json BEFORE the upload-dedup
+                        # branch below: the PreToolUse hook reads it on the hot path, so
+                        # it must be rewritten every run even when the upload is skipped.
+                        with time_step("update_mcp_tools_cache", "process"):
+                            _refresh_mcp_tools_cache(tool_name, user_name, projects, sentry_ctx)
+
                         # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.
                         # Backend already dedups on payload_hash; this short-circuits the upload
                         # itself when local cache shows no change since last successful upload.
@@ -3690,6 +3720,9 @@ def main():
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
+        # Per-tool key, stale from here on; later events inherit this dict.
+        sentry_ctx.pop("tool_name", None)
+
         # --- Persist any failed reports for the next run ---
         with time_step("persist_failed_reports", "queue"):
             if failed_reports:
@@ -3768,9 +3801,16 @@ def main():
                     "used_fallback_user": homes_enumerated == 0,
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),
+                    "in_container": in_container(),
                 }
                 if hasattr(os, "getuid"):
                     no_tools_ctx["is_root"] = os.getuid() == 0
+                elif platform.system() == "Windows":
+                    # Every Windows detector gates its all-users walk on this same probe.
+                    admin_state = _windows_process_is_elevated()
+                    no_tools_ctx["is_elevated"] = admin_state
+                    no_tools_ctx["detect_scope"] = "all_users" if admin_state else "single_home"
+                    no_tools_ctx["scan_home"] = os.path.basename(os.path.expanduser("~"))
                 report_to_sentry(
                     RuntimeError("Discovery found no tools"),
                     context=no_tools_ctx,

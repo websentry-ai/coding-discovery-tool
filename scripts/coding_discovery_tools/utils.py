@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import random
 import re
 import shlex
 import shutil
@@ -751,6 +752,9 @@ def send_scan_event(
         "scan_event": scan_event,
     }
 
+    # Differentiates a lifecycle-send failure from a per-tool one in the dedup signature.
+    sentry_context = dict(sentry_context or {}, scan_event=scan_event)
+
     if app_name:
         payload["app_name"] = app_name
 
@@ -778,6 +782,11 @@ def send_scan_event(
     )
 
 
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_SECONDS = 15
+BACKOFF_CAP_SECONDS = 120
+
+
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.
@@ -803,8 +812,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
     NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
-    MAX_ATTEMPTS = 3
-    BACKOFF_SECONDS = [2, 4]
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     ctx = sentry_context or {}
@@ -890,7 +897,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
                     if attempt < MAX_ATTEMPTS:
-                        _backoff(attempt, BACKOFF_SECONDS)
+                        _backoff(attempt)
                         continue
                     try:
                         raise RuntimeError(error_msg)
@@ -919,7 +926,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     return (False, False)
 
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     try:
                         error_detail = f"HTTP {http_code}"
@@ -933,7 +940,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             except subprocess.TimeoutExpired:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     try:
                         raise RuntimeError("curl timeout")
@@ -941,10 +948,16 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                     return (False, True)
 
+            except OSError as e:
+                # curl missing or not executable: local, not transient, so sleeping cannot help.
+                logger.error(f"Cannot execute curl: {e}")
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
+
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                     return (False, True)
@@ -970,10 +983,11 @@ def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
         logger.error(f"Backend response: {error_body}")
 
 
-def _backoff(attempt: int, delays: List[int]) -> None:
-    """Sleep for the backoff duration corresponding to the given attempt."""
-    wait = delays[attempt - 1]
-    logger.info(f"  Retrying in {wait}s...")
+def _backoff(attempt: int) -> None:
+    """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed together from retrying together."""
+    ceiling = min(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), BACKOFF_CAP_SECONDS)
+    wait = random.uniform(ceiling / 2, ceiling)
+    logger.info(f"  Retrying in {wait:.1f}s...")
     time.sleep(wait)
 
 
@@ -1638,13 +1652,14 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
-def _windows_process_is_elevated() -> bool:
-    """True if the process is elevated, or on any error (fail closed)."""
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return True
+def _windows_process_is_elevated():
+    """True/False, or None when the check could not run.
+
+    Shares one probe with the detectors so telemetry can never report a
+    privilege the scan did not actually have.
+    """
+    from .windows_extraction_helpers import windows_admin_state
+    return windows_admin_state()
 
 
 def _binary_in_cwd(path: str) -> bool:
@@ -2096,6 +2111,7 @@ _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
+    "scan_event",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2213,7 +2229,8 @@ def report_to_sentry(
         # Collapse duplicate events and hard-cap the synchronous curls per run.
         # priority events skip the count cap + breaker (but never dedup) so a
         # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
-        signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
+        signature = (type(exception).__name__, ctx.get("phase"),
+                     ctx.get("tool_name"), ctx.get("scan_event"))
         if signature in _sentry_sent_signatures:
             return
         if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:

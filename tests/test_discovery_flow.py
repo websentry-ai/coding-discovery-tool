@@ -1814,6 +1814,18 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         for key, value in ctx.items():
             self.assertNotIsInstance(value, list, f"context key {key!r} is a list")
 
+    def test_admin_state_is_never_invented(self):
+        import scripts.coding_discovery_tools.windows_extraction_helpers as weh
+        import scripts.coding_discovery_tools.utils as u
+
+        with patch.object(weh, "windows_admin_state", return_value=None):
+            self.assertIsNone(u._windows_process_is_elevated())
+
+        with patch("ctypes.windll", create=True) as windll:
+            windll.shell32.IsUserAnAdmin.side_effect = OSError("unavailable")
+            self.assertIsNone(weh.windows_admin_state())
+            self.assertIs(weh.is_running_as_admin(), False)
+
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
     def test_does_not_fire_when_tools_found(self):
         mock_sentry = Mock()

@@ -445,24 +445,29 @@ def read_truncated_file(file_path: Path) -> str:
         return ""
 
 
-def is_running_as_admin() -> bool:
+def windows_admin_state() -> Optional[bool]:
     """
-    Check if the current process is running as administrator.
-    
+    Whether the current process holds administrator rights.
+
     Returns:
-        True if running as administrator, False otherwise
+        True or False, or None when the check itself could not run.
     """
     try:
         import ctypes
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except Exception:
-        # Fallback: check if current user is Administrator or SYSTEM
-        try:
-            import getpass
-            current_user = getpass.getuser().lower()
-            return current_user in ["administrator", "system"]
-        except Exception:
-            return False
+        return None
+
+
+def is_running_as_admin() -> bool:
+    """
+    Check if the current process is running as administrator.
+
+    Returns:
+        True if running as administrator, False otherwise
+    """
+    # Undetermined counts as not-admin: under-report rather than assume access.
+    return windows_admin_state() is True
 
 
 def _other_user_appdata_local_dirs() -> List[Path]:

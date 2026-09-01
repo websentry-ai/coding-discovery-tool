@@ -3348,19 +3348,21 @@ def main():
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
+            with time_step("detect_tools", "detect"):
+                user_detect_failures = set()
+                user_tools = detector.detect_all_tools(
+                    user_home=user_home, failures=user_detect_failures
+                )
+            # After detection, which already touched this home: the probe can never be
+            # the first call to block on an unreachable profile.
             try:
-                # Bounds entries read, not time; detection below already blocks unbounded here.
                 if not any(islice(user_home.iterdir(), PROFILE_ENTRY_PROBE_CAP)):
                     profiles_empty += 1
             except (FileNotFoundError, NotADirectoryError):
                 pass  # absent, not unreadable
             except OSError:
                 profiles_unlistable += 1
-            with time_step("detect_tools", "detect"):
-                user_detect_failures = set()
-                user_tools = detector.detect_all_tools(
-                    user_home=user_home, failures=user_detect_failures
-                )
+
             # Detected tools stay in the manifest even if a later read errors (a read failure isn't an uninstall).
             for detected in user_tools:
                 scanned_manifest.add((user, detected.get('name', 'Unknown')))

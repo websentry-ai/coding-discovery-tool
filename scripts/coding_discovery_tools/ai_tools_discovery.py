@@ -3806,7 +3806,11 @@ def main():
                 if hasattr(os, "getuid"):
                     no_tools_ctx["is_root"] = os.getuid() == 0
                 elif platform.system() == "Windows":
-                    no_tools_ctx["is_elevated"] = _windows_process_is_elevated()
+                    # Every Windows detector gates its all-users walk on this same probe.
+                    admin_state = _windows_process_is_elevated()
+                    no_tools_ctx["is_elevated"] = admin_state
+                    no_tools_ctx["detect_scope"] = "all_users" if admin_state else "single_home"
+                    no_tools_ctx["scan_home"] = os.path.basename(os.path.expanduser("~"))
                 report_to_sentry(
                     RuntimeError("Discovery found no tools"),
                     context=no_tools_ctx,

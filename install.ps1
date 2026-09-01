@@ -49,29 +49,74 @@ function Get-PythonCommand {
 }
 
 function Test-GitInstalled {
-    try { $null = & git --version 2>&1; return $true } catch { return $false }
+    try {
+        $v = & git --version 2>&1
+        return ($LASTEXITCODE -eq 0 -and "$v" -match 'git version')
+    } catch { return $false }
+}
+
+function Test-RepositoryDownloaded {
+    return (Test-Path (Join-Path $TEMP_DIR "scripts"))
+}
+
+function Get-RepositoryWithGit {
+    New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+    try {
+        & git clone --depth 1 --branch $BRANCH --filter=blob:none --sparse $REPO_URL $TEMP_DIR 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Push-Location $TEMP_DIR
+            & git sparse-checkout set scripts/ 2>&1 | Out-Null
+            Pop-Location
+            if (Test-RepositoryDownloaded) { return $true }
+        }
+        Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+        & git clone --depth 1 --branch $BRANCH $REPO_URL $TEMP_DIR 2>&1 | Out-Null
+        return ($LASTEXITCODE -eq 0 -and (Test-RepositoryDownloaded))
+    } catch { return $false }
+}
+
+function Get-RepositoryWithArchive {
+    # No Git required: download the branch archive from GitHub and expand it.
+    # Mirrors download_with_curl in install.sh. Invoke-WebRequest uses the
+    # Windows certificate store, so customer-installed CAs (Zscaler etc.) work.
+    $archiveUrl = "https://github.com/websentry-ai/coding-discovery-tool/archive/refs/heads/$BRANCH.zip"
+    $zipPath = "$TEMP_DIR.zip"
+    $extractDir = "$TEMP_DIR-extract"
+    try {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+        Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force -ErrorAction Stop
+        # The archive has a single top-level folder, e.g. coding-discovery-tool-main
+        $root = Get-ChildItem -Path $extractDir -Directory | Select-Object -First 1
+        if (-not $root) { return $false }
+        New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+        Get-ChildItem -Path $root.FullName -Force | Move-Item -Destination $TEMP_DIR -Force
+        return (Test-RepositoryDownloaded)
+    } catch {
+        return $false
+    } finally {
+        Remove-Item -Path $zipPath, $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-Repository {
-    if (-not (Test-GitInstalled)) {
-        Write-ErrorMessage "Git is not installed."
-        return $false
-    }
-    New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
-    
-    try {
-        & git clone --depth 1 --branch $BRANCH --filter=blob:none --sparse $REPO_URL $TEMP_DIR 2>&1 | Out-Null
-        Push-Location $TEMP_DIR
-        & git sparse-checkout set scripts/ 2>&1 | Out-Null
-        Pop-Location
-        return $true
-    } catch {
-        try {
-            Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
-            & git clone --depth 1 --branch $BRANCH $REPO_URL $TEMP_DIR 2>&1 | Out-Null
+    if (Test-GitInstalled) {
+        if (Get-RepositoryWithGit) {
+            Write-Success "Repository downloaded (via git)"
             return $true
-        } catch { return $false }
+        }
+        Write-Warning "Git download failed, trying archive download..."
+        Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Info "Git not found, downloading archive instead..."
     }
+    if (Get-RepositoryWithArchive) {
+        Write-Success "Repository downloaded (via archive)"
+        return $true
+    }
+    Write-ErrorMessage "Could not download the repository with git or as an archive."
+    return $false
 }
 
 # --- MAIN EXECUTION ---

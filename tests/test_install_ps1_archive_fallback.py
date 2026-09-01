@@ -48,10 +48,11 @@ class TestHarnessHelpers(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^\s*Main\s*$")
 
     def test_path_without_git_drops_only_git_entries(self):
-        path = os.pathsep.join([r"C:\Windows", r"C:\Program Files\Git\cmd", r"C:\Python312"])
+        # Drive-letter-free entries so the check is valid on every OS's pathsep.
+        path = os.pathsep.join(["Windows", "Program Files/Git/cmd", "Python312"])
         self.assertEqual(
             _path_without_git(path),
-            os.pathsep.join([r"C:\Windows", r"C:\Python312"]),
+            os.pathsep.join(["Windows", "Python312"]),
         )
 
 

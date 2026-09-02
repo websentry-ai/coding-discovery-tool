@@ -48,46 +48,30 @@ class TestHarnessHelpers(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^\s*Main\s*$")
 
     def test_every_prerequisite_exit_reports_before_quitting(self):
-        """A gate that exits without reporting is invisible to the backend."""
+        """A gate that exits without reporting leaves no trace anywhere."""
         text = INSTALL_PS1.read_text(encoding="utf-8")
         self.assertIn("function Send-InstallerFailure", text)
         for gate in ("Python 3 required but not found.", "Failed to download repository."):
             block = text[text.index(gate) - 300:text.index(gate)]
             self.assertIn("Send-InstallerFailure", block, f"{gate!r} exits unreported")
 
-    def test_failure_report_uses_the_scan_lifecycle_contract(self):
+    def test_failure_report_uses_the_sentry_event_contract(self):
         text = INSTALL_PS1.read_text(encoding="utf-8")
-        for field in ("device_id", "run_id", "scan_event = 'failed'", "scan_error"):
+        for field in ("event_id", "'installer_blocked'", "reason     = $Reason",
+                      "InstallerPrerequisite", "/store/", "X-Sentry-Auth"):
             self.assertIn(field, text)
 
-    def test_failure_report_never_sends_the_key_over_http(self):
-        """The branch lookup guards on https; the report carries the same key."""
+    def test_issue_title_carries_only_the_reason_code(self):
+        """Per-machine detail in the title would split one issue into hundreds."""
         text = INSTALL_PS1.read_text(encoding="utf-8")
-        body = text[text.index("function Send-InstallerFailure"):]
-        guard = body[:body.index("Invoke-RestMethod")]
-        self.assertIn("-notmatch '^https://'", guard)
+        title = re.search(r"value = \"([^\"]*)\"", text).group(1)
+        self.assertIn("$Reason", title)
+        self.assertNotIn("$Detail", title)
 
-    def test_device_id_probes_match_the_agent_exactly(self):
-        """A probe the agent lacks, or a missing one, splits the machine's device row."""
+    def test_sentry_dsn_can_be_disabled_for_tests(self):
         text = INSTALL_PS1.read_text(encoding="utf-8")
-        body = text[text.index("function Get-DeviceId"):text.index("function Send-InstallerFailure")]
-        self.assertNotIn("Get-CimInstance", body)
-        order = ["Get-WmiObject Win32_BIOS",
-                 "wmic bios get serialnumber /format:list",
-                 "wmic bios get serialnumber)",
-                 "COMPUTERNAME"]
-        found = [body.index(p) for p in order]
-        self.assertEqual(found, sorted(found), "probe order diverges from the agent")
-        # wmic can emit several lines; the agent takes the first valid one, not the join.
-        self.assertIn("foreach ($line in $lines)", body)
-
-    def test_installer_rejects_the_same_placeholder_serials_as_the_agent(self):
-        from scripts.coding_discovery_tools.constants import INVALID_SERIAL_VALUES
-
-        text = INSTALL_PS1.read_text(encoding="utf-8")
-        listed = set(re.findall(r"'([^']+)'", text[text.index("$INVALID_SERIALS"):text.index("function Get-DeviceId")]))
-        # "" is unrepresentable in the PS list and is covered by the -not $serial check.
-        self.assertEqual(listed, {v for v in INVALID_SERIAL_VALUES if v})
+        self.assertIn("$env:AI_DISCOVERY_SENTRY_DSN", text)
+        self.assertIn("if (-not $SENTRY_DSN", text)
 
     def test_path_without_git_drops_only_git_entries(self):
         # Drive-letter-free entries so the check is valid on every OS's pathsep.

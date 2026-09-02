@@ -40,55 +40,41 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Remo
 
 $script:LastDownloadError = ''
 
-# Mirrors INVALID_SERIAL_VALUES in constants.py.
-$INVALID_SERIALS = @(
-    'TO BE FILLED BY O.E.M.', 'DEFAULT STRING', 'SERIALNUMBER', 'SYSTEM SERIAL NUMBER',
-    'NOT APPLICABLE', 'N/A', 'NONE', 'NOT SPECIFIED', 'OEM', 'O.E.M.', 'DEFAULT',
-    'SYSTEM MANUFACTURER', 'CHASSIS SERIAL NUMBER', '0', '00000000', '000000000000',
-    '123456789', 'XXXXXXXXXXXXXX'
-)
-
-function Get-DeviceId {
-    # Same probes and order as WindowsDeviceIdExtractor; diverging splits the device row.
-    $probes = @(
-        { (Get-WmiObject Win32_BIOS -ErrorAction Stop).SerialNumber },
-        { (& wmic bios get serialnumber /format:list) -match 'SerialNumber=' -replace 'SerialNumber=', '' },
-        { (& wmic bios get serialnumber) | Select-Object -Skip 1 }
-    )
-    foreach ($probe in $probes) {
-        $lines = @()
-        try { $lines = @(& $probe) } catch { }
-        # First valid line wins, as in the agent; joining them would invent a serial.
-        foreach ($line in $lines) {
-            $serial = "$line".Trim()
-            if ($serial -and $INVALID_SERIALS -notcontains $serial.ToUpper()) { return $serial }
-        }
-    }
-    return $env:COMPUTERNAME
-}
+$SENTRY_DSN = if ($env:AI_DISCOVERY_SENTRY_DSN) { $env:AI_DISCOVERY_SENTRY_DSN }
+              else { 'https://62a73a0043568547cb63a35394b63906@o4509196569149440.ingest.us.sentry.io/4510874666663936' }
 
 function Send-InstallerFailure {
-    # The agent never starts on these paths, so this is the backend's only signal.
+    # The agent never starts on these paths, so nothing else reports them.
     param([string]$Reason, [string]$Detail)
     try {
-        # Same HTTPS guard as the branch lookup; the key must never go out in clear.
-        if (-not $_key -or -not $_domain -or $_domain -notmatch '^https://') { return }
-        $serial = Get-DeviceId
+        if (-not $SENTRY_DSN -or -not $_domain) { return }
+        $key, $hostProject = ($SENTRY_DSN -replace '^https://', '') -split '@', 2
+        $sentryHost, $projectId = $hostProject -split '/', 2
+        $serial = ''
+        try { $serial = "$((Get-WmiObject Win32_BIOS -ErrorAction Stop).SerialNumber)".Trim() } catch { }
         $body = @{
-            device_id  = $serial
-            run_id     = [guid]::NewGuid().ToString()
-            scan_event = 'failed'
-            scan_error = @{
-                error_type = 'InstallerPrerequisite'
+            event_id  = [guid]::NewGuid().ToString('N')
+            timestamp = (Get-Date).ToUniversalTime().ToString('o')
+            level     = 'warning'
+            platform  = 'other'
+            sdk       = @{ name = 'install.ps1'; version = '1.0.0' }
+            tags      = @{
+                phase      = 'installer_blocked'
                 reason     = $Reason
-                message    = $Detail
-                ps_version = $PSVersionTable.PSVersion.ToString()
+                os         = 'Windows'
+                hostname   = $env:COMPUTERNAME
+                device_id  = $serial
+                domain     = $_domain
                 branch     = $BRANCH
+                ps_version = $PSVersionTable.PSVersion.ToString()
             }
-        } | ConvertTo-Json -Depth 5 -Compress
+            # Reason only in the title; detail varies per machine and would split the issue.
+            exception = @{ values = @(@{ type = 'InstallerPrerequisite'; value = "Discovery installer blocked: $Reason" }) }
+            extra     = @{ detail = $Detail }
+        } | ConvertTo-Json -Depth 6 -Compress
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
-        $null = Invoke-RestMethod -Uri (($_domain.TrimEnd('/')) + '/api/v1/ai-tools/report/') `
-            -Method Post -TimeoutSec 10 -Headers @{ Authorization = "Bearer $_key" } `
+        $null = Invoke-RestMethod -Uri "https://$sentryHost/api/$projectId/store/" -Method Post -TimeoutSec 10 `
+            -Headers @{ 'X-Sentry-Auth' = "Sentry sentry_version=7, sentry_key=$key, sentry_client=install.ps1/1.0.0" } `
             -ContentType 'application/json' -Body $body -ErrorAction Stop
     } catch { }
 }

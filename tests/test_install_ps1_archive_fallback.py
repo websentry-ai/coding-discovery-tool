@@ -57,9 +57,17 @@ class TestHarnessHelpers(unittest.TestCase):
 
     def test_failure_report_uses_the_sentry_event_contract(self):
         text = INSTALL_PS1.read_text(encoding="utf-8")
-        for field in ("event_id", "'installer_blocked'", "reason     = $Reason",
+        for field in ("event_id", "'installer_blocked'", "reason      = $Reason",
                       "InstallerPrerequisite", "/store/", "X-Sentry-Auth"):
             self.assertIn(field, text)
+
+    def test_raw_serial_is_not_labelled_device_id(self):
+        """The agent's device_id is validated; this is the unvalidated BIOS value."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        tags = text[text.index("tags      = @{"):text.index("exception = @{")]
+        self.assertIn("bios_serial", tags)
+        self.assertNotIn("device_id", tags)
+        self.assertIn("hostname", tags)
 
     def test_issue_title_carries_only_the_reason_code(self):
         """Per-machine detail in the title would split one issue into hundreds."""

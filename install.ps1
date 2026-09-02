@@ -50,6 +50,7 @@ function Send-InstallerFailure {
         if (-not $SENTRY_DSN -or -not $_domain) { return }
         $key, $hostProject = ($SENTRY_DSN -replace '^https://', '') -split '@', 2
         $sentryHost, $projectId = $hostProject -split '/', 2
+        # Raw BIOS value, not the agent's resolved device_id; hostname is the join key.
         $serial = ''
         try { $serial = "$((Get-WmiObject Win32_BIOS -ErrorAction Stop).SerialNumber)".Trim() } catch { }
         $body = @{
@@ -59,14 +60,14 @@ function Send-InstallerFailure {
             platform  = 'other'
             sdk       = @{ name = 'install.ps1'; version = '1.0.0' }
             tags      = @{
-                phase      = 'installer_blocked'
-                reason     = $Reason
-                os         = 'Windows'
-                hostname   = $env:COMPUTERNAME
-                device_id  = $serial
-                domain     = $_domain
-                branch     = $BRANCH
-                ps_version = $PSVersionTable.PSVersion.ToString()
+                phase       = 'installer_blocked'
+                reason      = $Reason
+                os          = 'Windows'
+                hostname    = $env:COMPUTERNAME
+                bios_serial = $serial
+                domain      = $_domain
+                branch      = $BRANCH
+                ps_version  = $PSVersionTable.PSVersion.ToString()
             }
             # Reason only in the title; detail varies per machine and would split the issue.
             exception = @{ values = @(@{ type = 'InstallerPrerequisite'; value = "Discovery installer blocked: $Reason" }) }

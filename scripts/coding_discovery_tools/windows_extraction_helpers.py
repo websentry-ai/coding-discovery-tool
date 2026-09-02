@@ -459,6 +459,71 @@ def windows_admin_state() -> Optional[bool]:
         return None
 
 
+def _running_as_local_system() -> bool:
+    """
+    True when the process runs as NT AUTHORITY\\SYSTEM (SID S-1-5-18).
+
+    IsUserAnAdmin() only reports enabled Administrators-group membership, which
+    SYSTEM does not have — its rights come from its own SID — so IsUserAnAdmin()
+    returns False/undetermined for SYSTEM. Recognize SYSTEM separately, otherwise
+    an MDM/all-users scan run as SYSTEM collapses to the empty systemprofile.
+    """
+    # Read the token's user SID through the Win32 API rather than spawning
+    # whoami: a subprocess running as SYSTEM is an execute-as-SYSTEM vector and
+    # can fail silently. windows_admin_state() above already uses ctypes.
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        TOKEN_QUERY = 0x0008
+        TokenUser = 1
+        LOCAL_SYSTEM_SID = "S-1-5-18"
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD)]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+                kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
+            return False
+        try:
+            size = wintypes.DWORD()
+            advapi32.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(size))
+            if not size.value:
+                return False
+            buf = (ctypes.c_byte * size.value)()
+            if not advapi32.GetTokenInformation(
+                    token, TokenUser, buf, size, ctypes.byref(size)):
+                return False
+            # TOKEN_USER begins with SID_AND_ATTRIBUTES whose first member is the PSID.
+            psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            str_sid = wintypes.LPWSTR()
+            if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(str_sid)):
+                return False
+            try:
+                return str_sid.value == LOCAL_SYSTEM_SID
+            finally:
+                kernel32.LocalFree(str_sid)
+        finally:
+            kernel32.CloseHandle(token)
+    except Exception as e:
+        # A silent failure reverts SYSTEM to non-admin and can empty an all-users
+        # scan, so log it rather than leaving it invisible.
+        logger.debug("SYSTEM SID detection failed: %s", e)
+        return False
+
+
 def is_running_as_admin() -> bool:
     """
     Check if the current process is running as administrator.
@@ -466,8 +531,13 @@ def is_running_as_admin() -> bool:
     Returns:
         True if running as administrator, False otherwise
     """
-    # Undetermined counts as not-admin: under-report rather than assume access.
-    return windows_admin_state() is True
+    # Administrators-group membership is the primary signal. SYSTEM is root but
+    # is NOT in that group, so IsUserAnAdmin() returns False/undetermined for it;
+    # recognize SYSTEM by its SID so an MDM/all-users scan still enumerates every
+    # profile instead of collapsing to the empty systemprofile.
+    if windows_admin_state() is True:
+        return True
+    return _running_as_local_system()
 
 
 def _other_user_appdata_local_dirs() -> List[Path]:

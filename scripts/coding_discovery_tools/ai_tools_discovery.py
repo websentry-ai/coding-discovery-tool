@@ -307,6 +307,27 @@ def _decode_project_path(path):
     return path
 
 
+_PATH_KEYS = ("path", "project_path")
+
+
+def _normalize_encoded_paths(obj):
+    """Decode the %20 space-escape in every reported path anywhere in a tool's
+    discovery result, in place. Project paths reach analytics from several fields
+    besides the top-level project entry — the per-rule / per-skill / per-MCP
+    ``project_path`` and nested ``path`` keys — so we walk the whole structure and
+    normalise each, ensuring no percent-encoded folder name escapes from any source.
+    Only %20 is touched (see _decode_project_path)."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in _PATH_KEYS and isinstance(value, str):
+                obj[key] = _decode_project_path(value)
+            else:
+                _normalize_encoded_paths(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _normalize_encoded_paths(item)
+
+
 class AIToolsDetector:
     """
     Detector for AI coding tools on macOS and Windows.
@@ -2346,9 +2367,7 @@ class AIToolsDetector:
         one chokepoint that every tool routes through."""
         result = self._process_single_tool_raw(tool)
         if isinstance(result, dict):
-            for proj in result.get("projects") or []:
-                if isinstance(proj, dict) and isinstance(proj.get("path"), str):
-                    proj["path"] = _decode_project_path(proj["path"])
+            _normalize_encoded_paths(result)
         return result
 
     def _process_single_tool_raw(self, tool: Dict) -> Dict:

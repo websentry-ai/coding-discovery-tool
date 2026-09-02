@@ -40,8 +40,7 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Remo
 
 $script:LastDownloadError = ''
 
-# Mirrors INVALID_SERIAL_VALUES in constants.py so a placeholder BIOS serial does
-# not become a device_id shared by every machine of that model.
+# Mirrors INVALID_SERIAL_VALUES in constants.py.
 $INVALID_SERIALS = @(
     'TO BE FILLED BY O.E.M.', 'DEFAULT STRING', 'SERIALNUMBER', 'SYSTEM SERIAL NUMBER',
     'NOT APPLICABLE', 'N/A', 'NONE', 'NOT SPECIFIED', 'OEM', 'O.E.M.', 'DEFAULT',
@@ -50,9 +49,7 @@ $INVALID_SERIALS = @(
 )
 
 function Get-DeviceId {
-    # Same probes, order and validation as WindowsDeviceIdExtractor, so a failure
-    # report lands on the device row a later successful scan writes to. Falling back
-    # to the hostname earlier than the agent does would split them across two rows.
+    # Same probes and order as WindowsDeviceIdExtractor; diverging splits the device row.
     $probes = @(
         { (Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber },
         { (Get-WmiObject Win32_BIOS -ErrorAction Stop).SerialNumber },
@@ -68,11 +65,10 @@ function Get-DeviceId {
 }
 
 function Send-InstallerFailure {
-    # The agent never starts on these paths, so this is the only signal the backend
-    # gets; the device would otherwise look like it was never enrolled at all.
+    # The agent never starts on these paths, so this is the backend's only signal.
     param([string]$Reason, [string]$Detail)
     try {
-        # Same HTTPS guard as the branch lookup: never put the key on the wire in clear.
+        # Same HTTPS guard as the branch lookup; the key must never go out in clear.
         if (-not $_key -or -not $_domain -or $_domain -notmatch '^https://') { return }
         $serial = Get-DeviceId
         $body = @{

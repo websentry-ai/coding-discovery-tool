@@ -476,7 +476,10 @@ def _running_as_local_system() -> bool:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).stdout or ""
         return any(field.strip().strip('"') == "S-1-5-18" for field in out.split(","))
-    except Exception:
+    except Exception as e:
+        # Log so a silent SYSTEM-detection failure (which reverts to non-admin and
+        # can yield an empty all-users scan) is diagnosable rather than invisible.
+        logger.debug("SYSTEM SID detection via whoami failed: %s", e)
         return False
 
 

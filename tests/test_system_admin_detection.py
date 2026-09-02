@@ -1,6 +1,6 @@
 """Root detection must recognize NT AUTHORITY\\SYSTEM, not only Administrators-group
 membership — otherwise an MDM/all-users scan run as SYSTEM collapses to the empty
-systemprofile and returns 0 inventory (WEB-5687)."""
+systemprofile and returns 0 inventory."""
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools import windows_extraction_helpers as weh

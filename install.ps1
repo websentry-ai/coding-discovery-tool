@@ -38,6 +38,36 @@ function Remove-TempDirectory {
 }
 $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Remove-TempDirectory }
 
+$script:LastDownloadError = ''
+
+function Send-InstallerFailure {
+    # The agent never starts on these paths, so this is the only signal the backend
+    # gets; the device would otherwise look like it was never enrolled at all.
+    param([string]$Reason, [string]$Detail)
+    try {
+        if (-not $_key -or -not $_domain) { return }
+        $serial = $null
+        try { $serial = "$((Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber)".Trim() } catch { }
+        if ([string]::IsNullOrWhiteSpace($serial)) { $serial = $env:COMPUTERNAME }
+        $body = @{
+            device_id  = $serial
+            run_id     = [guid]::NewGuid().ToString()
+            scan_event = 'failed'
+            scan_error = @{
+                error_type = 'InstallerPrerequisite'
+                reason     = $Reason
+                message    = $Detail
+                ps_version = $PSVersionTable.PSVersion.ToString()
+                branch     = $BRANCH
+            }
+        } | ConvertTo-Json -Depth 5 -Compress
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+        $null = Invoke-RestMethod -Uri (($_domain.TrimEnd('/')) + '/api/v1/ai-tools/report/') `
+            -Method Post -TimeoutSec 10 -Headers @{ Authorization = "Bearer $_key" } `
+            -ContentType 'application/json' -Body $body -ErrorAction Stop
+    } catch { }
+}
+
 function Get-PythonCommand {
     foreach ($cmd in @("python3", "python", "py -3")) {
         try {
@@ -96,6 +126,7 @@ function Get-RepositoryWithArchive {
     } catch {
         # Say which step failed so certificate, proxy, extraction and disk
         # problems are distinguishable from the log alone.
+        $script:LastDownloadError = $_.Exception.Message
         Write-Warning ("Archive download failed: " + $_.Exception.Message)
         return $false
     } finally {
@@ -118,6 +149,7 @@ function Get-Repository {
         Write-Success "Repository downloaded (via archive)"
         return $true
     }
+    if (-not $script:LastDownloadError) { $script:LastDownloadError = 'git and archive download both failed' }
     Write-ErrorMessage "Could not download the repository with git or as an archive."
     return $false
 }
@@ -176,9 +208,15 @@ function Main {
     }
 
     $pythonCmd = Get-PythonCommand
-    if (-not $pythonCmd) { Write-ErrorMessage "Python 3 required but not found."; exit 1 }
+    if (-not $pythonCmd) {
+        Send-InstallerFailure -Reason 'no-python' -Detail 'Python 3 not found in PATH'
+        Write-ErrorMessage "Python 3 required but not found."; exit 1
+    }
 
-    if (-not (Get-Repository)) { Write-ErrorMessage "Failed to download repository."; exit 1 }
+    if (-not (Get-Repository)) {
+        Send-InstallerFailure -Reason 'repo-download-failed' -Detail $script:LastDownloadError
+        Write-ErrorMessage "Failed to download repository."; exit 1
+    }
 
     Push-Location $TEMP_DIR
     try {

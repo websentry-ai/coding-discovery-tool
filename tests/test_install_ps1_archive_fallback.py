@@ -47,6 +47,19 @@ class TestHarnessHelpers(unittest.TestCase):
             self.assertIn(f"function {name}", text)
         self.assertNotRegex(text, r"(?m)^\s*Main\s*$")
 
+    def test_every_prerequisite_exit_reports_before_quitting(self):
+        """A gate that exits without reporting is invisible to the backend."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        self.assertIn("function Send-InstallerFailure", text)
+        for gate in ("Python 3 required but not found.", "Failed to download repository."):
+            block = text[text.index(gate) - 300:text.index(gate)]
+            self.assertIn("Send-InstallerFailure", block, f"{gate!r} exits unreported")
+
+    def test_failure_report_uses_the_scan_lifecycle_contract(self):
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        for field in ("device_id", "run_id", "scan_event = 'failed'", "scan_error"):
+            self.assertIn(field, text)
+
     def test_path_without_git_drops_only_git_entries(self):
         # Drive-letter-free entries so the check is valid on every OS's pathsep.
         path = os.pathsep.join(["Windows", "Program Files/Git/cmd", "Python312"])

@@ -708,5 +708,114 @@ class TestJetBrainsNamingDeterminism(unittest.TestCase):
         self.assertEqual(tools[0]["plan"], "Licensed")
 
 
+class TestManifestKeyedByInstallPath(unittest.TestCase):
+    """all_tools is keyed on name+path but the emission gate asked a name-only manifest, so every
+    user holding ANY install of tool T was emitted for EVERY path of T on the machine."""
+
+    ALICE = r"C:\Users\alice\.local\bin\claude.exe"
+    BOB = r"C:\Users\bob\AppData\Roaming\npm\claude.cmd"
+    SHARED = r"C:\Program Files\Claude\claude.exe"
+
+    def _run(self, paths_by_user, tool_name="Claude Code", extra=None):
+        """Drive main() with one tool per user at the given path. Returns (reports, manifest)."""
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        def _tool(path):
+            return {"name": tool_name, "version": "1.0", "install_path": path,
+                    "projects": [], **(extra or {})}
+
+        def _detect_all(user_home=None, failures=None):
+            for user, path in paths_by_user.items():
+                if str(user_home or "").endswith(user):
+                    return [_tool(path)]
+            return []
+
+        detector = Mock()
+        detector.get_device_id.return_value = "dev-xyz"
+        detector.detect_all_tools.side_effect = _detect_all
+        detector._set_canonical_vscode_copilot.return_value = None
+        detector._set_canonical_augment_surface.return_value = None
+        detector._set_canonical_junie_surface.return_value = None
+        detector.process_single_tool.side_effect = lambda t: t
+        detector.filter_tool_projects_by_user.side_effect = lambda t, _h: t.copy()
+        detector.generate_single_tool_report.side_effect = (
+            lambda tool, device_id, home_user, system_user=None, run_id=None:
+            {"home_user": home_user, "tools": [tool]})
+        detector.skills_metrics = {}
+
+        dc = Mock()
+        dc.get_cached_hash.return_value = None
+        dc.resumable_done.return_value = set()
+        dc.read_run.return_value = {}
+
+        reports, captured = [], {}
+
+        def _send_report(domain, api_key, report, app_name, sentry_context=None):
+            reports.append((report["home_user"], report["tools"][0].get("install_path")))
+            return True, False
+
+        def _send_scan_event(domain, api_key, device_id, run_id, scan_event, app_name=None, **kw):
+            if scan_event == "completed":
+                captured["manifest"] = kw.get("manifest")
+            return (True, None)
+
+        with patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm, "AIToolsDetector", return_value=detector), \
+             patch.object(adm, "discovery_cache", dc), \
+             patch.object(adm, "get_all_users_macos", return_value=sorted(paths_by_user)), \
+             patch.object(adm, "compute_payload_hash", side_effect=lambda t: "h"), \
+             patch.object(adm, "send_report_to_backend", side_effect=_send_report), \
+             patch.object(adm, "send_scan_event", side_effect=_send_scan_event), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "run_sweep", return_value=(0, 0, 0)), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", ["x", "--api-key", "k", "--domain", "http://127.0.0.1:1"]):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+        return reports, captured.get("manifest")
+
+    def test_same_tool_different_paths_emits_one_row_per_owner(self):
+        """Pre-fix: 2 paths x 2 users = 4 reports, two carrying the other user's binary."""
+        reports, _ = self._run({"alice": self.ALICE, "bob": self.BOB})
+        self.assertEqual(
+            sorted(reports), sorted([("alice", self.ALICE), ("bob", self.BOB)]),
+            f"each user must be reported once, with their OWN install path; got {reports}")
+
+    def test_shared_machine_wide_path_still_emits_for_every_user(self):
+        """One machine-wide install is legitimately every user's; the key must not over-correct."""
+        reports, _ = self._run({"alice": self.SHARED, "bob": self.SHARED})
+        self.assertEqual(sorted(reports),
+                         sorted([("alice", self.SHARED), ("bob", self.SHARED)]))
+
+    def test_manifest_wire_format_unchanged_and_deduped(self):
+        """Wire format unchanged; the dedup is mandatory -- the backend does not dedup and stops pruning at MAX_MANIFEST_ENTRIES."""
+        _, manifest = self._run({"alice": self.ALICE, "bob": self.BOB})
+        self.assertEqual(manifest, [{"home_user": "alice", "tool_name": "Claude Code"},
+                                    {"home_user": "bob", "tool_name": "Claude Code"}])
+
+    def test_ownership_gate_discard_removes_the_manifest_entry(self):
+        """discard() never raises, so a drifted key would silently leave the phantom unprunable."""
+        reports, manifest = self._run(
+            {"alice": self.ALICE, "bob": self.ALICE},
+            tool_name="GitHub Copilot CLI",
+            extra={"_config_path": "/Users/alice/.copilot"})
+        self.assertEqual(reports, [("alice", self.ALICE)])
+        self.assertEqual(manifest, [{"home_user": "alice", "tool_name": "GitHub Copilot CLI"}])
+
+    def test_filter_preserves_the_install_path_the_discard_key_depends_on(self):
+        """The discard keys off tool_filtered, so install_path must survive filtering unchanged."""
+        from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        tool = {"name": "Claude Code", "install_path": self.ALICE,
+                "projects": [{"path": "/Users/bob/proj"}]}
+        filtered = AIToolsDetector.filter_tool_projects_by_user(None, tool, Path("/Users/alice"))
+        self.assertEqual(self.ALICE, filtered["install_path"])
+        self.assertEqual([], filtered["projects"])
+
+
 if __name__ == "__main__":
     unittest.main()

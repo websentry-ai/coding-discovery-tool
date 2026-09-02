@@ -69,7 +69,8 @@ class WindowsCursorDetector(BaseToolDetector):
         Returns:
             List of Path objects
         """
-        user_home = Path.home()
+        # Scope to this user's home when set, so a multi-user scan can't attribute another user's per-user install.
+        user_home = getattr(self, 'user_home', None) or Path.home()
         return [
             user_home / "AppData" / "Local" / "Programs" / "cursor",
             user_home / "AppData" / "Local" / "Programs" / "Cursor",

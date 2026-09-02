@@ -50,11 +50,7 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     detector.user_home = user_home
 
     tool_name = detector.tool_name.lower()
-    
-    # System-wide tools (same for all users) - detect normally
-    if tool_name in ["cursor", "windsurf", "antigravity", "replit"]:
-        return detector.detect()
-    
+
     # User-specific tools - check user's home directory paths
     # Priority: npm (via nvm) installs, then Bun fallback
     

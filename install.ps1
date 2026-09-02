@@ -51,7 +51,6 @@ $INVALID_SERIALS = @(
 function Get-DeviceId {
     # Same probes and order as WindowsDeviceIdExtractor; diverging splits the device row.
     $probes = @(
-        { (Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber },
         { (Get-WmiObject Win32_BIOS -ErrorAction Stop).SerialNumber },
         { (& wmic bios get serialnumber /format:list) -match 'SerialNumber=' -replace 'SerialNumber=', '' },
         { (& wmic bios get serialnumber) | Select-Object -Skip 1 }

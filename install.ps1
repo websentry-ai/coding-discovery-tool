@@ -50,11 +50,20 @@ $INVALID_SERIALS = @(
 )
 
 function Get-DeviceId {
-    # Same order and validation as WindowsDeviceIdExtractor, so a failure report
-    # lands on the device row a later successful scan writes to.
-    $serial = $null
-    try { $serial = "$((Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber)".Trim() } catch { }
-    if ($serial -and $INVALID_SERIALS -notcontains $serial.ToUpper()) { return $serial }
+    # Same probes, order and validation as WindowsDeviceIdExtractor, so a failure
+    # report lands on the device row a later successful scan writes to. Falling back
+    # to the hostname earlier than the agent does would split them across two rows.
+    $probes = @(
+        { (Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber },
+        { (Get-WmiObject Win32_BIOS -ErrorAction Stop).SerialNumber },
+        { (& wmic bios get serialnumber /format:list) -match 'SerialNumber=' -replace 'SerialNumber=', '' },
+        { (& wmic bios get serialnumber) | Select-Object -Skip 1 }
+    )
+    foreach ($probe in $probes) {
+        $serial = $null
+        try { $serial = "$(& $probe)".Trim() } catch { }
+        if ($serial -and $INVALID_SERIALS -notcontains $serial.ToUpper()) { return $serial }
+    }
     return $env:COMPUTERNAME
 }
 

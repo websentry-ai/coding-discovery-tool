@@ -67,6 +67,15 @@ class TestHarnessHelpers(unittest.TestCase):
         guard = body[:body.index("Invoke-RestMethod")]
         self.assertIn("-notmatch '^https://'", guard)
 
+    def test_device_id_probes_every_source_the_agent_does(self):
+        """Falling back to the hostname sooner than the agent splits the device row."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        body = text[text.index("function Get-DeviceId"):text.index("function Send-InstallerFailure")]
+        for probe in ("Get-CimInstance Win32_BIOS", "Get-WmiObject Win32_BIOS",
+                      "wmic bios get serialnumber /format:list", "wmic bios get serialnumber)"):
+            self.assertIn(probe, body)
+        self.assertLess(body.index("wmic"), body.index("COMPUTERNAME"))
+
     def test_installer_rejects_the_same_placeholder_serials_as_the_agent(self):
         from scripts.coding_discovery_tools.constants import INVALID_SERIAL_VALUES
 

@@ -696,6 +696,26 @@ class TestWindowsOpenClawPerUserScoping(unittest.TestCase):
             self.det.user_home = bob
             self.assertIsNone(self.det.detect(), "and must not leak to the co-resident user")
 
+    def test_scoped_walk_matches_npm_shims_not_just_exe(self):
+        """npm-global installs ship .cmd/.ps1/extensionless shims, never an .exe."""
+        for shim in ("openclaw.cmd", "openclaw.ps1", "openclaw"):
+            with self.subTest(shim=shim), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "Users"
+                alice, bob = root / "alice", root / "bob"
+                npm = alice / "AppData" / "Roaming" / "npm"
+                npm.mkdir(parents=True)
+                (npm / shim).write_text("")
+                (bob / "AppData" / "Roaming").mkdir(parents=True)
+
+                with patch.object(self.mod.shutil, "which", return_value=None), \
+                     patch.object(self.det, "_check_running_process", return_value=False):
+                    self.det.user_home = alice
+                    result = self.det.detect()
+                    self.assertIsNotNone(result, f"{shim} must be detected")
+                    self.assertEqual(str(npm / shim), result["install_path"])
+                    self.det.user_home = bob
+                    self.assertIsNone(self.det.detect())
+
     def test_unscoped_keeps_legacy_behaviour(self):
         """No user_home set -> the original PATH/env/sweep path still runs."""
         with patch.object(self.mod.shutil, "which", return_value=r"C:\bin\openclaw.exe") as m:

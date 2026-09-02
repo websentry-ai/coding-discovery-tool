@@ -24,6 +24,8 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
     """Detector for OpenClaw on Windows."""
 
     _MACHINE_WIDE_ROOTS = (Path(r"C:\Program Files"), Path(r"C:\Program Files (x86)"))
+    # npm-global installs ship .cmd/.ps1/extensionless shims, not an .exe.
+    _EXECUTABLE_NAMES = ("openclaw.exe", "openclaw.cmd", "openclaw.ps1", "openclaw")
 
     def detect_openclaw(self) -> Optional[Dict]:
         """
@@ -232,13 +234,13 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
                         'temp', 'tmp', 'logs', 'log'
                     ]]
 
-                    if "openclaw.exe" in [f.lower() for f in filenames]:
-                        # Find the actual filename with correct case
-                        for f in filenames:
-                            if f.lower() == "openclaw.exe":
-                                full_path = Path(dirpath) / f
-                                logger.debug(f"Found openclaw.exe at: {full_path}")
-                                return full_path
+                    # Ordered by preference so an .exe wins over a shim in the same dir.
+                    by_name = {f.lower(): f for f in filenames}
+                    for wanted in self._EXECUTABLE_NAMES:
+                        if wanted in by_name:
+                            full_path = Path(dirpath) / by_name[wanted]
+                            logger.debug(f"Found OpenClaw executable at: {full_path}")
+                            return full_path
             except (PermissionError, OSError) as e:
                 logger.debug(f"Error searching {root}: {e}")
                 continue

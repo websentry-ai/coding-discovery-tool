@@ -44,7 +44,7 @@ $SENTRY_DSN = if ($env:AI_DISCOVERY_SENTRY_DSN) { $env:AI_DISCOVERY_SENTRY_DSN }
               else { 'https://62a73a0043568547cb63a35394b63906@o4509196569149440.ingest.us.sentry.io/4510874666663936' }
 
 function Send-InstallerFailure {
-    # The agent never starts on these paths, so nothing else reports them.
+    # install.ps1 exits before the agent exists, so utils.py's reporter cannot be used.
     param([string]$Reason, [string]$Detail)
     try {
         if (-not $SENTRY_DSN -or -not $_domain) { return }

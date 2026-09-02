@@ -459,6 +459,27 @@ def windows_admin_state() -> Optional[bool]:
         return None
 
 
+def _running_as_local_system() -> bool:
+    """
+    True when the process runs as NT AUTHORITY\\SYSTEM (SID S-1-5-18).
+
+    IsUserAnAdmin() only reports enabled Administrators-group membership, which
+    SYSTEM does not have — its rights come from its own SID — so IsUserAnAdmin()
+    returns False/undetermined for SYSTEM. Recognize SYSTEM separately, otherwise
+    an MDM/all-users scan run as SYSTEM collapses to the empty systemprofile.
+    """
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout or ""
+        return any(field.strip().strip('"') == "S-1-5-18" for field in out.split(","))
+    except Exception:
+        return False
+
+
 def is_running_as_admin() -> bool:
     """
     Check if the current process is running as administrator.
@@ -466,8 +487,13 @@ def is_running_as_admin() -> bool:
     Returns:
         True if running as administrator, False otherwise
     """
-    # Undetermined counts as not-admin: under-report rather than assume access.
-    return windows_admin_state() is True
+    # Administrators-group membership is the primary signal. SYSTEM is root but
+    # is NOT in that group, so IsUserAnAdmin() returns False/undetermined for it;
+    # recognize SYSTEM by its SID so an MDM/all-users scan still enumerates every
+    # profile instead of collapsing to the empty systemprofile.
+    if windows_admin_state() is True:
+        return True
+    return _running_as_local_system()
 
 
 def _other_user_appdata_local_dirs() -> List[Path]:

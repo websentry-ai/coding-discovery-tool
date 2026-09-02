@@ -54,8 +54,7 @@ class WindowsAntigravityDetector(BaseToolDetector):
             Path to the app if found, None otherwise
         """
         for app_path in self._get_search_paths():
-            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists()
-            # re-raises EACCES; without this the machine-wide candidates are never reached.
+            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists() re-raises it, hiding the machine-wide candidates; PermissionError only, so any other OSError still propagates and marks the run incomplete instead of pruning a real install.
             try:
                 if app_path.exists():
                     # Check for executable or app directory
@@ -65,7 +64,7 @@ class WindowsAntigravityDetector(BaseToolDetector):
                     # Check if it's a directory with resources
                     if app_path.is_dir() and (app_path / "resources").exists():
                         return app_path
-            except (PermissionError, OSError) as e:
+            except PermissionError as e:
                 logger.debug(f"Could not probe Antigravity path {app_path}: {e}")
                 continue
         return None

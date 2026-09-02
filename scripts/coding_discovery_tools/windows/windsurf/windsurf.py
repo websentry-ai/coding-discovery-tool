@@ -32,8 +32,7 @@ class WindowsWindsurfDetector(BaseToolDetector):
         windsurf_paths = self._get_search_paths()
 
         for windsurf_path in windsurf_paths:
-            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists()
-            # re-raises EACCES; without this the machine-wide candidates are never reached.
+            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists() re-raises it, hiding the machine-wide candidates; PermissionError only, so any other OSError still propagates and marks the run incomplete instead of pruning a real install.
             try:
                 if not windsurf_path.exists():
                     continue
@@ -41,7 +40,7 @@ class WindowsWindsurfDetector(BaseToolDetector):
                 windsurf_exe = windsurf_path / "Windsurf.exe"
                 has_exe = windsurf_exe.exists()
                 has_resources = (windsurf_path / "resources" / "app").exists()
-            except (PermissionError, OSError) as e:
+            except PermissionError as e:
                 logger.debug(f"Could not probe Windsurf path {windsurf_path}: {e}")
                 continue
 
@@ -67,7 +66,7 @@ class WindowsWindsurfDetector(BaseToolDetector):
             try:
                 if windsurf_exe.exists():
                     return self._get_version_for_path(windsurf_exe)
-            except (PermissionError, OSError) as e:
+            except PermissionError as e:
                 logger.debug(f"Could not probe Windsurf exe {windsurf_exe}: {e}")
                 continue
         return None

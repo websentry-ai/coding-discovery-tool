@@ -33,8 +33,7 @@ class WindowsCursorDetector(BaseToolDetector):
         cursor_paths = self._get_search_paths()
 
         for cursor_path in cursor_paths:
-            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists()
-            # re-raises EACCES; without this the machine-wide candidates are never reached.
+            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists() re-raises it, hiding the machine-wide candidates; PermissionError only, so any other OSError still propagates and marks the run incomplete instead of pruning a real install.
             try:
                 if not cursor_path.exists():
                     continue
@@ -42,7 +41,7 @@ class WindowsCursorDetector(BaseToolDetector):
                 cursor_exe = cursor_path / "Cursor.exe"
                 has_exe = cursor_exe.exists()
                 has_resources = (cursor_path / "resources" / "app").exists()
-            except (PermissionError, OSError) as e:
+            except PermissionError as e:
                 logger.debug(f"Could not probe Cursor path {cursor_path}: {e}")
                 continue
 
@@ -68,7 +67,7 @@ class WindowsCursorDetector(BaseToolDetector):
             try:
                 if cursor_exe.exists():
                     return self._get_version_for_path(cursor_exe)
-            except (PermissionError, OSError) as e:
+            except PermissionError as e:
                 logger.debug(f"Could not probe Cursor exe {cursor_exe}: {e}")
                 continue
         return None

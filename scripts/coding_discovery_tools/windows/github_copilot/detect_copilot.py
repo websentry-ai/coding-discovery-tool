@@ -98,7 +98,7 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         if scoped_home is not None:
             try:
                 return self._detect_vscode_for_user(Path(scoped_home))
-            except (PermissionError, OSError) as e:
+            except PermissionError as e:
                 logger.debug(f"Skipping VS Code Copilot for {scoped_home}: {e}")
                 return []
 
@@ -231,7 +231,7 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         if scoped_home is not None:
             try:
                 return self._detect_jetbrains_for_user(Path(scoped_home))
-            except (PermissionError, OSError) as e:
+            except PermissionError as e:
                 logger.debug(f"Skipping JetBrains Copilot for {scoped_home}: {e}")
                 return []
 

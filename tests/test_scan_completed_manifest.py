@@ -563,26 +563,50 @@ class TestWindowsDetectorProbePermissionSafety(unittest.TestCase):
         return {"Cursor": WindowsCursorDetector, "Windsurf": WindowsWindsurfDetector,
                 "Antigravity": WindowsAntigravityDetector}[label]()
 
+    @staticmethod
+    def _deny(denied_root, real_exists):
+        """Path.exists side effect that denies one subtree the way Windows denies another
+        user's profile. Injected rather than chmod'd: on Windows os.chmod only toggles the
+        read-only bit and cannot deny traversal, so a chmod-based test passes there without
+        ever entering the guard."""
+        def exists(self, *args, **kwargs):
+            if denied_root == self or denied_root in self.parents:
+                raise PermissionError(13, "Access is denied")
+            return real_exists(self, *args, **kwargs)
+        return exists
+
     def test_denied_user_dir_does_not_hide_machine_wide_install(self):
+        real_exists = Path.exists
         for label, exe, resources in self.CASES:
             with self.subTest(tool=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                denied = root / "Users" / "alice" / "AppData" / "Local" / "Programs" / label
-                denied.mkdir(parents=True)
+                profile = root / "Users" / "alice"
+                denied = profile / "AppData" / "Local" / "Programs" / label
                 machine = root / "Program Files" / label
                 (machine / resources).mkdir(parents=True)
                 (machine / exe).write_text("")
-                profile = root / "Users" / "alice"
-                os.chmod(profile, 0o000)
+
                 det = self._detector(label)
-                try:
-                    # Index 0 is the ACL-denied per-user dir, index 1 the machine-wide install.
-                    with patch.object(det, "_get_search_paths", return_value=[denied, machine]):
-                        result = det.detect()  # must not raise
-                finally:
-                    os.chmod(profile, 0o755)  # let TemporaryDirectory clean up
+                # Index 0 is the access-denied per-user dir, index 1 the machine-wide install.
+                with patch.object(det, "_get_search_paths", return_value=[denied, machine]), \
+                     patch.object(Path, "exists", self._deny(profile, real_exists)):
+                    result = det.detect()  # must not raise
                 self.assertIsNotNone(result, f"{label}: machine-wide install not reached")
                 self.assertEqual(str(machine), str(result["install_path"]))
+
+    def test_non_permission_oserror_still_propagates(self):
+        """A transient I/O failure must NOT be swallowed into "not installed" — it has to reach
+        detect_all_tools, which marks the run incomplete so the backend does not prune a real
+        install off a probe that never actually ran."""
+        def boom(self, *args, **kwargs):
+            raise OSError(5, "I/O error")
+        for label, _exe, _resources in self.CASES:
+            with self.subTest(tool=label):
+                det = self._detector(label)
+                with patch.object(det, "_get_search_paths", return_value=[Path("/x") / label]), \
+                     patch.object(Path, "exists", boom):
+                    with self.assertRaises(OSError):
+                        det.detect()
 
 
 class TestWindowsCopilotPerUserScoping(unittest.TestCase):

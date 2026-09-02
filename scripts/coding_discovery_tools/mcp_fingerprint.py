@@ -3,6 +3,7 @@ Fingerprint extraction for MCP server identity.
 
 ⚠️ KEEP IN SYNC: this logic is mirrored in
   - the gateway: `ai-gateway/src/services/mcpFingerprint.ts` (PreToolUse hot path),
+  - the backend: `ai-gateway-data/webapp/services/mcp_fingerprint.py` (ingest/recompute),
   - this discovery client copy (keys the local mcp-tools-cache.json), and
   - the device hooks: `setup/{claude-code,codex,copilot,augment}/hooks/unbound.py`
     and `setup/cursor/unbound.py` (embedded port that looks that cache up).
@@ -28,6 +29,7 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     bin:<name>                   -> basename of a bespoke local binary (args dropped)
     intellij:<name>              -> from an IntelliJ plugin-managed server (command == "builtin")
     claudeai:<name>              -> from a Claude.ai native integration (empty config, name starts with "claude.ai ")
+    copilot-builtin:<name>       -> from a Copilot builtin MCP server (scope=copilot-builtin, bare config)
     claude-connector:<name>      -> from a Claude desktop OAuth remote connector. These arrive named by a
                                     per-registration UUID at runtime; the client hook resolves the real
                                     display name and tags the config scope="claude-connector".
@@ -430,6 +432,10 @@ def compute_fingerprint(
     # by url here would never match claude-connector:<name>.
     if safe_additional_data.get('scope') == CLAUDE_CONNECTOR_SCOPE and safe_name:
         return f'claude-connector:{safe_name.lower()}'
+
+    if (safe_additional_data.get('scope') == 'copilot-builtin' and safe_name
+            and not command and not url and not safe_args):
+        return f'copilot-builtin:{safe_name.lower()}'
 
     # First-party built-ins arrive as a bare name (no command/url/args); collapse
     # separator variants to one identity so aliases share a fingerprint.

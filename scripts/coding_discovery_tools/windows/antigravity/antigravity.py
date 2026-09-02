@@ -54,14 +54,19 @@ class WindowsAntigravityDetector(BaseToolDetector):
             Path to the app if found, None otherwise
         """
         for app_path in self._get_search_paths():
-            if app_path.exists():
-                # Check for executable or app directory
-                exe_path = app_path / "Antigravity.exe"
-                if exe_path.exists():
-                    return app_path
-                # Check if it's a directory with resources
-                if app_path.is_dir() and (app_path / "resources").exists():
-                    return app_path
+            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists() re-raises it, hiding the machine-wide candidates; PermissionError only, so any other OSError still propagates and marks the run incomplete instead of pruning a real install.
+            try:
+                if app_path.exists():
+                    # Check for executable or app directory
+                    exe_path = app_path / "Antigravity.exe"
+                    if exe_path.exists():
+                        return app_path
+                    # Check if it's a directory with resources
+                    if app_path.is_dir() and (app_path / "resources").exists():
+                        return app_path
+            except PermissionError as e:
+                logger.debug(f"Could not probe Antigravity path {app_path}: {e}")
+                continue
         return None
 
     def is_installed_for_user(self, user_home: Path) -> bool:
@@ -103,13 +108,16 @@ class WindowsAntigravityDetector(BaseToolDetector):
         users, which would otherwise be unreachable, so we also enumerate every
         real user's ``Programs`` dir. The real-artifact gate in
         ``_find_app_path`` (``Antigravity.exe`` / ``resources`` tree) still
-        applies, restoring multi-user coverage WITHOUT a residue gate.
+        applies, restoring multi-user coverage WITHOUT a residue gate. When
+        ``user_home`` is set the scan is scoped to THAT user (plus machine-wide
+        dirs), so another user's per-user install is never attributed to them.
 
         Returns:
             List of Path objects
         """
+        scoped_home = getattr(self, 'user_home', None)
         try:
-            user_home = Path.home()
+            user_home = scoped_home or Path.home()
         except (RuntimeError, OSError):
             user_home = None
         paths = []
@@ -133,7 +141,7 @@ class WindowsAntigravityDetector(BaseToolDetector):
             Path("C:\\Program Files (x86)") / "Google Gemini",
         ])
 
-        if is_running_as_admin():
+        if scoped_home is None and is_running_as_admin():
             for program_root in self._other_user_program_dirs():
                 for name in self._PROGRAM_DIR_NAMES:
                     paths.append(program_root / name)

@@ -100,6 +100,40 @@ class TestCacheKey(unittest.TestCase):
             "claude-connector:gmail",
         )
 
+    def test_copilot_builtin_vector(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="github-mcp-server", url=None, command=None, args=None,
+                additional_data={"scope": "copilot-builtin"},
+            ),
+            "copilot-builtin:github-mcp-server",
+        )
+
+    def test_copilot_builtin_scope_cannot_override_transport(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="github-mcp-server", url="https://evil.example/mcp",
+                command=None, args=None,
+                additional_data={"scope": "copilot-builtin"},
+            ),
+            "url:evil.example/mcp",
+        )
+        self.assertEqual(
+            compute_cache_key(
+                name="github-mcp-server", url=None, command="npx",
+                args=["-y", "evil-pkg"],
+                additional_data={"scope": "copilot-builtin"},
+            ),
+            "npm:evil-pkg",
+        )
+
+    def test_untagged_bare_name_is_not_copilot_builtin(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="github-mcp-server", url=None, command=None, args=None,
+            )
+        )
+
     def test_name_plus_command_vector(self):
         self.assertEqual(
             compute_cache_key(name="gh", url=None, command="builtin", args=None),

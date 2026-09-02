@@ -50,11 +50,7 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     detector.user_home = user_home
 
     tool_name = detector.tool_name.lower()
-    
-    # System-wide tools (same for all users) - detect normally
-    if tool_name in ["cursor", "windsurf", "antigravity", "replit"]:
-        return detector.detect()
-    
+
     # User-specific tools - check user's home directory paths
     # Priority: npm (via nvm) installs, then Bun fallback
     
@@ -131,7 +127,12 @@ def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
     """Detect Codex installation for a user."""
     # Check user's .nvm versions for codex (npm installs - most common)
     nvm_versions = user_home / ".nvm" / "versions"
-    if nvm_versions.exists():
+    # Another user's home is access-denied to a non-elevated scan and .exists() re-raises it; guard the probe the way _detect_gemini_cli already does.
+    try:
+        nvm_present = nvm_versions.exists()
+    except PermissionError:
+        nvm_present = False
+    if nvm_present:
         try:
             for version_dir in nvm_versions.iterdir():
                 if version_dir.is_dir():
@@ -147,7 +148,11 @@ def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
     
     # Fallback: Check Bun global binaries
     bun_bin = user_home / ".bun" / "bin" / "codex"
-    if bun_bin.exists():
+    try:
+        bun_present = bun_bin.exists()
+    except PermissionError:
+        bun_present = False
+    if bun_present:
         return {
             "name": detector.tool_name,
             "version": detector.get_version(),
@@ -161,7 +166,12 @@ def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Di
     """Detect OpenCode installation for a user."""
     # Check user's .nvm versions for opencode
     nvm_versions = user_home / ".nvm" / "versions"
-    if nvm_versions.exists():
+    # Another user's home is access-denied to a non-elevated scan and .exists() re-raises it; guard the probe the way _detect_gemini_cli already does.
+    try:
+        nvm_present = nvm_versions.exists()
+    except PermissionError:
+        nvm_present = False
+    if nvm_present:
         try:
             for version_dir in nvm_versions.iterdir():
                 if version_dir.is_dir():
@@ -177,7 +187,11 @@ def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Di
     
     # Fallback: Check Bun global binaries
     bun_bin = user_home / ".bun" / "bin" / "opencode"
-    if bun_bin.exists():
+    try:
+        bun_present = bun_bin.exists()
+    except PermissionError:
+        bun_present = False
+    if bun_present:
         return {
             "name": detector.tool_name,
             "version": detector.get_version(),

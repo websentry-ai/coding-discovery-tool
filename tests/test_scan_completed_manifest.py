@@ -475,6 +475,200 @@ class TestExtensionDetectorPerUserScoping(unittest.TestCase):
         self.assertEqual(result, [{"name": "Roo Code (Cursor)"}])
 
 
+class TestWindowsIDEDetectorPerUserScoping(unittest.TestCase):
+    """Cursor / Windsurf / Antigravity / Replit install per-user under %LOCALAPPDATA% on Windows
+    (FOLDERID_UserProgramFiles is PERUSER), so a scan must probe the SCANNED user's home — not the
+    scanner's, and not every user's. Machine-wide Program Files installs stay visible to everyone.
+
+    Fails against the pre-fix code, where detect_tool_for_user short-circuited these four to a
+    detector.detect() that resolved Path.home() / the all-users enumeration instead."""
+
+    SCANNED = Path("C:/Users/alice")
+    SCANNER = Path("C:/Users/bob")
+
+    def _assert_scoped(self, candidates):
+        joined = " ".join(candidates)
+        self.assertIn("alice", joined)
+        self.assertNotIn("bob", joined)
+        self.assertTrue(any("Program Files" in c for c in candidates),
+                        "machine-wide installs must stay in scope for every user")
+
+    def test_cursor_scopes_to_set_user_home(self):
+        from scripts.coding_discovery_tools.windows.cursor import cursor as mod
+        det = mod.WindowsCursorDetector()
+        det.user_home = self.SCANNED
+        with patch.object(mod.Path, "home", return_value=self.SCANNER):
+            self._assert_scoped([str(p) for p in det._get_search_paths()])
+
+    def test_windsurf_scopes_to_set_user_home(self):
+        from scripts.coding_discovery_tools.windows.windsurf import windsurf as mod
+        det = mod.WindowsWindsurfDetector()
+        det.user_home = self.SCANNED
+        with patch.object(mod.Path, "home", return_value=self.SCANNER):
+            self._assert_scoped([str(p) for p in det._get_search_paths()])
+
+    def test_antigravity_scoped_skips_other_user_enumeration(self):
+        from scripts.coding_discovery_tools.windows.antigravity import antigravity as mod
+        det = mod.WindowsAntigravityDetector()
+        det.user_home = self.SCANNED
+        with patch.object(mod.Path, "home", return_value=self.SCANNER), \
+             patch.object(mod, "is_running_as_admin", return_value=True), \
+             patch.object(det, "_other_user_program_dirs",
+                          return_value=[self.SCANNER / "AppData" / "Local" / "Programs"]):
+            self._assert_scoped([str(p) for p in det._get_search_paths()])
+
+    def test_replit_scoped_ignores_scanner_localappdata_and_other_users(self):
+        from scripts.coding_discovery_tools.windows.replit import replit as mod
+        det = mod.WindowsReplitDetector()
+        det.user_home = self.SCANNED
+        scanner_local = str(self.SCANNER / "AppData" / "Local")
+        with patch.object(mod.Path, "home", return_value=self.SCANNER), \
+             patch.object(mod, "is_running_as_admin", return_value=True), \
+             patch.dict(os.environ, {"LOCALAPPDATA": scanner_local}), \
+             patch.object(det, "_other_user_local_appdata_dirs", return_value=[Path(scanner_local)]), \
+             patch.object(det, "_other_user_program_dirs", return_value=[Path(scanner_local) / "Programs"]):
+            self._assert_scoped([str(p) for p in det._candidate_install_paths()])
+
+    def test_unscoped_detectors_keep_scanner_home_and_all_users_enumeration(self):
+        """No user_home set (legacy single-user path) -> unchanged behaviour."""
+        from scripts.coding_discovery_tools.windows.cursor import cursor as cursor_mod
+        from scripts.coding_discovery_tools.windows.antigravity import antigravity as ag_mod
+        with patch.object(cursor_mod.Path, "home", return_value=self.SCANNER):
+            self.assertIn("bob", " ".join(str(p) for p in cursor_mod.WindowsCursorDetector()._get_search_paths()))
+        other = self.SCANNER / "AppData" / "Local" / "Programs"
+        det = ag_mod.WindowsAntigravityDetector()
+        with patch.object(ag_mod.Path, "home", return_value=self.SCANNED), \
+             patch.object(ag_mod, "is_running_as_admin", return_value=True), \
+             patch.object(det, "_other_user_program_dirs", return_value=[other]):
+            self.assertIn(str(other / "antigravity"), [str(p) for p in det._get_search_paths()])
+
+
+class TestWindowsDetectorProbePermissionSafety(unittest.TestCase):
+    """Scoping points detect() at OTHER users' profile dirs, which Windows ACL-denies to a
+    non-elevated scan (the scheduled task runs -RunLevel Limited). Path.exists() re-raises
+    EACCES -- CPython only ignores ENOENT/ENOTDIR/EBADF/ELOOP -- so an unguarded probe both
+    aborts before the machine-wide candidates AND marks the run incomplete, which stops the
+    backend pruning the very phantom rows this scoping exists to remove."""
+
+    CASES = (
+        ("Cursor", "Cursor.exe", "resources/app"),
+        ("Windsurf", "Windsurf.exe", "resources/app"),
+        ("Antigravity", "Antigravity.exe", "resources"),
+    )
+
+    def _detector(self, label):
+        from scripts.coding_discovery_tools.windows.cursor.cursor import WindowsCursorDetector
+        from scripts.coding_discovery_tools.windows.windsurf.windsurf import WindowsWindsurfDetector
+        from scripts.coding_discovery_tools.windows.antigravity.antigravity import WindowsAntigravityDetector
+        return {"Cursor": WindowsCursorDetector, "Windsurf": WindowsWindsurfDetector,
+                "Antigravity": WindowsAntigravityDetector}[label]()
+
+    @staticmethod
+    def _deny(denied_root, real_exists):
+        """Path.exists side effect that denies one subtree the way Windows denies another
+        user's profile. Injected rather than chmod'd: on Windows os.chmod only toggles the
+        read-only bit and cannot deny traversal, so a chmod-based test passes there without
+        ever entering the guard."""
+        def exists(self, *args, **kwargs):
+            if denied_root == self or denied_root in self.parents:
+                raise PermissionError(13, "Access is denied")
+            return real_exists(self, *args, **kwargs)
+        return exists
+
+    def test_denied_user_dir_does_not_hide_machine_wide_install(self):
+        real_exists = Path.exists
+        for label, exe, resources in self.CASES:
+            with self.subTest(tool=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                profile = root / "Users" / "alice"
+                denied = profile / "AppData" / "Local" / "Programs" / label
+                machine = root / "Program Files" / label
+                (machine / resources).mkdir(parents=True)
+                (machine / exe).write_text("")
+
+                det = self._detector(label)
+                # Index 0 is the access-denied per-user dir, index 1 the machine-wide install.
+                with patch.object(det, "_get_search_paths", return_value=[denied, machine]), \
+                     patch.object(Path, "exists", self._deny(profile, real_exists)):
+                    result = det.detect()  # must not raise
+                self.assertIsNotNone(result, f"{label}: machine-wide install not reached")
+                self.assertEqual(str(machine), str(result["install_path"]))
+
+    def test_non_permission_oserror_still_propagates(self):
+        """A transient I/O failure must NOT be swallowed into "not installed" — it has to reach
+        detect_all_tools, which marks the run incomplete so the backend does not prune a real
+        install off a probe that never actually ran."""
+        def boom(self, *args, **kwargs):
+            raise OSError(5, "I/O error")
+        for label, _exe, _resources in self.CASES:
+            with self.subTest(tool=label):
+                det = self._detector(label)
+                with patch.object(det, "_get_search_paths", return_value=[Path("/x") / label]), \
+                     patch.object(Path, "exists", boom):
+                    with self.assertRaises(OSError):
+                        det.detect()
+
+    def test_no_registered_windows_detector_raises_on_denied_home(self):
+        """Whole-fleet invariant, not per-tool: ONE raising detector marks the entire run
+        incomplete (detect_all_tools :475 -> incomplete_reasons -> manifest=None), and the
+        backend refuses to prune on a null manifest. So a single unguarded probe anywhere
+        disables pruning for every tool on the device. Also covers detectors added later."""
+        from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
+        from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
+
+        real_exists = Path.exists
+        with tempfile.TemporaryDirectory() as tmp:
+            denied = Path(tmp) / "Users" / "alice"
+            readable_scanner_home = Path(tmp) / "Users" / "bob"
+            readable_scanner_home.mkdir(parents=True)
+
+            raised = []
+            for det in ToolDetectorFactory.create_all_tool_detectors("Windows"):
+                with patch.object(Path, "exists", self._deny(denied, real_exists)), \
+                     patch.object(Path, "home", lambda: readable_scanner_home):
+                    try:
+                        detect_tool_for_user(det, denied)
+                    except Exception as exc:
+                        raised.append(f"{det.tool_name}: {type(exc).__name__}")
+            self.assertEqual([], raised, f"detectors raised on an access-denied home: {raised}")
+
+
+class TestWindowsCopilotPerUserScoping(unittest.TestCase):
+    """GitHub Copilot rows are emitted per host editor, and _detect_*_all_users() ignored the
+    per-user home set by detect_tool_for_user -- so under admin every profile got the union of
+    everyone's Copilot, and under a non-elevated scan every profile got the scanner's."""
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.windows.github_copilot import detect_copilot as mod
+        self.mod = mod
+        self.det = mod.WindowsGitHubCopilotDetector()
+
+    def test_vscode_scoped_to_set_user_home(self):
+        self.det.user_home = Path("C:/Users/alice")
+        with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.det, "_detect_vscode_for_user", return_value=[{"name": "x"}]) as m:
+            result = self.det._detect_vscode_all_users()
+        # Called exactly once with the SET home -- not Path.home(), not the C:\Users sweep.
+        m.assert_called_once_with(Path("C:/Users/alice"))
+        self.assertEqual(result, [{"name": "x"}])
+
+    def test_jetbrains_scoped_to_set_user_home(self):
+        self.det.user_home = Path("C:/Users/alice")
+        with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.det, "_detect_jetbrains_for_user", return_value=[{"name": "y"}]) as m:
+            result = self.det._detect_jetbrains_all_users()
+        m.assert_called_once_with(Path("C:/Users/alice"))
+        self.assertEqual(result, [{"name": "y"}])
+
+    def test_unscoped_keeps_all_users_sweep(self):
+        """No user_home set (legacy single-user path) -> unchanged behaviour."""
+        with patch.object(self.mod, "is_running_as_admin", return_value=False), \
+             patch.object(self.mod.Path, "home", return_value=Path("C:/Users/bob")), \
+             patch.object(self.det, "_detect_vscode_for_user", return_value=[]) as m:
+            self.det._detect_vscode_all_users()
+        m.assert_called_once_with(Path("C:/Users/bob"))
+
+
 class TestJetBrainsNamingDeterminism(unittest.TestCase):
     """The JetBrains tool name is the backend prune key (matched exactly vs the manifest), so it
     must exclude version and license/plan — otherwise a version bump or Free<->Licensed change
@@ -512,6 +706,115 @@ class TestJetBrainsNamingDeterminism(unittest.TestCase):
         self.assertNotIn("Licensed", tools[0]["name"])
         self.assertEqual(tools[0]["version"], "2025.3.1")
         self.assertEqual(tools[0]["plan"], "Licensed")
+
+
+class TestManifestKeyedByInstallPath(unittest.TestCase):
+    """all_tools is keyed on name+path but the emission gate asked a name-only manifest, so every
+    user holding ANY install of tool T was emitted for EVERY path of T on the machine."""
+
+    ALICE = r"C:\Users\alice\.local\bin\claude.exe"
+    BOB = r"C:\Users\bob\AppData\Roaming\npm\claude.cmd"
+    SHARED = r"C:\Program Files\Claude\claude.exe"
+
+    def _run(self, paths_by_user, tool_name="Claude Code", extra=None):
+        """Drive main() with one tool per user at the given path. Returns (reports, manifest)."""
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        def _tool(path):
+            return {"name": tool_name, "version": "1.0", "install_path": path,
+                    "projects": [], **(extra or {})}
+
+        def _detect_all(user_home=None, failures=None):
+            for user, path in paths_by_user.items():
+                if str(user_home or "").endswith(user):
+                    return [_tool(path)]
+            return []
+
+        detector = Mock()
+        detector.get_device_id.return_value = "dev-xyz"
+        detector.detect_all_tools.side_effect = _detect_all
+        detector._set_canonical_vscode_copilot.return_value = None
+        detector._set_canonical_augment_surface.return_value = None
+        detector._set_canonical_junie_surface.return_value = None
+        detector.process_single_tool.side_effect = lambda t: t
+        detector.filter_tool_projects_by_user.side_effect = lambda t, _h: t.copy()
+        detector.generate_single_tool_report.side_effect = (
+            lambda tool, device_id, home_user, system_user=None, run_id=None:
+            {"home_user": home_user, "tools": [tool]})
+        detector.skills_metrics = {}
+
+        dc = Mock()
+        dc.get_cached_hash.return_value = None
+        dc.resumable_done.return_value = set()
+        dc.read_run.return_value = {}
+
+        reports, captured = [], {}
+
+        def _send_report(domain, api_key, report, app_name, sentry_context=None):
+            reports.append((report["home_user"], report["tools"][0].get("install_path")))
+            return True, False
+
+        def _send_scan_event(domain, api_key, device_id, run_id, scan_event, app_name=None, **kw):
+            if scan_event == "completed":
+                captured["manifest"] = kw.get("manifest")
+            return (True, None)
+
+        with patch.object(adm.platform, "system", return_value="Darwin"), \
+             patch.object(adm, "AIToolsDetector", return_value=detector), \
+             patch.object(adm, "discovery_cache", dc), \
+             patch.object(adm, "get_all_users_macos", return_value=sorted(paths_by_user)), \
+             patch.object(adm, "compute_payload_hash", side_effect=lambda t: "h"), \
+             patch.object(adm, "send_report_to_backend", side_effect=_send_report), \
+             patch.object(adm, "send_scan_event", side_effect=_send_scan_event), \
+             patch.object(adm, "send_discovery_metrics", Mock()), \
+             patch.object(adm, "run_sweep", return_value=(0, 0, 0)), \
+             patch.object(adm, "load_pending_reports", return_value=[]), \
+             patch.object(adm, "save_failed_reports", Mock()), \
+             patch.object(adm, "report_to_sentry", Mock()), \
+             patch.object(utils_mod, "_SENTRY_DSN", ""), \
+             patch.object(sys, "argv", ["x", "--api-key", "k", "--domain", "http://127.0.0.1:1"]):
+            try:
+                adm.main()
+            except SystemExit:
+                pass
+        return reports, captured.get("manifest")
+
+    def test_same_tool_different_paths_emits_one_row_per_owner(self):
+        """Pre-fix: 2 paths x 2 users = 4 reports, two carrying the other user's binary."""
+        reports, _ = self._run({"alice": self.ALICE, "bob": self.BOB})
+        self.assertEqual(
+            sorted(reports), sorted([("alice", self.ALICE), ("bob", self.BOB)]),
+            f"each user must be reported once, with their OWN install path; got {reports}")
+
+    def test_shared_machine_wide_path_still_emits_for_every_user(self):
+        """One machine-wide install is legitimately every user's; the key must not over-correct."""
+        reports, _ = self._run({"alice": self.SHARED, "bob": self.SHARED})
+        self.assertEqual(sorted(reports),
+                         sorted([("alice", self.SHARED), ("bob", self.SHARED)]))
+
+    def test_manifest_wire_format_unchanged_and_deduped(self):
+        """Wire format unchanged; the dedup is mandatory -- the backend does not dedup and stops pruning at MAX_MANIFEST_ENTRIES."""
+        _, manifest = self._run({"alice": self.ALICE, "bob": self.BOB})
+        self.assertEqual(manifest, [{"home_user": "alice", "tool_name": "Claude Code"},
+                                    {"home_user": "bob", "tool_name": "Claude Code"}])
+
+    def test_ownership_gate_discard_removes_the_manifest_entry(self):
+        """discard() never raises, so a drifted key would silently leave the phantom unprunable."""
+        reports, manifest = self._run(
+            {"alice": self.ALICE, "bob": self.ALICE},
+            tool_name="GitHub Copilot CLI",
+            extra={"_config_path": "/Users/alice/.copilot"})
+        self.assertEqual(reports, [("alice", self.ALICE)])
+        self.assertEqual(manifest, [{"home_user": "alice", "tool_name": "GitHub Copilot CLI"}])
+
+    def test_filter_preserves_the_install_path_the_discard_key_depends_on(self):
+        """The discard keys off tool_filtered, so install_path must survive filtering unchanged."""
+        from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        tool = {"name": "Claude Code", "install_path": self.ALICE,
+                "projects": [{"path": "/Users/bob/proj"}]}
+        filtered = AIToolsDetector.filter_tool_projects_by_user(None, tool, Path("/Users/alice"))
+        self.assertEqual(self.ALICE, filtered["install_path"])
+        self.assertEqual([], filtered["projects"])
 
 
 if __name__ == "__main__":

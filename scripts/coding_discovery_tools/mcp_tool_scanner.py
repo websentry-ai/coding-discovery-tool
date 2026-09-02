@@ -24,6 +24,7 @@ import logging
 import os
 import queue
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -350,6 +351,18 @@ def _scan_stdio(
             env=env,
         )
     except FileNotFoundError:
+        # Some configs put the whole command line in `command` and leave `args`
+        # empty (e.g. "npx @sentry/mcp-server@latest"). Retry once, split. A path
+        # containing spaces resolves on the FIRST attempt via shutil.which(), so
+        # it never reaches here and is never split.
+        if not args and re.search(r"\s", command):
+            try:
+                parts = shlex.split(command, posix=(os.name != "nt"))
+            except ValueError:
+                parts = []
+            head = shutil.which(parts[0]) if len(parts) > 1 else None
+            if head:
+                return _scan_stdio(head, parts[1:], env_extra, timeout)
         return {"status": "command_not_found", "command": command}
     except OSError as exc:
         return {"status": "spawn_error", "error": f"{type(exc).__name__}: {exc}"}

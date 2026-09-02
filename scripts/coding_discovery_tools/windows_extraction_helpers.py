@@ -469,9 +469,16 @@ def _running_as_local_system() -> bool:
     an MDM/all-users scan run as SYSTEM collapses to the empty systemprofile.
     """
     try:
+        import os
         import subprocess
+        # Resolve whoami to its System32 path rather than the bare name: this runs
+        # as SYSTEM, and CreateProcess searches the image dir and CWD before
+        # System32, so a bare name would let a planted whoami.exe execute as SYSTEM
+        # (a local privilege-escalation primitive).
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        whoami_exe = os.path.join(system_root, "System32", "whoami.exe")
         out = subprocess.run(
-            ["whoami", "/user", "/fo", "csv", "/nh"],
+            [whoami_exe, "/user", "/fo", "csv", "/nh"],
             capture_output=True, text=True, timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).stdout or ""

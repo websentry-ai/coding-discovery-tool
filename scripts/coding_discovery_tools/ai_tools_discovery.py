@@ -234,6 +234,16 @@ def _refresh_mcp_tools_cache(tool_name: str, user_name: str, projects: List[Dict
         )
 
 
+def _install_key(user, tool):
+    """Manifest identity: a tool is per-user AND per-install-path.
+
+    Used at every populate/gate/discard site so the key can never drift. Without the
+    path, every user holding any install of tool T is emitted for every path of T on
+    the machine, and each row carries whichever path was processed last.
+    """
+    return (user, tool.get('name', 'Unknown'), tool.get('install_path'))
+
+
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
@@ -3348,7 +3358,7 @@ def main():
                 )
             # Detected tools stay in the manifest even if a later read errors (a read failure isn't an uninstall).
             for detected in user_tools:
-                scanned_manifest.add((user, detected.get('name', 'Unknown')))
+                scanned_manifest.add(_install_key(user, detected))
             # Detector error = presence unknown -> incomplete, no prune (tool_name is an umbrella label, not a row key).
             if user_detect_failures:
                 incomplete_reasons.append(f"detector error for user {user}")
@@ -3438,7 +3448,7 @@ def main():
 
                     try:
                         # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
-                        if (user_name, tool_name) not in scanned_manifest:
+                        if _install_key(user_name, tool) not in scanned_manifest:
                             continue
 
                         # Filter projects to only include this user's projects
@@ -3457,7 +3467,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard((user_name, tool_name))
+                            scanned_manifest.discard(_install_key(user_name, tool_filtered))
                             continue
 
                         # Ownership gate (Augment surfaces): same ~/.augment-keyed
@@ -3471,7 +3481,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard((user_name, tool_name))
+                            scanned_manifest.discard(_install_key(user_name, tool_filtered))
                             continue
 
                         # Detect subscription plan for Claude Code
@@ -3756,7 +3766,7 @@ def main():
                     "os": platform.system(),
                     "tool_count": len(tools),
                     "user_count": len(all_users),
-                    "manifest_size": len(scanned_manifest),
+                    "manifest_size": len({(hu, tn) for hu, tn, _ in scanned_manifest}),
                     "scan_incomplete": bool(incomplete_reasons),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
@@ -3826,7 +3836,8 @@ def main():
         if incomplete_reasons:
             manifest, covered = None, None
         else:
-            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
+            manifest = [{"home_user": hu, "tool_name": tn}
+                        for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
             covered = all_users
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",

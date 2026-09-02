@@ -468,25 +468,59 @@ def _running_as_local_system() -> bool:
     returns False/undetermined for SYSTEM. Recognize SYSTEM separately, otherwise
     an MDM/all-users scan run as SYSTEM collapses to the empty systemprofile.
     """
+    # Read the token's user SID through the Win32 API rather than spawning
+    # whoami: a subprocess running as SYSTEM is an execute-as-SYSTEM vector and
+    # can fail silently. windows_admin_state() above already uses ctypes.
     try:
-        import os
-        import subprocess
-        # Resolve whoami to its System32 path rather than the bare name: this runs
-        # as SYSTEM, and CreateProcess searches the image dir and CWD before
-        # System32, so a bare name would let a planted whoami.exe execute as SYSTEM
-        # (a local privilege-escalation primitive).
-        system_root = os.environ.get("SystemRoot", r"C:\Windows")
-        whoami_exe = os.path.join(system_root, "System32", "whoami.exe")
-        out = subprocess.run(
-            [whoami_exe, "/user", "/fo", "csv", "/nh"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout or ""
-        return any(field.strip().strip('"') == "S-1-5-18" for field in out.split(","))
+        import ctypes
+        from ctypes import wintypes
+
+        TOKEN_QUERY = 0x0008
+        TokenUser = 1
+        LOCAL_SYSTEM_SID = "S-1-5-18"
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD)]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+                kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
+            return False
+        try:
+            size = wintypes.DWORD()
+            advapi32.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(size))
+            if not size.value:
+                return False
+            buf = (ctypes.c_byte * size.value)()
+            if not advapi32.GetTokenInformation(
+                    token, TokenUser, buf, size, ctypes.byref(size)):
+                return False
+            # TOKEN_USER begins with SID_AND_ATTRIBUTES whose first member is the PSID.
+            psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            str_sid = wintypes.LPWSTR()
+            if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(str_sid)):
+                return False
+            try:
+                return str_sid.value == LOCAL_SYSTEM_SID
+            finally:
+                kernel32.LocalFree(str_sid)
+        finally:
+            kernel32.CloseHandle(token)
     except Exception as e:
-        # Log so a silent SYSTEM-detection failure (which reverts to non-admin and
-        # can yield an empty all-users scan) is diagnosable rather than invisible.
-        logger.debug("SYSTEM SID detection via whoami failed: %s", e)
+        # A silent failure reverts SYSTEM to non-admin and can empty an all-users
+        # scan, so log it rather than leaving it invisible.
+        logger.debug("SYSTEM SID detection failed: %s", e)
         return False
 
 

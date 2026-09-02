@@ -633,6 +633,97 @@ class TestWindowsDetectorProbePermissionSafety(unittest.TestCase):
             self.assertEqual([], raised, f"detectors raised on an access-denied home: {raised}")
 
 
+class TestWindowsOpenClawPerUserScoping(unittest.TestCase):
+    """OpenClaw is not in detect_tool_for_user's dispatch list, so it falls through to the default
+    detector.detect() and was missed by the earlier scoping work. All three of its probes resolved
+    the SCANNER's profile: PATH, %LOCALAPPDATA%/%APPDATA%, and the admin C:\\Users sweep."""
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.windows.openclaw import detect_openclaw as mod
+        self.mod = mod
+        self.det = mod.WindowsOpenClawDetector()
+
+    def _tree(self, tmp, owner):
+        root = Path(tmp) / "Users"
+        (root / owner / "AppData" / "Local" / "Programs" / "OpenClaw").mkdir(parents=True)
+        for other in ("alice", "bob"):
+            (root / other / "AppData" / "Local" / "Programs").mkdir(parents=True, exist_ok=True)
+        return root / "alice", root / "bob"
+
+    def test_scoped_to_the_scanned_user_not_the_scanner(self):
+        """Owner is detected; the co-resident user is not, whichever profile runs the scan."""
+        with tempfile.TemporaryDirectory() as tmp:
+            alice, bob = self._tree(tmp, "alice")
+            for admin in (False, True):
+                for scanner in (alice, bob):
+                    with self.subTest(admin=admin, scanner=scanner.name), \
+                         patch.object(self.mod, "is_running_as_admin", return_value=admin), \
+                         patch.dict(os.environ, {"LOCALAPPDATA": str(scanner / "AppData" / "Local")}), \
+                         patch.object(self.mod.shutil, "which",
+                                      return_value=str(alice / "bin" / "openclaw.exe")), \
+                         patch.object(self.det, "_check_running_process", return_value=True):
+                        self.det.user_home = alice
+                        self.assertIsNotNone(self.det.detect())
+                        self.det.user_home = bob
+                        self.assertIsNone(self.det.detect())
+
+    def test_machine_wide_install_survives_scoping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            program_files = Path(tmp) / "Program Files"
+            (program_files / "OpenClaw").mkdir(parents=True)
+            self.det.user_home = Path(tmp) / "Users" / "alice"
+            with patch.object(type(self.det), "_MACHINE_WIDE_ROOTS", (program_files,)):
+                result = self.det.detect()
+            self.assertIsNotNone(result)
+            self.assertEqual(str(program_files / "OpenClaw"), result["install_path"])
+
+    def test_scoped_deep_walk_still_finds_an_exe_outside_programs(self):
+        """Squirrel installs directly under %LOCALAPPDATA%\\OpenClaw, not Programs. The scoped
+        path must keep the deep walk (rooted at the SCANNED user) or it drops real installs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Users"
+            alice, bob = root / "alice", root / "bob"
+            versioned = alice / "AppData" / "Local" / "OpenClaw" / "app-1.2.3"
+            versioned.mkdir(parents=True)
+            (versioned / "openclaw.exe").write_text("")
+            (bob / "AppData" / "Local").mkdir(parents=True)
+
+            self.det.user_home = alice
+            result = self.det.detect()
+            self.assertIsNotNone(result, "install outside Programs must still be found")
+            self.assertEqual(str(versioned / "openclaw.exe"), result["install_path"])
+
+            self.det.user_home = bob
+            self.assertIsNone(self.det.detect(), "and must not leak to the co-resident user")
+
+    def test_scoped_walk_matches_npm_shims_not_just_exe(self):
+        """npm-global installs ship .cmd/.ps1/extensionless shims, never an .exe."""
+        for shim in ("openclaw.cmd", "openclaw.ps1", "openclaw"):
+            with self.subTest(shim=shim), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "Users"
+                alice, bob = root / "alice", root / "bob"
+                npm = alice / "AppData" / "Roaming" / "npm"
+                npm.mkdir(parents=True)
+                (npm / shim).write_text("")
+                (bob / "AppData" / "Roaming").mkdir(parents=True)
+
+                with patch.object(self.mod.shutil, "which", return_value=None), \
+                     patch.object(self.det, "_check_running_process", return_value=False):
+                    self.det.user_home = alice
+                    result = self.det.detect()
+                    self.assertIsNotNone(result, f"{shim} must be detected")
+                    self.assertEqual(str(npm / shim), result["install_path"])
+                    self.det.user_home = bob
+                    self.assertIsNone(self.det.detect())
+
+    def test_unscoped_keeps_legacy_behaviour(self):
+        """No user_home set -> the original PATH/env/sweep path still runs."""
+        with patch.object(self.mod.shutil, "which", return_value=r"C:\bin\openclaw.exe") as m:
+            result = self.det.detect()
+        m.assert_called()
+        self.assertIsNotNone(result)
+
+
 class TestWindowsCopilotPerUserScoping(unittest.TestCase):
     """GitHub Copilot rows are emitted per host editor, and _detect_*_all_users() ignored the
     per-user home set by detect_tool_for_user -- so under admin every profile got the union of

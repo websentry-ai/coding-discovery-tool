@@ -608,6 +608,30 @@ class TestWindowsDetectorProbePermissionSafety(unittest.TestCase):
                     with self.assertRaises(OSError):
                         det.detect()
 
+    def test_no_registered_windows_detector_raises_on_denied_home(self):
+        """Whole-fleet invariant, not per-tool: ONE raising detector marks the entire run
+        incomplete (detect_all_tools :475 -> incomplete_reasons -> manifest=None), and the
+        backend refuses to prune on a null manifest. So a single unguarded probe anywhere
+        disables pruning for every tool on the device. Also covers detectors added later."""
+        from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
+        from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
+
+        real_exists = Path.exists
+        with tempfile.TemporaryDirectory() as tmp:
+            denied = Path(tmp) / "Users" / "alice"
+            readable_scanner_home = Path(tmp) / "Users" / "bob"
+            readable_scanner_home.mkdir(parents=True)
+
+            raised = []
+            for det in ToolDetectorFactory.create_all_tool_detectors("Windows"):
+                with patch.object(Path, "exists", self._deny(denied, real_exists)), \
+                     patch.object(Path, "home", lambda: readable_scanner_home):
+                    try:
+                        detect_tool_for_user(det, denied)
+                    except Exception as exc:
+                        raised.append(f"{det.tool_name}: {type(exc).__name__}")
+            self.assertEqual([], raised, f"detectors raised on an access-denied home: {raised}")
+
 
 class TestWindowsCopilotPerUserScoping(unittest.TestCase):
     """GitHub Copilot rows are emitted per host editor, and _detect_*_all_users() ignored the

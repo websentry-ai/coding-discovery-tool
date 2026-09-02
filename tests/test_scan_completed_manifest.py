@@ -543,6 +543,84 @@ class TestWindowsIDEDetectorPerUserScoping(unittest.TestCase):
             self.assertIn(str(other / "antigravity"), [str(p) for p in det._get_search_paths()])
 
 
+class TestWindowsDetectorProbePermissionSafety(unittest.TestCase):
+    """Scoping points detect() at OTHER users' profile dirs, which Windows ACL-denies to a
+    non-elevated scan (the scheduled task runs -RunLevel Limited). Path.exists() re-raises
+    EACCES -- CPython only ignores ENOENT/ENOTDIR/EBADF/ELOOP -- so an unguarded probe both
+    aborts before the machine-wide candidates AND marks the run incomplete, which stops the
+    backend pruning the very phantom rows this scoping exists to remove."""
+
+    CASES = (
+        ("Cursor", "Cursor.exe", "resources/app"),
+        ("Windsurf", "Windsurf.exe", "resources/app"),
+        ("Antigravity", "Antigravity.exe", "resources"),
+    )
+
+    def _detector(self, label):
+        from scripts.coding_discovery_tools.windows.cursor.cursor import WindowsCursorDetector
+        from scripts.coding_discovery_tools.windows.windsurf.windsurf import WindowsWindsurfDetector
+        from scripts.coding_discovery_tools.windows.antigravity.antigravity import WindowsAntigravityDetector
+        return {"Cursor": WindowsCursorDetector, "Windsurf": WindowsWindsurfDetector,
+                "Antigravity": WindowsAntigravityDetector}[label]()
+
+    def test_denied_user_dir_does_not_hide_machine_wide_install(self):
+        for label, exe, resources in self.CASES:
+            with self.subTest(tool=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                denied = root / "Users" / "alice" / "AppData" / "Local" / "Programs" / label
+                denied.mkdir(parents=True)
+                machine = root / "Program Files" / label
+                (machine / resources).mkdir(parents=True)
+                (machine / exe).write_text("")
+                profile = root / "Users" / "alice"
+                os.chmod(profile, 0o000)
+                det = self._detector(label)
+                try:
+                    # Index 0 is the ACL-denied per-user dir, index 1 the machine-wide install.
+                    with patch.object(det, "_get_search_paths", return_value=[denied, machine]):
+                        result = det.detect()  # must not raise
+                finally:
+                    os.chmod(profile, 0o755)  # let TemporaryDirectory clean up
+                self.assertIsNotNone(result, f"{label}: machine-wide install not reached")
+                self.assertEqual(str(machine), str(result["install_path"]))
+
+
+class TestWindowsCopilotPerUserScoping(unittest.TestCase):
+    """GitHub Copilot rows are emitted per host editor, and _detect_*_all_users() ignored the
+    per-user home set by detect_tool_for_user -- so under admin every profile got the union of
+    everyone's Copilot, and under a non-elevated scan every profile got the scanner's."""
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.windows.github_copilot import detect_copilot as mod
+        self.mod = mod
+        self.det = mod.WindowsGitHubCopilotDetector()
+
+    def test_vscode_scoped_to_set_user_home(self):
+        self.det.user_home = Path("C:/Users/alice")
+        with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.det, "_detect_vscode_for_user", return_value=[{"name": "x"}]) as m:
+            result = self.det._detect_vscode_all_users()
+        # Called exactly once with the SET home -- not Path.home(), not the C:\Users sweep.
+        m.assert_called_once_with(Path("C:/Users/alice"))
+        self.assertEqual(result, [{"name": "x"}])
+
+    def test_jetbrains_scoped_to_set_user_home(self):
+        self.det.user_home = Path("C:/Users/alice")
+        with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.det, "_detect_jetbrains_for_user", return_value=[{"name": "y"}]) as m:
+            result = self.det._detect_jetbrains_all_users()
+        m.assert_called_once_with(Path("C:/Users/alice"))
+        self.assertEqual(result, [{"name": "y"}])
+
+    def test_unscoped_keeps_all_users_sweep(self):
+        """No user_home set (legacy single-user path) -> unchanged behaviour."""
+        with patch.object(self.mod, "is_running_as_admin", return_value=False), \
+             patch.object(self.mod.Path, "home", return_value=Path("C:/Users/bob")), \
+             patch.object(self.det, "_detect_vscode_for_user", return_value=[]) as m:
+            self.det._detect_vscode_all_users()
+        m.assert_called_once_with(Path("C:/Users/bob"))
+
+
 class TestJetBrainsNamingDeterminism(unittest.TestCase):
     """The JetBrains tool name is the backend prune key (matched exactly vs the manifest), so it
     must exclude version and license/plan — otherwise a version bump or Free<->Licensed change

@@ -32,16 +32,23 @@ class WindowsWindsurfDetector(BaseToolDetector):
         windsurf_paths = self._get_search_paths()
 
         for windsurf_path in windsurf_paths:
-            if not windsurf_path.exists():
+            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists()
+            # re-raises EACCES; without this the machine-wide candidates are never reached.
+            try:
+                if not windsurf_path.exists():
+                    continue
+
+                windsurf_exe = windsurf_path / "Windsurf.exe"
+                has_exe = windsurf_exe.exists()
+                has_resources = (windsurf_path / "resources" / "app").exists()
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not probe Windsurf path {windsurf_path}: {e}")
                 continue
 
-            windsurf_exe = windsurf_path / "Windsurf.exe"
-            has_resources = (windsurf_path / "resources" / "app").exists()
-
-            if windsurf_exe.exists() or has_resources:
+            if has_exe or has_resources:
                 return {
                     "name": self.tool_name,
-                    "version": self._get_version_for_path(windsurf_exe) if windsurf_exe.exists() else None,
+                    "version": self._get_version_for_path(windsurf_exe) if has_exe else None,
                     "install_path": str(windsurf_path)
                 }
 
@@ -57,8 +64,12 @@ class WindowsWindsurfDetector(BaseToolDetector):
         windsurf_paths = self._get_search_paths()
         for windsurf_path in windsurf_paths:
             windsurf_exe = windsurf_path / "Windsurf.exe"
-            if windsurf_exe.exists():
-                return self._get_version_for_path(windsurf_exe)
+            try:
+                if windsurf_exe.exists():
+                    return self._get_version_for_path(windsurf_exe)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not probe Windsurf exe {windsurf_exe}: {e}")
+                continue
         return None
 
     def _get_search_paths(self) -> List[Path]:

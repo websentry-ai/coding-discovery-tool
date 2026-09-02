@@ -54,14 +54,20 @@ class WindowsAntigravityDetector(BaseToolDetector):
             Path to the app if found, None otherwise
         """
         for app_path in self._get_search_paths():
-            if app_path.exists():
-                # Check for executable or app directory
-                exe_path = app_path / "Antigravity.exe"
-                if exe_path.exists():
-                    return app_path
-                # Check if it's a directory with resources
-                if app_path.is_dir() and (app_path / "resources").exists():
-                    return app_path
+            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists()
+            # re-raises EACCES; without this the machine-wide candidates are never reached.
+            try:
+                if app_path.exists():
+                    # Check for executable or app directory
+                    exe_path = app_path / "Antigravity.exe"
+                    if exe_path.exists():
+                        return app_path
+                    # Check if it's a directory with resources
+                    if app_path.is_dir() and (app_path / "resources").exists():
+                        return app_path
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not probe Antigravity path {app_path}: {e}")
+                continue
         return None
 
     def is_installed_for_user(self, user_home: Path) -> bool:

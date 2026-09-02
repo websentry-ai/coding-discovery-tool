@@ -60,6 +60,21 @@ class TestHarnessHelpers(unittest.TestCase):
         for field in ("device_id", "run_id", "scan_event = 'failed'", "scan_error"):
             self.assertIn(field, text)
 
+    def test_failure_report_never_sends_the_key_over_http(self):
+        """The branch lookup guards on https; the report carries the same key."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        body = text[text.index("function Send-InstallerFailure"):]
+        guard = body[:body.index("Invoke-RestMethod")]
+        self.assertIn("-notmatch '^https://'", guard)
+
+    def test_installer_rejects_the_same_placeholder_serials_as_the_agent(self):
+        from scripts.coding_discovery_tools.constants import INVALID_SERIAL_VALUES
+
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        listed = set(re.findall(r"'([^']+)'", text[text.index("$INVALID_SERIALS"):text.index("function Get-DeviceId")]))
+        # "" is unrepresentable in the PS list and is covered by the -not $serial check.
+        self.assertEqual(listed, {v for v in INVALID_SERIAL_VALUES if v})
+
     def test_path_without_git_drops_only_git_entries(self):
         # Drive-letter-free entries so the check is valid on every OS's pathsep.
         path = os.pathsep.join(["Windows", "Program Files/Git/cmd", "Python312"])

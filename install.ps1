@@ -40,15 +40,32 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Remo
 
 $script:LastDownloadError = ''
 
+# Mirrors INVALID_SERIAL_VALUES in constants.py so a placeholder BIOS serial does
+# not become a device_id shared by every machine of that model.
+$INVALID_SERIALS = @(
+    'TO BE FILLED BY O.E.M.', 'DEFAULT STRING', 'SERIALNUMBER', 'SYSTEM SERIAL NUMBER',
+    'NOT APPLICABLE', 'N/A', 'NONE', 'NOT SPECIFIED', 'OEM', 'O.E.M.', 'DEFAULT',
+    'SYSTEM MANUFACTURER', 'CHASSIS SERIAL NUMBER', '0', '00000000', '000000000000',
+    '123456789', 'XXXXXXXXXXXXXX'
+)
+
+function Get-DeviceId {
+    # Same order and validation as WindowsDeviceIdExtractor, so a failure report
+    # lands on the device row a later successful scan writes to.
+    $serial = $null
+    try { $serial = "$((Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber)".Trim() } catch { }
+    if ($serial -and $INVALID_SERIALS -notcontains $serial.ToUpper()) { return $serial }
+    return $env:COMPUTERNAME
+}
+
 function Send-InstallerFailure {
     # The agent never starts on these paths, so this is the only signal the backend
     # gets; the device would otherwise look like it was never enrolled at all.
     param([string]$Reason, [string]$Detail)
     try {
-        if (-not $_key -or -not $_domain) { return }
-        $serial = $null
-        try { $serial = "$((Get-CimInstance Win32_BIOS -ErrorAction Stop).SerialNumber)".Trim() } catch { }
-        if ([string]::IsNullOrWhiteSpace($serial)) { $serial = $env:COMPUTERNAME }
+        # Same HTTPS guard as the branch lookup: never put the key on the wire in clear.
+        if (-not $_key -or -not $_domain -or $_domain -notmatch '^https://') { return }
+        $serial = Get-DeviceId
         $body = @{
             device_id  = $serial
             run_id     = [guid]::NewGuid().ToString()

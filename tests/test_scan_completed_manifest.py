@@ -475,6 +475,74 @@ class TestExtensionDetectorPerUserScoping(unittest.TestCase):
         self.assertEqual(result, [{"name": "Roo Code (Cursor)"}])
 
 
+class TestWindowsIDEDetectorPerUserScoping(unittest.TestCase):
+    """Cursor / Windsurf / Antigravity / Replit install per-user under %LOCALAPPDATA% on Windows
+    (FOLDERID_UserProgramFiles is PERUSER), so a scan must probe the SCANNED user's home — not the
+    scanner's, and not every user's. Machine-wide Program Files installs stay visible to everyone.
+
+    Fails against the pre-fix code, where detect_tool_for_user short-circuited these four to a
+    detector.detect() that resolved Path.home() / the all-users enumeration instead."""
+
+    SCANNED = Path("C:/Users/alice")
+    SCANNER = Path("C:/Users/bob")
+
+    def _assert_scoped(self, candidates):
+        joined = " ".join(candidates)
+        self.assertIn("alice", joined)
+        self.assertNotIn("bob", joined)
+        self.assertTrue(any("Program Files" in c for c in candidates),
+                        "machine-wide installs must stay in scope for every user")
+
+    def test_cursor_scopes_to_set_user_home(self):
+        from scripts.coding_discovery_tools.windows.cursor import cursor as mod
+        det = mod.WindowsCursorDetector()
+        det.user_home = self.SCANNED
+        with patch.object(mod.Path, "home", return_value=self.SCANNER):
+            self._assert_scoped([str(p) for p in det._get_search_paths()])
+
+    def test_windsurf_scopes_to_set_user_home(self):
+        from scripts.coding_discovery_tools.windows.windsurf import windsurf as mod
+        det = mod.WindowsWindsurfDetector()
+        det.user_home = self.SCANNED
+        with patch.object(mod.Path, "home", return_value=self.SCANNER):
+            self._assert_scoped([str(p) for p in det._get_search_paths()])
+
+    def test_antigravity_scoped_skips_other_user_enumeration(self):
+        from scripts.coding_discovery_tools.windows.antigravity import antigravity as mod
+        det = mod.WindowsAntigravityDetector()
+        det.user_home = self.SCANNED
+        with patch.object(mod.Path, "home", return_value=self.SCANNER), \
+             patch.object(mod, "is_running_as_admin", return_value=True), \
+             patch.object(det, "_other_user_program_dirs",
+                          return_value=[self.SCANNER / "AppData" / "Local" / "Programs"]):
+            self._assert_scoped([str(p) for p in det._get_search_paths()])
+
+    def test_replit_scoped_ignores_scanner_localappdata_and_other_users(self):
+        from scripts.coding_discovery_tools.windows.replit import replit as mod
+        det = mod.WindowsReplitDetector()
+        det.user_home = self.SCANNED
+        scanner_local = str(self.SCANNER / "AppData" / "Local")
+        with patch.object(mod.Path, "home", return_value=self.SCANNER), \
+             patch.object(mod, "is_running_as_admin", return_value=True), \
+             patch.dict(os.environ, {"LOCALAPPDATA": scanner_local}), \
+             patch.object(det, "_other_user_local_appdata_dirs", return_value=[Path(scanner_local)]), \
+             patch.object(det, "_other_user_program_dirs", return_value=[Path(scanner_local) / "Programs"]):
+            self._assert_scoped([str(p) for p in det._candidate_install_paths()])
+
+    def test_unscoped_detectors_keep_scanner_home_and_all_users_enumeration(self):
+        """No user_home set (legacy single-user path) -> unchanged behaviour."""
+        from scripts.coding_discovery_tools.windows.cursor import cursor as cursor_mod
+        from scripts.coding_discovery_tools.windows.antigravity import antigravity as ag_mod
+        with patch.object(cursor_mod.Path, "home", return_value=self.SCANNER):
+            self.assertIn("bob", " ".join(str(p) for p in cursor_mod.WindowsCursorDetector()._get_search_paths()))
+        other = self.SCANNER / "AppData" / "Local" / "Programs"
+        det = ag_mod.WindowsAntigravityDetector()
+        with patch.object(ag_mod.Path, "home", return_value=self.SCANNED), \
+             patch.object(ag_mod, "is_running_as_admin", return_value=True), \
+             patch.object(det, "_other_user_program_dirs", return_value=[other]):
+            self.assertIn(str(other / "antigravity"), [str(p) for p in det._get_search_paths()])
+
+
 class TestJetBrainsNamingDeterminism(unittest.TestCase):
     """The JetBrains tool name is the backend prune key (matched exactly vs the manifest), so it
     must exclude version and license/plan — otherwise a version bump or Free<->Licensed change

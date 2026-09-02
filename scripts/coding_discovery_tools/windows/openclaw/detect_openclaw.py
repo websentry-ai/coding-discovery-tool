@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 class WindowsOpenClawDetector(BaseOpenClawDetector):
     """Detector for OpenClaw on Windows."""
 
+    _MACHINE_WIDE_ROOTS = (Path(r"C:\Program Files"), Path(r"C:\Program Files (x86)"))
+
     def detect_openclaw(self) -> Optional[Dict]:
         """
         Detect OpenClaw on Windows.
@@ -80,11 +82,10 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
         return None
 
     def _detect_for_user(self, user_home: Path) -> Optional[Dict]:
-        """This user's own install dir plus the machine-wide ones. The unscoped path's PATH/env/sweep probes all resolve the SCANNER's profile, so they are not reused here."""
+        """This user's install dirs plus the machine-wide ones, mirroring the unscoped path's exact-dir-then-deep-walk order. Only the PATH and running-process probes are dropped: neither can be attributed to a profile."""
         candidates = [
             user_home / "AppData" / "Local" / "Programs" / "OpenClaw",
-            Path(r"C:\Program Files\OpenClaw"),
-            Path(r"C:\Program Files (x86)\OpenClaw"),
+            *(root / "OpenClaw" for root in self._MACHINE_WIDE_ROOTS),
         ]
         for path in candidates:
             try:
@@ -93,13 +94,18 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
             except PermissionError as e:
                 logger.debug(f"Could not probe OpenClaw path {path}: {e}")
                 continue
-            return {
-                "name": "OpenClaw",
-                "version": None,
-                "install_path": str(path),
-                "projects": [],
-            }
-        return None
+            return self._scoped_result(str(path))
+
+        exe = self._search_for_executable([
+            user_home / "AppData" / "Local",
+            user_home / "AppData" / "Roaming",
+            *self._MACHINE_WIDE_ROOTS,
+        ])
+        return self._scoped_result(str(exe)) if exe else None
+
+    @staticmethod
+    def _scoped_result(install_path: str) -> Dict:
+        return {"name": "OpenClaw", "version": None, "install_path": install_path, "projects": []}
 
     def _update_result(self, data: Dict, path: str, method: str):
         """Helper to update the detection result dict."""
@@ -189,32 +195,35 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
                 return path
         return None
 
-    def _search_for_executable(self) -> Optional[Path]:
+    def _search_for_executable(self, search_roots: Optional[List[Path]] = None) -> Optional[Path]:
         """
         Search for openclaw.exe in major directories.
         This is a deeper search when static paths don't find it.
+
+        ``search_roots`` lets the scoped path walk the SCANNED user's AppData instead of the
+        env-derived (scanner's) one, keeping this coverage without the cross-user attribution.
         """
-        search_roots = []
+        if search_roots is None:
+            search_roots = []
 
-        local_appdata = os.environ.get("LOCALAPPDATA", "")
-        appdata = os.environ.get("APPDATA", "")
+            local_appdata = os.environ.get("LOCALAPPDATA", "")
+            appdata = os.environ.get("APPDATA", "")
 
-        if local_appdata and os.path.exists(local_appdata):
-            search_roots.append(Path(local_appdata))
+            if local_appdata and os.path.exists(local_appdata):
+                search_roots.append(Path(local_appdata))
 
-        if appdata and os.path.exists(appdata):
-            search_roots.append(Path(appdata))
+            if appdata and os.path.exists(appdata):
+                search_roots.append(Path(appdata))
 
-        # Also check Program Files
-        program_files = Path(r"C:\Program Files")
-        program_files_x86 = Path(r"C:\Program Files (x86)")
-
-        if program_files.exists():
-            search_roots.append(program_files)
-        if program_files_x86.exists():
-            search_roots.append(program_files_x86)
+            search_roots.extend(self._MACHINE_WIDE_ROOTS)
 
         for root in search_roots:
+            try:
+                if not root.exists():
+                    continue
+            except PermissionError as e:
+                logger.debug(f"Could not probe OpenClaw search root {root}: {e}")
+                continue
             try:
                 for dirpath, dirnames, filenames in os.walk(root):
                     # Skip common directories that slow down search

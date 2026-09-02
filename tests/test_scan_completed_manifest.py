@@ -669,13 +669,32 @@ class TestWindowsOpenClawPerUserScoping(unittest.TestCase):
 
     def test_machine_wide_install_survives_scoping(self):
         with tempfile.TemporaryDirectory() as tmp:
-            machine = Path(tmp) / "Program Files" / "OpenClaw"
-            machine.mkdir(parents=True)
+            program_files = Path(tmp) / "Program Files"
+            (program_files / "OpenClaw").mkdir(parents=True)
             self.det.user_home = Path(tmp) / "Users" / "alice"
-            with patch.object(self.mod, "Path", lambda a: machine if "Program Files" in str(a) else Path(a)):
+            with patch.object(type(self.det), "_MACHINE_WIDE_ROOTS", (program_files,)):
                 result = self.det.detect()
             self.assertIsNotNone(result)
-            self.assertEqual(str(machine), result["install_path"])
+            self.assertEqual(str(program_files / "OpenClaw"), result["install_path"])
+
+    def test_scoped_deep_walk_still_finds_an_exe_outside_programs(self):
+        """Squirrel installs directly under %LOCALAPPDATA%\\OpenClaw, not Programs. The scoped
+        path must keep the deep walk (rooted at the SCANNED user) or it drops real installs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Users"
+            alice, bob = root / "alice", root / "bob"
+            versioned = alice / "AppData" / "Local" / "OpenClaw" / "app-1.2.3"
+            versioned.mkdir(parents=True)
+            (versioned / "openclaw.exe").write_text("")
+            (bob / "AppData" / "Local").mkdir(parents=True)
+
+            self.det.user_home = alice
+            result = self.det.detect()
+            self.assertIsNotNone(result, "install outside Programs must still be found")
+            self.assertEqual(str(versioned / "openclaw.exe"), result["install_path"])
+
+            self.det.user_home = bob
+            self.assertIsNone(self.det.detect(), "and must not leak to the co-resident user")
 
     def test_unscoped_keeps_legacy_behaviour(self):
         """No user_home set -> the original PATH/env/sweep path still runs."""

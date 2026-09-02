@@ -56,9 +56,13 @@ function Get-DeviceId {
         { (& wmic bios get serialnumber) | Select-Object -Skip 1 }
     )
     foreach ($probe in $probes) {
-        $serial = $null
-        try { $serial = "$(& $probe)".Trim() } catch { }
-        if ($serial -and $INVALID_SERIALS -notcontains $serial.ToUpper()) { return $serial }
+        $lines = @()
+        try { $lines = @(& $probe) } catch { }
+        # First valid line wins, as in the agent; joining them would invent a serial.
+        foreach ($line in $lines) {
+            $serial = "$line".Trim()
+            if ($serial -and $INVALID_SERIALS -notcontains $serial.ToUpper()) { return $serial }
+        }
     }
     return $env:COMPUTERNAME
 }

@@ -78,6 +78,8 @@ class TestHarnessHelpers(unittest.TestCase):
                  "COMPUTERNAME"]
         found = [body.index(p) for p in order]
         self.assertEqual(found, sorted(found), "probe order diverges from the agent")
+        # wmic can emit several lines; the agent takes the first valid one, not the join.
+        self.assertIn("foreach ($line in $lines)", body)
 
     def test_installer_rejects_the_same_placeholder_serials_as_the_agent(self):
         from scripts.coding_discovery_tools.constants import INVALID_SERIAL_VALUES

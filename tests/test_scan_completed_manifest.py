@@ -710,9 +710,7 @@ class TestJetBrainsNamingDeterminism(unittest.TestCase):
 
 class TestManifestKeyedByInstallPath(unittest.TestCase):
     """all_tools is keyed on name+path but the emission gate asked a name-only manifest, so every
-    user holding ANY install of tool T was emitted for EVERY path of T on the machine. Both users
-    genuinely have the tool -- these are real installs carrying another user's install_path, and
-    since ingest is delete-then-create on (device, tool_name, home_user), last write wins."""
+    user holding ANY install of tool T was emitted for EVERY path of T on the machine."""
 
     ALICE = r"C:\Users\alice\.local\bin\claude.exe"
     BOB = r"C:\Users\bob\AppData\Roaming\npm\claude.cmd"
@@ -782,31 +780,26 @@ class TestManifestKeyedByInstallPath(unittest.TestCase):
         return reports, captured.get("manifest")
 
     def test_same_tool_different_paths_emits_one_row_per_owner(self):
-        """Pre-fix this emits 2 paths x 2 users = 4 reports, two of them carrying the other
-        user's binary."""
+        """Pre-fix: 2 paths x 2 users = 4 reports, two carrying the other user's binary."""
         reports, _ = self._run({"alice": self.ALICE, "bob": self.BOB})
         self.assertEqual(
             sorted(reports), sorted([("alice", self.ALICE), ("bob", self.BOB)]),
             f"each user must be reported once, with their OWN install path; got {reports}")
 
     def test_shared_machine_wide_path_still_emits_for_every_user(self):
-        """Path in the key must not over-correct: one machine-wide install is legitimately
-        every user's, and all_tools dedups it to a single entry."""
+        """One machine-wide install is legitimately every user's; the key must not over-correct."""
         reports, _ = self._run({"alice": self.SHARED, "bob": self.SHARED})
         self.assertEqual(sorted(reports),
                          sorted([("alice", self.SHARED), ("bob", self.SHARED)]))
 
     def test_manifest_wire_format_unchanged_and_deduped(self):
-        """The manifest stays [{home_user, tool_name}] -- reconcile reads only tool_name per
-        home_user. Dedup is mandatory, not cosmetic: the backend does not dedup, and it refuses
-        to prune once the manifest reaches MAX_MANIFEST_ENTRIES."""
+        """Wire format unchanged; the dedup is mandatory -- the backend does not dedup and stops pruning at MAX_MANIFEST_ENTRIES."""
         _, manifest = self._run({"alice": self.ALICE, "bob": self.BOB})
         self.assertEqual(manifest, [{"home_user": "alice", "tool_name": "Claude Code"},
                                     {"home_user": "bob", "tool_name": "Claude Code"}])
 
     def test_ownership_gate_discard_removes_the_manifest_entry(self):
-        """set.discard() never raises, so a drifted key would silently leave the entry in the
-        manifest and the phantom would never be pruned. Assert the entry is actually gone."""
+        """discard() never raises, so a drifted key would silently leave the phantom unprunable."""
         reports, manifest = self._run(
             {"alice": self.ALICE, "bob": self.ALICE},
             tool_name="GitHub Copilot CLI",
@@ -815,8 +808,7 @@ class TestManifestKeyedByInstallPath(unittest.TestCase):
         self.assertEqual(manifest, [{"home_user": "alice", "tool_name": "GitHub Copilot CLI"}])
 
     def test_filter_preserves_the_install_path_the_discard_key_depends_on(self):
-        """The discard keys off tool_filtered; filter_tool_projects_by_user must keep
-        install_path byte-identical or the gate silently stops suppressing."""
+        """The discard keys off tool_filtered, so install_path must survive filtering unchanged."""
         from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         tool = {"name": "Claude Code", "install_path": self.ALICE,
                 "projects": [{"path": "/Users/bob/proj"}]}

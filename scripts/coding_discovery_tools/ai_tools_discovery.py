@@ -235,12 +235,7 @@ def _refresh_mcp_tools_cache(tool_name: str, user_name: str, projects: List[Dict
 
 
 def _install_key(user, tool):
-    """Manifest identity: a tool is per-user AND per-install-path.
-
-    Used at every populate/gate/discard site so the key can never drift. Without the
-    path, every user holding any install of tool T is emitted for every path of T on
-    the machine, and each row carries whichever path was processed last.
-    """
+    """Manifest identity: per-user AND per-install-path. Used at every populate/gate/discard site so the key can't drift."""
     return (user, tool.get('name', 'Unknown'), tool.get('install_path'))
 
 

@@ -27,7 +27,14 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
         """
         Detect OpenClaw on Windows.
         Handles both user-level execution and admin-level (MDM) execution.
+
+        When ``user_home`` is set the scan is scoped to THAT user, so one user's
+        install is not credited to every profile on the box.
         """
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            return self._detect_for_user(Path(scoped_home))
+
         detection_data = {
             "name": "OpenClaw",
             "platform": "Windows",
@@ -70,6 +77,28 @@ class WindowsOpenClawDetector(BaseOpenClawDetector):
                 "projects": [],
             }
 
+        return None
+
+    def _detect_for_user(self, user_home: Path) -> Optional[Dict]:
+        """This user's own install dir plus the machine-wide ones. The unscoped path's PATH/env/sweep probes all resolve the SCANNER's profile, so they are not reused here."""
+        candidates = [
+            user_home / "AppData" / "Local" / "Programs" / "OpenClaw",
+            Path(r"C:\Program Files\OpenClaw"),
+            Path(r"C:\Program Files (x86)\OpenClaw"),
+        ]
+        for path in candidates:
+            try:
+                if not path.exists():
+                    continue
+            except PermissionError as e:
+                logger.debug(f"Could not probe OpenClaw path {path}: {e}")
+                continue
+            return {
+                "name": "OpenClaw",
+                "version": None,
+                "install_path": str(path),
+                "projects": [],
+            }
         return None
 
     def _update_result(self, data: Dict, path: str, method: str):

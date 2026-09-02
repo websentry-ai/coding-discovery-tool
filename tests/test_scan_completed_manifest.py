@@ -633,6 +633,58 @@ class TestWindowsDetectorProbePermissionSafety(unittest.TestCase):
             self.assertEqual([], raised, f"detectors raised on an access-denied home: {raised}")
 
 
+class TestWindowsOpenClawPerUserScoping(unittest.TestCase):
+    """OpenClaw is not in detect_tool_for_user's dispatch list, so it falls through to the default
+    detector.detect() and was missed by the earlier scoping work. All three of its probes resolved
+    the SCANNER's profile: PATH, %LOCALAPPDATA%/%APPDATA%, and the admin C:\\Users sweep."""
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.windows.openclaw import detect_openclaw as mod
+        self.mod = mod
+        self.det = mod.WindowsOpenClawDetector()
+
+    def _tree(self, tmp, owner):
+        root = Path(tmp) / "Users"
+        (root / owner / "AppData" / "Local" / "Programs" / "OpenClaw").mkdir(parents=True)
+        for other in ("alice", "bob"):
+            (root / other / "AppData" / "Local" / "Programs").mkdir(parents=True, exist_ok=True)
+        return root / "alice", root / "bob"
+
+    def test_scoped_to_the_scanned_user_not_the_scanner(self):
+        """Owner is detected; the co-resident user is not, whichever profile runs the scan."""
+        with tempfile.TemporaryDirectory() as tmp:
+            alice, bob = self._tree(tmp, "alice")
+            for admin in (False, True):
+                for scanner in (alice, bob):
+                    with self.subTest(admin=admin, scanner=scanner.name), \
+                         patch.object(self.mod, "is_running_as_admin", return_value=admin), \
+                         patch.dict(os.environ, {"LOCALAPPDATA": str(scanner / "AppData" / "Local")}), \
+                         patch.object(self.mod.shutil, "which",
+                                      return_value=str(alice / "bin" / "openclaw.exe")), \
+                         patch.object(self.det, "_check_running_process", return_value=True):
+                        self.det.user_home = alice
+                        self.assertIsNotNone(self.det.detect())
+                        self.det.user_home = bob
+                        self.assertIsNone(self.det.detect())
+
+    def test_machine_wide_install_survives_scoping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            machine = Path(tmp) / "Program Files" / "OpenClaw"
+            machine.mkdir(parents=True)
+            self.det.user_home = Path(tmp) / "Users" / "alice"
+            with patch.object(self.mod, "Path", lambda a: machine if "Program Files" in str(a) else Path(a)):
+                result = self.det.detect()
+            self.assertIsNotNone(result)
+            self.assertEqual(str(machine), result["install_path"])
+
+    def test_unscoped_keeps_legacy_behaviour(self):
+        """No user_home set -> the original PATH/env/sweep path still runs."""
+        with patch.object(self.mod.shutil, "which", return_value=r"C:\bin\openclaw.exe") as m:
+            result = self.det.detect()
+        m.assert_called()
+        self.assertIsNotNone(result)
+
+
 class TestWindowsCopilotPerUserScoping(unittest.TestCase):
     """GitHub Copilot rows are emitted per host editor, and _detect_*_all_users() ignored the
     per-user home set by detect_tool_for_user -- so under admin every profile got the union of

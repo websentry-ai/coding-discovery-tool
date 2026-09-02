@@ -543,6 +543,132 @@ class TestWindowsIDEDetectorPerUserScoping(unittest.TestCase):
             self.assertIn(str(other / "antigravity"), [str(p) for p in det._get_search_paths()])
 
 
+class TestWindowsDetectorProbePermissionSafety(unittest.TestCase):
+    """Scoping points detect() at OTHER users' profile dirs, which Windows ACL-denies to a
+    non-elevated scan (the scheduled task runs -RunLevel Limited). Path.exists() re-raises
+    EACCES -- CPython only ignores ENOENT/ENOTDIR/EBADF/ELOOP -- so an unguarded probe both
+    aborts before the machine-wide candidates AND marks the run incomplete, which stops the
+    backend pruning the very phantom rows this scoping exists to remove."""
+
+    CASES = (
+        ("Cursor", "Cursor.exe", "resources/app"),
+        ("Windsurf", "Windsurf.exe", "resources/app"),
+        ("Antigravity", "Antigravity.exe", "resources"),
+    )
+
+    def _detector(self, label):
+        from scripts.coding_discovery_tools.windows.cursor.cursor import WindowsCursorDetector
+        from scripts.coding_discovery_tools.windows.windsurf.windsurf import WindowsWindsurfDetector
+        from scripts.coding_discovery_tools.windows.antigravity.antigravity import WindowsAntigravityDetector
+        return {"Cursor": WindowsCursorDetector, "Windsurf": WindowsWindsurfDetector,
+                "Antigravity": WindowsAntigravityDetector}[label]()
+
+    @staticmethod
+    def _deny(denied_root, real_exists):
+        """Path.exists side effect that denies one subtree the way Windows denies another
+        user's profile. Injected rather than chmod'd: on Windows os.chmod only toggles the
+        read-only bit and cannot deny traversal, so a chmod-based test passes there without
+        ever entering the guard."""
+        def exists(self, *args, **kwargs):
+            if denied_root == self or denied_root in self.parents:
+                raise PermissionError(13, "Access is denied")
+            return real_exists(self, *args, **kwargs)
+        return exists
+
+    def test_denied_user_dir_does_not_hide_machine_wide_install(self):
+        real_exists = Path.exists
+        for label, exe, resources in self.CASES:
+            with self.subTest(tool=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                profile = root / "Users" / "alice"
+                denied = profile / "AppData" / "Local" / "Programs" / label
+                machine = root / "Program Files" / label
+                (machine / resources).mkdir(parents=True)
+                (machine / exe).write_text("")
+
+                det = self._detector(label)
+                # Index 0 is the access-denied per-user dir, index 1 the machine-wide install.
+                with patch.object(det, "_get_search_paths", return_value=[denied, machine]), \
+                     patch.object(Path, "exists", self._deny(profile, real_exists)):
+                    result = det.detect()  # must not raise
+                self.assertIsNotNone(result, f"{label}: machine-wide install not reached")
+                self.assertEqual(str(machine), str(result["install_path"]))
+
+    def test_non_permission_oserror_still_propagates(self):
+        """A transient I/O failure must NOT be swallowed into "not installed" — it has to reach
+        detect_all_tools, which marks the run incomplete so the backend does not prune a real
+        install off a probe that never actually ran."""
+        def boom(self, *args, **kwargs):
+            raise OSError(5, "I/O error")
+        for label, _exe, _resources in self.CASES:
+            with self.subTest(tool=label):
+                det = self._detector(label)
+                with patch.object(det, "_get_search_paths", return_value=[Path("/x") / label]), \
+                     patch.object(Path, "exists", boom):
+                    with self.assertRaises(OSError):
+                        det.detect()
+
+    def test_no_registered_windows_detector_raises_on_denied_home(self):
+        """Whole-fleet invariant, not per-tool: ONE raising detector marks the entire run
+        incomplete (detect_all_tools :475 -> incomplete_reasons -> manifest=None), and the
+        backend refuses to prune on a null manifest. So a single unguarded probe anywhere
+        disables pruning for every tool on the device. Also covers detectors added later."""
+        from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
+        from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
+
+        real_exists = Path.exists
+        with tempfile.TemporaryDirectory() as tmp:
+            denied = Path(tmp) / "Users" / "alice"
+            readable_scanner_home = Path(tmp) / "Users" / "bob"
+            readable_scanner_home.mkdir(parents=True)
+
+            raised = []
+            for det in ToolDetectorFactory.create_all_tool_detectors("Windows"):
+                with patch.object(Path, "exists", self._deny(denied, real_exists)), \
+                     patch.object(Path, "home", lambda: readable_scanner_home):
+                    try:
+                        detect_tool_for_user(det, denied)
+                    except Exception as exc:
+                        raised.append(f"{det.tool_name}: {type(exc).__name__}")
+            self.assertEqual([], raised, f"detectors raised on an access-denied home: {raised}")
+
+
+class TestWindowsCopilotPerUserScoping(unittest.TestCase):
+    """GitHub Copilot rows are emitted per host editor, and _detect_*_all_users() ignored the
+    per-user home set by detect_tool_for_user -- so under admin every profile got the union of
+    everyone's Copilot, and under a non-elevated scan every profile got the scanner's."""
+
+    def setUp(self):
+        from scripts.coding_discovery_tools.windows.github_copilot import detect_copilot as mod
+        self.mod = mod
+        self.det = mod.WindowsGitHubCopilotDetector()
+
+    def test_vscode_scoped_to_set_user_home(self):
+        self.det.user_home = Path("C:/Users/alice")
+        with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.det, "_detect_vscode_for_user", return_value=[{"name": "x"}]) as m:
+            result = self.det._detect_vscode_all_users()
+        # Called exactly once with the SET home -- not Path.home(), not the C:\Users sweep.
+        m.assert_called_once_with(Path("C:/Users/alice"))
+        self.assertEqual(result, [{"name": "x"}])
+
+    def test_jetbrains_scoped_to_set_user_home(self):
+        self.det.user_home = Path("C:/Users/alice")
+        with patch.object(self.mod, "is_running_as_admin", return_value=True), \
+             patch.object(self.det, "_detect_jetbrains_for_user", return_value=[{"name": "y"}]) as m:
+            result = self.det._detect_jetbrains_all_users()
+        m.assert_called_once_with(Path("C:/Users/alice"))
+        self.assertEqual(result, [{"name": "y"}])
+
+    def test_unscoped_keeps_all_users_sweep(self):
+        """No user_home set (legacy single-user path) -> unchanged behaviour."""
+        with patch.object(self.mod, "is_running_as_admin", return_value=False), \
+             patch.object(self.mod.Path, "home", return_value=Path("C:/Users/bob")), \
+             patch.object(self.det, "_detect_vscode_for_user", return_value=[]) as m:
+            self.det._detect_vscode_all_users()
+        m.assert_called_once_with(Path("C:/Users/bob"))
+
+
 class TestJetBrainsNamingDeterminism(unittest.TestCase):
     """The JetBrains tool name is the backend prune key (matched exactly vs the manifest), so it
     must exclude version and license/plan — otherwise a version bump or Free<->Licensed change

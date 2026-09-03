@@ -41,7 +41,9 @@ def _dispatched(root: Path, tool_dir: str):
     found = []
     walk_for_tool_directories(
         root, root, tool_dir,
-        lambda d, _projects_by_root: found.append(os.path.relpath(str(d), str(root))),
+        # Normalise the separator so assertions read the same on POSIX and Windows.
+        lambda d, _projects_by_root: found.append(
+            os.path.relpath(str(d), str(root)).replace(os.sep, "/")),
         {},
     )
     return sorted(found)
@@ -123,8 +125,8 @@ class TestToolDirWalkE2E(unittest.TestCase):
         if rc.returncode != 0:  # junction creation genuinely unavailable
             self.skipTest(f"mklink /J failed: {rc.stderr.strip()}")
         got = _dispatched(self.root, ".cursor")
-        self.assertIn("proj\\.cursor", got, "junctioned tool dir inside root must be extracted")
-        self.assertIn("shared\\.cursor", got)
+        self.assertIn("proj/.cursor", got, "junctioned tool dir inside root must be extracted")
+        self.assertIn("shared/.cursor", got)
 
     @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
     def test_walk_survives_unreadable_subdir(self):

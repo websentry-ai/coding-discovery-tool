@@ -28,10 +28,27 @@ if ($_domain -and $_key -and $_domain -match '^https://') {
 
 $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"
 
-function Write-Info { Write-Host "i " -ForegroundColor Blue -NoNewline; Write-Host $args[0] }
-function Write-Success { Write-Host "[OK] " -ForegroundColor Green -NoNewline; Write-Host $args[0] }
-function Write-Warning { Write-Host "[!] " -ForegroundColor Yellow -NoNewline; Write-Host $args[0] }
-function Write-ErrorMessage { Write-Host "[X] " -ForegroundColor Red -NoNewline; Write-Host $args[0] }
+# Same directory and line format as setup-scheduled-scan.ps1's scheduled.log, so installer and
+# scheduled-run failures sit side by side. Under MDM the console output goes nowhere.
+$LogDir = Join-Path $env:LOCALAPPDATA 'Unbound\Logs'
+$script:InstallLog = Join-Path $LogDir 'install.log'
+function Write-Log($msg) {
+    try {
+        if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+        "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg |
+            Out-File -FilePath $script:InstallLog -Append -Encoding UTF8
+    } catch { }
+}
+
+function Write-Info { Write-Host "i " -ForegroundColor Blue -NoNewline; Write-Host $args[0]; Write-Log $args[0] }
+function Write-Success { Write-Host "[OK] " -ForegroundColor Green -NoNewline; Write-Host $args[0]; Write-Log $args[0] }
+function Write-Warning { Write-Host "[!] " -ForegroundColor Yellow -NoNewline; Write-Host $args[0]; Write-Log "WARNING: $($args[0])" }
+function Write-ErrorMessage {
+    Write-Host "[X] " -ForegroundColor Red -NoNewline; Write-Host $args[0]
+    Write-Log "ERROR: $($args[0])"
+    # Say where the detail went; without this the customer has to know the convention.
+    Write-Host "    Details written to $script:InstallLog" -ForegroundColor DarkGray
+}
 
 function Remove-TempDirectory {
     if (Test-Path $TEMP_DIR) { Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue }

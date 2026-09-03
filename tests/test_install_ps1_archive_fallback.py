@@ -77,6 +77,23 @@ class TestHarnessHelpers(unittest.TestCase):
         self.assertIn("$Reason", title)
         self.assertNotIn("$Detail", title)
 
+    def test_failures_are_written_to_the_shared_unbound_log_dir(self):
+        """Under MDM the console goes nowhere, so the run has to leave a file behind. Same
+        directory and line format as setup-scheduled-scan.ps1 so support looks in one place."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        self.assertIn("function Write-Log", text)
+        self.assertIn("Join-Path $env:LOCALAPPDATA 'Unbound\\Logs'", text)
+        self.assertIn("'install.log'", text)
+        scheduled = (INSTALL_PS1.parent / "setup-scheduled-scan.ps1").read_text(encoding="utf-8")
+        self.assertIn("Unbound\\Logs", scheduled, "the shared log dir moved; install.ps1 must follow")
+
+    def test_error_message_says_where_the_log_is(self):
+        """Otherwise the customer has to already know the convention to send us anything."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        block = text[text.index("function Write-ErrorMessage"):]
+        self.assertIn("Details written to", block[:600])
+        self.assertIn("$script:InstallLog", block[:600])
+
     def test_sentry_dsn_can_be_disabled_for_tests(self):
         text = INSTALL_PS1.read_text(encoding="utf-8")
         self.assertIn("$env:AI_DISCOVERY_SENTRY_DSN", text)

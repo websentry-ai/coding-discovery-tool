@@ -238,17 +238,16 @@ class TestReviewHardening(unittest.TestCase):
         self._tmp.cleanup()
 
     @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
-    def test_dispatch_skips_indexed_dir_swapped_to_symlink(self):
-        # Finding 1 (TOCTOU): a dir indexed as real but swapped for a symlink
-        # before dispatch is re-validated and refused.
-        real = self.root / "proj" / ".cursor"
-        real.mkdir(parents=True)
-        index = {".cursor": [real]}
-        import shutil
-        shutil.rmtree(real)
-        outside = self.root / "elsewhere"
-        outside.mkdir()
-        os.symlink(outside, real)  # .cursor is now a symlink
+    def test_symlinked_tool_dir_inside_root_is_dispatched(self):
+        # A .cursor that is a symlink to a real dir INSIDE the scan root (stow,
+        # chezmoi, a monorepo sharing one rules folder) must dispatch: stat follows
+        # the link and containment passes. Only escaping links are refused (below).
+        target = self.root / "shared" / ".cursor"
+        target.mkdir(parents=True)
+        link = self.root / "proj" / ".cursor"
+        link.parent.mkdir(parents=True)
+        os.symlink(target, link)
+        index = {".cursor": [link]}
         got = []
         orig = pdi.get_subtree_index
         pdi.get_subtree_index = lambda *a, **k: index
@@ -257,7 +256,7 @@ class TestReviewHardening(unittest.TestCase):
                              lambda n: n.lower() == ".cursor", got.append)
         finally:
             pdi.get_subtree_index = orig
-        self.assertEqual(got, [])
+        self.assertEqual([str(p) for p in got], [str(link)])
 
     def test_dispatch_skips_vanished_indexed_dir(self):
         # Finding 1: a dir removed after indexing is skipped, not dispatched.
@@ -272,25 +271,6 @@ class TestReviewHardening(unittest.TestCase):
         finally:
             pdi.get_subtree_index = orig
         self.assertEqual(got, [])
-
-    def test_outermost_prune_survives_bucket_order(self):
-        # Finding 4: case-insensitive matching buckets by exact basename, so a
-        # differently-cased nested child (.Cursor) can flatten ahead of its
-        # ancestor (.cursor). The depth sort must still prune the child.
-        anc = self.root / "a" / ".cursor"
-        anc.mkdir(parents=True)
-        child = anc / "n" / ".Cursor"
-        child.mkdir(parents=True)
-        index = {".Cursor": [child], ".cursor": [anc]}  # child's bucket first
-        got = []
-        orig = pdi.get_subtree_index
-        pdi.get_subtree_index = lambda *a, **k: index
-        try:
-            dispatch_matches(self.root, self.root, _never_skip, "t",
-                             lambda n: n.lower() == ".cursor", got.append)
-        finally:
-            pdi.get_subtree_index = orig
-        self.assertEqual([str(p) for p in got], [str(anc)])
 
     def test_concurrent_get_subtree_index_is_safe(self):
         # Finding 3: parallel walks (Windows MCP ThreadPoolExecutor) must not race
@@ -314,9 +294,9 @@ class TestReviewHardening(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(all(set(r) == set(results[0]) for r in results))
 
-    def test_mcp_walker_forwards_skip_id(self):
-        # Finding 2: the MCP walker keys the shared cache by a caller-supplied
-        # skip_id (default shared), so a different prune can be isolated.
+    def test_mcp_walker_requires_and_forwards_skip_id(self):
+        # skip_id is required (no default), so a caller with different prune rules
+        # cannot silently share another tool's index; it is forwarded to dispatch.
         from coding_discovery_tools import mcp_extraction_helpers as mh
         seen = []
         orig = mh.dispatch_matches
@@ -324,18 +304,23 @@ class TestReviewHardening(unittest.TestCase):
         try:
             mh.walk_for_mcp_configs_generic(
                 self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
-                _never_skip)
+                _never_skip, skip_id="cursor_ide")
             mh.walk_for_mcp_configs_generic(
                 self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
-                _never_skip, skip_id="custom")
+                _never_skip, skip_id="cursor_cli")
         finally:
             mh.dispatch_matches = orig
-        self.assertEqual(seen, ["mcp_project", "custom"])
+        self.assertEqual(seen, ["cursor_ide", "cursor_cli"])
+        # Omitting it is a TypeError, not a silent fall back to a shared id.
+        with self.assertRaises(TypeError):
+            mh.walk_for_mcp_configs_generic(
+                self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
+                _never_skip)
 
     def test_dispatch_allows_real_indexed_dir(self):
         # Finding B guard, positive side: a real directory (and, by the same
-        # S_IFDIR lstat, a Windows junction) still dispatches — only symlinks and
-        # vanished dirs are dropped.
+        # S_ISDIR stat, a Windows junction — stat follows to a real dir) still
+        # dispatches; only vanished dirs and escaping links are dropped.
         real = self.root / "proj" / ".cursor"
         real.mkdir(parents=True)
         index = {".cursor": [real]}
@@ -364,11 +349,11 @@ class TestReviewHardening(unittest.TestCase):
         try:
             mh.walk_for_mcp_configs_generic(
                 self.root, self.root, [], ".cursor", "mcp.json", "Cursor", None,
-                _never_skip)
+                _never_skip, skip_id="h")
             hidden_flag = seen["hidden"]
             mh.walk_for_mcp_configs_generic(
                 self.root, self.root, [], "AGENTS", "mcp.json", "X", None,
-                _never_skip)
+                _never_skip, skip_id="nh")
         finally:
             mh.dispatch_matches = orig
         self.assertTrue(hidden_flag)        # ".cursor" -> index path
@@ -492,6 +477,93 @@ class TestReviewHardening(unittest.TestCase):
         self.assertEqual(set(macos_h._SKIP_SYSTEM_PREFIXES), set(SKIP_SYSTEM_DIRS))
         self.assertEqual(set(linux_h._LINUX_SKIP_SYSTEM_PREFIXES),
                          {d + "/" for d in linux_h._LINUX_SKIP_SYSTEM_DIRS})
+
+
+def _staging_reference(root: Path, current: Path, is_match, should_skip) -> list:
+    """Independent DFS walk mirroring the pre-index per-tool behaviour: dispatch a
+    matching dir (never descend it), descend the rest, never descend a symlink,
+    honour the depth cap, and only dispatch a real dir inside the scan root.
+    Encounter (DFS) order — what the old per-tool walk produced."""
+    root_real = os.path.realpath(str(root))
+    out: list = []
+
+    def walk(d: Path):
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            return
+        for e in entries:
+            item = Path(e.path)
+            if should_skip(item) or len(item.relative_to(root).parts) > MAX_SEARCH_DEPTH:
+                continue
+            if not e.is_dir():
+                continue
+            if is_match(e.name):
+                if pdi._is_dispatchable(item) and pdi._within_scan_root(item, root_real):
+                    out.append(item)
+                continue
+            if not e.is_symlink():
+                walk(item)
+
+    walk(Path(current))
+    return out
+
+
+class TestStagingParity(unittest.TestCase):
+    """Diff BOTH new routes (the shared index and the direct fallback) against an
+    independent DFS reference, over the cases the three review divergences came
+    from. Running both implementations over the same tree and diffing is what
+    would have caught symlink drop, fault caching, and the dispatch-order shift."""
+
+    def setUp(self):
+        clear_cache()
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        clear_cache()
+        self._tmp.cleanup()
+
+    def _build(self, layout):
+        for parts in layout:
+            self.root.joinpath(*parts).mkdir(parents=True, exist_ok=True)
+
+    def _assert_both_routes_match_reference(self, is_match, should_skip=_never_skip):
+        ref = [str(p) for p in _staging_reference(self.root, self.root, is_match, should_skip)]
+        clear_cache()
+        idx_got: list = []
+        dispatch_matches(self.root, self.root, should_skip, "parity", is_match, idx_got.append)
+        fb_got: list = []
+        pdi._walk_direct(self.root, self.root, is_match, fb_got.append, should_skip)
+        self.assertEqual([str(p) for p in idx_got], ref, "index route diverged from the reference")
+        self.assertEqual([str(p) for p in fb_got], ref, "fallback route diverged from the reference")
+
+    def test_parity_nesting_siblings_and_cross_name(self):
+        self._build([("a", ".cursor"), ("a", ".cursor", "deep", ".cursor"),
+                     ("b", "src", ".cursor"), ("c", ".roo", "inner", ".cursor")])
+        self._assert_both_routes_match_reference(lambda n: n == ".cursor")
+
+    def test_parity_with_skip_prune(self):
+        self._build([("keep", ".cursor"), ("node_modules", "pkg", ".cursor")])
+        self._assert_both_routes_match_reference(
+            lambda n: n == ".cursor", lambda p: "node_modules" in p.parts)
+
+    def test_parity_depth_cap(self):
+        chain = self.root
+        for i in range(MAX_SEARCH_DEPTH + 1):
+            chain = chain / f"d{i}"
+        (chain / ".cursor").mkdir(parents=True, exist_ok=True)
+        (self.root / "shallow" / ".cursor").mkdir(parents=True, exist_ok=True)
+        self._assert_both_routes_match_reference(lambda n: n == ".cursor")
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_parity_symlinked_tool_dir_inside_root(self):
+        # The stow case that blocked the PR: a symlinked .cursor resolving inside
+        # the root must be dispatched by every route.
+        (self.root / "shared" / ".cursor").mkdir(parents=True)
+        (self.root / "proj").mkdir(parents=True)
+        os.symlink(self.root / "shared" / ".cursor", self.root / "proj" / ".cursor")
+        self._assert_both_routes_match_reference(lambda n: n == ".cursor")
 
 
 if __name__ == "__main__":

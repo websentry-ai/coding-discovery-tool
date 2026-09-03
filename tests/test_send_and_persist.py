@@ -84,6 +84,22 @@ class TestSendReport(unittest.TestCase):
         self.report = {"home_user": "alice", "device_id": "TEST123", "tools": []}
 
     @patch("time.sleep")
+    def test_failure_phase_distinguishes_the_three_message_types(self, _sleep):
+        """A device that dies on in_progress never started; one that dies on the inventory
+        upload scanned fine and could not deliver. Both share send_report_to_backend, so
+        without a distinct phase they are indistinguishable in Sentry."""
+        self.server.default_code = 500
+        seen = []
+        with patch.object(utils_mod, "report_to_sentry",
+                          side_effect=lambda exc, ctx=None, **kw: seen.append((ctx or {}).get("phase"))):
+            utils_mod.send_scan_event(self.base_url, "k", "dev", "run", "in_progress")
+            utils_mod.send_scan_event(self.base_url, "k", "dev", "run", "completed")
+            utils_mod.send_report_to_backend(self.base_url, "k", self.report)
+        self.assertEqual(
+            ["scan_event:in_progress", "scan_event:completed", "send_report"],
+            list(dict.fromkeys(seen)))
+
+    @patch("time.sleep")
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_successful_send(self, _sleep):
         self.server.default_code = 200

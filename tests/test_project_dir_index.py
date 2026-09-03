@@ -205,10 +205,13 @@ class TestFailSafeDispatch(unittest.TestCase):
                              lambda n: n == ".cursor", got.append)
         finally:
             pdi.get_subtree_index = orig
-        return sorted(str(p) for p in got)
+        # No sort: both routes walk the same os.scandir order, so comparing the
+        # lists as-is pins dispatch order, not just the set of dirs found.
+        return [str(p) for p in got]
 
     def test_fallback_dispatch_is_identical_to_index(self):
-        # The independent fallback walk must discover exactly what the index does.
+        # The independent fallback walk must discover the same dirs in the same
+        # order the index does.
         via_index = self._collect_via(force_index_error=False)
         clear_cache()
         via_fallback = self._collect_via(force_index_error=True)

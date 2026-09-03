@@ -54,16 +54,10 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> bool:
-    """Record every hidden dir under ``current_dir`` by basename.
-
-    Returns True only if ``current_dir`` AND every descended subtree were fully
-    readable, so the caller can skip caching a partial index and let a transient
-    fault be retried per tool (as the old per-tool walk did).
-
-    A dir is recorded before its children (``outermost_only`` relies on that).
-    Links and junctions are recorded but never descended: a privileged scan must
-    not follow a user's link into another tree.
-    """
+    """Record every hidden dir under ``current_dir`` by basename, returning True
+    only if this dir and every subtree below it were fully readable — so the
+    caller can skip caching a partial index. Records a dir before its children
+    (``outermost_only`` relies on it); records but never descends links."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
@@ -184,9 +178,8 @@ def dispatch_matches(root_path: Path, current_dir: Path,
     try:
         index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
         # Each bucket is one basename in ancestor-before-descendant order, so for
-        # the (single-basename) matchers in use this stays DFS-ordered and
-        # outermost_only prunes correctly. A matcher spanning basenames of
-        # differing case would need to re-establish that order.
+        # the single-basename matchers in use this stays DFS-ordered and prunes
+        # correctly. A cross-basename matcher would need to re-establish order.
         matches = [d for name, dirs in index.items() if is_match(name) for d in dirs]
         targets = outermost_only(matches)
     except Exception as e:

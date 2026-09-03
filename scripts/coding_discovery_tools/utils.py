@@ -773,12 +773,15 @@ def send_scan_event(
     if covered_home_users is not None:
         payload["covered_home_users"] = covered_home_users
 
+    # Tag which message failed: a device that dies on in_progress never got off the ground,
+    # one that dies on the inventory upload scanned fine and could not deliver. Both share
+    # send_report_to_backend, so without this they are indistinguishable in Sentry.
     return send_report_to_backend(
         backend_url,
         api_key,
         payload,
         app_name,
-        sentry_context
+        {**(sentry_context or {}), "phase": f"scan_event:{scan_event}"}
     )
 
 
@@ -902,7 +905,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     try:
                         raise RuntimeError(error_msg)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning")
+                        report_to_sentry(exc, {"phase": "send_report", **ctx, "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning")
                     return (False, True)
 
                 http_code = int(status_str)
@@ -922,7 +925,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                             error_detail += f": {response_body[:200]}"
                         raise RuntimeError(error_detail)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
+                        report_to_sentry(exc, {"phase": "send_report", **ctx, "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
                     return (False, False)
 
                 if attempt < MAX_ATTEMPTS:
@@ -934,7 +937,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                             error_detail += f": {response_body[:200]}"
                         raise RuntimeError(error_detail)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
+                        report_to_sentry(exc, {"phase": "send_report", **ctx, "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
                     return (False, True)
 
             except subprocess.TimeoutExpired:
@@ -945,13 +948,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     try:
                         raise RuntimeError("curl timeout")
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                        report_to_sentry(exc, {"phase": "send_report", **ctx, "attempt": attempt}, level="warning")
                     return (False, True)
 
             except OSError as e:
                 # curl missing or not executable: local, not transient, so sleeping cannot help.
                 logger.error(f"Cannot execute curl: {e}")
-                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                report_to_sentry(e, {"phase": "send_report", **ctx, "attempt": attempt}, level="warning")
                 return (False, True)
 
             except Exception as e:
@@ -959,7 +962,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 if attempt < MAX_ATTEMPTS:
                     _backoff(attempt)
                 else:
-                    report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                    report_to_sentry(e, {"phase": "send_report", **ctx, "attempt": attempt}, level="warning")
                     return (False, True)
 
         return (False, True)

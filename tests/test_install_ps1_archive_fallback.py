@@ -47,6 +47,71 @@ class TestHarnessHelpers(unittest.TestCase):
             self.assertIn(f"function {name}", text)
         self.assertNotRegex(text, r"(?m)^\s*Main\s*$")
 
+    def test_every_prerequisite_exit_reports_before_quitting(self):
+        """A gate that exits without reporting leaves no trace anywhere."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        self.assertIn("function Send-InstallerFailure", text)
+        for gate in ("Missing required arguments: -ApiKey and -Domain",
+                     "Python 3 required but not found.", "Failed to download repository."):
+            block = text[text.index(gate) - 300:text.index(gate)]
+            self.assertIn("Send-InstallerFailure", block, f"{gate!r} exits unreported")
+
+    def test_failure_report_uses_the_sentry_event_contract(self):
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        for field in ("event_id", "'installer_blocked'", "reason      = $Reason",
+                      "InstallerPrerequisite", "/store/", "X-Sentry-Auth"):
+            self.assertIn(field, text)
+
+    def test_raw_serial_is_not_labelled_device_id(self):
+        """The agent's device_id is validated; this is the unvalidated BIOS value."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        tags = text[text.index("tags      = @{"):text.index("exception = @{")]
+        self.assertIn("bios_serial", tags)
+        self.assertNotIn("device_id", tags)
+        self.assertIn("hostname", tags)
+
+    def test_issue_title_carries_only_the_reason_code(self):
+        """Per-machine detail in the title would split one issue into hundreds."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        title = re.search(r"value = \"([^\"]*)\"", text).group(1)
+        self.assertIn("$Reason", title)
+        self.assertNotIn("$Detail", title)
+
+    def test_failures_are_written_to_the_shared_unbound_log_dir(self):
+        """Under MDM the console goes nowhere, so the run has to leave a file behind. Same
+        directory and line format as setup-scheduled-scan.ps1 so support looks in one place."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        self.assertIn("function Write-Log", text)
+        self.assertIn("Join-Path $env:LOCALAPPDATA 'Unbound\\Logs'", text)
+        self.assertIn("'install.log'", text)
+        scheduled = (INSTALL_PS1.parent / "setup-scheduled-scan.ps1").read_text(encoding="utf-8")
+        self.assertIn("Unbound\\Logs", scheduled, "the shared log dir moved; install.ps1 must follow")
+
+    def test_error_message_says_where_the_log_is(self):
+        """Otherwise the customer has to already know the convention to send us anything."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        block = text[text.index("function Write-ErrorMessage"):]
+        self.assertIn("Details written to", block[:600])
+        self.assertIn("$script:InstallLog", block[:600])
+
+    def test_third_party_detail_is_flattened_redacted_and_capped(self):
+        """Exception text is unbounded and not ours. A newline forges a second log entry in the
+        artifact customers send us; a URI could carry the key. Caps at 1024 like the Python side."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        self.assertIn("function Format-Detail", text)
+        body = text[text.index("function Format-Detail"):text.index("function Write-Log")]
+        self.assertIn("[\\r\\n]+", body, "multi-line detail must be flattened")
+        self.assertIn("<redacted>", body, "the api key must be scrubbed")
+        self.assertIn("1024", body, "detail must be capped like response_body[:1024]")
+        # Both sinks must go through it: the local log and the Sentry payload.
+        self.assertIn("(Format-Detail $msg)", text)
+        self.assertIn("detail = (Format-Detail $Detail)", text)
+
+    def test_sentry_dsn_can_be_disabled_for_tests(self):
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        self.assertIn("$env:AI_DISCOVERY_SENTRY_DSN", text)
+        self.assertIn("if (-not $SENTRY_DSN", text)
+
     def test_path_without_git_drops_only_git_entries(self):
         # Drive-letter-free entries so the check is valid on every OS's pathsep.
         path = os.pathsep.join(["Windows", "Program Files/Git/cmd", "Python312"])

@@ -20,6 +20,7 @@ from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 
 from .constants import MAX_SEARCH_DEPTH
 from .mcp_script_hash import augment_script_fields
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -740,6 +741,15 @@ def extract_mcp_from_dir_generic(
         logger.warning(f"Error reading {tool_name} MCP config {mcp_config_file}: {e}")
 
 
+# Distinct from the rules index id: the MCP prune adds is_home_dotdir_descendant,
+# which the Linux rules prune omits, so the two must not share a cached tree.
+# Every MCP caller uses the same prune (should_skip_path + should_skip_system_path
+# for the running OS), so they intentionally share this one id and its cached
+# walk. A caller with a DIFFERENT prune must pass a distinct skip_id, or it would
+# be served an index built under the wrong prune.
+_MCP_PROJECT_SKIP_ID = "mcp_project"
+
+
 def walk_for_mcp_configs_generic(
     root_path: Path,
     current_dir: Path,
@@ -749,71 +759,37 @@ def walk_for_mcp_configs_generic(
     tool_name: str,
     global_tool_dir: Optional[Path],
     should_skip_func: Callable[[Path], bool],
-    current_depth: int = 0
+    current_depth: int = 0,
+    *,
+    skip_id: str,  # required: keys the shared cache — callers with different
+    # prune rules must pass distinct ids so one tool can't be served another's index
 ) -> None:
-    """
-    Generic function to recursively walk directory tree looking for tool MCP config files.
+    """Walk a subtree for one tool's MCP configs via the shared index (matching the
+    tool dir case-insensitively), falling back to an independent walk if the index
+    faults. Replaces the per-tool walkers. ``current_depth`` is unused (call-site
+    compatibility); ``skip_id`` keys the shared cache."""
+    def prune(item: Path) -> bool:
+        return should_skip_func(item) or is_home_dotdir_descendant(item)
 
-    This replaces all tool-specific walk_for_*_mcp_configs functions.
+    target = tool_dir_name.lower()
 
-    Args:
-        root_path: Root search path (for depth calculation)
-        current_dir: Current directory being processed
-        projects: List to append project configs to
-        tool_dir_name: Name of the tool directory to look for (e.g., ".cursor", ".windsurf")
-        config_filename: Name(s) of the MCP config file (e.g., "mcp.json" or ["mcp.json", "mcp.JSON"])
-        tool_name: Name of the tool (for logging)
-        global_tool_dir: Path to global tool directory to skip (optional)
-        should_skip_func: Function to check if a path should be skipped
-        current_depth: Current recursion depth
-    """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-    
-    try:
-        for item in current_dir.iterdir():
-            try:
-                # Check if we should skip this path
-                if should_skip_func(item) or is_home_dotdir_descendant(item):
-                    continue
+    def on_match(tool_dir: Path) -> None:
+        try:
+            extract_mcp_from_dir_generic(
+                tool_dir, projects, config_filename, tool_name, global_tool_dir
+            )
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error processing {tool_dir}: {e}")
 
-                # Check depth
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    # Path not relative to root (different drive on Windows)
-                    continue
-                
-                if item.is_dir():
-                    # Found the tool directory!
-                    if item.name.lower() == tool_dir_name.lower():
-                        extract_mcp_from_dir_generic(
-                            item, projects, config_filename, tool_name, global_tool_dir
-                        )
-                        # Don't recurse into tool directory
-                        continue
-                    
-                    if item.is_symlink():
-                        continue
-
-                    # Recurse into subdirectories
-                    walk_for_mcp_configs_generic(
-                        root_path, item, projects, tool_dir_name, config_filename,
-                        tool_name, global_tool_dir, should_skip_func, current_depth + 1
-                    )
-                
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
-                continue
-                
-    except (PermissionError, OSError):
-        pass
-    except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+    dispatch_matches(
+        root_path, current_dir, prune, skip_id,
+        lambda name: name.lower() == target, on_match,
+        # The shared index stores only hidden dirs; a non-hidden marker must use
+        # the direct walk or it would silently never match.
+        markers_all_hidden=tool_dir_name.startswith("."),
+    )
 
 
 def extract_claude_mcp_fields(config_data: Dict, config_path: Path) -> List[Dict]:
@@ -903,7 +879,7 @@ def walk_for_cursor_mcp_configs(
     """
     walk_for_mcp_configs_generic(
         root_path, current_dir, projects, ".cursor", MCP_JSON_FILENAMES,
-        "Cursor", global_cursor_dir, should_skip_func, current_depth
+        "Cursor", global_cursor_dir, should_skip_func, current_depth, skip_id=_MCP_PROJECT_SKIP_ID
     )
 
 
@@ -946,7 +922,7 @@ def walk_for_windsurf_mcp_configs(
     """
     walk_for_mcp_configs_generic(
         root_path, current_dir, projects, ".windsurf", MCP_CONFIG_JSON_FILENAMES,
-        "Windsurf", global_windsurf_dir, should_skip_func, current_depth
+        "Windsurf", global_windsurf_dir, should_skip_func, current_depth, skip_id=_MCP_PROJECT_SKIP_ID
     )
 
 
@@ -989,7 +965,7 @@ def walk_for_roo_mcp_configs(
     """
     walk_for_mcp_configs_generic(
         root_path, current_dir, projects, ".roo", MCP_JSON_FILENAMES,
-        "Roo Code", global_roo_dir, should_skip_func, current_depth
+        "Roo Code", global_roo_dir, should_skip_func, current_depth, skip_id=_MCP_PROJECT_SKIP_ID
     )
 
 
@@ -1032,7 +1008,7 @@ def walk_for_kilocode_mcp_configs(
     """
     walk_for_mcp_configs_generic(
         root_path, current_dir, projects, ".kilocode", MCP_JSON_FILENAMES,
-        "Kilo Code", global_kilocode_dir, should_skip_func, current_depth
+        "Kilo Code", global_kilocode_dir, should_skip_func, current_depth, skip_id=_MCP_PROJECT_SKIP_ID
     )
 
 

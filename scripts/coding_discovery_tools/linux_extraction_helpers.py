@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .constants import MAX_SEARCH_DEPTH
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,18 @@ from .macos_extraction_helpers import (  # noqa: F401
 # Linux-specific overrides
 # ---------------------------------------------------------------------------
 
+# Precomputed once so the per-path check is a single C-level ``str.startswith``
+# over a tuple instead of a Python generator that re-iterates every skip dir on
+# every path — this predicate runs on every entry of every walk.
+_LINUX_SKIP_SYSTEM_PREFIXES = tuple(d + '/' for d in _LINUX_SKIP_SYSTEM_DIRS)
+
+
 def should_skip_system_path(path: Path) -> bool:
     """Return True for Linux virtual-filesystem and system directories."""
     path_str = str(path)
-    return any(path_str == d or path_str.startswith(d + '/') for d in _LINUX_SKIP_SYSTEM_DIRS)
+    # Same result as ``any(s == d or s.startswith(d + '/') for d in ...)``, but the
+    # prefix scan runs in C via ``startswith(tuple)`` instead of a Python loop.
+    return path_str in _LINUX_SKIP_SYSTEM_DIRS or path_str.startswith(_LINUX_SKIP_SYSTEM_PREFIXES)
 
 
 def get_top_level_directories(root_path: Path) -> List[Path]:
@@ -130,6 +139,16 @@ def is_user_level_tool_dir(tool_dir: Path) -> bool:
     return False
 
 
+# Linux project-walk prune. Unlike macOS it does NOT skip hidden home-level dirs
+# (Linux tool configs live under /home/<u>/.<tool>). The id keys the index cache
+# and must differ from the macOS policy.
+def _linux_project_skip(item: Path) -> bool:
+    return should_skip_path(item) or should_skip_system_path(item)
+
+
+_LINUX_PROJECT_SKIP_ID = "linux_project"
+
+
 def walk_for_tool_directories(
     root_path: Path,
     current_dir: Path,
@@ -138,38 +157,25 @@ def walk_for_tool_directories(
     projects_by_root: Dict,
     current_depth: int = 0,
 ) -> None:
-    """Linux-aware walk: uses Linux should_skip_system_path, not the macOS one.
+    """Linux-aware walk: uses Linux should_skip_system_path, not the macOS one
+    (macOS skips '/home' entirely, which would drop all /home/* configs).
 
-    The macOS version skips '/home' entirely (it's in macOS SKIP_SYSTEM_DIRS),
-    which would silently drop all project-level configs under /home/*.
+    Routes through the shared directory index, falling back to an independent walk
+    if the index faults. ``current_depth`` is unused (call-site compatibility).
     """
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
-    try:
-        for item in current_dir.iterdir():
-            try:
-                if should_skip_path(item) or should_skip_system_path(item):
-                    continue
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    continue
-                if item.is_dir():
-                    if item.name == tool_dir_name:
-                        extract_from_dir_func(item, projects_by_root)
-                        continue
-                    if item.is_symlink():
-                        continue
-                    walk_for_tool_directories(
-                        root_path, item, tool_dir_name,
-                        extract_from_dir_func, projects_by_root, current_depth + 1,
-                    )
-            except (PermissionError, OSError):
-                continue
-    except (PermissionError, OSError):
-        pass
+    def on_match(tool_dir: Path) -> None:
+        try:
+            extract_from_dir_func(tool_dir, projects_by_root)
+        except (PermissionError, OSError):
+            pass
+
+    dispatch_matches(
+        root_path, current_dir, _linux_project_skip, _LINUX_PROJECT_SKIP_ID,
+        lambda name: name == tool_dir_name, on_match,
+        # The shared index stores only hidden dirs; a non-hidden marker must use
+        # the direct walk or it would silently never match.
+        markers_all_hidden=tool_dir_name.startswith("."),
+    )
 
 
 def get_linux_user_homes() -> List[Path]:

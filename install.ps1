@@ -179,6 +179,10 @@ function Main {
     }
 
     if (-not $ApiKey -or -not $Domain) {
+        # Reports only when the domain resolved; without it there is nothing to attribute
+        # the event to, so a missing -Domain stays unreportable by construction.
+        Send-InstallerFailure -Reason 'missing-arguments' `
+            -Detail "ApiKey supplied: $([bool]$ApiKey); Domain supplied: $([bool]$Domain)"
         Write-ErrorMessage "Missing required arguments: -ApiKey and -Domain"
         exit 1
     }

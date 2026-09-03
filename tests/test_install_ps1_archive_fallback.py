@@ -51,7 +51,8 @@ class TestHarnessHelpers(unittest.TestCase):
         """A gate that exits without reporting leaves no trace anywhere."""
         text = INSTALL_PS1.read_text(encoding="utf-8")
         self.assertIn("function Send-InstallerFailure", text)
-        for gate in ("Python 3 required but not found.", "Failed to download repository."):
+        for gate in ("Missing required arguments: -ApiKey and -Domain",
+                     "Python 3 required but not found.", "Failed to download repository."):
             block = text[text.index(gate) - 300:text.index(gate)]
             self.assertIn("Send-InstallerFailure", block, f"{gate!r} exits unreported")
 

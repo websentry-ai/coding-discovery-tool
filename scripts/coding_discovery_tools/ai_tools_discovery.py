@@ -2949,6 +2949,9 @@ def main():
     parser.add_argument('--api-key', type=str, help='API key for authentication and report submission (or set UNBOUND_API_KEY env)')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
+    # Deprecated and ignored: the scan authenticates with --api-key. Kept so a
+    # stale MDM policy or cron that still passes it is not rejected outright.
+    parser.add_argument('--discovery-key', type=str, help=argparse.SUPPRESS)
     parser.add_argument(
         '--timeout', type=int, default=DEFAULT_RUN_TIMEOUT_SECONDS,
         help='Self-imposed run timeout in seconds (default: %(default)s). On '

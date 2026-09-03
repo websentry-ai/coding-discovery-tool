@@ -201,6 +201,49 @@ class TestCacheKey(unittest.TestCase):
             compute_cache_key(name="b", url=None, command="npx", args=["x"]),
         )
 
+    def test_smithery_cli_uses_scoped_run_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npx",
+                args=["-y", "@smithery/cli@latest", "run", "@vendor/server", "--key", "secret"],
+            ),
+            "smithery:@vendor/server",
+        )
+
+    def test_smithery_cli_uses_bare_run_target_through_windows_cmd(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="cmd.exe",
+                args=["/c", "npx", "-y", "@smithery/cli", "run", "example-server"],
+            ),
+            "smithery:example-server",
+        )
+
+    def test_dnx_uses_nuget_package_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dnx",
+                args=["Vendor.Server@1.2.3", "serve"],
+            ),
+            "nuget:vendor.server",
+        )
+
+    def test_dotnet_tool_execute_ignores_nuget_source_url(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "execute", "Example.Server@2.0.0",
+                    "--source", "https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
     def test_config_changes_key(self):
         self.assertNotEqual(
             compute_cache_key(name="s", url=None, command="npx", args=["pkg-a"]),

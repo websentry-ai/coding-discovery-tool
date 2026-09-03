@@ -23,6 +23,8 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     url-arg:<host[:port]/path>   -> from a URL embedded in args (e.g., mcp-remote proxies)
     git:<host/owner/repo>        -> from a git+ install spec in args (npx/uvx git installs)
     npm:<package>                -> from an npm package in args (@scoped, or bare under npx/npm/bunx)
+    smithery:<server>            -> target passed to `@smithery/cli run`
+    nuget:<package>              -> package run by `dnx` or `dotnet tool execute`
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
     script:<hash>                -> content hash of a local script (supplied by the client)
@@ -94,6 +96,7 @@ NPM_SUBCOMMANDS = frozenset({'exec', 'run', 'run-script', 'x', 'create', 'init',
 # Python-package runners and the sub-commands that precede the package.
 PYPI_RUNNERS = frozenset({'uvx', 'uv', 'pipx'})
 PYPI_SUBCOMMANDS = frozenset({'run', 'tool', 'tool-run'})
+NUGET_RUNNERS = frozenset({'dnx', 'dotnet'})
 
 # Prompt Security's MCP proxy wraps the real server command after this token.
 PROMPT_SECURITY_BASENAME = 'prompt_security_mcp'
@@ -110,7 +113,7 @@ RUNTIMES = frozenset({
 # Commands that have their own rule (or are runtimes) -- excluded from the
 # catch-all `bin:` tier so they don't double-resolve.
 BIN_SKIP_COMMANDS = (
-    RUNTIMES | NPM_RUNNERS | PYPI_RUNNERS
+    RUNTIMES | NPM_RUNNERS | PYPI_RUNNERS | NUGET_RUNNERS
     | frozenset({'docker', 'builtin', PROMPT_SECURITY_BASENAME})
 )
 
@@ -239,6 +242,37 @@ def _normalize_npm(pkg: str) -> str:
         i = p.find('@', 1)
         return p[:i] if i != -1 else p
     return p.split('@')[0]
+
+
+def _smithery_run_target(args: List[str]) -> Optional[str]:
+    """Return the server after `@smithery/cli run`, never the wrapper package."""
+    for index, arg in enumerate(args):
+        if not isinstance(arg, str) or _normalize_npm(arg).lower() != '@smithery/cli':
+            continue
+        if index + 2 >= len(args) or str(args[index + 1]).lower() != 'run':
+            return None
+        target = _unquote(args[index + 2])
+        if (
+            not target
+            or target.startswith('-')
+            or target.startswith(('http://', 'https://', 'git+'))
+            or _looks_like_local_path(target)
+        ):
+            return None
+        return _normalize_npm(target).lower()
+    return None
+
+
+def _nuget_package(base: str, args: List[str]) -> Optional[str]:
+    candidate = None
+    if base == 'dnx':
+        candidate = next((arg for arg in args if isinstance(arg, str) and not arg.startswith('-')), None)
+    elif base == 'dotnet' and len(args) >= 3 and [str(arg).lower() for arg in args[:2]] == ['tool', 'execute']:
+        candidate = args[2]
+    if not isinstance(candidate, str):
+        return None
+    package = _unquote(candidate).split('@', 1)[0].lower()
+    return package if re.fullmatch(r'[a-z0-9][a-z0-9._-]*', package) else None
 
 
 def _normalize_pypi(pkg: str) -> str:
@@ -449,6 +483,14 @@ def compute_fingerprint(
         identity = _extract_url_identity(url)
         if identity:
             return f'url:{identity}'
+
+    nuget_package = _nuget_package(base, safe_args)
+    if nuget_package:
+        return f'nuget:{nuget_package}'
+
+    smithery_target = _smithery_run_target(safe_args)
+    if smithery_target:
+        return f'smithery:{smithery_target}'
 
     # 2. URLs inside args -> url-arg:<identity> (only if all URLs resolve to a single identity)
     url_args = _urls_in_args(safe_args)

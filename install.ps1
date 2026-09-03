@@ -6,8 +6,17 @@ param(
     [string]$Domain,
 
     [Parameter(Mandatory=$false)]
-    [string]$AppName
+    [string]$AppName,
+
+    # Deprecated and ignored: the scan authenticates with -ApiKey. Declared so a
+    # stale MDM policy or cron that still passes it is not rejected outright.
+    [Parameter(Mandatory=$false)]
+    [string]$DiscoveryKey
 )
+
+if (-not [string]::IsNullOrWhiteSpace($DiscoveryKey)) {
+    Write-Warning "-DiscoveryKey is deprecated and ignored - the scan uses -ApiKey."
+}
 
 $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 

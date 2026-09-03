@@ -625,8 +625,9 @@ while [[ $# -gt 0 ]]; do
             if [ $# -lt 2 ]; then echo "Error: --api-key requires a value"; usage; fi
             API_KEY="$2"; shift 2 ;;
         --discovery-key)
-            if [ $# -lt 2 ]; then echo "Error: --discovery-key requires a value"; usage; fi
-            DISCOVERY_KEY="$2"; shift 2 ;;
+            # Deprecated and ignored downstream. Tolerated with or without a
+            # value so a stale cron or MDM policy never fails on it.
+            if [ $# -lt 2 ]; then shift; else DISCOVERY_KEY="$2"; shift 2; fi ;;
         --domain)
             if [ $# -lt 2 ]; then echo "Error: --domain requires a value"; usage; fi
             DOMAIN="$2"; shift 2 ;;

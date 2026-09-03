@@ -245,7 +245,6 @@ def _normalize_npm(pkg: str) -> str:
 
 
 def _smithery_run_target(args: List[str]) -> Optional[str]:
-    """Return the server after `@smithery/cli run`, never the wrapper package."""
     for index, arg in enumerate(args):
         if not isinstance(arg, str) or _normalize_npm(arg).lower() != '@smithery/cli':
             continue

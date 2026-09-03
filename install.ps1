@@ -32,10 +32,22 @@ $TEMP_DIR = Join-Path $env:TEMP "coding-discovery-tool-$(Get-Random)"
 # scheduled-run failures sit side by side. Under MDM the console output goes nowhere.
 $LogDir = Join-Path $env:LOCALAPPDATA 'Unbound\Logs'
 $script:InstallLog = Join-Path $LogDir 'install.log'
+
+function Format-Detail($text) {
+    # Exception text is third-party and unbounded. Flatten so one entry stays one line,
+    # redact the key in case a URI ever carries it, and cap at 1024 like the Python side
+    # does for response_body/curl_stderr.
+    if (-not $text) { return '' }
+    $s = [string]$text -replace '[\r\n]+', ' '
+    if ($_key) { $s = $s -replace [regex]::Escape($_key), '<redacted>' }
+    if ($s.Length -gt 1024) { $s = $s.Substring(0, 1024) }
+    return $s
+}
+
 function Write-Log($msg) {
     try {
         if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
-        "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg |
+        "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), (Format-Detail $msg) |
             Out-File -FilePath $script:InstallLog -Append -Encoding UTF8
     } catch { }
 }
@@ -88,7 +100,7 @@ function Send-InstallerFailure {
             }
             # Reason only in the title; detail varies per machine and would split the issue.
             exception = @{ values = @(@{ type = 'InstallerPrerequisite'; value = "Discovery installer blocked: $Reason" }) }
-            extra     = @{ detail = $Detail }
+            extra     = @{ detail = (Format-Detail $Detail) }
         } | ConvertTo-Json -Depth 6 -Compress
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
         $null = Invoke-RestMethod -Uri "https://$sentryHost/api/$projectId/store/" -Method Post -TimeoutSec 10 `

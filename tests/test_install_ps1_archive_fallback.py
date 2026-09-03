@@ -94,6 +94,19 @@ class TestHarnessHelpers(unittest.TestCase):
         self.assertIn("Details written to", block[:600])
         self.assertIn("$script:InstallLog", block[:600])
 
+    def test_third_party_detail_is_flattened_redacted_and_capped(self):
+        """Exception text is unbounded and not ours. A newline forges a second log entry in the
+        artifact customers send us; a URI could carry the key. Caps at 1024 like the Python side."""
+        text = INSTALL_PS1.read_text(encoding="utf-8")
+        self.assertIn("function Format-Detail", text)
+        body = text[text.index("function Format-Detail"):text.index("function Write-Log")]
+        self.assertIn("[\\r\\n]+", body, "multi-line detail must be flattened")
+        self.assertIn("<redacted>", body, "the api key must be scrubbed")
+        self.assertIn("1024", body, "detail must be capped like response_body[:1024]")
+        # Both sinks must go through it: the local log and the Sentry payload.
+        self.assertIn("(Format-Detail $msg)", text)
+        self.assertIn("detail = (Format-Detail $Detail)", text)
+
     def test_sentry_dsn_can_be_disabled_for_tests(self):
         text = INSTALL_PS1.read_text(encoding="utf-8")
         self.assertIn("$env:AI_DISCOVERY_SENTRY_DSN", text)

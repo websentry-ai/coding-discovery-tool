@@ -52,7 +52,10 @@ def _dispatched(root: Path, tool_dir: str):
 class TestToolDirWalkE2E(unittest.TestCase):
     def setUp(self):
         pdi.clear_cache()
-        self._tmp = tempfile.mkdtemp(prefix="scan-e2e-")
+        # Plant under HOME, not the system temp dir: the real Linux prune skips
+        # system paths like /tmp (prod walks /home/<user>), so a /tmp fixture would
+        # be correctly skipped and dispatch nothing. HOME is walkable on every OS.
+        self._tmp = tempfile.mkdtemp(prefix="scan-e2e-", dir=str(Path.home()))
         self.root = Path(self._tmp).resolve()
 
     def tearDown(self):

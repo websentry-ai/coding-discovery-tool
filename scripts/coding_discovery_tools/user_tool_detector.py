@@ -11,7 +11,7 @@ import os
 import platform
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
@@ -23,6 +23,7 @@ from .utils import (
     run_command,
     windows_node_manager_shims,
 )
+from .vscode_extension_helpers import VSCODE_EDITOR_KEYS, find_extension_in_editor
 
 logger = logging.getLogger(__name__)
 
@@ -605,6 +606,23 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
     return None
 
 
+CLAUDE_CODE_EXTENSION_ID = "anthropic.claude-code"
+
+
+def claude_vscode_extension_binaries(user_home: Path) -> List[Path]:
+    """``claude`` binaries bundled inside the Claude Code VS Code extension.
+
+    Gated on a live ``extensions.json`` entry so uninstalled residue cannot match.
+    """
+    exe = "claude.exe" if platform.system() == "Windows" else "claude"
+    binaries: List[Path] = []
+    for editor in VSCODE_EDITOR_KEYS:
+        found = find_extension_in_editor(user_home, editor, CLAUDE_CODE_EXTENSION_ID)
+        if found:
+            binaries.append(Path(found[0]) / "resources" / "native-binary" / exe)
+    return binaries
+
+
 def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     """
     Find the absolute path to the claude binary for a specific user.
@@ -613,6 +631,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     npm-global, yarn-global, nvm, and a ``which claude`` PATH backstop.
     On Windows: .local/bin, AppData npm (.cmd and bare), AppData Local Programs,
     Bun, and the Node managers (nvm-windows, Volta, pnpm).
+    On both: the VS Code extension's bundled CLI, checked last.
 
     Args:
         user_home: Path to the user's home directory
@@ -652,6 +671,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             Path("/usr/bin/claude"),               # apt/dnf system package
         ]
         candidates = machine_global + user_relative
+
+    candidates += claude_vscode_extension_binaries(user_home)
 
     is_root = is_running_as_root()
     for candidate in candidates:

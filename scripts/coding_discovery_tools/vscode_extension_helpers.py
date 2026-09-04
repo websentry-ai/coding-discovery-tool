@@ -27,6 +27,9 @@ _EXTENSIONS_DIR_BY_EDITOR = {
     "Antigravity": ".antigravity/extensions",
 }
 
+# For callers that scan every editor rather than a fixed SUPPORTED_IDES subset.
+VSCODE_EDITOR_KEYS = tuple(_EXTENSIONS_DIR_BY_EDITOR)
+
 
 def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     """Return the extensions registry directory for ``ide_key`` under ``user_home``.

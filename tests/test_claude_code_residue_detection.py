@@ -13,6 +13,7 @@ false-NEGATIVE guard); residue-only ``~/.claude`` -> NOT detected (the FP fix);
 and a present-but-non-executable file -> NOT detected.
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -735,3 +736,95 @@ class TestToolConfigDirsDiagnostic(unittest.TestCase):
     def test_is_a_queryable_sentry_tag(self):
         """Must be a tag, not just context, or it can't be grouped on in Sentry."""
         self.assertIn("config_dirs_present", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):
+    """The extension bundles the CLI at ``resources/native-binary/claude`` — a real
+    binary install no fixed candidate path reaches. Gated on a live
+    ``extensions.json`` entry, and probed last."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _plant(self, ext_root: str, exe: str, listed: bool = True, with_binary: bool = True) -> Path:
+        """Install the extension under ``<home>/<ext_root>``; returns the bundled binary."""
+        ext_dir = self.home / ext_root / "anthropic.claude-code-2.1.260"
+        binary = ext_dir / "resources" / "native-binary" / exe
+        if with_binary:
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_text("")
+            os.chmod(binary, 0o755)
+        else:
+            ext_dir.mkdir(parents=True, exist_ok=True)
+        entries = [{"identifier": {"id": "anthropic.claude-code"}, "version": "2.1.260",
+                    "relativeLocation": ext_dir.name}] if listed else []
+        registry = self.home / ext_root / "extensions.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(json.dumps(entries))
+        return binary
+
+    def _detect_windows(self):
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            return _detect_claude_code(det, self.home)
+
+    def test_bundled_binary_detected_in_vscode(self):
+        binary = self._plant(".vscode/extensions", "claude.exe")
+        result = self._detect_windows()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+
+    def test_bundled_binary_detected_in_forks(self):
+        for ext_root in (".cursor/extensions", ".windsurf/extensions",
+                         ".vscode-oss/extensions", ".antigravity/extensions"):
+            with self.subTest(ext_root=ext_root):
+                self.tearDown()
+                self.setUp()
+                binary = self._plant(ext_root, "claude.exe")
+                self.assertEqual(self._detect_windows()["install_path"], str(binary))
+
+    def test_uninstalled_extension_residue_not_detected(self):
+        """Uninstall: dir and binary still on disk, but delisted from the registry."""
+        self._plant(".vscode/extensions", "claude.exe", listed=False)
+        self.assertIsNone(self._detect_windows())
+
+    def test_listed_extension_without_binary_not_detected(self):
+        self._plant(".vscode/extensions", "claude.exe", with_binary=False)
+        self.assertIsNone(self._detect_windows())
+
+    def test_standalone_install_wins_over_extension(self):
+        """Both surfaces present -> one row, pointing at the standalone install."""
+        self._plant(".vscode/extensions", "claude.exe")
+        npm = self.home / "AppData" / "Roaming" / "npm" / "claude.cmd"
+        npm.parent.mkdir(parents=True, exist_ok=True)
+        npm.write_text("")
+        os.chmod(npm, 0o755)
+        self.assertEqual(self._detect_windows()["install_path"], str(npm))
+
+    def test_corrupt_registry_never_raises(self):
+        registry = self.home / ".vscode" / "extensions" / "extensions.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text("{not json")
+        self.assertIsNone(self._detect_windows())
+
+    @unittest.skipIf(os.name == "nt", "POSIX branch: os.access(X_OK) has no Windows semantics")
+    def test_bundled_binary_detected_on_posix(self):
+        """Same surface on macOS/Linux, where the bundled binary has no suffix."""
+        binary = self._plant(".vscode/extensions", "claude")
+        p_exists, p_access = _isolate_abs()
+        p_exists.start()
+        p_access.start()
+        self.addCleanup(p_exists.stop)
+        self.addCleanup(p_access.stop)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))

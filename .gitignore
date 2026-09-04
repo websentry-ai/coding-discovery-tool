@@ -47,4 +47,7 @@ Thumbs.db
 .agent/
 
 # Kilo Code config
-.kilocode/.claude/worktrees/
+.kilocode/
+
+# Local git worktrees
+.claude/worktrees/

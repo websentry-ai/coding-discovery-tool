@@ -24,7 +24,10 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction
 from .mcp_script_hash import augment_script_fields
-from .vscode_extension_helpers import find_extension_in_editor
+from .vscode_extension_helpers import (
+    extensions_dir_for_editor,
+    find_extension_in_editor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -586,6 +589,7 @@ def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
 _VSCODE_MCP_PROVIDER_CACHE_KEY = "mcp.extCachedServers"
 _VSCODE_MCP_PROVIDER_CACHE_MAX_BYTES = 5 * 1024 * 1024
 _VSCODE_EXTENSION_STATE_MAX_BYTES = 1024 * 1024
+_VSCODE_EXTENSION_MANIFEST_MAX_BYTES = 5 * 1024 * 1024
 _VSCODE_STATE_DATABASE_MAX_COUNT = 500
 _VSCODE_DISABLED_EXTENSIONS_KEY = "extensionsIdentifiers/disabled"
 _VSCODE_ENABLED_EXTENSIONS_KEY = "extensionsIdentifiers/enabled"
@@ -820,8 +824,14 @@ def _manifest_declares_vscode_mcp_provider(
     contribution_id: str,
 ) -> bool:
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with manifest_path.open("rb") as manifest_file:
+            raw_manifest = manifest_file.read(
+                _VSCODE_EXTENSION_MANIFEST_MAX_BYTES + 1
+            )
+        if len(raw_manifest) > _VSCODE_EXTENSION_MANIFEST_MAX_BYTES:
+            return False
+        manifest = json.loads(raw_manifest.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
         return False
     if not isinstance(manifest, dict):
         return False
@@ -853,15 +863,30 @@ def _find_vscode_mcp_provider_manifest(
     contribution_id: str,
 ) -> Optional[Path]:
     ide_key = code_user_base.parent.name
+    extensions_root = extensions_dir_for_editor(user_home, ide_key)
     extension = find_extension_in_editor(user_home, ide_key, extension_id)
-    if extension is not None:
-        manifest_path = Path(extension[0]) / "package.json"
-        if _manifest_declares_vscode_mcp_provider(
-            manifest_path,
-            extension_id,
-            contribution_id,
-        ):
-            return manifest_path
+    if extension is not None and extensions_root is not None:
+        try:
+            extension_path = Path(os.path.abspath(extension[0]))
+            expected_root = Path(os.path.abspath(extensions_root))
+            extension_path.relative_to(expected_root)
+        except (ValueError, OSError):
+            extension_path = None
+        if extension_path is not None:
+            manifest_path = extension_path / "package.json"
+            guarded_paths = (
+                expected_root.parent,
+                expected_root,
+                extension_path,
+                manifest_path,
+            )
+            if not any(is_symlink_or_junction(path) for path in guarded_paths):
+                if _manifest_declares_vscode_mcp_provider(
+                    manifest_path,
+                    extension_id,
+                    contribution_id,
+                ):
+                    return manifest_path
 
     for extension_root in _vscode_builtin_extension_roots(
         user_home,
@@ -1105,6 +1130,7 @@ def _extract_vscode_cached_mcp_projects(
     user_home: Path,
     operating_system: str,
 ) -> List[Dict]:
+    skip_live_scan = _running_with_elevated_privileges(operating_system)
     seen = set()
     validated_providers: Dict[str, bool] = {}
     configs: Dict[str, Dict[str, Any]] = {}
@@ -1188,6 +1214,7 @@ def _extract_vscode_cached_mcp_projects(
                     continue
                 if (
                     launch_config["type"] == "stdio"
+                    and not skip_live_scan
                     and not _vscode_cached_command_exists(
                         launch_config["command"],
                         launch_config.get("cwd"),
@@ -1237,7 +1264,7 @@ def _extract_vscode_cached_mcp_projects(
     for config_key, server in _transform_vscode_cached_mcp_server_entries(
         configs,
         labels,
-        _running_with_elevated_privileges(operating_system),
+        skip_live_scan,
     ):
         grouped.setdefault(scopes[config_key], []).append(server)
 

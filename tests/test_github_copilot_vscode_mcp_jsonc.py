@@ -392,9 +392,16 @@ class _GitHubCopilotVscodeMcpMixin:
             mcp_helpers,
             "_running_with_elevated_privileges",
             return_value=True,
-        ), patch.object(mcp_helpers, "_scan_servers_in_mapping") as scan_servers:
+        ), patch.object(
+            mcp_helpers,
+            "_vscode_cached_command_exists",
+        ) as command_exists, patch.object(
+            mcp_helpers,
+            "_scan_servers_in_mapping",
+        ) as scan_servers:
             servers = self._all_servers(self._extract())
 
+        command_exists.assert_not_called()
         scan_servers.assert_not_called()
         self.assertEqual(len(servers), 1)
         self.assertEqual(servers[0]["scan"]["error"]["code"], "privilege_boundary")
@@ -431,8 +438,35 @@ class _GitHubCopilotVscodeMcpMixin:
 
         self.assertEqual(self._all_servers(self._extract()), [])
 
+    def test_extension_manifest_outside_registry_root_is_ignored(self):
+        extension_dir = self._install_gitlens_provider()
+        outside_dir = Path(self.tmp_dir) / "outside-extension"
+        outside_dir.mkdir()
+        shutil.copy(extension_dir / "package.json", outside_dir / "package.json")
+        (extension_dir.parent / "extensions.json").write_text(
+            json.dumps([
+                {
+                    "identifier": {"id": "eamodio.gitlens"},
+                    "location": {"fsPath": str(outside_dir)},
+                }
+            ]),
+            encoding="utf-8",
+        )
+        self._write_gitkraken_provider_cache()
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
     def test_provider_removed_from_live_manifest_is_ignored(self):
         self._install_gitlens_provider(declares_provider=False)
+        self._write_gitkraken_provider_cache()
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_oversized_extension_manifest_is_ignored(self):
+        extension_dir = self._install_gitlens_provider()
+        (extension_dir / "package.json").write_bytes(
+            b" " * (mcp_helpers._VSCODE_EXTENSION_MANIFEST_MAX_BYTES + 1)
+        )
         self._write_gitkraken_provider_cache()
 
         self.assertEqual(self._all_servers(self._extract()), [])
@@ -480,7 +514,12 @@ class _GitHubCopilotVscodeMcpMixin:
         self._install_gitlens_provider()
         self._write_gitkraken_provider_cache(create_command=False)
 
-        self.assertEqual(self._all_servers(self._extract()), [])
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=False,
+        ):
+            self.assertEqual(self._all_servers(self._extract()), [])
 
     def test_relative_cached_executable_is_resolved_from_cwd(self):
         self._install_gitlens_provider()
@@ -506,7 +545,12 @@ class _GitHubCopilotVscodeMcpMixin:
             )
             conn.commit()
 
-        servers = self._all_servers(self._extract())
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=False,
+        ):
+            servers = self._all_servers(self._extract())
 
         self.assertEqual([server["name"] for server in servers], ["GitKraken"])
 

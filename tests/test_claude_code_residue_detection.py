@@ -23,6 +23,7 @@ from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.user_tool_detector import (
+    _EXTENSION_VERSION,
     _detect_claude_code,
     find_claude_binary_for_user,
 )
@@ -807,6 +808,37 @@ class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):
         os.chmod(npm, 0o755)
         self.assertEqual(self._detect_windows()["install_path"], str(npm))
 
+    def test_registry_location_is_never_used(self):
+        """The recorded location is a VS Code URI (``/c:/Users/...`` on Windows) and is
+        user-writable while the binary it names is executed, so it must not be followed:
+        the real install still resolves, and a location pointing elsewhere is ignored."""
+        real = self._plant(".vscode/extensions", "claude.exe")
+        decoy = self.home / "elsewhere" / "resources" / "native-binary" / "claude.exe"
+        decoy.parent.mkdir(parents=True, exist_ok=True)
+        decoy.write_text("")
+        os.chmod(decoy, 0o755)
+        registry = self.home / ".vscode" / "extensions" / "extensions.json"
+        registry.write_text(json.dumps([{
+            "identifier": {"id": "anthropic.claude-code"},
+            "version": "2.1.260",
+            "location": {"$mid": 1, "path": "/c:/nope", "scheme": "file"},
+            "relativeLocation": "anthropic.claude-code-2.1.260",
+        }]))
+        self.assertEqual(self._detect_windows()["install_path"], str(real))
+
+    def test_platform_suffixed_install_dir_detected(self):
+        """Real dirs carry a platform suffix: anthropic.claude-code-2.1.217-darwin-arm64."""
+        ext_root = self.home / ".vscode" / "extensions"
+        binary = ext_root / "anthropic.claude-code-2.1.260-win32-x64" / "resources" / "native-binary" / "claude.exe"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("")
+        os.chmod(binary, 0o755)
+        ext_root.joinpath("extensions.json").write_text(json.dumps([{
+            "identifier": {"id": "anthropic.claude-code"}, "version": "2.1.260",
+            "relativeLocation": "anthropic.claude-code-2.1.260-win32-x64",
+        }]))
+        self.assertEqual(self._detect_windows()["install_path"], str(binary))
+
     def test_corrupt_registry_never_raises(self):
         registry = self.home / ".vscode" / "extensions" / "extensions.json"
         registry.parent.mkdir(parents=True, exist_ok=True)
@@ -828,3 +860,27 @@ class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(binary))
+
+    def test_live_version_selected_over_superseded_dirs(self):
+        """Superseded version dirs keep working binaries, so the registry's live
+        version must pick the dir actually in use."""
+        ext_root = self.home / ".vscode" / "extensions"
+        for ver in ("2.1.187", "2.1.217", "2.1.202"):
+            b = ext_root / f"anthropic.claude-code-{ver}-win32-x64" / "resources" / "native-binary" / "claude.exe"
+            b.parent.mkdir(parents=True, exist_ok=True)
+            b.write_text("")
+            os.chmod(b, 0o755)
+        ext_root.joinpath("extensions.json").write_text(json.dumps([{
+            "identifier": {"id": "anthropic.claude-code"}, "version": "2.1.217",
+            "relativeLocation": "anthropic.claude-code-2.1.217-win32-x64",
+        }]))
+        self.assertIn("2.1.217", self._detect_windows()["install_path"])
+
+    def test_glob_metacharacters_in_version_rejected(self):
+        """The registry version reaches a glob pattern and is user-writable."""
+        for bad in ("../../evil", "2.1.*", "2.1.260\n", "*"):
+            with self.subTest(version=bad):
+                self.assertIsNone(_EXTENSION_VERSION.match(bad))
+        for good in ("2.1.260", "2", "2.1.260.1"):
+            with self.subTest(version=good):
+                self.assertIsNotNone(_EXTENSION_VERSION.match(good))

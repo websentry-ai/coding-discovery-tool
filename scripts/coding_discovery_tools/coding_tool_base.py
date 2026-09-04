@@ -7,6 +7,7 @@ and tool detection across different operating systems.
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -1157,9 +1158,25 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         Each profile is its own permission surface — a YOLO named profile is as real
         a risk as the default — so all are read (not first-wins) and merged to the
         most permissive posture."""
-        for user_dir in self._user_config_dirs(Path(user_home)):
+        home = Path(user_home)
+        for user_dir in self._user_config_dirs(home):
             for path in enumerate_vscode_user_files(user_dir, "settings.json"):
-                yield path
+                if self._resolves_within(path, home):
+                    yield path
+
+    @staticmethod
+    def _resolves_within(path: Path, user_home: Path) -> bool:
+        """Refuse a settings file whose real path escapes the user's home. Under an
+        elevated all-users scan a user could symlink their own settings.json to a
+        root-owned file and have its contents reported as theirs; ``realpath``
+        follows every link, so an escaping target resolves outside and is dropped.
+        An in-home symlink (stow/chezmoi) still resolves inside and is allowed."""
+        try:
+            real = os.path.normcase(os.path.realpath(str(path)))
+            base = os.path.normcase(os.path.realpath(str(user_home)))
+        except OSError:
+            return False
+        return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
 
     def extract_settings(self) -> Optional[Dict]:
         """Return one backend-ready permission record — the most-permissive posture
@@ -1206,6 +1223,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 records.append(record)
         if not records:
             return None
+        # Base the merge on the most-permissive profile/channel so settings_path
+        # attributes to where the risk actually is (e.g. an Insiders YOLO profile),
+        # not just the first file read.
+        records.sort(key=self._permissiveness, reverse=True)
         return self._merge_records(records[0], records[1:])
 
     @staticmethod

@@ -193,6 +193,39 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
             for h in homes:
                 shutil.rmtree(h, ignore_errors=True)
 
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_settings_symlink_escaping_home_is_refused(self):
+        # A user's settings.json symlinked to an out-of-home file must NOT be read
+        # (a privileged scan could otherwise report root-owned content as the user's).
+        outside = Path(tempfile.mkdtemp(prefix="copilot-outside-"))
+        try:
+            (outside / "evil.json").write_text(json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+            ud = self.home / "Library" / "Application Support" / "Code" / "User"
+            # replace the benign default settings.json with an escaping symlink
+            (ud / "settings.json").unlink()
+            os.symlink(outside / "evil.json", ud / "settings.json")
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(self.home)
+            rec = ex.extract_settings()
+            # only the in-home profile (workp, mcp deny) remains — the escaping YOLO is dropped
+            self.assertNotEqual(rec and rec.get("permission_mode"), "bypassPermissions",
+                                "content from an out-of-home symlink must not be reported")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_in_home_settings_symlink_is_allowed(self):
+        # A stow/chezmoi-style symlink that resolves INSIDE the home is still read.
+        real = self.home / "dotfiles" / "vscode-settings.json"
+        real.parent.mkdir(parents=True)
+        real.write_text(json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        (ud / "settings.json").unlink()
+        os.symlink(real, ud / "settings.json")
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        self.assertEqual(ex.extract_settings()["permission_mode"], "bypassPermissions")
+
     def test_no_copilot_settings_returns_none(self):
         empty_home = Path(tempfile.mkdtemp(prefix="copilot-perm-empty-", dir=str(Path.home())))
         try:

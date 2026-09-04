@@ -398,11 +398,15 @@ class _GitHubCopilotVscodeMcpMixin:
         ) as command_exists, patch.object(
             mcp_helpers,
             "_scan_servers_in_mapping",
-        ) as scan_servers:
+        ) as scan_servers, patch.object(
+            mcp_helpers,
+            "augment_script_fields",
+        ) as augment_script:
             servers = self._all_servers(self._extract())
 
         command_exists.assert_not_called()
         scan_servers.assert_not_called()
+        augment_script.assert_not_called()
         self.assertEqual(len(servers), 1)
         self.assertEqual(servers[0]["scan"]["error"]["code"], "privilege_boundary")
 

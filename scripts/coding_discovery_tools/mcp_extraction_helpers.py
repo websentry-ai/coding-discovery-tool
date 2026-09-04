@@ -1095,6 +1095,7 @@ def _transform_vscode_cached_mcp_server_entries(
     servers = transform_mcp_servers_to_array(
         configs,
         _scan_overrides=scan_overrides,
+        _skip_script_augmentation=skip_live_scan,
     )
     reported: List[Tuple[str, Dict]] = []
     for server in servers:
@@ -1349,6 +1350,7 @@ def transform_mcp_servers_to_array(
     mcp_servers: Dict,
     *,
     _scan_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    _skip_script_augmentation: bool = False,
 ) -> List[Dict]:
     """
     Transform mcpServers from object format to array format.
@@ -1435,7 +1437,8 @@ def transform_mcp_servers_to_array(
                 **{field_name: field_value for field_name, field_value in server_config.items()
                     if field_name not in excluded_fields}
             }
-            augment_script_fields(server_obj)
+            if not _skip_script_augmentation:
+                augment_script_fields(server_obj)
             server_obj["scan"] = scan_results.get(server_name) or batch_error
             servers_array.append(server_obj)
 

@@ -27,9 +27,6 @@ class _MapExtractor(BaseGitHubCopilotSettingsExtractor):
     def _user_config_dirs(self, user_home):
         return []
 
-    def _iter_workspace_settings_files(self, user_home):
-        return []
-
 
 class TestPermissionMapping(unittest.TestCase):
     def setUp(self):
@@ -45,10 +42,6 @@ class TestPermissionMapping(unittest.TestCase):
         self.assertEqual(self._rec({"chat.tools.global.autoApprove": True})["permission_mode"], "bypassPermissions")
         self.assertEqual(self._rec({"chat.tools.autoApprove": True})["permission_mode"], "bypassPermissions")
 
-    def test_file_autoapprove_is_accept_edits(self):
-        rec = self._rec({"github.copilot.chat.agent.autoApproveFileChanges": True})
-        self.assertEqual(rec["permission_mode"], "acceptEdits")
-
     def test_default_mode_when_nothing_auto_approved(self):
         rec = self._rec({"chat.agent.enabled": True})
         self.assertEqual(rec["permission_mode"], "default")
@@ -63,11 +56,17 @@ class TestPermissionMapping(unittest.TestCase):
         self.assertIn("Bash(rm *)", rec["deny_rules"])
         self.assertIn("Bash(curl *)", rec["deny_rules"])
 
-    def test_blocklist_becomes_deny_rules(self):
-        rec = self._rec({"github.copilot.chat.agent.terminalCommands.blocklist": ["sudo", "rm -rf"]})
-        self.assertEqual(rec["permission_mode"], "default")
-        self.assertIn("Bash(sudo *)", rec["deny_rules"])
-        self.assertIn("Bash(rm -rf *)", rec["deny_rules"])
+    def test_only_registry_verified_keys_are_captured(self):
+        # Guard against re-introducing blog-era phantom keys: keys that VS Code
+        # does not register must never appear in raw_settings or affect the mode.
+        rec = self._rec({
+            "chat.tools.global.autoApprove": True,                              # real
+            "github.copilot.chat.agent.autoApproveFileChanges": True,           # phantom
+            "github.copilot.chat.agent.terminalCommands.blocklist": ["sudo"],   # phantom
+        })
+        self.assertIn("chat.tools.global.autoApprove", rec["raw_settings"])
+        self.assertNotIn("github.copilot.chat.agent.autoApproveFileChanges", rec["raw_settings"])
+        self.assertNotIn("github.copilot.chat.agent.terminalCommands.blocklist", rec["raw_settings"])
 
     def test_mcp_allow_deny_strings_and_objects(self):
         rec = self._rec({
@@ -87,12 +86,12 @@ class TestPermissionMapping(unittest.TestCase):
         self.assertIn("chat.tools.global.autoApprove", rec["raw_settings"])
         self.assertNotIn("editor.fontSize", rec["raw_settings"])
 
-    def test_workspace_merge_escalates_mode_and_unions_rules(self):
+    def test_merge_escalates_mode_and_unions_rules(self):
         user = self._rec({"chat.tools.terminal.autoApprove": {"ls": True}})
         ws = self._rec({"chat.tools.global.autoApprove": True,
                         "chat.tools.terminal.autoApprove": {"pwd": True, "ls": True}})
         merged = self.ex._merge_records(user, [ws])
-        # a workspace bypass surfaces; allow rules union without duplicating "ls"
+        # a more-permissive profile surfaces; allow rules union without duplicating "ls"
         self.assertEqual(merged["permission_mode"], "bypassPermissions")
         self.assertEqual(sorted(merged["allow_rules"]), ["Bash(ls *)", "Bash(pwd *)"])
 
@@ -107,7 +106,7 @@ class TestPermissionMapping(unittest.TestCase):
 
 
 class TestMacOSExtractorOverFixture(unittest.TestCase):
-    """Drive the real macOS extractor over a planted user + workspace settings.json."""
+    """Drive the real macOS extractor over planted user + profile settings.json."""
 
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="copilot-perm-e2e-", dir=str(Path.home())))
@@ -117,17 +116,17 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
             "chat.tools.global.autoApprove": True,
             "chat.tools.terminal.autoApprove": {"git status": True, "rm": False},
         }), encoding="utf-8")
-        # a workspace-scope settings.json
-        ws = self.home / "repo" / ".vscode"
-        ws.mkdir(parents=True)
-        (ws / "settings.json").write_text(json.dumps({
+        # a named profile that denies an MCP server
+        prof = user_dir / "profiles" / "workp"
+        prof.mkdir(parents=True)
+        (prof / "settings.json").write_text(json.dumps({
             "chat.mcp.deniedServers": ["evil-mcp"],
         }), encoding="utf-8")
 
     def tearDown(self):
         shutil.rmtree(self.home, ignore_errors=True)
 
-    def test_extracts_user_and_merges_workspace(self):
+    def test_extracts_user_and_merges_profiles(self):
         ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
         ex._scan_users = lambda cb: cb(self.home)  # constrain to the fixture
         rec = ex.extract_settings()
@@ -135,7 +134,7 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
         self.assertEqual(rec["permission_mode"], "bypassPermissions")
         self.assertIn("Bash(git status *)", rec["allow_rules"])
         self.assertIn("Bash(rm *)", rec["deny_rules"])
-        # workspace-scoped MCP denial merged in
+        # profile-scoped MCP denial merged in
         self.assertIn("evil-mcp", rec["mcp_policies"]["deniedMcpServers"])
 
     def test_named_profile_yolo_is_detected_and_escalates(self):

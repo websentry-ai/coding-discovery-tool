@@ -19,7 +19,6 @@ from .mcp_extraction_helpers import (
     _strip_trailing_commas,
     enumerate_vscode_user_files,
 )
-from .constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 
 logger = logging.getLogger(__name__)
 
@@ -1103,33 +1102,42 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     """Extract VS Code GitHub Copilot agent-mode permissions from ``settings.json``.
 
     Copilot's agent permissions have no dedicated file — they live in VS Code's
-    ``settings.json`` (JSONC): the user-scope file plus any
-    ``<workspace>/.vscode/settings.json``. This reads the security-relevant
-    auto-approve / terminal / MCP keys and emits the same backend-ready record the
-    Cursor extractor does (``permission_mode`` + ``allow_rules`` / ``deny_rules`` /
+    ``settings.json`` (JSONC). This reads the **user-scope** file for every VS Code
+    profile (the default profile plus each ``profiles/<id>``, on both the stable
+    and Insiders channels) and emits the same backend-ready record the Cursor
+    extractor does (``permission_mode`` + ``allow_rules`` / ``deny_rules`` /
     ``mcp_*``), so it routes as tool-level permissions with no backend change.
+
+    Scope is deliberately user + profiles only. The auto-approve keys are
+    user/application-scoped — ``chat.tools.global.autoApprove`` applies globally
+    across all workspaces — and VS Code does not honor them from a workspace
+    ``.vscode/settings.json`` (and ignores workspace settings entirely in an
+    untrusted workspace), so reading them from workspace files would report a
+    posture the tool never applies. The authoritative posture lives in user and
+    profile settings, and every profile is read because a locked-down default with
+    a YOLO named profile is a real risk.
     """
 
-    # Keys sourced from Microsoft's enterprise AI-settings reference and the
-    # agent-mode docs. A file with none of these carries no permission signal.
+    # Every key here was verified to exist in the VS Code configuration registry
+    # (workbench bundle) — blog-era / Business-only keys that the extension does
+    # not actually register are deliberately excluded so we never report a setting
+    # the tool ignores. ``chat.tools.autoApprove`` is the pre-rename name of
+    # ``chat.tools.global.autoApprove``, kept only to read older installs.
     SECURITY_RELEVANT_KEYS = {
-        "chat.tools.global.autoApprove", "chat.tools.autoApprove",
+        "chat.tools.global.autoApprove", "chat.tools.autoApprove",  # global YOLO (current + legacy)
         "chat.tools.eligibleForAutoApproval",
         "chat.tools.terminal.enableAutoApprove", "chat.tools.terminal.autoApprove",
         "chat.tools.urls.autoApprove",
-        "github.copilot.chat.agent.autoApproveFileChanges",
-        "github.copilot.chat.agent.autoApproveTerminal",
-        "github.copilot.chat.agent.terminalCommands.blocklist",
-        "chat.agent.enabled", "github.copilot.chat.agent.enabled",
-        "chat.agent.sandbox.enabled",
+        "chat.agent.enabled", "chat.agent.sandbox.enabled",
         "chat.agent.networkFilter", "chat.agent.allowedNetworkDomains",
         "chat.agent.deniedNetworkDomains",
         "chat.mcp.access", "chat.mcp.allowedServers", "chat.mcp.deniedServers",
         "github.copilot.chat.claudeAgent.enabled",
     }
 
-    # A truthy global auto-approve removes every confirmation (bypass); auto-approving
-    # only file edits maps to acceptEdits; anything else is the default gated mode.
+    # A truthy global auto-approve removes every confirmation (bypass); there is no
+    # separate file-edit auto-approve setting in the registry, so the mode is either
+    # bypass or the default gated mode.
     _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove", "chat.tools.autoApprove")
 
     @abstractmethod
@@ -1153,45 +1161,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             for path in enumerate_vscode_user_files(user_dir, "settings.json"):
                 yield path
 
-    def _iter_workspace_settings_files(self, user_home) -> Iterable[Path]:
-        """Yield every ``<workspace>/.vscode/settings.json`` under this user.
-
-        ``.vscode`` is in ``SKIP_DIRS`` (the project walk treats it as a config
-        dir, not a subtree to descend), so the general walk never reaches it —
-        exactly as the workspace ``mcp.json`` discovery has to. This walk exempts
-        the ``.vscode`` leaf: it is checked for ``settings.json`` but never
-        descended, every other ``SKIP_DIRS`` entry is pruned, links are not
-        followed, and depth is bounded."""
-        found: List[Path] = []
-        self._walk_workspace_settings(Path(user_home), found, current_depth=0)
-        return found
-
-    def _walk_workspace_settings(self, current_dir: Path, found: List[Path],
-                                 current_depth: int = 0) -> None:
-        if current_depth > MAX_SEARCH_DEPTH:
-            return
-        try:
-            for item in current_dir.iterdir():
-                try:
-                    if not item.is_dir():
-                        continue
-                    if item.name == ".vscode":
-                        settings = item / "settings.json"
-                        if settings.is_file():
-                            found.append(settings)
-                        continue  # never descend the config dir
-                    if item.name in SKIP_DIRS or is_symlink_or_junction(item):
-                        continue
-                    self._walk_workspace_settings(item, found, current_depth + 1)
-                except (PermissionError, OSError):
-                    continue
-        except (PermissionError, OSError):
-            return
-
     def extract_settings(self) -> Optional[Dict]:
-        """Return one backend-ready permission record (user scope, with any
-        workspace ``.vscode/settings.json`` allow/deny/MCP lists merged in), or
-        None when no Copilot permission setting is present anywhere."""
+        """Return one backend-ready permission record — the most-permissive posture
+        across all of a user's VS Code profiles — or None when no Copilot permission
+        setting is present. User/profile scope only (see the class docstring)."""
         records: List[Dict] = []
 
         def extract_for_user(user_home) -> None:
@@ -1210,8 +1183,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return records[0]
 
     def _extract_for_user(self, user_home: Path) -> Optional[Dict]:
+        # User scope only: the default profile + every named profile, each channel.
         records = []
-        # User scope: default profile + every named profile, each channel.
         for path in self._iter_user_settings_files(user_home):
             data = self._parse_jsonc(path)
             if data is None:
@@ -1220,15 +1193,6 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             if record:
                 logger.info(f"  ✓ Extracted Copilot settings from {path}")
                 records.append(record)
-        # Project scope: every <workspace>/.vscode/settings.json.
-        for path in self._iter_workspace_settings_files(user_home):
-            data = self._parse_jsonc(path)
-            if data is None:
-                continue
-            record = self._build_record(data, path, "project")
-            if record:
-                records.append(record)
-
         if not records:
             return None
         return self._merge_records(records[0], records[1:])
@@ -1280,8 +1244,6 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     def _permission_mode(self, data: Dict) -> str:
         if any(data.get(k) is True for k in self._GLOBAL_AUTOAPPROVE_KEYS):
             return "bypassPermissions"
-        if data.get("github.copilot.chat.agent.autoApproveFileChanges") is True:
-            return "acceptEdits"
         return "default"
 
     @staticmethod
@@ -1313,11 +1275,6 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                     allow.append(rule)
                 elif verdict is False:
                     deny.append(rule)
-        blocklist = data.get("github.copilot.chat.agent.terminalCommands.blocklist")
-        if isinstance(blocklist, list):
-            for cmd in blocklist:
-                if isinstance(cmd, str) and cmd:
-                    deny.append(f"Bash({cmd} *)")
         return self._dedupe(allow), self._dedupe(deny)
 
     @staticmethod

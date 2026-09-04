@@ -1338,10 +1338,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return out
 
     def _merge_records(self, base: Dict, others: List[Dict]) -> Dict:
-        """Union the allow/deny/MCP lists across every profile and workspace record
+        """Union the allow/deny/MCP lists across a user's profile records
         — concatenated base-first, order-preserving de-dupe — and escalate the mode
-        to the most permissive seen, so one YOLO profile or workspace surfaces even
-        when the default profile is locked down."""
+        to the most permissive seen, so one YOLO profile surfaces even when the
+        default profile is locked down."""
         if not others:
             return base
         merged = dict(base)

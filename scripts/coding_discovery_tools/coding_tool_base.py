@@ -1240,9 +1240,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             if path.stat().st_size > 8 * 1024 * 1024:  # a settings.json this large is pathological
                 logger.debug(f"settings file too large, skipping: {path}")
                 return None
-            # utf-8-sig strips a leading BOM (some Windows editors write one) so
-            # json.loads doesn't choke on it; plain UTF-8 is read unchanged.
-            raw = path.read_text(encoding="utf-8-sig", errors="replace")
+            raw = path.read_text(encoding="utf-8", errors="replace")
             data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
             return data if isinstance(data, dict) else None
         except (PermissionError, OSError) as e:

@@ -309,6 +309,34 @@ class TestWindowsCopilotCliWinGet(unittest.TestCase):
         _make_hooks_only(self.home)
         self.assertIsNone(self.detector.detect())
 
+    def test_nvm_windows_shim_detected(self):
+        """nvm-windows moves the npm global prefix to ``%APPDATA%\\nvm\\<version>``."""
+        cmd = self.home / "AppData" / "Roaming" / "nvm" / "v22.11.0" / "copilot.cmd"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("", encoding="utf-8")
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cmd))
+
+    def test_volta_shim_detected(self):
+        exe = self.home / "AppData" / "Local" / "Volta" / "bin" / "copilot.exe"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(exe))
+
+    def test_pnpm_shim_detected(self):
+        cmd = self.home / "AppData" / "Local" / "pnpm" / "copilot.cmd"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("", encoding="utf-8")
+        with patch.object(self.detector, "get_version", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cmd))
+
 
 class TestWindowsCopilotCliVersionNeverShelled(unittest.TestCase):
     """A resolved path carries the profile name, and ``&``/``^`` are legal in Win32

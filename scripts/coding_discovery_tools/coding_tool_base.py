@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -1161,22 +1162,45 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         home = Path(user_home)
         for user_dir in self._user_config_dirs(home):
             for path in enumerate_vscode_user_files(user_dir, "settings.json"):
-                if self._resolves_within(path, home):
-                    yield path
+                yield path
 
     @staticmethod
-    def _resolves_within(path: Path, user_home: Path) -> bool:
-        """Refuse a settings file whose real path escapes the user's home. Under an
-        elevated all-users scan a user could symlink their own settings.json to a
-        root-owned file and have its contents reported as theirs; ``realpath``
-        follows every link, so an escaping target resolves outside and is dropped.
-        An in-home symlink (stow/chezmoi) still resolves inside and is allowed."""
+    def _read_contained(path: Path, user_home: Path) -> Optional[str]:
+        """Read ``path`` only if the descriptor we actually hold is a regular file
+        inside the user's home.
+
+        Validating a path and then opening it in a separate step leaves a window in
+        which a user can swap their settings.json for a link out of their home; an
+        elevated scan would then read, and report, a file the user cannot see. So
+        the file is opened once and every check is made against that open
+        descriptor — including comparing its identity to the in-home path's, which
+        refuses a file swapped either side of the open. An in-home symlink
+        (stow/chezmoi) resolves inside and is still read."""
+        fd = None
         try:
+            fd = os.open(str(path), os.O_RDONLY)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None
             real = os.path.normcase(os.path.realpath(str(path)))
             base = os.path.normcase(os.path.realpath(str(user_home)))
-        except OSError:
-            return False
-        return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+            if not (real == base or real.startswith(base.rstrip(os.sep) + os.sep)):
+                return None
+            resolved = os.stat(real)
+            if (resolved.st_dev, resolved.st_ino) != (st.st_dev, st.st_ino):
+                return None  # swapped between the open and the check
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+                fd = None
+                return handle.read()
+        except OSError as e:
+            logger.debug(f"Could not read {path}: {e}")
+            return None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def extract_settings(self) -> Optional[Dict]:
         """Return one backend-ready permission record — the most-permissive posture
@@ -1214,7 +1238,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         # User scope only: the default profile + every named profile, each channel.
         records = []
         for path in self._iter_user_settings_files(user_home):
-            data = self._parse_jsonc(path)
+            data = self._parse_jsonc(path, user_home)
             if data is None:
                 continue
             record = self._build_record(data, path, "user")
@@ -1229,15 +1253,22 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         records.sort(key=self._permissiveness, reverse=True)
         return self._merge_records(records[0], records[1:])
 
-    @staticmethod
-    def _parse_jsonc(path: Path) -> Optional[Dict]:
+    @classmethod
+    def _parse_jsonc(cls, path: Path, user_home=None) -> Optional[Dict]:
         """Leniently parse a VS Code JSONC settings file (comments + trailing commas
         tolerated). Returns the dict, or None if missing/unreadable/not a dict.
-        Never raises — this runs on customer machines."""
+        When ``user_home`` is given the file is read through the containment check
+        so a link out of the home is never read. Never raises — this runs on
+        customer machines."""
         try:
-            if not path.is_file():
-                return None
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            if user_home is not None:
+                raw = cls._read_contained(path, Path(user_home))
+                if raw is None:
+                    return None
+            else:
+                if not path.is_file():
+                    return None
+                raw = path.read_text(encoding="utf-8", errors="replace")
             data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
             return data if isinstance(data, dict) else None
         except (PermissionError, OSError) as e:

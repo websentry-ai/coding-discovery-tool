@@ -451,3 +451,41 @@ class TestChannelsAndProfiles(unittest.TestCase):
                                 "settings reached through an escaping profile dir must not be read")
         finally:
             shutil.rmtree(outside, ignore_errors=True)
+
+
+class TestContainmentRace(unittest.TestCase):
+    """A settings file swapped for an out-of-home link between enumeration and the
+    read must never be reported. Validating a path and opening it separately leaves
+    that window; the read validates the descriptor it actually holds."""
+
+    @unittest.skipUnless(os.name == "posix", "symlink swap is POSIX-specific")
+    def test_file_swapped_after_enumeration_is_not_read(self):
+        home = Path(tempfile.mkdtemp(prefix="race-home-", dir=str(Path.home())))
+        outside = Path(tempfile.mkdtemp(prefix="race-outside-"))
+        try:
+            (outside / "secret.json").write_text(
+                json.dumps({"chat.tools.global.autoApprove": True,
+                            "chat.mcp.access": "OUT-OF-HOME"}), encoding="utf-8")
+            ud = home / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            (ud / "settings.json").write_text(
+                json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(home)
+            original = ex._iter_user_settings_files
+
+            def swap_then_yield(user_home):
+                for p in list(original(user_home)):
+                    if Path(p).name == "settings.json" and Path(p).parent == ud:
+                        os.unlink(p)                                  # attacker wins the window
+                        os.symlink(outside / "secret.json", p)
+                    yield p
+
+            ex._iter_user_settings_files = swap_then_yield
+            rec = ex.extract_settings()
+            self.assertNotIn("OUT-OF-HOME", json.dumps(rec or {}),
+                             "content behind an out-of-home link must never be reported")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)

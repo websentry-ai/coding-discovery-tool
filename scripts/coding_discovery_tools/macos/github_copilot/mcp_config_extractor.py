@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 from ...mcp_extraction_helpers import (
     enumerate_vscode_mcp_files,
     extract_ide_global_configs_with_root_support,
@@ -165,7 +165,8 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item) or should_skip_system_path(item):
+                    # .vscode is in SKIP_DIRS; exempt the leaf so the check below is reachable.
+                    if item.name != ".vscode" and (should_skip_path(item) or should_skip_system_path(item)):
                         continue
 
                     try:
@@ -176,13 +177,12 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                         continue
 
                     if item.is_dir():
-                        # Skip dirs from SKIP_DIRS but still check .vscode directly
-                        if item.name in SKIP_DIRS and item.name != ".vscode":
+                        if is_symlink_or_junction(item):
                             continue
                         if item.name == ".vscode":
                             self._check_vscode_mcp(item, configs)
                             continue
-                        if item.is_symlink():
+                        if item.name in SKIP_DIRS:
                             continue
                         self._walk_for_workspace_mcp(root_path, item, configs, current_depth + 1)
 

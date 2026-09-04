@@ -103,12 +103,23 @@ def cache_key_for_server(server: Dict) -> Optional[str]:
     transform_mcp_servers_to_array (env/headers already stripped).
     Never raises; None when the server isn't cacheable."""
     try:
+        additional_data = server.get("additional_data")
+        if not isinstance(additional_data, dict):
+            additional_data = {}
+        provider_id = server.get("providerId")
+        provider_server_id = server.get("providerServerId")
+        if isinstance(provider_id, str) and isinstance(provider_server_id, str):
+            additional_data = {
+                **additional_data,
+                "providerId": provider_id,
+                "providerServerId": provider_server_id,
+            }
         return compute_cache_key(
             name=server.get("name"),
             url=server.get("url"),
             command=server.get("command"),
             args=server.get("args"),
-            additional_data=server.get("additional_data"),
+            additional_data=additional_data,
             script_hash=server.get("scriptHash"),
         )
     except Exception as e:

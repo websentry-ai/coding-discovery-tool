@@ -23,6 +23,9 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     url-arg:<host[:port]/path>   -> from a URL embedded in args (e.g., mcp-remote proxies)
     git:<host/owner/repo>        -> from a git+ install spec in args (npx/uvx git installs)
     npm:<package>                -> from an npm package in args (@scoped, or bare under npx/npm/bunx)
+    smithery:<server>            -> target passed to a registry-resolved Smithery CLI
+    smithery-unverified:<server> -> target passed to a locally resolvable Smithery CLI
+    nuget:<package>              -> package run by `dnx` or `dotnet tool exec`
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
     script:<hash>                -> content hash of a local script (supplied by the client)
@@ -48,7 +51,7 @@ Returns None when no signal can be extracted -- the caller falls back to name-ba
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 
@@ -86,6 +89,8 @@ CLAUDEAI_ALLOWED_ADDITIONAL_DATA = ({}, {'scope': 'claudeai'})
 
 # npm-package runners: the first positional arg is the package to run.
 NPM_RUNNERS = frozenset({'npx', 'npm', 'bunx'})
+SMITHERY_CLI_PACKAGES = frozenset({'@smithery/cli', 'smithery'})
+SMITHERY_GLOBAL_FLAGS = frozenset({'--verbose', '--debug', '--json', '--table'})
 # Sub-runners under npx/bunx that are not the package themselves (the real
 # target -- usually a local script -- follows).
 NPX_LOCAL_RUNNERS = frozenset({'tsx', 'ts-node'})
@@ -94,6 +99,7 @@ NPM_SUBCOMMANDS = frozenset({'exec', 'run', 'run-script', 'x', 'create', 'init',
 # Python-package runners and the sub-commands that precede the package.
 PYPI_RUNNERS = frozenset({'uvx', 'uv', 'pipx'})
 PYPI_SUBCOMMANDS = frozenset({'run', 'tool', 'tool-run'})
+NUGET_RUNNERS = frozenset({'dnx', 'dotnet'})
 
 # Prompt Security's MCP proxy wraps the real server command after this token.
 PROMPT_SECURITY_BASENAME = 'prompt_security_mcp'
@@ -110,7 +116,7 @@ RUNTIMES = frozenset({
 # Commands that have their own rule (or are runtimes) -- excluded from the
 # catch-all `bin:` tier so they don't double-resolve.
 BIN_SKIP_COMMANDS = (
-    RUNTIMES | NPM_RUNNERS | PYPI_RUNNERS
+    RUNTIMES | NPM_RUNNERS | PYPI_RUNNERS | NUGET_RUNNERS
     | frozenset({'docker', 'builtin', PROMPT_SECURITY_BASENAME})
 )
 
@@ -201,6 +207,13 @@ def _command_base(command: Optional[str]) -> str:
     return _EXE_SUFFIX_RE.sub('', base.lower())
 
 
+def _trusted_launcher_base(command: Optional[str]) -> str:
+    token = _unquote(command).strip() if command else ''
+    if '/' in token or '\\' in token:
+        return ''
+    return _command_base(token)
+
+
 def _unquote(value: str) -> str:
     """Strip surrounding quotes some clients leave in arg values."""
     return value.strip('"\'')
@@ -223,22 +236,280 @@ def _looks_like_local_path(value: str) -> bool:
 
 
 def _npm_package_from_args(args: List[str]) -> Optional[str]:
-    """Find the first @scoped npm package in args, stripped of any @version suffix."""
     for arg in args:
         if not isinstance(arg, str) or not arg.startswith('@'):
             continue
-        second_at = arg.find('@', 1)
-        return arg[:second_at] if second_at != -1 else arg
+        return _registry_npm_package(arg)
     return None
 
 
-def _normalize_npm(pkg: str) -> str:
-    """@scope/name@ver -> @scope/name ; name@ver -> name"""
-    p = _unquote(pkg)
-    if p.startswith('@'):
-        i = p.find('@', 1)
-        return p[:i] if i != -1 else p
-    return p.split('@')[0]
+def _registry_npm_package(spec: str) -> Optional[str]:
+    token = _unquote(spec).strip()
+    if token.startswith('@'):
+        version_at = token.find('@', 1)
+        package = token if version_at == -1 else token[:version_at]
+        selector = None if version_at == -1 else token[version_at + 1:]
+        package_pattern = r'@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*'
+    else:
+        package, separator, selector = token.partition('@')
+        selector = selector if separator else None
+        package_pattern = r'[a-z0-9][a-z0-9._-]*'
+    if not re.fullmatch(package_pattern, package, re.IGNORECASE):
+        return None
+    if selector is not None and (
+        selector.startswith('.')
+        or not re.fullmatch(r'[a-z0-9*^~<>=.+_-]+', selector, re.IGNORECASE)
+    ):
+        return None
+    return package.lower()
+
+
+def _smithery_server_identity(value: str) -> Optional[str]:
+    target = _unquote(value).strip()
+    if target.startswith('@'):
+        target = target[1:]
+    pattern = r'[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?'
+    return target.lower() if re.fullmatch(pattern, target, re.IGNORECASE) else None
+
+
+def _is_registry_resolved_smithery_cli(value: str) -> bool:
+    return _unquote(value).strip().lower() in {
+        '@smithery/cli@latest',
+        'smithery@latest',
+    }
+
+
+def _smithery_command_target(tokens: List[str]) -> Optional[str]:
+    while tokens and str(tokens[0]).lower() in SMITHERY_GLOBAL_FLAGS:
+        tokens = tokens[1:]
+    if tokens and str(tokens[0]).lower() == 'mcp':
+        tokens = tokens[1:]
+        while tokens and str(tokens[0]).lower() in SMITHERY_GLOBAL_FLAGS:
+            tokens = tokens[1:]
+    if not tokens or str(tokens[0]).lower() != 'run':
+        return None
+
+    target = None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if not isinstance(token, str):
+            return None
+        lower = token.lower()
+        if lower in {'--config', '--key'}:
+            if (
+                index + 1 >= len(tokens)
+                or not isinstance(tokens[index + 1], str)
+                or tokens[index + 1].startswith('-')
+            ):
+                return None
+            index += 2
+            continue
+        if any(lower.startswith(f'{flag}=') for flag in ('--config', '--key')):
+            if not token.partition('=')[2]:
+                return None
+            index += 1
+            continue
+        if token.startswith('-') or target is not None:
+            return None
+        target = _smithery_server_identity(token)
+        if target is None:
+            return None
+        index += 1
+    return target
+
+
+def _smithery_run_target(
+    args: List[str],
+    command_base: str,
+    launcher_trusted: bool,
+) -> Optional[Tuple[str, bool]]:
+    if command_base == 'smithery':
+        target = _smithery_command_target(args)
+        return (target, False) if target else None
+    if command_base == 'cmd' and any(
+        isinstance(arg, str) and re.search(r'[&|<>^\r\n]', arg)
+        for arg in args
+    ):
+        return None
+
+    for index, arg in enumerate(args):
+        if (
+            not isinstance(arg, str)
+            or _registry_npm_package(arg) not in SMITHERY_CLI_PACKAGES
+        ):
+            continue
+        prefix_tokens = []
+        for prefix_arg in args[:index]:
+            if not isinstance(prefix_arg, str):
+                return None
+            prefix_tokens.append(_unquote(prefix_arg).lower())
+
+        def valid_runner_prefix(runner, tokens):
+            safe_flags = {'-y', '--yes'}
+            if runner in {'bunx', 'bun'}:
+                safe_flags.update({'--bun', '--no-install', '--verbose', '--silent'})
+            if runner == 'npm':
+                safe_flags.add('--')
+            if any(token.startswith('-') and token not in safe_flags for token in tokens):
+                return False
+            positional = [token for token in tokens if token not in safe_flags]
+            if runner == 'npm':
+                return tokens[-1:] == ['--'] and positional in (['exec'], ['x'])
+            if runner == 'bun':
+                return positional == ['x']
+            return not positional
+
+        if command_base in NPM_RUNNERS:
+            if not valid_runner_prefix(command_base, prefix_tokens):
+                return None
+        elif command_base == 'bun':
+            if not valid_runner_prefix(command_base, prefix_tokens):
+                return None
+        elif command_base == 'cmd':
+            runner_positions = [
+                offset for offset, token in enumerate(prefix_tokens)
+                if _trusted_launcher_base(token) in NPM_RUNNERS | {'bun'}
+            ]
+            if len(runner_positions) != 1:
+                return None
+            runner_index = runner_positions[0]
+            shell_prefix = prefix_tokens[:runner_index]
+            if '/c' not in shell_prefix or any(
+                token not in {'/c', '/d', '/s'} for token in shell_prefix
+            ):
+                return None
+            if not valid_runner_prefix(
+                _trusted_launcher_base(prefix_tokens[runner_index]),
+                prefix_tokens[runner_index + 1:],
+            ):
+                return None
+        else:
+            return None
+        target = _smithery_command_target(args[index + 1:])
+        if target is None:
+            return None
+        registry_resolved = (
+            launcher_trusted
+            and command_base in {'npx', 'npm'}
+            and _is_registry_resolved_smithery_cli(arg)
+        )
+        return target, registry_resolved
+    return None
+
+
+def _nuget_package(base: str, args: List[str]) -> Optional[str]:
+    if base == 'dnx':
+        tokens = args
+    elif base == 'dotnet' and args and str(args[0]).lower() == 'dnx':
+        tokens = args[1:]
+    elif (
+        base == 'dotnet'
+        and len(args) >= 2
+        and str(args[0]).lower() == 'tool'
+        and str(args[1]).lower() in {'exec', 'execute'}
+    ):
+        tokens = args[2:]
+    else:
+        return None
+
+    if any(
+        isinstance(arg, str)
+        and (
+            arg.lower() == '--configfile'
+            or arg.lower().startswith('--configfile=')
+            or arg.lower().startswith('--configfile:')
+            or arg.lower() == '--add-source'
+            or arg.lower().startswith('--add-source=')
+            or arg.lower().startswith('--add-source:')
+        )
+        for arg in tokens
+    ):
+        return None
+
+    source_flags = {'--source', '-s'}
+    source_seen = False
+    for index, arg in enumerate(tokens):
+        if not isinstance(arg, str):
+            continue
+        if arg == '--':
+            break
+        value = None
+        if arg.lower() in source_flags:
+            value = tokens[index + 1] if index + 1 < len(tokens) else None
+        elif any(
+            arg.lower().startswith((f'{flag}=', f'{flag}:'))
+            for flag in source_flags
+        ):
+            value = re.split(r'[=:]', arg, maxsplit=1)[1]
+        if value is None:
+            continue
+        source_seen = True
+        if not isinstance(value, str):
+            return None
+        parsed = urlparse(_unquote(value))
+        if parsed.scheme not in {'http', 'https'} or parsed.hostname not in {
+            'api.nuget.org', 'nuget.org', 'www.nuget.org',
+        }:
+            return None
+    if not source_seen:
+        return None
+
+    value_options = {
+        '--version', '--framework', '--arch', '-a', '--verbosity', '-v',
+        '--configfile', '--source', '-s',
+    }
+    flag_options = {
+        '--prerelease', '--allow-roll-forward', '--ignore-failed-sources',
+        '--interactive', '--yes', '-y', '--disable-parallel', '--no-cache',
+        '--no-http-cache',
+    }
+    candidate = None
+    version = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == '--':
+            if candidate is None:
+                return None
+            break
+        if not isinstance(token, str):
+            return None
+        lower = token.lower()
+        option = re.split(r'[=:]', lower, maxsplit=1)[0]
+        has_attached_value = len(option) < len(token)
+        if option in value_options:
+            if option == '--version':
+                value = token[len(option) + 1:] if has_attached_value else (
+                    tokens[index + 1] if index + 1 < len(tokens) else None
+                )
+                if not isinstance(value, str) or version is not None:
+                    return None
+                version = _unquote(value)
+            index += 1 if has_attached_value else 2
+            continue
+        if lower in flag_options:
+            index += 1
+            continue
+        if token.startswith('-'):
+            return None
+        if candidate is not None:
+            return None
+        candidate = token
+        index += 1
+    if not isinstance(candidate, str):
+        return None
+    package, separator, inline_version = _unquote(candidate).partition('@')
+    if separator:
+        if version is not None:
+            return None
+        version = inline_version
+    if not version or not re.fullmatch(
+        r'(?:\*|[0-9][a-z0-9*.+_-]*)', version, re.IGNORECASE,
+    ):
+        return None
+    package = package.lower()
+    return package if re.fullmatch(r'[a-z0-9][a-z0-9._-]*', package) else None
 
 
 def _normalize_pypi(pkg: str) -> str:
@@ -293,6 +564,74 @@ def _package_from_runner_args(args: List[str], skip: frozenset) -> Optional[str]
             return None
         return t
     return None
+
+
+def _npm_runner_invocation(
+    command_base: str,
+    args: List[str],
+) -> Optional[Tuple[str, List[str]]]:
+    if command_base in NPM_RUNNERS:
+        return command_base, args
+    if command_base == 'bun':
+        if args and isinstance(args[0], str) and _unquote(args[0]).lower() == 'x':
+            return command_base, args[1:]
+        return None
+    if command_base != 'cmd' or any(
+        not isinstance(arg, str) or re.search(r'[&|<>^\r\n]', arg)
+        for arg in args
+    ):
+        return None
+
+    runner_positions = [
+        index for index, arg in enumerate(args)
+        if _trusted_launcher_base(arg) in NPM_RUNNERS | {'bun'}
+    ]
+    if len(runner_positions) != 1:
+        return None
+    runner_index = runner_positions[0]
+    shell_prefix = [_unquote(arg).lower() for arg in args[:runner_index]]
+    if '/c' not in shell_prefix or any(
+        token not in {'/c', '/d', '/s'} for token in shell_prefix
+    ):
+        return None
+
+    runner = _trusted_launcher_base(args[runner_index])
+    nested_args = args[runner_index + 1:]
+    if runner == 'bun':
+        if not nested_args or _unquote(nested_args[0]).lower() != 'x':
+            return None
+        nested_args = nested_args[1:]
+    return runner, nested_args
+
+
+def _npm_package_before_smithery(runner: str, args: List[str]) -> Optional[str]:
+    safe_flags = {'-y', '--yes', '--'}
+    if runner in {'bun', 'bunx'}:
+        safe_flags.update({'--bun', '--no-install', '--verbose', '--silent'})
+    npm_command_seen = runner != 'npm'
+    candidate = None
+    for arg in args:
+        if not isinstance(arg, str):
+            return None
+        if _registry_npm_package(arg) in SMITHERY_CLI_PACKAGES:
+            break
+        token = _unquote(arg)
+        lower = token.lower()
+        if token.startswith('-'):
+            if lower not in safe_flags:
+                return None
+            continue
+        if not npm_command_seen:
+            if lower not in {'exec', 'x'}:
+                return None
+            npm_command_seen = True
+            continue
+        if _trusted_launcher_base(token) in NPM_RUNNERS | {'bun'}:
+            return None
+        if candidate is not None or _looks_like_local_path(token):
+            return None
+        candidate = token
+    return candidate if npm_command_seen else None
 
 
 # `docker run` BOOLEAN flags — the closed, stable set that consumes NO value.
@@ -406,6 +745,7 @@ def compute_fingerprint(
     safe_args = args or []
     safe_additional_data = additional_data or {}
     base = _command_base(command)
+    launcher_base = _trusted_launcher_base(command)
 
     # 0. Prompt Security proxy: the real server command follows `__args__`.
     #    Unwrap and fingerprint the inner command instead of the wrapper.
@@ -450,6 +790,59 @@ def compute_fingerprint(
         if identity:
             return f'url:{identity}'
 
+    nuget_package = _nuget_package(launcher_base, safe_args)
+    if nuget_package:
+        return f'nuget:{nuget_package}'
+
+    smithery_match = _smithery_run_target(
+        safe_args,
+        base,
+        launcher_trusted=bool(launcher_base),
+    )
+    if smithery_match:
+        smithery_target, registry_resolved = smithery_match
+        prefix = 'smithery' if registry_resolved else 'smithery-unverified'
+        return f'{prefix}:{smithery_target}'
+    if base == 'smithery':
+        return None
+    first_scoped_package = _npm_package_from_args(safe_args)
+    runner_package = None
+    runner_invocation = _npm_runner_invocation(launcher_base, safe_args)
+    if runner_invocation is not None:
+        runner, runner_args = runner_invocation
+        if any(
+            isinstance(arg, str)
+            and _registry_npm_package(arg) in SMITHERY_CLI_PACKAGES
+            for arg in runner_args
+        ):
+            candidate = _npm_package_before_smithery(runner, runner_args)
+        else:
+            candidate = _package_from_runner_args(
+                runner_args,
+                NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | NPM_RUNNERS | RUNTIMES,
+            )
+        runner_package = _registry_npm_package(candidate) if candidate else None
+    smithery_index = next((
+        index for index, arg in enumerate(safe_args)
+        if isinstance(arg, str)
+        and _registry_npm_package(arg) in SMITHERY_CLI_PACKAGES
+    ), None)
+    first_scoped_index = next((
+        index for index, arg in enumerate(safe_args)
+        if isinstance(arg, str) and arg.startswith('@')
+    ), None)
+    if (
+        smithery_index is not None
+        and (
+            first_scoped_index is None
+            or first_scoped_index >= smithery_index
+        )
+    ):
+        if launcher_base in NPM_RUNNERS | {'bun', 'cmd'}:
+            if not runner_package or runner_package in SMITHERY_CLI_PACKAGES:
+                return None
+        first_scoped_package = None
+
     # 2. URLs inside args -> url-arg:<identity> (only if all URLs resolve to a single identity)
     url_args = _urls_in_args(safe_args)
     if url_args:
@@ -471,15 +864,12 @@ def compute_fingerprint(
         return f'git:{git}'
 
     # 4. @scoped npm package anywhere in args (command-agnostic, original rule)
-    scoped_npm = _npm_package_from_args(safe_args)
-    if scoped_npm:
-        return f'npm:{scoped_npm}'
+    if first_scoped_package:
+        return f'npm:{first_scoped_package}'
 
     # 5. npm package run via npx / npm / bunx (bare or quoted-scoped)
-    if base in NPM_RUNNERS:
-        pkg = _package_from_runner_args(safe_args, NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | RUNTIMES)
-        if pkg:
-            return f'npm:{_normalize_npm(pkg)}'
+    if runner_package:
+        return f'npm:{runner_package}'
 
     # 6. Python package run via uvx / uv / pipx
     if base in PYPI_RUNNERS:

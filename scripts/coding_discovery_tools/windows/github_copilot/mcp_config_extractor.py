@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 from ...mcp_extraction_helpers import (
     append_vscode_cached_mcp_servers,
     enumerate_vscode_mcp_files,
@@ -175,7 +175,8 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item, system_dirs):
+                    # .vscode is in SKIP_DIRS; exempt the leaf so the check below is reachable.
+                    if item.name != ".vscode" and should_skip_path(item, system_dirs):
                         continue
 
                     try:
@@ -186,12 +187,12 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                         continue
 
                     if item.is_dir():
-                        if item.name in SKIP_DIRS and item.name != ".vscode":
+                        if is_symlink_or_junction(item):
                             continue
                         if item.name == ".vscode":
                             self._check_vscode_mcp(item, configs)
                             continue
-                        if item.is_symlink():
+                        if item.name in SKIP_DIRS:
                             continue
                         self._walk_for_workspace_mcp(root_path, item, configs, system_dirs, current_depth + 1)
 
@@ -211,7 +212,9 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         Check a .vscode directory for mcp.json and extract its config.
         """
         mcp_json = vscode_dir / "mcp.json"
-        if mcp_json.exists() and mcp_json.is_file():
+        if is_symlink_or_junction(mcp_json):
+            return
+        if mcp_json.is_file():
             project_root = str(vscode_dir.parent)
             config = self._read_mcp_config(mcp_json, project_root)
             if config:

@@ -44,7 +44,7 @@ class TestStdioEmbeddedArgs(unittest.TestCase):
 
         self.bindir = root / "bin"
         self.bindir.mkdir()
-        self._write_stub(self.bindir / "stubmcp")
+        self.stub_command = self._write_stub(self.bindir / "stubmcp")
 
         # A real install whose path contains a space, as 19 prod configs do.
         spaced_dir = root / "My App"
@@ -107,7 +107,7 @@ class TestStdioEmbeddedArgs(unittest.TestCase):
     def test_relative_command_resolves_from_configured_cwd(self):
         cwd = Path(self.tmp.name) / "provider"
         cwd.mkdir()
-        command = self._write_stub(cwd / "local-mcp").name
+        command = f".{os.sep}{self._write_stub(cwd / 'local-mcp').name}"
 
         result = scanner.scan_mcp_server(
             {"command": command, "args": [], "env": {}, "cwd": str(cwd)}
@@ -116,24 +116,42 @@ class TestStdioEmbeddedArgs(unittest.TestCase):
         self.assertEqual("scanned", result.get("status"))
         self.assertEqual(2, len(result.get("tools") or []))
 
-    def test_configured_cwd_wins_over_same_named_path_command(self):
+    def test_explicit_relative_command_resolves_from_configured_cwd(self):
         cwd = Path(self.tmp.name) / "provider"
         cwd.mkdir()
         local_command = self._write_stub(cwd / "stubmcp")
+        command = f".{os.sep}{local_command.name}"
 
         with patch.object(
             scanner.subprocess,
             "Popen",
             side_effect=FileNotFoundError,
         ) as popen:
-            scanner._scan_stdio(local_command.name, ["--flag"], {}, 10, cwd=str(cwd))
+            scanner._scan_stdio(command, ["--flag"], {}, 10, cwd=str(cwd))
 
-        self.assertEqual(popen.call_args.args[0][0], str(local_command))
+        self.assertEqual(Path(popen.call_args.args[0][0]).resolve(), local_command.resolve())
+
+    def test_bare_command_uses_path_instead_of_configured_cwd(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        self._write_stub(cwd / "stubmcp")
+
+        with patch.object(
+            scanner.subprocess,
+            "Popen",
+            side_effect=FileNotFoundError,
+        ) as popen:
+            scanner._scan_stdio("stubmcp", ["--flag"], {}, 10, cwd=str(cwd))
+
+        self.assertEqual(
+            Path(popen.call_args.args[0][0]).resolve(),
+            self.stub_command.resolve(),
+        )
 
     def test_embedded_command_retry_preserves_configured_cwd(self):
         cwd = Path(self.tmp.name) / "provider"
         cwd.mkdir()
-        command = self._write_stub(cwd / "local-mcp").name
+        command = f".{os.sep}{self._write_stub(cwd / 'local-mcp').name}"
 
         with patch.object(scanner, "_scan_stdio", wraps=scanner._scan_stdio) as scan_stdio:
             result = scan_stdio(f"{command} --flag", [], {}, 10, cwd=str(cwd))

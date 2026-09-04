@@ -20,9 +20,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .constants import MAX_SEARCH_DEPTH
+from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction
 from .mcp_script_hash import augment_script_fields
 from .vscode_extension_helpers import find_extension_in_editor
 
@@ -592,6 +592,7 @@ _VSCODE_ENABLED_EXTENSIONS_KEY = "extensionsIdentifiers/enabled"
 _VSCODE_MCP_PROVIDER_MAX_COUNT = 200
 _VSCODE_MCP_SERVERS_PER_PROVIDER_MAX_COUNT = 100
 _VSCODE_MCP_SERVER_MAX_COUNT = 500
+_VSCODE_WORKSPACE_METADATA_MAX_BYTES = 64 * 1024
 
 
 def _enumerate_vscode_state_databases(code_user_base: Path) -> List[Path]:
@@ -606,8 +607,13 @@ def _enumerate_vscode_state_databases(code_user_base: Path) -> List[Path]:
     for pattern in patterns:
         try:
             for db_path in sorted(code_user_base.glob(pattern)):
-                if db_path.is_file():
-                    candidates.append(db_path)
+                if is_symlink_or_junction(db_path) or not db_path.is_file():
+                    continue
+                try:
+                    db_path.resolve().relative_to(code_user_base.resolve())
+                except (ValueError, OSError, RuntimeError):
+                    continue
+                candidates.append(db_path)
         except Exception as exc:
             logger.debug(
                 "VS Code MCP provider cache: skipping %s under %s: %s",
@@ -941,41 +947,163 @@ def _vscode_cached_url_for_report(url: str) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
-def _transform_vscode_cached_mcp_servers(
+def _vscode_workspace_uri_for_report(uri: str, operating_system: str) -> Optional[str]:
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "file":
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")) or None
+
+    path = unquote(parsed.path)
+    if operating_system == "windows":
+        windows_path = path.replace("/", "\\")
+        if parsed.netloc:
+            return f"\\\\{parsed.netloc}{windows_path}"
+        if re.match(r"^/[A-Za-z]:", path):
+            windows_path = windows_path[1:]
+        if re.match(r"^[A-Za-z]:", windows_path):
+            windows_path = windows_path[0].upper() + windows_path[1:]
+        return windows_path or None
+
+    if parsed.netloc:
+        return f"//{parsed.netloc}{path}"
+    return path or None
+
+
+def _vscode_cache_scope_path(
+    code_user_base: Path,
+    db_path: Path,
+    operating_system: str,
+) -> Optional[str]:
+    try:
+        relative_parts = db_path.relative_to(code_user_base).parts
+    except ValueError:
+        return None
+
+    if "workspaceStorage" in relative_parts:
+        metadata_path = db_path.parent / "workspace.json"
+        try:
+            with metadata_path.open("rb") as metadata_file:
+                raw_metadata = metadata_file.read(
+                    _VSCODE_WORKSPACE_METADATA_MAX_BYTES + 1
+                )
+            if len(raw_metadata) > _VSCODE_WORKSPACE_METADATA_MAX_BYTES:
+                return None
+            metadata = json.loads(raw_metadata.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(metadata, dict):
+            return None
+        workspace_uri = metadata.get("folder") or metadata.get("workspace")
+        if not isinstance(workspace_uri, str) or not workspace_uri:
+            return None
+        return _vscode_workspace_uri_for_report(workspace_uri, operating_system)
+
+    if len(relative_parts) >= 3 and relative_parts[0] == "profiles":
+        return str(code_user_base / "profiles" / relative_parts[1])
+    if relative_parts == ("globalStorage", "state.vscdb"):
+        return str(code_user_base)
+    return None
+
+
+def _running_with_elevated_privileges(operating_system: str) -> bool:
+    if operating_system == "windows":
+        try:
+            from .windows_extraction_helpers import (
+                is_running_as_admin,
+                windows_admin_state,
+            )
+            admin_state = windows_admin_state()
+            return admin_state is not False or is_running_as_admin()
+        except Exception:
+            return True
+
+    try:
+        effective_uid = os.geteuid()
+        return effective_uid == 0 or effective_uid != os.getuid()
+    except (AttributeError, OSError):
+        return True
+
+
+def _privilege_boundary_scan_result() -> Dict[str, Any]:
+    return {
+        "scanned_at": (
+            datetime.datetime.now(datetime.timezone.utc)
+            .replace(microsecond=0).isoformat()
+        ),
+        "tools": None,
+        "tool_count": None,
+        "server_info": None,
+        "error": {
+            "code": "privilege_boundary",
+            "details": {"reason": "cached_vscode_launch_under_elevated_process"},
+        },
+    }
+
+
+def _transform_vscode_cached_mcp_server_entries(
     configs: Dict[str, Dict[str, Any]],
     labels: Dict[str, str],
-) -> List[Dict]:
-    servers = transform_mcp_servers_to_array(configs)
-    reported: List[Dict] = []
+    skip_live_scan: bool,
+) -> List[Tuple[str, Dict]]:
+    scan_overrides = (
+        {config_key: _privilege_boundary_scan_result() for config_key in configs}
+        if skip_live_scan
+        else None
+    )
+    servers = transform_mcp_servers_to_array(
+        configs,
+        _scan_overrides=scan_overrides,
+    )
+    reported: List[Tuple[str, Dict]] = []
     for server in servers:
-        server["name"] = labels[server["name"]]
+        config_key = server["name"]
+        server["name"] = labels[config_key]
         url = server.get("url")
         if isinstance(url, str):
             sanitized_url = _vscode_cached_url_for_report(url)
             if not sanitized_url:
                 continue
             server["url"] = sanitized_url
-        reported.append(server)
+        reported.append((config_key, server))
     return reported
 
 
-def extract_vscode_cached_mcp_servers(
+def _transform_vscode_cached_mcp_servers(
+    configs: Dict[str, Dict[str, Any]],
+    labels: Dict[str, str],
+    skip_live_scan: bool = False,
+) -> List[Dict]:
+    return [
+        server
+        for _, server in _transform_vscode_cached_mcp_server_entries(
+            configs,
+            labels,
+            skip_live_scan,
+        )
+    ]
+
+
+def _extract_vscode_cached_mcp_projects(
     code_user_base: Path,
     user_home: Path,
     operating_system: str,
 ) -> List[Dict]:
-    """Extract MCPs registered by VS Code extensions, such as GitLens.
-
-    These servers have no ``mcp.json``. Extensions register them through VS
-    Code's MCP provider API, which persists resolved launch definitions under
-    ``mcp.extCachedServers`` in ``state.vscdb``.
-    """
     seen = set()
     validated_providers: Dict[str, bool] = {}
     configs: Dict[str, Dict[str, Any]] = {}
     labels: Dict[str, str] = {}
+    scopes: Dict[str, str] = {}
 
     for db_path in _enumerate_vscode_state_databases(code_user_base):
+        scope_path = _vscode_cache_scope_path(
+            code_user_base,
+            db_path,
+            operating_system,
+        )
+        if scope_path is None:
+            continue
         provider_cache = _read_vscode_mcp_provider_cache(db_path)
         if not provider_cache:
             continue
@@ -1034,7 +1162,7 @@ def extract_vscode_cached_mcp_servers(
                 :_VSCODE_MCP_SERVERS_PER_PROVIDER_MAX_COUNT
             ]:
                 if len(configs) >= _VSCODE_MCP_SERVER_MAX_COUNT:
-                    return _transform_vscode_cached_mcp_servers(configs, labels)
+                    break
                 if not isinstance(cached_server, dict):
                     continue
                 launch_config = _normalize_vscode_cached_launch(
@@ -1065,7 +1193,7 @@ def extract_vscode_cached_mcp_servers(
                 ):
                     continue
 
-                identity = (provider_id, server_id)
+                identity = (scope_path, provider_id, server_id)
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -1077,8 +1205,41 @@ def extract_vscode_cached_mcp_servers(
                     "providerServerId": server_id,
                 }
                 labels[config_key] = label
+                scopes[config_key] = scope_path
 
-    return _transform_vscode_cached_mcp_servers(configs, labels)
+            if len(configs) >= _VSCODE_MCP_SERVER_MAX_COUNT:
+                break
+        if len(configs) >= _VSCODE_MCP_SERVER_MAX_COUNT:
+            break
+
+    grouped: Dict[str, List[Dict]] = {}
+    for config_key, server in _transform_vscode_cached_mcp_server_entries(
+        configs,
+        labels,
+        _running_with_elevated_privileges(operating_system),
+    ):
+        grouped.setdefault(scopes[config_key], []).append(server)
+
+    return [
+        {"path": scope_path, "mcpServers": servers}
+        for scope_path, servers in grouped.items()
+    ]
+
+
+def extract_vscode_cached_mcp_servers(
+    code_user_base: Path,
+    user_home: Path,
+    operating_system: str,
+) -> List[Dict]:
+    return [
+        server
+        for project in _extract_vscode_cached_mcp_projects(
+            code_user_base,
+            user_home,
+            operating_system,
+        )
+        for server in project["mcpServers"]
+    ]
 
 
 def append_vscode_cached_mcp_servers(
@@ -1087,21 +1248,20 @@ def append_vscode_cached_mcp_servers(
     user_home: Path,
     operating_system: str,
 ) -> None:
-    cached_servers = extract_vscode_cached_mcp_servers(
+    cached_projects = _extract_vscode_cached_mcp_projects(
         code_user_base,
         user_home,
         operating_system,
     )
-    if not cached_servers:
-        return
-
-    base_path = str(code_user_base)
-    for config in configs:
-        if config.get("path") == base_path:
-            config.setdefault("mcpServers", []).extend(cached_servers)
-            return
-
-    configs.append({"path": base_path, "mcpServers": cached_servers})
+    for cached_project in cached_projects:
+        for config in configs:
+            if config.get("path") == cached_project["path"]:
+                config.setdefault("mcpServers", []).extend(
+                    cached_project["mcpServers"]
+                )
+                break
+        else:
+            configs.append(cached_project)
 
 
 # Shared JSONC strippers for hand-edited MCP config files (// and /* */ comments,
@@ -1137,7 +1297,11 @@ def _strip_trailing_commas(raw: str) -> str:
     return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
-def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
+def transform_mcp_servers_to_array(
+    mcp_servers: Dict,
+    *,
+    _scan_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict]:
     """
     Transform mcpServers from object format to array format.
 
@@ -1169,25 +1333,31 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     }
 
     # Scan each server for its tool list before we strip credentials.
-    scan_results: Dict[str, Dict[str, Any]] = {}
+    scan_results: Dict[str, Dict[str, Any]] = dict(_scan_overrides or {})
+    scan_targets = {
+        server_name: server_config
+        for server_name, server_config in mcp_servers.items()
+        if server_name not in scan_results
+    }
     batch_error: Optional[Dict[str, Any]] = None
-    try:
-        scan_results = _scan_servers_in_mapping(mcp_servers)
-    except Exception as exc:
-        logger.warning("MCP scan pass failed: %s", exc, exc_info=True)
-        batch_error = {
-            "scanned_at": (
-                datetime.datetime.now(datetime.timezone.utc)
-                .replace(microsecond=0).isoformat()
-            ),
-            "tools": None,
-            "tool_count": None,
-            "server_info": None,
-            "error": {
-                "code": "scanner_error",
-                "details": {"raw_error": f"{type(exc).__name__}: {exc}"},
-            },
-        }
+    if scan_targets:
+        try:
+            scan_results.update(_scan_servers_in_mapping(scan_targets))
+        except Exception as exc:
+            logger.warning("MCP scan pass failed: %s", exc, exc_info=True)
+            batch_error = {
+                "scanned_at": (
+                    datetime.datetime.now(datetime.timezone.utc)
+                    .replace(microsecond=0).isoformat()
+                ),
+                "tools": None,
+                "tool_count": None,
+                "server_info": None,
+                "error": {
+                    "code": "scanner_error",
+                    "details": {"raw_error": f"{type(exc).__name__}: {exc}"},
+                },
+            }
 
     servers_array = []
     for server_name, server_config in mcp_servers.items():

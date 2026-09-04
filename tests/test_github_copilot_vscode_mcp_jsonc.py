@@ -128,6 +128,7 @@ class _GitHubCopilotVscodeMcpMixin:
         workspace_id: str = "workspace-a",
         create_command: bool = True,
         command_name: str = "gk.exe",
+        workspace_uri: str = None,
     ) -> Path:
         db_path = (
             self.code_user_base
@@ -136,6 +137,12 @@ class _GitHubCopilotVscodeMcpMixin:
             / "state.vscdb"
         )
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        if workspace_uri is None:
+            workspace_uri = self._workspace_location(workspace_id)[0]
+        (db_path.parent / "workspace.json").write_text(
+            json.dumps({"folder": workspace_uri}),
+            encoding="utf-8",
+        )
         command = (
             self.code_user_base
             / "globalStorage"
@@ -176,6 +183,15 @@ class _GitHubCopilotVscodeMcpMixin:
             )
             conn.commit()
         return db_path
+
+    def _workspace_location(self, workspace_id: str):
+        if self.operating_system == "windows":
+            return (
+                f"file:///c%3A/Users/test/{workspace_id}",
+                f"C:\\Users\\test\\{workspace_id}",
+            )
+        home = "/Users/test" if self.operating_system == "macos" else "/home/test"
+        return f"file://{home}/{workspace_id}", f"{home}/{workspace_id}"
 
     def _write_extension_state(self, db_path: Path, key: str, extension_id: str) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,8 +254,10 @@ class _GitHubCopilotVscodeMcpMixin:
         self._install_gitlens_provider()
         self._write_gitkraken_provider_cache()
 
-        servers = self._all_servers(self._extract())
+        configs = self._extract()
+        servers = self._all_servers(configs)
         self.assertEqual(len(servers), 1)
+        self.assertEqual(configs[0]["path"], self._workspace_location("workspace-a")[1])
         server = servers[0]
         self.assertEqual(server["name"], "GitKraken")
         self.assertEqual(server["type"], "stdio")
@@ -263,13 +281,24 @@ class _GitHubCopilotVscodeMcpMixin:
         names = {server["name"] for server in self._all_servers(self._extract())}
         self.assertEqual(names, {"postman", "GitKraken"})
 
-    def test_duplicate_extension_provider_cache_is_deduplicated(self):
+    def test_extension_provider_cache_preserves_workspace_scope(self):
         self._install_gitlens_provider()
         self._write_gitkraken_provider_cache("workspace-a")
         self._write_gitkraken_provider_cache("workspace-b")
 
-        servers = self._all_servers(self._extract())
-        self.assertEqual([server["name"] for server in servers], ["GitKraken"])
+        configs = self._extract()
+        self.assertEqual(len(configs), 2)
+        self.assertEqual(
+            {config["path"] for config in configs},
+            {
+                self._workspace_location("workspace-a")[1],
+                self._workspace_location("workspace-b")[1],
+            },
+        )
+        self.assertEqual(
+            [server["name"] for server in self._all_servers(configs)],
+            ["GitKraken", "GitKraken"],
+        )
 
     def test_extension_provider_without_optional_cache_nonce_is_preserved(self):
         self._install_gitlens_provider()
@@ -294,13 +323,16 @@ class _GitHubCopilotVscodeMcpMixin:
 
     def test_newest_usable_cache_wins_for_stable_provider_identity(self):
         self._install_gitlens_provider()
+        workspace_uri = self._workspace_location("shared-workspace")[0]
         old_db = self._write_gitkraken_provider_cache(
             "workspace-old",
             command_name="gk-old.exe",
+            workspace_uri=workspace_uri,
         )
         new_db = self._write_gitkraken_provider_cache(
             "workspace-new",
             command_name="gk-new.exe",
+            workspace_uri=workspace_uri,
         )
         os.utime(old_db, (1, 1))
         os.utime(new_db, (2, 2))
@@ -309,6 +341,66 @@ class _GitHubCopilotVscodeMcpMixin:
 
         self.assertEqual(len(servers), 1)
         self.assertTrue(servers[0]["command"].endswith("gk-new.exe"))
+
+    def test_workspace_cache_without_scope_metadata_is_ignored(self):
+        self._install_gitlens_provider()
+        db_path = self._write_gitkraken_provider_cache()
+        (db_path.parent / "workspace.json").unlink()
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_symlinked_workspace_cache_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        self._install_gitlens_provider()
+        db_path = self._write_gitkraken_provider_cache()
+        external_db = Path(self.tmp_dir) / "external-state.vscdb"
+        db_path.replace(external_db)
+        db_path.symlink_to(external_db)
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_elevated_discovery_reports_cache_without_executing_it(self):
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache()
+
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=True,
+        ), patch.object(mcp_helpers, "_scan_servers_in_mapping") as scan_servers:
+            servers = self._all_servers(self._extract())
+
+        scan_servers.assert_not_called()
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0]["scan"]["error"]["code"], "privilege_boundary")
+
+    def test_non_elevated_discovery_scans_cached_launch(self):
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache()
+        scan = {
+            "scanned_at": None,
+            "tools": [{"name": "repository_status"}],
+            "tool_count": 1,
+            "server_info": None,
+            "error": None,
+        }
+
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=False,
+        ), patch.object(
+            mcp_helpers,
+            "_scan_servers_in_mapping",
+            return_value={"0": scan},
+        ) as scan_servers:
+            servers = self._all_servers(self._extract())
+
+        scanned_config = scan_servers.call_args.args[0]["0"]
+        self.assertEqual(scanned_config["env"], {"SHOULD_NOT_LEAVE_DEVICE": "secret"})
+        self.assertEqual(servers[0]["scan"]["tool_count"], 1)
+        self.assertNotIn("env", servers[0])
 
     def test_uninstalled_extension_cache_is_ignored(self):
         self._write_gitkraken_provider_cache()
@@ -741,6 +833,7 @@ class TestMacOSGitHubCopilotVscodeMcpJsonc(
 ):
     extractor_cls = MacOSGitHubCopilotMCPConfigExtractor
     code_user_relpath = ("Library", "Application Support", "Code", "User")
+    operating_system = "macos"
 
 
 class TestLinuxGitHubCopilotVscodeMcpJsonc(
@@ -748,6 +841,7 @@ class TestLinuxGitHubCopilotVscodeMcpJsonc(
 ):
     extractor_cls = LinuxGitHubCopilotMCPConfigExtractor
     code_user_relpath = (".config", "Code", "User")
+    operating_system = "linux"
 
 
 class TestWindowsGitHubCopilotVscodeMcpJsonc(
@@ -755,6 +849,7 @@ class TestWindowsGitHubCopilotVscodeMcpJsonc(
 ):
     extractor_cls = WindowsGitHubCopilotMCPConfigExtractor
     code_user_relpath = ("AppData", "Roaming", "Code", "User")
+    operating_system = "windows"
 
 
 if __name__ == "__main__":

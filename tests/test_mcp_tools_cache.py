@@ -105,19 +105,15 @@ class TestCacheKey(unittest.TestCase):
             "bin:gk",
         )
 
-    def test_bare_vscode_provider_uses_provider_identity(self):
+    def test_bare_vscode_provider_is_not_a_fingerprint(self):
         server = {
             "name": "GitKraken",
             "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
             "providerServerId": "eamodio.gitlens/GitKraken",
         }
-        self.assertEqual(
-            cache_key_for_server(server),
-            "vscode-provider:eamodio.gitlens/gitlens.gkmcpprovider:"
-            "eamodio.gitlens/gitkraken",
-        )
+        self.assertIsNone(cache_key_for_server(server))
 
-    def test_cached_vscode_provider_uses_provider_identity(self):
+    def test_cached_vscode_provider_keeps_launch_identity(self):
         server = {
             "name": "GitKraken",
             "command": "gk",
@@ -128,22 +124,8 @@ class TestCacheKey(unittest.TestCase):
         }
         self.assertEqual(
             cache_key_for_server(server),
-            "vscode-provider:eamodio.gitlens/gitlens.gkmcpprovider:"
-            "eamodio.gitlens/gitkraken",
+            "bin:gk",
         )
-
-    def test_vscode_provider_identity_respects_storage_limit(self):
-        provider_id = f"{'a' * 128}/{'b' * 128}"
-        self.assertIsNone(compute_cache_key(
-            name="provider",
-            url=None,
-            command="node",
-            args=[],
-            additional_data={
-                "providerId": provider_id,
-                "providerServerId": provider_id,
-            },
-        ))
 
     def test_http_provider_keeps_url_bound_identity(self):
         self.assertEqual(

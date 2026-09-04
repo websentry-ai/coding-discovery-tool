@@ -25,7 +25,6 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     npm:<package>                -> from an npm package in args (@scoped, or bare under npx/npm/bunx)
     smithery:<server>            -> target passed to Smithery CLI `run`
     nuget:<package>              -> package run by `dnx` or `dotnet tool exec`
-    vscode-provider:<provider>:<server> -> VS Code extension-provided server
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
     script:<hash>                -> content hash of a local script (supplied by the client)
@@ -61,7 +60,6 @@ logger = logging.getLogger(__name__)
 CLAUDE_BUILTIN_PREFIX = 'claude-builtin:'
 
 CLAUDE_CONNECTOR_SCOPE = 'claude-connector'
-VSCODE_PROVIDER_CACHE_SCOPE = 'vscode-provider-cache'
 
 # Claude Code sanitizes display names into runtime names (non-alphanumerics -> '_'), so one
 # server arrives under several spellings. chrome/browser/preview stay separate: different tools.
@@ -613,25 +611,6 @@ def _normalize_bin(command: str) -> Optional[str]:
     return b
 
 
-def _vscode_provider_identity(additional_data) -> Optional[str]:
-    if not isinstance(additional_data, dict):
-        return None
-    provider_id = additional_data.get('providerId')
-    server_id = additional_data.get('providerServerId')
-    pattern = re.compile(
-        r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}'
-    )
-    if (
-        not isinstance(provider_id, str)
-        or not isinstance(server_id, str)
-        or not pattern.fullmatch(provider_id)
-        or not pattern.fullmatch(server_id)
-    ):
-        return None
-    identity = f'{provider_id.lower()}:{server_id.lower()}'
-    return identity if len('vscode-provider:') + len(identity) <= 500 else None
-
-
 def compute_fingerprint(
     name: Optional[str],
     command: Optional[str],
@@ -695,13 +674,6 @@ def compute_fingerprint(
         identity = _extract_url_identity(url)
         if identity:
             return f'url:{identity}'
-
-    provider_identity = _vscode_provider_identity(safe_additional_data)
-    if provider_identity and (
-        safe_additional_data.get('scope') == VSCODE_PROVIDER_CACHE_SCOPE
-        or (not command and not url and not safe_args)
-    ):
-        return f'vscode-provider:{provider_identity}'
 
     nuget_package = _nuget_package(base, safe_args)
     if nuget_package:

@@ -844,6 +844,25 @@ class TestGitHubCopilotWorkspaceMCP(unittest.TestCase):
                 self._walk(extractor, Path(self.tmp_dir) / "Users", configs)
                 self.assertEqual(configs, [])
 
+    def test_walk_skips_symlinked_mcp_json(self):
+        """A symlinked mcp.json must not pull an out-of-tree config into the project."""
+        outside = Path(self.tmp_dir) / "outside"
+        outside.mkdir(parents=True)
+        (outside / "other.json").write_text(json.dumps({
+            "servers": {"out-of-tree": {"command": "unbound-test-no-such-binary"}}
+        }), encoding="utf-8")
+        vscode = Path(self.tmp_dir) / "Users" / "alice" / "repo" / ".vscode"
+        vscode.mkdir(parents=True)
+        (vscode / "mcp.json").symlink_to(outside / "other.json")
+
+        for extractor in (MacOSGitHubCopilotMCPConfigExtractor(),
+                          LinuxGitHubCopilotMCPConfigExtractor(),
+                          WindowsGitHubCopilotMCPConfigExtractor()):
+            with self.subTest(extractor=type(extractor).__name__):
+                configs = []
+                self._walk(extractor, Path(self.tmp_dir) / "Users", configs)
+                self.assertEqual(configs, [])
+
     def test_check_vscode_mcp_finds_and_parses_mcp_json(self):
         vscode_dir = Path(self.tmp_dir) / "myproject" / ".vscode"
         vscode_dir.mkdir(parents=True)

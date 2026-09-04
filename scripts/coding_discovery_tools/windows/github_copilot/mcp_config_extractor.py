@@ -205,7 +205,9 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         Check a .vscode directory for mcp.json and extract its config.
         """
         mcp_json = vscode_dir / "mcp.json"
-        if mcp_json.exists() and mcp_json.is_file():
+        if is_symlink_or_junction(mcp_json):
+            return
+        if mcp_json.is_file():
             project_root = str(vscode_dir.parent)
             config = self._read_mcp_config(mcp_json, project_root)
             if config:

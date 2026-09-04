@@ -384,6 +384,41 @@ class _GitHubCopilotVscodeMcpMixin:
 
         self.assertEqual(self._all_servers(self._extract()), [])
 
+    def test_symlinked_workspace_metadata_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        self._install_gitlens_provider()
+        db_path = self._write_gitkraken_provider_cache()
+        metadata_path = db_path.parent / "workspace.json"
+        external_metadata = Path(self.tmp_dir) / "external-workspace.json"
+        metadata_path.replace(external_metadata)
+        metadata_path.symlink_to(external_metadata)
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_symlinked_profile_state_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache(profile_id="profile-a")
+        profile_state = (
+            self.code_user_base
+            / "profiles"
+            / "profile-a"
+            / "globalStorage"
+            / "state.vscdb"
+        )
+        external_state = Path(self.tmp_dir) / "external-profile-state.vscdb"
+        self._write_extension_state(
+            external_state,
+            "extensionsIdentifiers/disabled",
+            "eamodio.gitlens",
+        )
+        profile_state.parent.mkdir(parents=True, exist_ok=True)
+        profile_state.symlink_to(external_state)
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
     def test_elevated_discovery_reports_cache_without_executing_it(self):
         self._install_gitlens_provider()
         self._write_gitkraken_provider_cache()

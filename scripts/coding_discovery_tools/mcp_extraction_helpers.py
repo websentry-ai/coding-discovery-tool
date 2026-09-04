@@ -599,6 +599,39 @@ _VSCODE_MCP_SERVER_MAX_COUNT = 500
 _VSCODE_WORKSPACE_METADATA_MAX_BYTES = 64 * 1024
 
 
+def _vscode_state_file_is_safe(
+    path: Path,
+    code_user_base: Path,
+    *,
+    missing_ok: bool = False,
+) -> bool:
+    try:
+        relative_parts = path.relative_to(code_user_base).parts
+    except ValueError:
+        return False
+
+    paths = [code_user_base]
+    current = code_user_base
+    for part in relative_parts:
+        current /= part
+        paths.append(current)
+
+    for current in paths:
+        try:
+            os.lstat(current)
+        except FileNotFoundError:
+            return missing_ok
+        except OSError:
+            return False
+        if is_symlink_or_junction(current):
+            return False
+
+    try:
+        return current.is_file()
+    except OSError:
+        return False
+
+
 def _enumerate_vscode_state_databases(code_user_base: Path) -> List[Path]:
     candidates: List[Path] = []
     patterns = (
@@ -611,11 +644,7 @@ def _enumerate_vscode_state_databases(code_user_base: Path) -> List[Path]:
     for pattern in patterns:
         try:
             for db_path in sorted(code_user_base.glob(pattern)):
-                if is_symlink_or_junction(db_path) or not db_path.is_file():
-                    continue
-                try:
-                    db_path.resolve().relative_to(code_user_base.resolve())
-                except (ValueError, OSError, RuntimeError):
+                if not _vscode_state_file_is_safe(db_path, code_user_base):
                     continue
                 candidates.append(db_path)
         except Exception as exc:
@@ -1008,6 +1037,8 @@ def _vscode_cache_scope_path(
 
     if "workspaceStorage" in relative_parts:
         metadata_path = db_path.parent / "workspace.json"
+        if not _vscode_state_file_is_safe(metadata_path, code_user_base):
+            return None
         try:
             with metadata_path.open("rb") as metadata_file:
                 raw_metadata = metadata_file.read(
@@ -1162,8 +1193,15 @@ def _extract_vscode_cached_mcp_projects(
                 db_path,
                 _VSCODE_DISABLED_EXTENSIONS_KEY,
             )
+        profile_state_db = _profile_state_database(code_user_base, db_path)
+        if not _vscode_state_file_is_safe(
+            profile_state_db,
+            code_user_base,
+            missing_ok=True,
+        ):
+            continue
         profile_disabled = _vscode_extension_ids_from_state(
-            _profile_state_database(code_user_base, db_path),
+            profile_state_db,
             _VSCODE_DISABLED_EXTENSIONS_KEY,
         )
 

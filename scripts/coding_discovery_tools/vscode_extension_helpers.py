@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # cross-platform, not the ~/.config app-data tree).
 _EXTENSIONS_DIR_BY_EDITOR = {
     "Code": ".vscode/extensions",
+    "Code - Insiders": ".vscode-insiders/extensions",
     "Cursor": ".cursor/extensions",
     "Windsurf": ".windsurf/extensions",
     "VSCodium": ".vscode-oss/extensions",
@@ -107,7 +108,7 @@ def _resolve_entry_location(entry: dict, extensions_dir: Path) -> str:
     """
     location = entry.get("location")
     if isinstance(location, dict):
-        abs_path = location.get("path") or location.get("fsPath")
+        abs_path = location.get("fsPath") or location.get("path")
         if isinstance(abs_path, str) and abs_path:
             return abs_path
 

@@ -1235,23 +1235,39 @@ class AIToolsDetector:
 
     @staticmethod
     def _union_mcp_servers(existing: List[Dict], incoming: List[Dict]) -> List[Dict]:
-        """Combine two MCP-server lists, de-duplicated by server name.
+        def identity(server):
+            if not isinstance(server, dict):
+                return None
+            provider_id = server.get("providerId")
+            provider_server_id = server.get("providerServerId")
+            provider_profile_id = server.get("providerProfileId")
+            if not isinstance(provider_profile_id, str):
+                provider_profile_id = None
+            if (
+                isinstance(provider_id, str)
+                and isinstance(provider_server_id, str)
+            ):
+                return (
+                    "vscode-provider",
+                    provider_id,
+                    provider_server_id,
+                    provider_profile_id,
+                )
+            name = server.get("name")
+            return ("name", name) if name is not None else None
 
-        Multiple config sources can resolve to the same project path — most
-        notably a project whose root is the user's home directory, which yields
-        both a ``~/.claude.json`` ``projects[<home>]`` entry and a home-rooted
-        ``~/.mcp.json`` entry. Unioning (instead of overwriting) keeps both
-        sources' servers; first-seen wins, so the higher-precedence source
-        merged earlier is preserved on a name conflict.
-        """
         merged = list(existing or [])
-        seen = {s.get("name") for s in merged if isinstance(s, dict)}
+        seen = set()
+        for server in merged:
+            server_identity = identity(server)
+            if server_identity is not None:
+                seen.add(server_identity)
         for server in (incoming or []):
-            name = server.get("name") if isinstance(server, dict) else None
-            if name is not None and name in seen:
+            server_identity = identity(server)
+            if server_identity is not None and server_identity in seen:
                 continue
-            if name is not None:
-                seen.add(name)
+            if server_identity is not None:
+                seen.add(server_identity)
             merged.append(server)
         return merged
 

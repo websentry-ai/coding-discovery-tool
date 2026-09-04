@@ -13,6 +13,7 @@ from ...linux_extraction_helpers import (
     should_skip_system_path,
 )
 from ...mcp_extraction_helpers import (
+    append_vscode_cached_mcp_servers,
     enumerate_vscode_mcp_files,
     transform_mcp_servers_to_array,
     _strip_jsonc_comments,
@@ -70,6 +71,12 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                 config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
                 if config:
                     configs.append(config)
+            append_vscode_cached_mcp_servers(
+                configs,
+                code_user_base,
+                user_home,
+                "linux",
+            )
 
         return configs
 

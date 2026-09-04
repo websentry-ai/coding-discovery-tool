@@ -9,17 +9,28 @@ import datetime
 import hashlib
 import json
 import logging
+import ntpath
 import os
 import platform
+import posixpath
 import re
+import shutil
+import sqlite3
+import stat
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
+from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .constants import MAX_SEARCH_DEPTH
+from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction
 from .mcp_script_hash import augment_script_fields
+from .vscode_extension_helpers import (
+    extensions_dir_for_editor,
+    find_extension_in_editor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -578,6 +589,879 @@ def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
     return files
 
 
+_VSCODE_MCP_PROVIDER_CACHE_KEY = "mcp.extCachedServers"
+_VSCODE_MCP_PROVIDER_CACHE_MAX_BYTES = 5 * 1024 * 1024
+_VSCODE_EXTENSION_STATE_MAX_BYTES = 1024 * 1024
+_VSCODE_EXTENSION_MANIFEST_MAX_BYTES = 5 * 1024 * 1024
+_VSCODE_STATE_DATABASE_MAX_COUNT = 500
+_VSCODE_DISABLED_EXTENSIONS_KEY = "extensionsIdentifiers/disabled"
+_VSCODE_ENABLED_EXTENSIONS_KEY = "extensionsIdentifiers/enabled"
+_VSCODE_MCP_PROVIDER_MAX_COUNT = 200
+_VSCODE_MCP_SERVERS_PER_PROVIDER_MAX_COUNT = 100
+_VSCODE_MCP_SERVER_MAX_COUNT = 500
+_VSCODE_WORKSPACE_METADATA_MAX_BYTES = 64 * 1024
+_VSCODE_PROVIDER_CACHE_SCOPE = "vscode-provider-cache"
+
+
+def _vscode_path_is_safe(
+    path: Path,
+    trusted_root: Path,
+    *,
+    require_directory: bool = False,
+    missing_ok: bool = False,
+) -> bool:
+    try:
+        relative_parts = path.relative_to(trusted_root).parts
+    except ValueError:
+        return False
+    if any(part in (os.curdir, os.pardir) for part in relative_parts):
+        return False
+
+    paths = [trusted_root]
+    current = trusted_root
+    for part in relative_parts:
+        current /= part
+        paths.append(current)
+
+    current_stat = None
+    for current in paths:
+        try:
+            current_stat = os.lstat(current)
+        except FileNotFoundError:
+            return missing_ok
+        except OSError:
+            return False
+        if is_symlink_or_junction(current):
+            return False
+
+    if current_stat is None:
+        return False
+    if require_directory:
+        return stat.S_ISDIR(current_stat.st_mode)
+    return stat.S_ISREG(current_stat.st_mode)
+
+
+def _vscode_child_directories(parent: Path, trusted_root: Path) -> List[Path]:
+    if not _vscode_path_is_safe(
+        parent,
+        trusted_root,
+        require_directory=True,
+    ):
+        return []
+
+    children = []
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                child = Path(entry.path)
+                try:
+                    if is_symlink_or_junction(child):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        children.append(child)
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    return sorted(children)
+
+
+def _vscode_trusted_root(path: Path, user_home: Path) -> Path:
+    try:
+        path.relative_to(user_home)
+        return user_home
+    except ValueError:
+        return Path(path.anchor) if path.anchor else path.parent
+
+
+def _enumerate_vscode_state_databases(
+    code_user_base: Path,
+    user_home: Path,
+) -> List[Path]:
+    candidates: List[Path] = []
+
+    def add(candidate: Path) -> None:
+        if _vscode_path_is_safe(candidate, user_home):
+            candidates.append(candidate)
+
+    add(code_user_base / "globalStorage" / "state.vscdb")
+    for workspace_dir in _vscode_child_directories(
+        code_user_base / "workspaceStorage",
+        user_home,
+    ):
+        add(workspace_dir / "state.vscdb")
+    for profile_dir in _vscode_child_directories(
+        code_user_base / "profiles",
+        user_home,
+    ):
+        add(profile_dir / "globalStorage" / "state.vscdb")
+        for workspace_dir in _vscode_child_directories(
+            profile_dir / "workspaceStorage",
+            user_home,
+        ):
+            add(workspace_dir / "state.vscdb")
+
+    def modified_at(path: Path) -> int:
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    ordered = sorted(set(candidates), key=lambda path: (-modified_at(path), str(path)))
+    return ordered[:_VSCODE_STATE_DATABASE_MAX_COUNT]
+
+
+def _read_vscode_state_json(
+    db_path: Path,
+    key: str,
+    max_bytes: int,
+) -> Optional[Any]:
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(
+            sqlite3.connect(database_uri, uri=True, timeout=1.0)
+        ) as connection:
+            row = connection.execute(
+                "SELECT length(CAST(value AS BLOB)) FROM ItemTable WHERE key = ? LIMIT 1",
+                (key,),
+            ).fetchone()
+            if not row or not isinstance(row[0], int):
+                return None
+            if row[0] > max_bytes:
+                logger.debug(
+                    "VS Code state: ignoring oversized %s in %s (%d bytes)",
+                    key,
+                    db_path,
+                    row[0],
+                )
+                return None
+            value_row = connection.execute(
+                "SELECT value FROM ItemTable WHERE key = ? LIMIT 1",
+                (key,),
+            ).fetchone()
+    except (OSError, sqlite3.Error) as exc:
+        logger.debug("VS Code state: cannot read %s from %s: %s", key, db_path, exc)
+        return None
+
+    if not value_row:
+        return None
+
+    raw_value = value_row[0]
+    if isinstance(raw_value, bytes):
+        try:
+            raw_value = raw_value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            logger.debug(
+                "VS Code state: invalid UTF-8 for %s in %s: %s",
+                key,
+                db_path,
+                exc,
+            )
+            return None
+    if not isinstance(raw_value, str):
+        return None
+
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        logger.debug("VS Code state: invalid JSON for %s in %s: %s", key, db_path, exc)
+        return None
+
+
+def _read_vscode_mcp_provider_cache(db_path: Path) -> Optional[Dict[str, Any]]:
+    decoded = _read_vscode_state_json(
+        db_path,
+        _VSCODE_MCP_PROVIDER_CACHE_KEY,
+        _VSCODE_MCP_PROVIDER_CACHE_MAX_BYTES,
+    )
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _normalize_vscode_cached_launch(launch: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(launch, dict):
+        return None
+
+    transport_type = launch.get("type")
+    if transport_type == 1:
+        command = launch.get("command")
+        args = launch.get("args")
+        env = launch.get("env")
+        if not isinstance(command, str) or not command:
+            return None
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            return None
+        if not isinstance(env, dict):
+            return None
+
+        config: Dict[str, Any] = {
+            "type": "stdio",
+            "command": command,
+            "args": args,
+            "env": env,
+        }
+        cwd = launch.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            config["cwd"] = cwd
+        return config
+
+    if transport_type == 2:
+        uri = launch.get("uri")
+        if not isinstance(uri, dict):
+            return None
+        scheme = uri.get("scheme")
+        authority = uri.get("authority")
+        path = uri.get("path", "")
+        query = uri.get("query", "")
+        fragment = uri.get("fragment", "")
+        if (
+            not isinstance(scheme, str)
+            or scheme.lower() not in ("http", "https")
+            or not isinstance(authority, str)
+            or not authority
+            or not all(isinstance(value, str) for value in (path, query, fragment))
+        ):
+            return None
+
+        config = {
+            "type": "http",
+            "url": urlunsplit((scheme, authority, path, query, fragment)),
+        }
+        headers = launch.get("headers")
+        if isinstance(headers, list) and all(
+            isinstance(header, list)
+            and len(header) == 2
+            and all(isinstance(value, str) for value in header)
+            for header in headers
+        ):
+            config["headers"] = dict(headers)
+        return config
+
+    return None
+
+
+def _vscode_builtin_extension_roots(
+    user_home: Path,
+    code_user_base: Path,
+    operating_system: str,
+) -> List[Path]:
+    insiders = code_user_base.parent.name == "Code - Insiders"
+
+    if operating_system == "windows":
+        app_name = "Microsoft VS Code Insiders" if insiders else "Microsoft VS Code"
+        install_roots = [
+            user_home / "AppData" / "Local" / "Programs" / app_name,
+            Path(f"C:\\Program Files\\{app_name}"),
+            Path(f"C:\\Program Files (x86)\\{app_name}"),
+        ]
+        extension_roots = [
+            root / "resources" / "app" / "extensions"
+            for root in install_roots
+        ]
+        for install_root in install_roots:
+            trusted_root = _vscode_trusted_root(install_root, user_home)
+            for version_dir in _vscode_child_directories(
+                install_root,
+                trusted_root,
+            ):
+                versioned_root = version_dir / "resources" / "app" / "extensions"
+                if _vscode_path_is_safe(
+                    versioned_root,
+                    trusted_root,
+                    require_directory=True,
+                ):
+                    extension_roots.append(versioned_root)
+        return extension_roots
+
+    if operating_system == "macos":
+        app_name = (
+            "Visual Studio Code - Insiders.app"
+            if insiders
+            else "Visual Studio Code.app"
+        )
+        suffix = Path("Contents/Resources/app/extensions")
+        return [
+            Path("/Applications") / app_name / suffix,
+            user_home / "Applications" / app_name / suffix,
+        ]
+
+    if operating_system != "linux":
+        return []
+
+    channel = "code-insiders" if insiders else "code"
+    opt_name = "visual-studio-code-insiders" if insiders else "visual-studio-code"
+    roots = [
+        Path(f"/usr/share/{channel}/resources/app/extensions"),
+        Path(f"/usr/lib/{channel}/extensions"),
+        Path(f"/opt/{opt_name}/resources/app/extensions"),
+    ]
+    if not insiders:
+        roots.append(Path("/snap/code/current/usr/share/code/resources/app/extensions"))
+    return roots
+
+
+def _manifest_declares_vscode_mcp_provider(
+    manifest_path: Path,
+    extension_id: str,
+    contribution_id: str,
+) -> bool:
+    try:
+        with manifest_path.open("rb") as manifest_file:
+            raw_manifest = manifest_file.read(
+                _VSCODE_EXTENSION_MANIFEST_MAX_BYTES + 1
+            )
+        if len(raw_manifest) > _VSCODE_EXTENSION_MANIFEST_MAX_BYTES:
+            return False
+        manifest = json.loads(raw_manifest.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+
+    publisher = manifest.get("publisher")
+    name = manifest.get("name")
+    if not isinstance(publisher, str) or not isinstance(name, str):
+        return False
+    if f"{publisher}.{name}".lower() != extension_id.lower():
+        return False
+
+    contributes = manifest.get("contributes")
+    providers = (
+        contributes.get("mcpServerDefinitionProviders")
+        if isinstance(contributes, dict)
+        else None
+    )
+    return isinstance(providers, list) and any(
+        isinstance(provider, dict) and provider.get("id") == contribution_id
+        for provider in providers
+    )
+
+
+def _find_vscode_mcp_provider_manifest(
+    user_home: Path,
+    code_user_base: Path,
+    operating_system: str,
+    extension_id: str,
+    contribution_id: str,
+) -> Optional[Path]:
+    ide_key = code_user_base.parent.name
+    extensions_root = extensions_dir_for_editor(user_home, ide_key)
+    registry_path = (
+        extensions_root / "extensions.json"
+        if extensions_root is not None
+        else None
+    )
+    extension = (
+        find_extension_in_editor(user_home, ide_key, extension_id)
+        if registry_path is not None
+        and _vscode_path_is_safe(registry_path, user_home)
+        else None
+    )
+    if extension is not None and extensions_root is not None:
+        try:
+            extension_path = Path(os.path.abspath(extension[0]))
+            expected_root = Path(os.path.abspath(extensions_root))
+            extension_path.relative_to(expected_root)
+        except (ValueError, OSError):
+            extension_path = None
+        if extension_path is not None:
+            manifest_path = extension_path / "package.json"
+            if _vscode_path_is_safe(
+                extension_path,
+                user_home,
+                require_directory=True,
+            ) and _vscode_path_is_safe(manifest_path, user_home):
+                if _manifest_declares_vscode_mcp_provider(
+                    manifest_path,
+                    extension_id,
+                    contribution_id,
+                ):
+                    return manifest_path
+
+    for extension_root in _vscode_builtin_extension_roots(
+        user_home,
+        code_user_base,
+        operating_system,
+    ):
+        trusted_root = _vscode_trusted_root(extension_root, user_home)
+        for extension_path in _vscode_child_directories(
+            extension_root,
+            trusted_root,
+        ):
+            manifest_path = extension_path / "package.json"
+            if not _vscode_path_is_safe(manifest_path, trusted_root):
+                continue
+            if _manifest_declares_vscode_mcp_provider(
+                manifest_path,
+                extension_id,
+                contribution_id,
+            ):
+                return manifest_path
+    return None
+
+
+def _vscode_extension_ids_from_state(db_path: Path, key: str) -> set:
+    stored = _read_vscode_state_json(
+        db_path,
+        key,
+        _VSCODE_EXTENSION_STATE_MAX_BYTES,
+    )
+    if not isinstance(stored, list):
+        return set()
+    return {
+        item["id"].lower()
+        for item in stored
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+
+
+def _profile_state_database(code_user_base: Path, cache_db_path: Path) -> Path:
+    try:
+        relative_parts = cache_db_path.relative_to(code_user_base).parts
+    except ValueError:
+        return code_user_base / "globalStorage" / "state.vscdb"
+    if len(relative_parts) >= 2 and relative_parts[0] == "profiles":
+        return (
+            code_user_base
+            / "profiles"
+            / relative_parts[1]
+            / "globalStorage"
+            / "state.vscdb"
+        )
+    return code_user_base / "globalStorage" / "state.vscdb"
+
+
+def _vscode_cached_command_exists(command: str, cwd: Optional[str] = None) -> bool:
+    expanded = os.path.expandvars(os.path.expanduser(command))
+    command_path = Path(expanded)
+    if command_path.is_absolute():
+        try:
+            return command_path.is_file()
+        except OSError:
+            return False
+    if cwd:
+        try:
+            if (Path(os.path.expandvars(os.path.expanduser(cwd))) / command_path).is_file():
+                return True
+        except OSError:
+            pass
+    return shutil.which(expanded) is not None
+
+
+def _vscode_cached_url_for_report(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return ""
+    hostname = parsed.hostname or ""
+    if not hostname:
+        return ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if port is not None:
+        netloc = f"{hostname}:{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _vscode_workspace_uri_for_report(uri: str, operating_system: str) -> Optional[str]:
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "file":
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")) or None
+
+    path = unquote(parsed.path)
+    if operating_system == "windows":
+        windows_path = path.replace("/", "\\")
+        if parsed.netloc:
+            return f"\\\\{parsed.netloc}{windows_path}"
+        if re.match(r"^/[A-Za-z]:", path):
+            windows_path = windows_path[1:]
+        if re.match(r"^[A-Za-z]:", windows_path):
+            windows_path = windows_path[0].upper() + windows_path[1:]
+        return windows_path or None
+
+    if parsed.netloc:
+        return f"//{parsed.netloc}{path}"
+    return path or None
+
+
+def _vscode_workspace_path_is_owned(
+    workspace_path: str,
+    user_home: Path,
+    operating_system: str,
+) -> bool:
+    path_module = ntpath if operating_system == "windows" else posixpath
+    try:
+        home_uri = user_home.absolute().as_uri()
+    except ValueError:
+        return False
+    home_path = _vscode_workspace_uri_for_report(home_uri, operating_system)
+    if home_path is None:
+        return False
+    normalized_home = path_module.normcase(path_module.normpath(home_path))
+    normalized_workspace = path_module.normcase(
+        path_module.normpath(workspace_path)
+    )
+    workspace_is_absolute = path_module.isabs(normalized_workspace) or (
+        operating_system == "windows"
+        and normalized_home.startswith("\\")
+        and normalized_workspace.startswith("\\")
+    )
+    if not workspace_is_absolute:
+        return False
+    try:
+        return path_module.commonpath(
+            (normalized_home, normalized_workspace)
+        ) == normalized_home
+    except ValueError:
+        return False
+
+
+def _vscode_cache_scope_path(
+    code_user_base: Path,
+    db_path: Path,
+    user_home: Path,
+    operating_system: str,
+) -> Optional[str]:
+    try:
+        relative_parts = db_path.relative_to(code_user_base).parts
+    except ValueError:
+        return None
+
+    if "workspaceStorage" in relative_parts:
+        metadata_path = db_path.parent / "workspace.json"
+        if not _vscode_path_is_safe(metadata_path, user_home):
+            return None
+        try:
+            with metadata_path.open("rb") as metadata_file:
+                raw_metadata = metadata_file.read(
+                    _VSCODE_WORKSPACE_METADATA_MAX_BYTES + 1
+                )
+            if len(raw_metadata) > _VSCODE_WORKSPACE_METADATA_MAX_BYTES:
+                return None
+            metadata = json.loads(raw_metadata.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(metadata, dict):
+            return None
+        workspace_uri = metadata.get("folder") or metadata.get("workspace")
+        if not isinstance(workspace_uri, str) or not workspace_uri:
+            return None
+        workspace_path = _vscode_workspace_uri_for_report(
+            workspace_uri,
+            operating_system,
+        )
+        if workspace_path is None or not _vscode_workspace_path_is_owned(
+            workspace_path,
+            user_home,
+            operating_system,
+        ):
+            return None
+        path_module = ntpath if operating_system == "windows" else posixpath
+        return path_module.normpath(workspace_path)
+
+    if len(relative_parts) >= 3 and relative_parts[0] == "profiles":
+        return str(code_user_base / "profiles" / relative_parts[1])
+    if relative_parts == ("globalStorage", "state.vscdb"):
+        return str(code_user_base)
+    return None
+
+
+def _vscode_cache_profile_id(
+    code_user_base: Path,
+    db_path: Path,
+) -> Optional[str]:
+    try:
+        relative_parts = db_path.relative_to(code_user_base).parts
+    except ValueError:
+        return None
+    if len(relative_parts) >= 2 and relative_parts[0] == "profiles":
+        return relative_parts[1]
+    return None
+
+
+def _running_with_elevated_privileges(operating_system: str) -> bool:
+    if operating_system == "windows":
+        try:
+            from .windows_extraction_helpers import (
+                is_running_as_admin,
+                windows_admin_state,
+            )
+            admin_state = windows_admin_state()
+            return admin_state is not False or is_running_as_admin()
+        except Exception:
+            return True
+
+    try:
+        effective_uid = os.geteuid()
+        return effective_uid == 0 or effective_uid != os.getuid()
+    except (AttributeError, OSError):
+        return True
+
+
+def _privilege_boundary_scan_result(
+    reason: str = "cached_vscode_launch_under_elevated_process",
+) -> Dict[str, Any]:
+    return {
+        "scanned_at": (
+            datetime.datetime.now(datetime.timezone.utc)
+            .replace(microsecond=0).isoformat()
+        ),
+        "tools": None,
+        "tool_count": None,
+        "server_info": None,
+        "error": {
+            "code": "privilege_boundary",
+            "details": {"reason": reason},
+        },
+    }
+
+
+def _transform_vscode_cached_mcp_server_entries(
+    configs: Dict[str, Dict[str, Any]],
+    labels: Dict[str, str],
+    skip_live_scan: bool,
+) -> List[Tuple[str, Dict]]:
+    scan_overrides = (
+        {config_key: _privilege_boundary_scan_result() for config_key in configs}
+        if skip_live_scan
+        else None
+    )
+    servers = transform_mcp_servers_to_array(
+        configs,
+        _scan_overrides=scan_overrides,
+        _skip_script_augmentation=skip_live_scan,
+    )
+    reported: List[Tuple[str, Dict]] = []
+    for server in servers:
+        config_key = server["name"]
+        server["name"] = labels[config_key]
+        server["additional_data"] = {
+            "scope": _VSCODE_PROVIDER_CACHE_SCOPE,
+        }
+        url = server.get("url")
+        if isinstance(url, str):
+            sanitized_url = _vscode_cached_url_for_report(url)
+            if not sanitized_url:
+                continue
+            server["url"] = sanitized_url
+        reported.append((config_key, server))
+    return reported
+
+
+def _transform_vscode_cached_mcp_servers(
+    configs: Dict[str, Dict[str, Any]],
+    labels: Dict[str, str],
+    skip_live_scan: bool = False,
+) -> List[Dict]:
+    return [
+        server
+        for _, server in _transform_vscode_cached_mcp_server_entries(
+            configs,
+            labels,
+            skip_live_scan,
+        )
+    ]
+
+
+def _extract_vscode_cached_mcp_projects(
+    code_user_base: Path,
+    user_home: Path,
+    operating_system: str,
+) -> List[Dict]:
+    skip_live_scan = _running_with_elevated_privileges(operating_system)
+    seen = set()
+    validated_providers: Dict[str, bool] = {}
+    configs: Dict[str, Dict[str, Any]] = {}
+    labels: Dict[str, str] = {}
+    scopes: Dict[str, str] = {}
+
+    for db_path in _enumerate_vscode_state_databases(code_user_base, user_home):
+        scope_path = _vscode_cache_scope_path(
+            code_user_base,
+            db_path,
+            user_home,
+            operating_system,
+        )
+        if scope_path is None:
+            continue
+        profile_id = _vscode_cache_profile_id(code_user_base, db_path)
+        provider_cache = _read_vscode_mcp_provider_cache(db_path)
+        if not provider_cache:
+            continue
+
+        workspace_enabled = set()
+        workspace_disabled = set()
+        if "workspaceStorage" in db_path.parts:
+            workspace_enabled = _vscode_extension_ids_from_state(
+                db_path,
+                _VSCODE_ENABLED_EXTENSIONS_KEY,
+            )
+            workspace_disabled = _vscode_extension_ids_from_state(
+                db_path,
+                _VSCODE_DISABLED_EXTENSIONS_KEY,
+            )
+        profile_state_db = _profile_state_database(code_user_base, db_path)
+        if not _vscode_path_is_safe(
+            profile_state_db,
+            user_home,
+            missing_ok=True,
+        ):
+            continue
+        profile_disabled = _vscode_extension_ids_from_state(
+            profile_state_db,
+            _VSCODE_DISABLED_EXTENSIONS_KEY,
+        )
+
+        for provider_index, (provider_id, provider_value) in enumerate(
+            provider_cache.items()
+        ):
+            if provider_index >= _VSCODE_MCP_PROVIDER_MAX_COUNT:
+                break
+            if not isinstance(provider_id, str) or not isinstance(provider_value, dict):
+                continue
+            provider_parts = provider_id.split("/", 1)
+            if len(provider_parts) != 2 or not all(provider_parts):
+                continue
+            extension_id, contribution_id = provider_parts
+            if provider_id not in validated_providers:
+                validated_providers[provider_id] = bool(
+                    _find_vscode_mcp_provider_manifest(
+                        user_home,
+                        code_user_base,
+                        operating_system,
+                        extension_id,
+                        contribution_id,
+                    )
+                )
+            if not validated_providers[provider_id]:
+                continue
+            normalized_extension_id = extension_id.lower()
+            if (
+                normalized_extension_id not in workspace_enabled
+                and normalized_extension_id in workspace_disabled | profile_disabled
+            ):
+                continue
+
+            cached_servers = provider_value.get("servers")
+            if not isinstance(cached_servers, list):
+                continue
+
+            for cached_server in cached_servers[
+                :_VSCODE_MCP_SERVERS_PER_PROVIDER_MAX_COUNT
+            ]:
+                if len(configs) >= _VSCODE_MCP_SERVER_MAX_COUNT:
+                    break
+                if not isinstance(cached_server, dict):
+                    continue
+                launch_config = _normalize_vscode_cached_launch(
+                    cached_server.get("launch")
+                )
+                if launch_config is None:
+                    continue
+                if (
+                    launch_config["type"] == "stdio"
+                    and not skip_live_scan
+                    and not _vscode_cached_command_exists(
+                        launch_config["command"],
+                        launch_config.get("cwd"),
+                    )
+                ):
+                    continue
+
+                server_id = cached_server.get("id")
+                label = cached_server.get("label")
+                if (
+                    not isinstance(server_id, str)
+                    or not server_id
+                    or not isinstance(label, str)
+                    or not label
+                    or (
+                        cached_server.get("cacheNonce") is not None
+                        and not isinstance(cached_server["cacheNonce"], str)
+                    )
+                ):
+                    continue
+
+                identity = (scope_path, profile_id, provider_id, server_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+
+                config_key = str(len(configs))
+                configs[config_key] = {
+                    **launch_config,
+                    "providerId": provider_id,
+                    "providerServerId": server_id,
+                    **(
+                        {"providerProfileId": profile_id}
+                        if profile_id is not None
+                        else {}
+                    ),
+                }
+                labels[config_key] = label
+                scopes[config_key] = scope_path
+
+            if len(configs) >= _VSCODE_MCP_SERVER_MAX_COUNT:
+                break
+        if len(configs) >= _VSCODE_MCP_SERVER_MAX_COUNT:
+            break
+
+    grouped: Dict[str, List[Dict]] = {}
+    for config_key, server in _transform_vscode_cached_mcp_server_entries(
+        configs,
+        labels,
+        skip_live_scan,
+    ):
+        grouped.setdefault(scopes[config_key], []).append(server)
+
+    return [
+        {"path": scope_path, "mcpServers": servers}
+        for scope_path, servers in grouped.items()
+    ]
+
+
+def extract_vscode_cached_mcp_servers(
+    code_user_base: Path,
+    user_home: Path,
+    operating_system: str,
+) -> List[Dict]:
+    return [
+        server
+        for project in _extract_vscode_cached_mcp_projects(
+            code_user_base,
+            user_home,
+            operating_system,
+        )
+        for server in project["mcpServers"]
+    ]
+
+
+def append_vscode_cached_mcp_servers(
+    configs: List[Dict],
+    code_user_base: Path,
+    user_home: Path,
+    operating_system: str,
+) -> None:
+    cached_projects = _extract_vscode_cached_mcp_projects(
+        code_user_base,
+        user_home,
+        operating_system,
+    )
+    for cached_project in cached_projects:
+        for config in configs:
+            if config.get("path") == cached_project["path"]:
+                config.setdefault("mcpServers", []).extend(
+                    cached_project["mcpServers"]
+                )
+                break
+        else:
+            configs.append(cached_project)
+
+
 # Shared JSONC strippers for hand-edited MCP config files (// and /* */ comments,
 # trailing commas) that are invalid for json.loads. Group 1 captures full quoted
 # strings so comment-like / comma sequences inside string values are preserved.
@@ -611,7 +1495,12 @@ def _strip_trailing_commas(raw: str) -> str:
     return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
-def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
+def transform_mcp_servers_to_array(
+    mcp_servers: Dict,
+    *,
+    _scan_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    _skip_script_augmentation: bool = False,
+) -> List[Dict]:
     """
     Transform mcpServers from object format to array format.
 
@@ -643,25 +1532,55 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
     }
 
     # Scan each server for its tool list before we strip credentials.
-    scan_results: Dict[str, Dict[str, Any]] = {}
-    batch_error: Optional[Dict[str, Any]] = None
-    try:
-        scan_results = _scan_servers_in_mapping(mcp_servers)
-    except Exception as exc:
-        logger.warning("MCP scan pass failed: %s", exc, exc_info=True)
-        batch_error = {
-            "scanned_at": (
-                datetime.datetime.now(datetime.timezone.utc)
-                .replace(microsecond=0).isoformat()
-            ),
-            "tools": None,
-            "tool_count": None,
-            "server_info": None,
-            "error": {
-                "code": "scanner_error",
-                "details": {"raw_error": f"{type(exc).__name__}: {exc}"},
-            },
+    scan_results: Dict[str, Dict[str, Any]] = dict(_scan_overrides or {})
+    scan_targets = {
+        server_name: server_config
+        for server_name, server_config in mcp_servers.items()
+        if server_name not in scan_results
+    }
+    stdio_targets = {
+        server_name
+        for server_name, server_config in mcp_servers.items()
+        if isinstance(server_config, dict)
+        and isinstance(server_config.get("command"), str)
+        and bool(server_config["command"])
+    }
+    protected_targets = set()
+    if stdio_targets and _running_with_elevated_privileges(
+        "windows" if platform.system() == "Windows" else platform.system().lower()
+    ):
+        protected_targets = stdio_targets
+        for server_name in protected_targets:
+            scan_results.setdefault(
+                server_name,
+                _privilege_boundary_scan_result(
+                    "configured_stdio_under_elevated_process"
+                ),
+            )
+        scan_targets = {
+            server_name: server_config
+            for server_name, server_config in scan_targets.items()
+            if server_name not in protected_targets
         }
+    batch_error: Optional[Dict[str, Any]] = None
+    if scan_targets:
+        try:
+            scan_results.update(_scan_servers_in_mapping(scan_targets))
+        except Exception as exc:
+            logger.warning("MCP scan pass failed: %s", exc, exc_info=True)
+            batch_error = {
+                "scanned_at": (
+                    datetime.datetime.now(datetime.timezone.utc)
+                    .replace(microsecond=0).isoformat()
+                ),
+                "tools": None,
+                "tool_count": None,
+                "server_info": None,
+                "error": {
+                    "code": "scanner_error",
+                    "details": {"raw_error": f"{type(exc).__name__}: {exc}"},
+                },
+            }
 
     servers_array = []
     for server_name, server_config in mcp_servers.items():
@@ -671,7 +1590,11 @@ def transform_mcp_servers_to_array(mcp_servers: Dict) -> List[Dict]:
                 **{field_name: field_value for field_name, field_value in server_config.items()
                     if field_name not in excluded_fields}
             }
-            augment_script_fields(server_obj)
+            if (
+                not _skip_script_augmentation
+                and server_name not in protected_targets
+            ):
+                augment_script_fields(server_obj)
             server_obj["scan"] = scan_results.get(server_name) or batch_error
             servers_array.append(server_obj)
 

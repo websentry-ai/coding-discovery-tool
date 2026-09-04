@@ -50,7 +50,7 @@ Returns None when no signal can be extracted -- the caller falls back to name-ba
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 
@@ -359,7 +359,7 @@ def _smithery_run_target(
         elif command_base == 'cmd':
             runner_positions = [
                 offset for offset, token in enumerate(prefix_tokens)
-                if token in NPM_RUNNERS or token == 'bun'
+                if _trusted_launcher_base(token) in NPM_RUNNERS | {'bun'}
             ]
             if len(runner_positions) != 1:
                 return None
@@ -370,7 +370,7 @@ def _smithery_run_target(
             ):
                 return None
             if not valid_runner_prefix(
-                prefix_tokens[runner_index],
+                _trusted_launcher_base(prefix_tokens[runner_index]),
                 prefix_tokens[runner_index + 1:],
             ):
                 return None
@@ -548,6 +548,74 @@ def _package_from_runner_args(args: List[str], skip: frozenset) -> Optional[str]
     return None
 
 
+def _npm_runner_invocation(
+    command_base: str,
+    args: List[str],
+) -> Optional[Tuple[str, List[str]]]:
+    if command_base in NPM_RUNNERS:
+        return command_base, args
+    if command_base == 'bun':
+        if args and isinstance(args[0], str) and _unquote(args[0]).lower() == 'x':
+            return command_base, args[1:]
+        return None
+    if command_base != 'cmd' or any(
+        not isinstance(arg, str) or re.search(r'[&|<>^\r\n]', arg)
+        for arg in args
+    ):
+        return None
+
+    runner_positions = [
+        index for index, arg in enumerate(args)
+        if _trusted_launcher_base(arg) in NPM_RUNNERS | {'bun'}
+    ]
+    if len(runner_positions) != 1:
+        return None
+    runner_index = runner_positions[0]
+    shell_prefix = [_unquote(arg).lower() for arg in args[:runner_index]]
+    if '/c' not in shell_prefix or any(
+        token not in {'/c', '/d', '/s'} for token in shell_prefix
+    ):
+        return None
+
+    runner = _trusted_launcher_base(args[runner_index])
+    nested_args = args[runner_index + 1:]
+    if runner == 'bun':
+        if not nested_args or _unquote(nested_args[0]).lower() != 'x':
+            return None
+        nested_args = nested_args[1:]
+    return runner, nested_args
+
+
+def _npm_package_before_smithery(runner: str, args: List[str]) -> Optional[str]:
+    safe_flags = {'-y', '--yes', '--'}
+    if runner in {'bun', 'bunx'}:
+        safe_flags.update({'--bun', '--no-install', '--verbose', '--silent'})
+    npm_command_seen = runner != 'npm'
+    candidate = None
+    for arg in args:
+        if not isinstance(arg, str):
+            return None
+        if _registry_npm_package(arg) in SMITHERY_CLI_PACKAGES:
+            break
+        token = _unquote(arg)
+        lower = token.lower()
+        if token.startswith('-'):
+            if lower not in safe_flags:
+                return None
+            continue
+        if not npm_command_seen:
+            if lower not in {'exec', 'x'}:
+                return None
+            npm_command_seen = True
+            continue
+        if _trusted_launcher_base(token) in NPM_RUNNERS | {'bun'}:
+            return None
+        if candidate is not None or _looks_like_local_path(token):
+            return None
+        candidate = token
+    return candidate if npm_command_seen else None
+
+
 # `docker run` BOOLEAN flags — the closed, stable set that consumes NO value.
 # Everything else that looks like a flag is treated as value-taking, so an
 # unknown or newly-added value flag can never leak its value as the image: it
@@ -715,11 +783,20 @@ def compute_fingerprint(
         return None
     first_scoped_package = _npm_package_from_args(safe_args)
     runner_package = None
-    if launcher_base in NPM_RUNNERS:
-        candidate = _package_from_runner_args(
-            safe_args,
-            NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | NPM_RUNNERS | RUNTIMES,
-        )
+    runner_invocation = _npm_runner_invocation(launcher_base, safe_args)
+    if runner_invocation is not None:
+        runner, runner_args = runner_invocation
+        if any(
+            isinstance(arg, str)
+            and _registry_npm_package(arg) in SMITHERY_CLI_PACKAGES
+            for arg in runner_args
+        ):
+            candidate = _npm_package_before_smithery(runner, runner_args)
+        else:
+            candidate = _package_from_runner_args(
+                runner_args,
+                NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | NPM_RUNNERS | RUNTIMES,
+            )
         runner_package = _registry_npm_package(candidate) if candidate else None
     smithery_index = next((
         index for index, arg in enumerate(safe_args)

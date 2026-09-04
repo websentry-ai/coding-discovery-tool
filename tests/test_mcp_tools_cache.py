@@ -295,6 +295,7 @@ class TestCacheKey(unittest.TestCase):
             ("npm", ["exec", "--", "@smithery/cli", "run", "vendor/server"]),
             ("bunx", ["--bun", "@smithery/cli", "run", "vendor/server"]),
             ("bun", ["x", "--bun", "@smithery/cli", "run", "vendor/server"]),
+            ("cmd", ["/c", "npx.cmd", "-y", "@smithery/cli", "run", "vendor/server"]),
         ]
         for command, args in vectors:
             with self.subTest(command=command, args=args):
@@ -344,6 +345,28 @@ class TestCacheKey(unittest.TestCase):
             "npm:wrapper-mcp",
         )
 
+    def test_smithery_argument_preserves_wrapped_npm_launchers(self):
+        vectors = [
+            ("bun", ["x", "wrapper-mcp", "@smithery/cli", "run", "@vendor/server"]),
+            ("cmd", ["/d", "/c", "npx", "wrapper-mcp", "@smithery/cli", "run", "@vendor/server"]),
+        ]
+        for command, args in vectors:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args,
+                    ),
+                    "npm:wrapper-mcp",
+                )
+
+    def test_smithery_argument_does_not_turn_bun_script_into_package(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="alias", url=None, command="bun",
+                args=["wrapper-mcp", "@smithery/cli", "run", "@vendor/server"],
+            )
+        )
+
     def test_smithery_rejects_execution_changing_inputs(self):
         vectors = [
             ("npx", ["--registry=https://packages.example", "@smithery/cli", "run", "@vendor/server"]),
@@ -357,6 +380,8 @@ class TestCacheKey(unittest.TestCase):
             ("npx", ["-y", "@smithery/cli", "run", "@vendor/server", "--package=evil"]),
             ("npm", ["exec", "--", "@smithery/cli", "run", "@vendor/server", "--call=evil"]),
             ("cmd", ["/c", "npx", "@smithery/cli", "run", "@vendor/server", "&", "evil"]),
+            ("npx", ["--workspace", "decoy", "@smithery/cli", "run", "@vendor/server"]),
+            ("bunx", ["--cwd", "decoy", "@smithery/cli", "run", "@vendor/server"]),
         ]
         for command, args in vectors:
             with self.subTest(command=command, args=args):
@@ -390,12 +415,14 @@ class TestCacheKey(unittest.TestCase):
         )
 
     def test_nested_npm_runner_does_not_claim_smithery_identity(self):
-        self.assertIsNone(
-            compute_cache_key(
-                name="alias", url=None, command="npx",
-                args=["npm", "@smithery/cli", "run", "@vendor/server"],
-            )
-        )
+        for nested_runner in ["npm", "npx.cmd", "bun"]:
+            with self.subTest(nested_runner=nested_runner):
+                self.assertIsNone(
+                    compute_cache_key(
+                        name="alias", url=None, command="npx",
+                        args=[nested_runner, "@smithery/cli", "run", "@vendor/server"],
+                    )
+                )
 
     def test_smithery_argument_does_not_erase_non_npm_launcher(self):
         vectors = [

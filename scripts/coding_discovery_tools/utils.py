@@ -165,6 +165,28 @@ def resolve_npm_global_tool_bin(
     return None
 
 
+_NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*$")
+
+
+def windows_node_manager_shims(user_home: Path, tool: str) -> List[Path]:
+    """``user_home``-relative shims for Windows Node managers that move the npm global prefix."""
+    roots = [
+        user_home / "AppData" / "Local" / "Volta" / "bin",
+        user_home / "AppData" / "Local" / "pnpm",
+    ]
+    try:
+        nvm_root = user_home / "AppData" / "Roaming" / "nvm"
+        # Version dirs only: the shim is probed under shell=True and `&`/`^` are legal in dir names.
+        roots.extend(
+            d for d in sorted(nvm_root.iterdir())
+            if d.is_dir() and _NVM_WINDOWS_VERSION_DIR.match(d.name)
+        )
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate nvm-windows dirs for {tool}: {e}")
+
+    return [root / f"{tool}{ext}" for root in roots for ext in (".cmd", ".exe")]
+
+
 def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
     """Under a root/MDM multi-user scan, decide whether a MACHINE-GLOBAL binary
     (Homebrew / /usr/local / /usr/bin) should be attributed to ``user_home``.

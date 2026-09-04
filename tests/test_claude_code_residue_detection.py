@@ -14,6 +14,7 @@ and a present-but-non-executable file -> NOT detected.
 """
 
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -619,6 +620,61 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(exe))
+
+    def test_nvm_windows_shim_detected(self):
+        """nvm-windows moves the npm global prefix to ``%APPDATA%\\nvm\\<version>``."""
+        cmd = self.home / "AppData" / "Roaming" / "nvm" / "v22.11.0" / "claude.cmd"
+        self._make_exec(cmd)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cmd))
+
+    def test_volta_shim_detected(self):
+        exe = self.home / "AppData" / "Local" / "Volta" / "bin" / "claude.exe"
+        self._make_exec(exe)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(exe))
+
+    def test_pnpm_shim_detected(self):
+        cmd = self.home / "AppData" / "Local" / "pnpm" / "claude.cmd"
+        self._make_exec(cmd)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cmd))
+
+    def test_nvm_dir_with_shell_metacharacters_ignored(self):
+        """A dir like ``x&&calc`` would inject a command into the shell=True probe."""
+        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20"):
+            with self.subTest(name=name):
+                self._make_exec(
+                    self.home / "AppData" / "Roaming" / "nvm" / name / "claude.cmd"
+                )
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNone(result)
+
+    def test_another_users_nvm_shim_not_attributed(self):
+        """Every added root is ``user_home``-relative."""
+        other = Path(self.tmp.name).parent / "other-profile"
+        self._make_exec(other / "AppData" / "Roaming" / "nvm" / "v22.11.0" / "claude.cmd")
+        self.addCleanup(shutil.rmtree, other, True)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

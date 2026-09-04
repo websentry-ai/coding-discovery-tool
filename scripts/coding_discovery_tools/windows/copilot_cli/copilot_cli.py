@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ...constants import VERSION_TIMEOUT
-from ...utils import run_command
+from ...utils import run_command, windows_node_manager_shims
 from ...windows_extraction_helpers import is_running_as_admin
 from ...macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector, _parse_cli_version
 
@@ -137,7 +137,8 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
 
         Checks the per-user install locations below: the npm global shim, the WinGet
         shim (the ``GitHub.Copilot`` package's ``copilot`` command alias lands in the
-        per-user Links dir), and the ``.local/bin`` / ``.bun/bin`` binaries.
+        per-user Links dir), the ``.local/bin`` / ``.bun/bin`` binaries, and the
+        Node managers (nvm-windows, Volta, pnpm).
         Best-effort: returns None on any error. Never raises.
         """
         try:
@@ -146,6 +147,7 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
                 user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "copilot.exe",
                 user_home / ".local" / "bin" / "copilot.exe",
                 user_home / ".bun" / "bin" / "copilot.exe",
+                *windows_node_manager_shims(user_home, "copilot"),
             ):
                 try:
                     if candidate.exists():

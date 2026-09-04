@@ -21,6 +21,7 @@ from .utils import (
     machine_global_binary_owned_by_user,
     resolve_npm_global_tool_bin,
     run_command,
+    windows_node_manager_shims,
 )
 
 logger = logging.getLogger(__name__)
@@ -611,7 +612,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     On macOS/Linux: Homebrew (Apple Silicon and Intel), .local/bin, Bun,
     npm-global, yarn-global, nvm, and a ``which claude`` PATH backstop.
     On Windows: .local/bin, AppData npm (.cmd and bare), AppData Local Programs,
-    and Bun.
+    Bun, and the Node managers (nvm-windows, Volta, pnpm).
 
     Args:
         user_home: Path to the user's home directory
@@ -630,6 +631,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             # per-user Links dir (NOT under AppData\Local\Programs\claude).
             user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "claude.exe",
             user_home / ".bun" / "bin" / "claude.exe",
+            *windows_node_manager_shims(user_home, "claude"),
         ]
     else:
         user_relative = [

@@ -267,7 +267,7 @@ class TestCacheKey(unittest.TestCase):
                 command="npx",
                 args=["-y", "@smithery/cli@latest", "run", "@vendor/server", "--key", "secret"],
             ),
-            "smithery:@vendor/server",
+            "smithery:vendor/server",
         )
 
     def test_smithery_cli_uses_bare_run_target_through_windows_cmd(self):
@@ -281,6 +281,54 @@ class TestCacheKey(unittest.TestCase):
             "smithery:example-server",
         )
 
+    def test_smithery_current_package_uses_mcp_run_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npx",
+                args=["-y", "smithery@latest", "mcp", "run", "vendor/server"],
+            ),
+            "smithery:vendor/server",
+        )
+
+    def test_smithery_supported_runner_forms(self):
+        vectors = [
+            ("smithery.cmd", ["--verbose", "run", "@vendor/server"]),
+            ("npm", ["exec", "--", "@smithery/cli", "run", "vendor/server"]),
+            ("bunx", ["--bun", "@smithery/cli", "run", "vendor/server"]),
+            ("bun", ["x", "--bun", "@smithery/cli", "run", "vendor/server"]),
+        ]
+        for command, args in vectors:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args
+                    ),
+                    "smithery:vendor/server",
+                )
+
+    def test_invalid_standalone_smithery_command_fails_closed(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="smithery",
+                args=["list", "vendor/server"],
+            )
+        )
+
+    def test_smithery_config_can_precede_the_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npx",
+                args=["-y", "@smithery/cli", "run", "--config", "{}", "@vendor/server"],
+            ),
+            "smithery:vendor/server",
+        )
+
     def test_smithery_argument_does_not_override_another_launcher(self):
         self.assertEqual(
             compute_cache_key(
@@ -292,15 +340,17 @@ class TestCacheKey(unittest.TestCase):
 
     def test_smithery_rejects_execution_changing_inputs(self):
         vectors = [
-            ["--registry=https://packages.example", "@smithery/cli", "run", "@vendor/server"],
-            ["-y", "@smithery/cli@npm:evil", "run", "@vendor/server"],
-            ["-y", "@smithery/cli", "run", "@vendor/server@npm:evil"],
+            ("npx", ["--registry=https://packages.example", "@smithery/cli", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli@npm:evil", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli", "run", "@vendor/server@npm:evil"]),
+            ("npm", ["exec", "@smithery/cli", "run", "@vendor/server"]),
+            ("cmd", ["/c", "npx", "@smithery/cli", "run", "@vendor/server", "&", "evil"]),
         ]
-        for args in vectors:
-            with self.subTest(args=args):
+        for command, args in vectors:
+            with self.subTest(command=command, args=args):
                 self.assertIsNone(
                     compute_cache_key(
-                        name="alias", url=None, command="npx", args=args,
+                        name="alias", url=None, command=command, args=args,
                     )
                 )
 
@@ -369,6 +419,58 @@ class TestCacheKey(unittest.TestCase):
             ),
             "nuget:example.server",
         )
+
+    def test_dotnet_dnx_alias_supports_official_options(self):
+        self.assertEqual(
+            compute_fingerprint(
+                name="example",
+                command="dotnet",
+                url=None,
+                args=[
+                    "dnx", "--arch", "x64", "--verbosity", "diag",
+                    "--disable-parallel", "--no-cache", "--no-http-cache",
+                    "--source", "https://api.nuget.org/v3/index.json",
+                    "Example.Server@2.0.0",
+                ],
+                additional_data={},
+            ),
+            "nuget:example.server",
+        )
+
+    def test_dotnet_tool_args_after_separator_keep_package_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="dotnet",
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0", "--source",
+                    "https://api.nuget.org/v3/index.json", "--", "--listen",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_nuget_restore_options_after_package_fail_closed(self):
+        for extra in (
+            "--add-source:https://packages.example/v3/index.json",
+            "--configfile:NuGet.Config",
+            "--unknown-option",
+        ):
+            with self.subTest(extra=extra):
+                self.assertNotEqual(
+                    compute_cache_key(
+                        name="alias",
+                        url=None,
+                        command="dotnet",
+                        args=[
+                            "tool", "exec", "Example.Server@2.0.0",
+                            "--source", "https://api.nuget.org/v3/index.json",
+                            extra,
+                        ],
+                    ),
+                    "nuget:example.server",
+                )
 
     def test_custom_nuget_config_does_not_share_package_identity(self):
         self.assertIsNone(

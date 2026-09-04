@@ -338,12 +338,23 @@ class TestCacheKey(unittest.TestCase):
             "npm:@vendor/wrapper",
         )
 
+    def test_smithery_argument_preserves_bare_launcher(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="npx",
+                args=["wrapper-mcp", "@smithery/cli", "run", "@vendor/server"],
+            ),
+            "npm:wrapper-mcp",
+        )
+
     def test_smithery_rejects_execution_changing_inputs(self):
         vectors = [
             ("npx", ["--registry=https://packages.example", "@smithery/cli", "run", "@vendor/server"]),
             ("npx", ["-y", "@smithery/cli@npm:evil", "run", "@vendor/server"]),
             ("npx", ["-y", "@smithery/cli", "run", "@vendor/server@npm:evil"]),
             ("npm", ["exec", "@smithery/cli", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli", "run", "@vendor/server", "--package=evil"]),
+            ("npm", ["exec", "--", "@smithery/cli", "run", "@vendor/server", "--call=evil"]),
             ("cmd", ["/c", "npx", "@smithery/cli", "run", "@vendor/server", "&", "evil"]),
         ]
         for command, args in vectors:

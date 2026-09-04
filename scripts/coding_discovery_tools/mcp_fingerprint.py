@@ -272,24 +272,34 @@ def _smithery_command_target(tokens: List[str]) -> Optional[str]:
     if not tokens or str(tokens[0]).lower() != 'run':
         return None
 
+    target = None
     index = 1
     while index < len(tokens):
         token = tokens[index]
         if not isinstance(token, str):
             return None
         lower = token.lower()
-        if lower == '--config':
-            if index + 1 >= len(tokens):
+        if lower in {'--config', '--key'}:
+            if (
+                index + 1 >= len(tokens)
+                or not isinstance(tokens[index + 1], str)
+                or tokens[index + 1].startswith('-')
+            ):
                 return None
             index += 2
             continue
-        if lower.startswith('--config='):
+        if any(lower.startswith(f'{flag}=') for flag in ('--config', '--key')):
+            if not token.partition('=')[2]:
+                return None
             index += 1
             continue
-        if token.startswith('-'):
+        if token.startswith('-') or target is not None:
             return None
-        return _smithery_server_identity(token)
-    return None
+        target = _smithery_server_identity(token)
+        if target is None:
+            return None
+        index += 1
+    return target
 
 
 def _smithery_run_target(
@@ -696,6 +706,13 @@ def compute_fingerprint(
     if base == 'smithery':
         return None
     first_scoped_package = _npm_package_from_args(safe_args)
+    runner_package = None
+    if base in NPM_RUNNERS:
+        candidate = _package_from_runner_args(
+            safe_args,
+            NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | NPM_RUNNERS | RUNTIMES,
+        )
+        runner_package = _registry_npm_package(candidate) if candidate else None
     smithery_index = next((
         index for index, arg in enumerate(safe_args)
         if isinstance(arg, str)
@@ -712,7 +729,9 @@ def compute_fingerprint(
             or first_scoped_index >= smithery_index
         )
     ):
-        return None
+        if not runner_package or runner_package in SMITHERY_CLI_PACKAGES:
+            return None
+        first_scoped_package = None
 
     # 2. URLs inside args -> url-arg:<identity> (only if all URLs resolve to a single identity)
     url_args = _urls_in_args(safe_args)
@@ -739,11 +758,8 @@ def compute_fingerprint(
         return f'npm:{first_scoped_package}'
 
     # 5. npm package run via npx / npm / bunx (bare or quoted-scoped)
-    if base in NPM_RUNNERS:
-        pkg = _package_from_runner_args(safe_args, NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | RUNTIMES)
-        package = _registry_npm_package(pkg) if pkg else None
-        if package:
-            return f'npm:{package}'
+    if runner_package:
+        return f'npm:{runner_package}'
 
     # 6. Python package run via uvx / uv / pipx
     if base in PYPI_RUNNERS:

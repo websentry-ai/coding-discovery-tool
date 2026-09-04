@@ -269,6 +269,10 @@ class _GitHubCopilotVscodeMcpMixin:
             "eamodio.gitlens/gitlens.gkMcpProvider",
         )
         self.assertEqual(server["providerServerId"], "eamodio.gitlens/GitKraken")
+        self.assertEqual(
+            server["additional_data"],
+            {"scope": "vscode-provider-cache"},
+        )
         self.assertNotIn("providerCacheNonce", server)
         self.assertNotIn("env", server)
 

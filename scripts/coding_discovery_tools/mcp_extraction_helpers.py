@@ -600,6 +600,7 @@ _VSCODE_MCP_PROVIDER_MAX_COUNT = 200
 _VSCODE_MCP_SERVERS_PER_PROVIDER_MAX_COUNT = 100
 _VSCODE_MCP_SERVER_MAX_COUNT = 500
 _VSCODE_WORKSPACE_METADATA_MAX_BYTES = 64 * 1024
+_VSCODE_PROVIDER_CACHE_SCOPE = "vscode-provider-cache"
 
 
 def _vscode_path_is_safe(
@@ -1238,6 +1239,9 @@ def _transform_vscode_cached_mcp_server_entries(
     for server in servers:
         config_key = server["name"]
         server["name"] = labels[config_key]
+        server["additional_data"] = {
+            "scope": _VSCODE_PROVIDER_CACHE_SCOPE,
+        }
         url = server.get("url")
         if isinstance(url, str):
             sanitized_url = _vscode_cached_url_for_report(url)

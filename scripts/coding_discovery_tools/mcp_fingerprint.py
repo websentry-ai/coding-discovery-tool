@@ -206,6 +206,13 @@ def _command_base(command: Optional[str]) -> str:
     return _EXE_SUFFIX_RE.sub('', base.lower())
 
 
+def _trusted_launcher_base(command: Optional[str]) -> str:
+    token = _unquote(command).strip() if command else ''
+    if '/' in token or '\\' in token:
+        return ''
+    return _command_base(token)
+
+
 def _unquote(value: str) -> str:
     """Strip surrounding quotes some clients leave in arg values."""
     return value.strip('"\'')
@@ -249,7 +256,7 @@ def _registry_npm_package(spec: str) -> Optional[str]:
     if not re.fullmatch(package_pattern, package, re.IGNORECASE):
         return None
     if selector is not None and (
-        selector in {'.', '..'}
+        selector.startswith('.')
         or not re.fullmatch(r'[a-z0-9*^~<>=.+_-]+', selector, re.IGNORECASE)
     ):
         return None
@@ -437,6 +444,7 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
         '--no-http-cache',
     }
     candidate = None
+    version = None
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -449,6 +457,13 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
         lower = token.lower()
         option = lower.split('=', 1)[0]
         if option in value_options:
+            if option == '--version':
+                value = token.split('=', 1)[1] if '=' in token else (
+                    tokens[index + 1] if index + 1 < len(tokens) else None
+                )
+                if not isinstance(value, str) or version is not None:
+                    return None
+                version = _unquote(value)
             index += 1 if '=' in token else 2
             continue
         if lower in flag_options:
@@ -462,7 +477,16 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
         index += 1
     if not isinstance(candidate, str):
         return None
-    package = _unquote(candidate).split('@', 1)[0].lower()
+    package, separator, inline_version = _unquote(candidate).partition('@')
+    if separator:
+        if version is not None:
+            return None
+        version = inline_version
+    if not version or not re.fullmatch(
+        r'(?:\*|[0-9][a-z0-9*.+_-]*)', version, re.IGNORECASE,
+    ):
+        return None
+    package = package.lower()
     return package if re.fullmatch(r'[a-z0-9][a-z0-9._-]*', package) else None
 
 
@@ -631,6 +655,7 @@ def compute_fingerprint(
     safe_args = args or []
     safe_additional_data = additional_data or {}
     base = _command_base(command)
+    launcher_base = _trusted_launcher_base(command)
 
     # 0. Prompt Security proxy: the real server command follows `__args__`.
     #    Unwrap and fingerprint the inner command instead of the wrapper.
@@ -675,18 +700,18 @@ def compute_fingerprint(
         if identity:
             return f'url:{identity}'
 
-    nuget_package = _nuget_package(base, safe_args)
+    nuget_package = _nuget_package(launcher_base, safe_args)
     if nuget_package:
         return f'nuget:{nuget_package}'
 
-    smithery_target = _smithery_run_target(safe_args, base)
+    smithery_target = _smithery_run_target(safe_args, launcher_base)
     if smithery_target:
         return f'smithery:{smithery_target}'
     if base == 'smithery':
         return None
     first_scoped_package = _npm_package_from_args(safe_args)
     runner_package = None
-    if base in NPM_RUNNERS:
+    if launcher_base in NPM_RUNNERS:
         candidate = _package_from_runner_args(
             safe_args,
             NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | NPM_RUNNERS | RUNTIMES,

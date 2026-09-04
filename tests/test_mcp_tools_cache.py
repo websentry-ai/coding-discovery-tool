@@ -349,6 +349,8 @@ class TestCacheKey(unittest.TestCase):
             ("npx", ["--registry=https://packages.example", "@smithery/cli", "run", "@vendor/server"]),
             ("npx", ["-y", "@smithery/cli@npm:evil", "run", "@vendor/server"]),
             ("npx", ["-y", "@smithery/cli@.", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli@...", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli@.hidden", "run", "@vendor/server"]),
             ("npx", ["-y", "smithery@..", "mcp", "run", "vendor/server"]),
             ("npx", ["-y", "@smithery/cli", "run", "@vendor/server@npm:evil"]),
             ("npm", ["exec", "@smithery/cli", "run", "@vendor/server"]),
@@ -358,6 +360,21 @@ class TestCacheKey(unittest.TestCase):
         ]
         for command, args in vectors:
             with self.subTest(command=command, args=args):
+                self.assertIsNone(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args,
+                    )
+                )
+
+    def test_smithery_rejects_path_qualified_launchers(self):
+        vectors = [
+            ("./smithery", ["run", "@vendor/server"]),
+            ("/tmp/evil/smithery", ["run", "@vendor/server"]),
+            (r"C:\evil\smithery.exe", ["run", "@vendor/server"]),
+            ("./npx", ["-y", "@smithery/cli", "run", "@vendor/server"]),
+        ]
+        for command, args in vectors:
+            with self.subTest(command=command):
                 self.assertIsNone(
                     compute_cache_key(
                         name="alias", url=None, command=command, args=args,
@@ -499,6 +516,42 @@ class TestCacheKey(unittest.TestCase):
                 name="alias", url=None, command="dotnet",
                 args=["tool", "exec", "Example.Server@2.0.0"],
             )
+        )
+
+    def test_dotnet_requires_an_explicit_version(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "exec", "--source",
+                    "https://api.nuget.org/v3/index.json", "Example.Server",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_dotnet_supports_version_option(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "exec", "--version", "2.0.0", "--source",
+                    "https://api.nuget.org/v3/index.json", "Example.Server",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_nuget_rejects_path_qualified_launcher(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="/tmp/dotnet",
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0", "--source",
+                    "https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
         )
 
     def test_nuget_add_source_does_not_bind_to_nuget_org(self):

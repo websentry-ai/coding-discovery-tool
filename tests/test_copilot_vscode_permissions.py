@@ -372,6 +372,8 @@ class TestParseResilience(unittest.TestCase):
         self.assertIsNone(self.ex._build_record({}, Path("/x/s.json"), "user"))
 
     @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses file permissions, so chmod 000 is not unreadable")
     def test_unreadable_file_returns_none(self):
         p = self._write('{"chat.tools.global.autoApprove": true}')
         os.chmod(p, 0o000)

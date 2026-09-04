@@ -90,16 +90,27 @@ class TestContentHash(unittest.TestCase):
 
 
 class TestCacheKey(unittest.TestCase):
-    def test_vscode_provider_identity_wins_over_launch_details(self):
+    def test_vscode_provider_identity_does_not_override_launch_details(self):
         server = {
             "name": "GitKraken",
-            "command": "node",
-            "args": ["extension.js"],
+            "command": "gk",
+            "args": ["mcp"],
             "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
             "providerServerId": "eamodio.gitlens/GitKraken",
             "providerProfileId": "profile-a",
         }
 
+        self.assertEqual(
+            cache_key_for_server(server),
+            "bin:gk",
+        )
+
+    def test_bare_vscode_provider_uses_provider_identity(self):
+        server = {
+            "name": "GitKraken",
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "eamodio.gitlens/GitKraken",
+        }
         self.assertEqual(
             cache_key_for_server(server),
             "vscode-provider:eamodio.gitlens/gitlens.gkmcpprovider:"
@@ -279,31 +290,42 @@ class TestCacheKey(unittest.TestCase):
             "npm:@vendor/wrapper",
         )
 
+    def test_smithery_rejects_execution_changing_inputs(self):
+        vectors = [
+            ["--registry=https://packages.example", "@smithery/cli", "run", "@vendor/server"],
+            ["-y", "@smithery/cli@npm:evil", "run", "@vendor/server"],
+            ["-y", "@smithery/cli", "run", "@vendor/server@npm:evil"],
+        ]
+        for args in vectors:
+            with self.subTest(args=args):
+                self.assertIsNone(
+                    compute_cache_key(
+                        name="alias", url=None, command="npx", args=args,
+                    )
+                )
+
     def test_runtime_argument_does_not_claim_smithery_identity(self):
-        self.assertEqual(
+        self.assertIsNone(
             compute_cache_key(
                 name="alias", url=None, command="python",
                 args=["-c", "npx", "@smithery/cli", "run", "@vendor/server"],
-            ),
-            "npm:@smithery/cli",
+            )
         )
 
     def test_nested_npm_runner_does_not_claim_smithery_identity(self):
-        self.assertEqual(
+        self.assertIsNone(
             compute_cache_key(
                 name="alias", url=None, command="npx",
                 args=["npm", "@smithery/cli", "run", "@vendor/server"],
-            ),
-            "npm:@smithery/cli",
+            )
         )
 
-    def test_dnx_uses_nuget_package_identity(self):
-        self.assertEqual(
+    def test_dnx_requires_an_explicit_official_source(self):
+        self.assertIsNone(
             compute_cache_key(
                 name="alias", url=None, command="dnx",
                 args=["Vendor.Server@1.2.3", "serve"],
-            ),
-            "nuget:vendor.server",
+            )
         )
 
     def test_dotnet_tool_execute_ignores_nuget_source_url(self):
@@ -339,7 +361,10 @@ class TestCacheKey(unittest.TestCase):
                 name="example",
                 command="dnx",
                 url=None,
-                args=["--framework", "net10.0", "-y", "Example.Server@2.0.0"],
+                args=[
+                    "--framework", "net10.0", "-y", "Example.Server@2.0.0",
+                    "--source", "https://api.nuget.org/v3/index.json",
+                ],
                 additional_data={},
             ),
             "nuget:example.server",
@@ -356,11 +381,34 @@ class TestCacheKey(unittest.TestCase):
             )
         )
 
-    def test_dotnet_tool_exec_uses_nuget_package_identity(self):
-        self.assertEqual(
+    def test_dotnet_tool_exec_requires_an_explicit_official_source(self):
+        self.assertIsNone(
             compute_cache_key(
                 name="alias", url=None, command="dotnet",
                 args=["tool", "exec", "Example.Server@2.0.0"],
+            )
+        )
+
+    def test_nuget_add_source_does_not_bind_to_nuget_org(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dnx",
+                args=[
+                    "Example.Server@2.0.0", "--add-source",
+                    "https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_attached_nuget_source_cannot_hide_the_real_host(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dnx",
+                args=[
+                    "Example.Server@2.0.0",
+                    "--source=https://api.nuget.org=@evil.com/v3/index.json",
+                ],
             ),
             "nuget:example.server",
         )

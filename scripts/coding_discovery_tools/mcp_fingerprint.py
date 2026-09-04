@@ -227,22 +227,29 @@ def _looks_like_local_path(value: str) -> bool:
 
 
 def _npm_package_from_args(args: List[str]) -> Optional[str]:
-    """Find the first @scoped npm package in args, stripped of any @version suffix."""
     for arg in args:
         if not isinstance(arg, str) or not arg.startswith('@'):
             continue
-        second_at = arg.find('@', 1)
-        return arg[:second_at] if second_at != -1 else arg
+        return _registry_npm_package(arg)
     return None
 
 
-def _normalize_npm(pkg: str) -> str:
-    """@scope/name@ver -> @scope/name ; name@ver -> name"""
-    p = _unquote(pkg)
-    if p.startswith('@'):
-        i = p.find('@', 1)
-        return p[:i] if i != -1 else p
-    return p.split('@')[0]
+def _registry_npm_package(spec: str) -> Optional[str]:
+    token = _unquote(spec).strip()
+    if token.startswith('@'):
+        version_at = token.find('@', 1)
+        package = token if version_at == -1 else token[:version_at]
+        selector = None if version_at == -1 else token[version_at + 1:]
+        package_pattern = r'@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*'
+    else:
+        package, separator, selector = token.partition('@')
+        selector = selector if separator else None
+        package_pattern = r'[a-z0-9][a-z0-9._-]*'
+    if not re.fullmatch(package_pattern, package, re.IGNORECASE):
+        return None
+    if selector is not None and not re.fullmatch(r'[a-z0-9*^~<>=.+_-]+', selector, re.IGNORECASE):
+        return None
+    return package.lower()
 
 
 def _smithery_run_target(
@@ -250,7 +257,7 @@ def _smithery_run_target(
     command_base: Optional[str] = None,
 ) -> Optional[str]:
     for index, arg in enumerate(args):
-        if not isinstance(arg, str) or _normalize_npm(arg).lower() != '@smithery/cli':
+        if not isinstance(arg, str) or _registry_npm_package(arg) != '@smithery/cli':
             continue
         prefix_tokens = []
         for prefix_arg in args[:index]:
@@ -259,10 +266,10 @@ def _smithery_run_target(
             prefix_tokens.append(_unquote(prefix_arg).lower())
 
         def valid_runner_prefix(runner, tokens):
-            positional = [
-                token for token in tokens
-                if token != '--' and not token.startswith('-')
-            ]
+            safe_flags = {'-y', '--yes'}
+            if any(token.startswith('-') and token not in safe_flags for token in tokens):
+                return False
+            positional = [token for token in tokens if token not in safe_flags]
             if runner == 'npm':
                 return positional in (['exec'], ['x'])
             return not positional
@@ -300,7 +307,7 @@ def _smithery_run_target(
             or _looks_like_local_path(target)
         ):
             return None
-        return _normalize_npm(target).lower()
+        return _registry_npm_package(target)
     return None
 
 
@@ -322,12 +329,15 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
         and (
             arg.lower() == '--configfile'
             or arg.lower().startswith('--configfile=')
+            or arg.lower() == '--add-source'
+            or arg.lower().startswith('--add-source=')
         )
         for arg in tokens
     ):
         return None
 
-    source_flags = {'--source', '--add-source', '-s'}
+    source_flags = {'--source', '-s'}
+    source_seen = False
     for index, arg in enumerate(tokens):
         if not isinstance(arg, str):
             continue
@@ -340,6 +350,7 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
             value = arg.split('=', 1)[1]
         if value is None:
             continue
+        source_seen = True
         if not isinstance(value, str):
             return None
         parsed = urlparse(_unquote(value))
@@ -347,9 +358,11 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
             'api.nuget.org', 'nuget.org', 'www.nuget.org',
         }:
             return None
+    if not source_seen:
+        return None
 
     value_options = {
-        '--version', '--framework', '--configfile', '--source', '--add-source', '-s',
+        '--version', '--framework', '--configfile', '--source', '-s',
     }
     flag_options = {
         '--prerelease', '--allow-roll-forward', '--ignore-failed-sources',
@@ -608,7 +621,7 @@ def compute_fingerprint(
             return f'url:{identity}'
 
     provider_identity = _vscode_provider_identity(safe_additional_data)
-    if provider_identity:
+    if provider_identity and not command and not url and not safe_args:
         return f'vscode-provider:{provider_identity}'
 
     nuget_package = _nuget_package(base, safe_args)
@@ -618,6 +631,12 @@ def compute_fingerprint(
     smithery_target = _smithery_run_target(safe_args, base)
     if smithery_target:
         return f'smithery:{smithery_target}'
+    first_scoped_package = _npm_package_from_args(safe_args)
+    if first_scoped_package in {None, '@smithery/cli'} and any(
+        isinstance(arg, str) and _registry_npm_package(arg) == '@smithery/cli'
+        for arg in safe_args
+    ):
+        return None
 
     # 2. URLs inside args -> url-arg:<identity> (only if all URLs resolve to a single identity)
     url_args = _urls_in_args(safe_args)
@@ -640,15 +659,15 @@ def compute_fingerprint(
         return f'git:{git}'
 
     # 4. @scoped npm package anywhere in args (command-agnostic, original rule)
-    scoped_npm = _npm_package_from_args(safe_args)
-    if scoped_npm:
-        return f'npm:{scoped_npm}'
+    if first_scoped_package:
+        return f'npm:{first_scoped_package}'
 
     # 5. npm package run via npx / npm / bunx (bare or quoted-scoped)
     if base in NPM_RUNNERS:
         pkg = _package_from_runner_args(safe_args, NPX_LOCAL_RUNNERS | NPM_SUBCOMMANDS | RUNTIMES)
-        if pkg:
-            return f'npm:{_normalize_npm(pkg)}'
+        package = _registry_npm_package(pkg) if pkg else None
+        if package:
+            return f'npm:{package}'
 
     # 6. Python package run via uvx / uv / pipx
     if base in PYPI_RUNNERS:

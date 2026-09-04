@@ -1237,9 +1237,6 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         try:
             if not path.is_file():
                 return None
-            if path.stat().st_size > 8 * 1024 * 1024:  # a settings.json this large is pathological
-                logger.debug(f"settings file too large, skipping: {path}")
-                return None
             raw = path.read_text(encoding="utf-8", errors="replace")
             data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
             return data if isinstance(data, dict) else None

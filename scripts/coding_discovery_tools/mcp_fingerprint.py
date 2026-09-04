@@ -23,7 +23,8 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     url-arg:<host[:port]/path>   -> from a URL embedded in args (e.g., mcp-remote proxies)
     git:<host/owner/repo>        -> from a git+ install spec in args (npx/uvx git installs)
     npm:<package>                -> from an npm package in args (@scoped, or bare under npx/npm/bunx)
-    smithery:<server>            -> target passed to Smithery CLI `run`
+    smithery:<server>            -> target passed to a registry-resolved Smithery CLI
+    smithery-unverified:<server> -> target passed to a locally resolvable Smithery CLI
     nuget:<package>              -> package run by `dnx` or `dotnet tool exec`
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
@@ -271,6 +272,13 @@ def _smithery_server_identity(value: str) -> Optional[str]:
     return target.lower() if re.fullmatch(pattern, target, re.IGNORECASE) else None
 
 
+def _is_registry_resolved_smithery_cli(value: str) -> bool:
+    return _unquote(value).strip().lower() in {
+        '@smithery/cli@latest',
+        'smithery@latest',
+    }
+
+
 def _smithery_command_target(tokens: List[str]) -> Optional[str]:
     while tokens and str(tokens[0]).lower() in SMITHERY_GLOBAL_FLAGS:
         tokens = tokens[1:]
@@ -313,10 +321,12 @@ def _smithery_command_target(tokens: List[str]) -> Optional[str]:
 
 def _smithery_run_target(
     args: List[str],
-    command_base: Optional[str] = None,
-) -> Optional[str]:
+    command_base: str,
+    launcher_trusted: bool,
+) -> Optional[Tuple[str, bool]]:
     if command_base == 'smithery':
-        return _smithery_command_target(args)
+        target = _smithery_command_target(args)
+        return (target, False) if target else None
     if command_base == 'cmd' and any(
         isinstance(arg, str) and re.search(r'[&|<>^\r\n]', arg)
         for arg in args
@@ -376,7 +386,15 @@ def _smithery_run_target(
                 return None
         else:
             return None
-        return _smithery_command_target(args[index + 1:])
+        target = _smithery_command_target(args[index + 1:])
+        if target is None:
+            return None
+        registry_resolved = (
+            launcher_trusted
+            and command_base in {'npx', 'npm'}
+            and _is_registry_resolved_smithery_cli(arg)
+        )
+        return target, registry_resolved
     return None
 
 
@@ -776,9 +794,15 @@ def compute_fingerprint(
     if nuget_package:
         return f'nuget:{nuget_package}'
 
-    smithery_target = _smithery_run_target(safe_args, launcher_base)
-    if smithery_target:
-        return f'smithery:{smithery_target}'
+    smithery_match = _smithery_run_target(
+        safe_args,
+        base,
+        launcher_trusted=bool(launcher_base),
+    )
+    if smithery_match:
+        smithery_target, registry_resolved = smithery_match
+        prefix = 'smithery' if registry_resolved else 'smithery-unverified'
+        return f'{prefix}:{smithery_target}'
     if base == 'smithery':
         return None
     first_scoped_package = _npm_package_from_args(safe_args)

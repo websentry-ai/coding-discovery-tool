@@ -11,7 +11,7 @@ import os
 import platform
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
@@ -22,6 +22,11 @@ from .utils import (
     resolve_npm_global_tool_bin,
     run_command,
     windows_node_manager_shims,
+)
+from .vscode_extension_helpers import (
+    VSCODE_EDITOR_KEYS,
+    extensions_dir_for_editor,
+    find_extension_in_editor,
 )
 
 logger = logging.getLogger(__name__)
@@ -605,6 +610,41 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
     return None
 
 
+CLAUDE_CODE_EXTENSION_ID = "anthropic.claude-code"
+# Registry versions reach a glob pattern, so anchor as strictly as the nvm dir allowlist.
+_EXTENSION_VERSION = re.compile(r"^\d+(?:\.\d+)*\Z")
+
+
+def claude_vscode_extension_binaries(user_home: Path) -> List[Path]:
+    """``claude`` binaries bundled inside the Claude Code VS Code extension.
+
+    Gated on a live ``extensions.json`` entry so uninstalled residue cannot match.
+    The install dir is globbed rather than taken from the registry entry, whose
+    recorded location is a VS Code URI (``/c:/Users/...`` on Windows) and is
+    user-writable while the binary it names gets executed.
+    """
+    exe = "claude.exe" if platform.system() == "Windows" else "claude"
+    binaries: List[Path] = []
+    for editor in VSCODE_EDITOR_KEYS:
+        extensions_dir = extensions_dir_for_editor(user_home, editor)
+        if extensions_dir is None:
+            continue
+        found = find_extension_in_editor(user_home, editor, CLAUDE_CODE_EXTENSION_ID)
+        if not found:
+            continue
+        # Dir is <id>-<version>[-<platform>]; superseded version dirs linger, so the
+        # live version from the registry picks the one actually in use.
+        version = found[1] if found[1] and _EXTENSION_VERSION.match(found[1]) else None
+        pattern = f"{CLAUDE_CODE_EXTENSION_ID}-{version}*" if version else f"{CLAUDE_CODE_EXTENSION_ID}-*"
+        try:
+            install_dirs = sorted(extensions_dir.glob(pattern), reverse=True)
+        except (PermissionError, OSError, ValueError) as exc:
+            logger.debug(f"Could not list {extensions_dir}: {exc}")
+            continue
+        binaries.extend(d / "resources" / "native-binary" / exe for d in install_dirs)
+    return binaries
+
+
 def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     """
     Find the absolute path to the claude binary for a specific user.
@@ -613,6 +653,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     npm-global, yarn-global, nvm, and a ``which claude`` PATH backstop.
     On Windows: .local/bin, AppData npm (.cmd and bare), AppData Local Programs,
     Bun, and the Node managers (nvm-windows, Volta, pnpm).
+    On both: the VS Code extension's bundled CLI, checked last.
 
     Args:
         user_home: Path to the user's home directory
@@ -652,6 +693,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             Path("/usr/bin/claude"),               # apt/dnf system package
         ]
         candidates = machine_global + user_relative
+
+    candidates += claude_vscode_extension_binaries(user_home)
 
     is_root = is_running_as_root()
     for candidate in candidates:

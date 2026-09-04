@@ -654,7 +654,7 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
 
     def test_nvm_dir_with_shell_metacharacters_ignored(self):
         """A dir like ``x&&calc`` would inject a command into the shell=True probe."""
-        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20", "v1.2\n", "v1\n&&calc"):
+        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20"):
             with self.subTest(name=name):
                 self._make_exec(
                     self.home / "AppData" / "Roaming" / "nvm" / name / "claude.cmd"
@@ -679,6 +679,27 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNvmVersionAllowlist(unittest.TestCase):
+    """Asserted on the pattern, not the filesystem: Windows cannot create a dir whose
+    name holds a newline, so the ``\\Z`` anchor is untestable through mkdir there."""
+
+    def test_accepts_real_version_dirs(self):
+        for name in ("v22.11.0", "20.9.0", "v18", "1.2.3.4"):
+            with self.subTest(name=name):
+                self.assertTrue(utils_mod._NVM_WINDOWS_VERSION_DIR.match(name))
+
+    def test_rejects_trailing_newline(self):
+        """Python ``$`` also matches before a trailing newline; ``\\Z`` does not."""
+        for name in ("v22.11.0\n", "20.9.0\n", "v1\n&&calc"):
+            with self.subTest(name=name):
+                self.assertIsNone(utils_mod._NVM_WINDOWS_VERSION_DIR.match(name))
+
+    def test_rejects_shell_metacharacters(self):
+        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20", "v1;rm", "v1 v2"):
+            with self.subTest(name=name):
+                self.assertIsNone(utils_mod._NVM_WINDOWS_VERSION_DIR.match(name))
 
 
 class TestToolConfigDirsDiagnostic(unittest.TestCase):

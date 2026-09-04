@@ -25,6 +25,7 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     npm:<package>                -> from an npm package in args (@scoped, or bare under npx/npm/bunx)
     smithery:<server>            -> target passed to `@smithery/cli run`
     nuget:<package>              -> package run by `dnx` or `dotnet tool execute`
+    vscode-provider:<provider>:<server> -> VS Code extension-provided server
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
     script:<hash>                -> content hash of a local script (supplied by the client)
@@ -244,10 +245,51 @@ def _normalize_npm(pkg: str) -> str:
     return p.split('@')[0]
 
 
-def _smithery_run_target(args: List[str]) -> Optional[str]:
+def _smithery_run_target(
+    args: List[str],
+    command_base: Optional[str] = None,
+) -> Optional[str]:
     for index, arg in enumerate(args):
         if not isinstance(arg, str) or _normalize_npm(arg).lower() != '@smithery/cli':
             continue
+        prefix_tokens = []
+        for prefix_arg in args[:index]:
+            if not isinstance(prefix_arg, str):
+                return None
+            prefix_tokens.append(_unquote(prefix_arg).lower())
+
+        def valid_runner_prefix(runner, tokens):
+            positional = [
+                token for token in tokens
+                if token != '--' and not token.startswith('-')
+            ]
+            if runner == 'npm':
+                return positional in (['exec'], ['x'])
+            return not positional
+
+        if command_base in NPM_RUNNERS:
+            if not valid_runner_prefix(command_base, prefix_tokens):
+                return None
+        elif command_base == 'cmd':
+            runner_positions = [
+                offset for offset, token in enumerate(prefix_tokens)
+                if token in NPM_RUNNERS
+            ]
+            if len(runner_positions) != 1:
+                return None
+            runner_index = runner_positions[0]
+            shell_prefix = prefix_tokens[:runner_index]
+            if '/c' not in shell_prefix or any(
+                token not in {'/c', '/d', '/s'} for token in shell_prefix
+            ):
+                return None
+            if not valid_runner_prefix(
+                prefix_tokens[runner_index],
+                prefix_tokens[runner_index + 1:],
+            ):
+                return None
+        else:
+            return None
         if index + 2 >= len(args) or str(args[index + 1]).lower() != 'run':
             return None
         target = _unquote(args[index + 2])
@@ -263,11 +305,74 @@ def _smithery_run_target(args: List[str]) -> Optional[str]:
 
 
 def _nuget_package(base: str, args: List[str]) -> Optional[str]:
-    candidate = None
     if base == 'dnx':
-        candidate = next((arg for arg in args if isinstance(arg, str) and not arg.startswith('-')), None)
-    elif base == 'dotnet' and len(args) >= 3 and [str(arg).lower() for arg in args[:2]] == ['tool', 'execute']:
-        candidate = args[2]
+        tokens = args
+    elif (
+        base == 'dotnet'
+        and len(args) >= 2
+        and str(args[0]).lower() == 'tool'
+        and str(args[1]).lower() in {'exec', 'execute'}
+    ):
+        tokens = args[2:]
+    else:
+        return None
+
+    if any(
+        isinstance(arg, str)
+        and (
+            arg.lower() == '--configfile'
+            or arg.lower().startswith('--configfile=')
+        )
+        for arg in tokens
+    ):
+        return None
+
+    source_flags = {'--source', '--add-source', '-s'}
+    for index, arg in enumerate(tokens):
+        if not isinstance(arg, str):
+            continue
+        if arg == '--':
+            break
+        value = None
+        if arg.lower() in source_flags:
+            value = tokens[index + 1] if index + 1 < len(tokens) else None
+        elif any(arg.lower().startswith(f'{flag}=') for flag in source_flags):
+            value = arg.split('=', 1)[1]
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return None
+        parsed = urlparse(_unquote(value))
+        if parsed.scheme not in {'http', 'https'} or parsed.hostname not in {
+            'api.nuget.org', 'nuget.org', 'www.nuget.org',
+        }:
+            return None
+
+    value_options = {
+        '--version', '--framework', '--configfile', '--source', '--add-source', '-s',
+    }
+    flag_options = {
+        '--prerelease', '--allow-roll-forward', '--ignore-failed-sources',
+        '--interactive', '--yes', '-y',
+    }
+    candidate = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not isinstance(token, str) or token == '--':
+            return None
+        lower = token.lower()
+        option = lower.split('=', 1)[0]
+        if option in value_options:
+            index += 1 if '=' in token else 2
+            continue
+        if lower in flag_options:
+            index += 1
+            continue
+        if token.startswith('-'):
+            return None
+        candidate = token
+        break
     if not isinstance(candidate, str):
         return None
     package = _unquote(candidate).split('@', 1)[0].lower()
@@ -419,6 +524,25 @@ def _normalize_bin(command: str) -> Optional[str]:
     return b
 
 
+def _vscode_provider_identity(additional_data) -> Optional[str]:
+    if not isinstance(additional_data, dict):
+        return None
+    provider_id = additional_data.get('providerId')
+    server_id = additional_data.get('providerServerId')
+    pattern = re.compile(
+        r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}'
+    )
+    if (
+        not isinstance(provider_id, str)
+        or not isinstance(server_id, str)
+        or not pattern.fullmatch(provider_id)
+        or not pattern.fullmatch(server_id)
+    ):
+        return None
+    identity = f'{provider_id.lower()}:{server_id.lower()}'
+    return identity if len('vscode-provider:') + len(identity) <= 500 else None
+
+
 def compute_fingerprint(
     name: Optional[str],
     command: Optional[str],
@@ -483,11 +607,15 @@ def compute_fingerprint(
         if identity:
             return f'url:{identity}'
 
+    provider_identity = _vscode_provider_identity(safe_additional_data)
+    if provider_identity:
+        return f'vscode-provider:{provider_identity}'
+
     nuget_package = _nuget_package(base, safe_args)
     if nuget_package:
         return f'nuget:{nuget_package}'
 
-    smithery_target = _smithery_run_target(safe_args)
+    smithery_target = _smithery_run_target(safe_args, base)
     if smithery_target:
         return f'smithery:{smithery_target}'
 

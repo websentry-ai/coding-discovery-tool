@@ -27,7 +27,10 @@ from scripts.coding_discovery_tools.mcp_extraction_helpers import (
     transform_mcp_servers_to_array,
 )
 from scripts.coding_discovery_tools.mcp_fingerprint import compute_fingerprint
-from scripts.coding_discovery_tools.mcp_tools_cache import compute_cache_key
+from scripts.coding_discovery_tools.mcp_tools_cache import (
+    cache_key_for_server,
+    compute_cache_key,
+)
 
 
 class TestContentHash(unittest.TestCase):
@@ -87,6 +90,50 @@ class TestContentHash(unittest.TestCase):
 
 
 class TestCacheKey(unittest.TestCase):
+    def test_vscode_provider_identity_wins_over_launch_details(self):
+        server = {
+            "name": "GitKraken",
+            "command": "node",
+            "args": ["extension.js"],
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "eamodio.gitlens/GitKraken",
+            "providerProfileId": "profile-a",
+        }
+
+        self.assertEqual(
+            cache_key_for_server(server),
+            "vscode-provider:eamodio.gitlens/gitlens.gkmcpprovider:"
+            "eamodio.gitlens/gitkraken",
+        )
+
+    def test_vscode_provider_identity_respects_storage_limit(self):
+        provider_id = f"{'a' * 128}/{'b' * 128}"
+        self.assertIsNone(compute_cache_key(
+            name="provider",
+            url=None,
+            command="node",
+            args=[],
+            additional_data={
+                "providerId": provider_id,
+                "providerServerId": provider_id,
+            },
+        ))
+
+    def test_http_provider_keeps_url_bound_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="provider",
+                url="https://mcp.example.com/api",
+                command=None,
+                args=[],
+                additional_data={
+                    "providerId": "publisher.extension/provider",
+                    "providerServerId": "publisher.extension/server",
+                },
+            ),
+            "url:mcp.example.com/api",
+        )
+
     """Canonical fingerprint vectors. Fixed vectors are the sync
     contract with the five setup-hook copies — if one changes, the copies have
     diverged."""
@@ -223,6 +270,33 @@ class TestCacheKey(unittest.TestCase):
             "smithery:example-server",
         )
 
+    def test_smithery_argument_does_not_override_another_launcher(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="npx",
+                args=["@vendor/wrapper", "@smithery/cli", "run", "@vendor/server"],
+            ),
+            "npm:@vendor/wrapper",
+        )
+
+    def test_runtime_argument_does_not_claim_smithery_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="python",
+                args=["-c", "npx", "@smithery/cli", "run", "@vendor/server"],
+            ),
+            "npm:@smithery/cli",
+        )
+
+    def test_nested_npm_runner_does_not_claim_smithery_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="npx",
+                args=["npm", "@smithery/cli", "run", "@vendor/server"],
+            ),
+            "npm:@smithery/cli",
+        )
+
     def test_dnx_uses_nuget_package_identity(self):
         self.assertEqual(
             compute_cache_key(
@@ -240,6 +314,53 @@ class TestCacheKey(unittest.TestCase):
                     "tool", "execute", "Example.Server@2.0.0",
                     "--source", "https://api.nuget.org/v3/index.json",
                 ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_custom_nuget_feed_does_not_share_package_identity(self):
+        self.assertEqual(
+            compute_fingerprint(
+                name="example",
+                command="dotnet",
+                url=None,
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0", "--source",
+                    "https://packages.example.com/v3/index.json",
+                ],
+                additional_data={},
+            ),
+            "url-arg:packages.example.com/v3/index.json",
+        )
+
+    def test_dnx_skips_framework_value_before_package(self):
+        self.assertEqual(
+            compute_fingerprint(
+                name="example",
+                command="dnx",
+                url=None,
+                args=["--framework", "net10.0", "-y", "Example.Server@2.0.0"],
+                additional_data={},
+            ),
+            "nuget:example.server",
+        )
+
+    def test_custom_nuget_config_does_not_share_package_identity(self):
+        self.assertIsNone(
+            compute_fingerprint(
+                name="example",
+                command="dnx",
+                url=None,
+                args=["--configfile", "Vendor.Config", "Example.Server@2.0.0"],
+                additional_data={},
+            )
+        )
+
+    def test_dotnet_tool_exec_uses_nuget_package_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=["tool", "exec", "Example.Server@2.0.0"],
             ),
             "nuget:example.server",
         )

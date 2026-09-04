@@ -250,7 +250,10 @@ def _registry_npm_package(spec: str) -> Optional[str]:
         package_pattern = r'[a-z0-9][a-z0-9._-]*'
     if not re.fullmatch(package_pattern, package, re.IGNORECASE):
         return None
-    if selector is not None and not re.fullmatch(r'[a-z0-9*^~<>=.+_-]+', selector, re.IGNORECASE):
+    if selector is not None and (
+        selector in {'.', '..'}
+        or not re.fullmatch(r'[a-z0-9*^~<>=.+_-]+', selector, re.IGNORECASE)
+    ):
         return None
     return package.lower()
 

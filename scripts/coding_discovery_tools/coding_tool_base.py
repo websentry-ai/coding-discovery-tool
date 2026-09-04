@@ -1291,16 +1291,28 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return p
 
     def _terminal_rules(self, data: Dict) -> Tuple[List[str], List[str]]:
+        """Split ``chat.tools.terminal.autoApprove`` into allow/deny Bash rules.
+
+        A verdict is either a bare boolean or the object form VS Code also accepts
+        (``{"approve": true, "matchCommandLine": true}``); both decide the same
+        thing, so read ``approve`` out of the object rather than dropping the entry
+        — a missed object-form ``false`` would hide a real denial."""
         allow, deny = [], []
         auto = data.get("chat.tools.terminal.autoApprove")
         if isinstance(auto, dict):
             for pattern, verdict in auto.items():
                 if not isinstance(pattern, str) or not pattern:
                     continue
+                if isinstance(verdict, bool):
+                    approved = verdict
+                elif isinstance(verdict, dict):
+                    approved = verdict.get("approve")
+                else:
+                    approved = None
                 rule = f"Bash({self._clean_terminal_pattern(pattern)} *)"
-                if verdict is True:
+                if approved is True:
                     allow.append(rule)
-                elif verdict is False:
+                elif approved is False:
                     deny.append(rule)
         return self._dedupe(allow), self._dedupe(deny)
 

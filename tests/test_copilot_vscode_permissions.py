@@ -282,3 +282,170 @@ class TestCanonicalRowAttachment(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTerminalRuleEdgeCases(unittest.TestCase):
+    """Reachable shapes of chat.tools.terminal.autoApprove."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _rules(self, auto):
+        rec = self.ex._build_record({"chat.tools.terminal.autoApprove": auto},
+                                    Path("/x/settings.json"), "user")
+        return (rec or {}).get("allow_rules", []), (rec or {}).get("deny_rules", [])
+
+    def test_object_form_approve_true_is_an_allow_rule(self):
+        # VS Code also accepts {"approve": true, "matchCommandLine": true}
+        allow, _ = self._rules({"npm run": {"approve": True, "matchCommandLine": True}})
+        self.assertIn("Bash(npm run *)", allow)
+
+    def test_object_form_approve_false_is_a_deny_rule(self):
+        # the dangerous miss: an object-form denial must not vanish
+        _, deny = self._rules({"rm -rf": {"approve": False}})
+        self.assertIn("Bash(rm -rf *)", deny)
+
+    def test_unknown_verdict_shape_is_ignored_not_guessed(self):
+        allow, deny = self._rules({"weird": "yes", "other": 123, "none": None})
+        self.assertEqual(allow, [])
+        self.assertEqual(deny, [])
+
+    def test_empty_pattern_key_is_skipped(self):
+        allow, _ = self._rules({"": True, "ls": True})
+        self.assertEqual(allow, ["Bash(ls *)"])
+
+    def test_unicode_and_quoted_patterns_survive(self):
+        allow, _ = self._rules({'echo "héllo"': True})
+        self.assertIn('Bash(echo "héllo" *)', allow)
+
+    def test_duplicate_rules_deduped(self):
+        rec = self.ex._build_record({"chat.tools.terminal.autoApprove": {"/ls/": True, "ls": True}},
+                                    Path("/x/s.json"), "user")
+        self.assertEqual(rec["allow_rules"], ["Bash(ls *)"])
+
+
+class TestModeEdgeCases(unittest.TestCase):
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _mode(self, data):
+        return self.ex._build_record(data, Path("/x/s.json"), "user")["permission_mode"]
+
+    def test_truthy_non_boolean_is_not_bypass(self):
+        # only a literal true flips the mode; "true"/1 must not be read as bypass
+        self.assertEqual(self._mode({"chat.tools.global.autoApprove": "true"}), "default")
+        self.assertEqual(self._mode({"chat.tools.global.autoApprove": 1}), "default")
+
+    def test_legacy_key_alone_still_bypasses(self):
+        self.assertEqual(self._mode({"chat.tools.autoApprove": True}), "bypassPermissions")
+
+
+class TestParseResilience(unittest.TestCase):
+    """A broken or hostile settings.json degrades quietly; it never crashes a scan."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+        self.tmp = Path(tempfile.mkdtemp(prefix="parse-"))
+
+    def tearDown(self):
+        for p in self.tmp.rglob("*"):
+            try: p.chmod(0o644)
+            except OSError: pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, text):
+        p = self.tmp / "settings.json"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_malformed_json_returns_none(self):
+        self.assertIsNone(self.ex._parse_jsonc(self._write('{"a": ')))
+
+    def test_non_dict_json_returns_none(self):
+        self.assertIsNone(self.ex._parse_jsonc(self._write('["not", "a", "dict"]')))
+        self.assertIsNone(self.ex._parse_jsonc(self._write('42')))
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(self.ex._parse_jsonc(self.tmp / "nope.json"))
+
+    def test_empty_object_yields_no_record(self):
+        self.assertIsNone(self.ex._build_record({}, Path("/x/s.json"), "user"))
+
+    @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
+    def test_unreadable_file_returns_none(self):
+        p = self._write('{"chat.tools.global.autoApprove": true}')
+        os.chmod(p, 0o000)
+        try:
+            self.assertIsNone(self.ex._parse_jsonc(p))
+        finally:
+            os.chmod(p, 0o644)
+
+
+class TestChannelsAndProfiles(unittest.TestCase):
+    """Stable vs Insiders, many profiles, and hostile entries under profiles/."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="chan-", dir=str(Path.home())))
+        self.stable = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.insiders = self.home / "Library" / "Application Support" / "Code - Insiders" / "User"
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _ex(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex
+
+    @staticmethod
+    def _w(p, obj):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(obj), encoding="utf-8")
+
+    def test_insiders_only_install_is_extracted(self):
+        # no stable dir at all — the Insiders channel must still be read
+        self._w(self.insiders / "settings.json", {"chat.tools.global.autoApprove": True})
+        rec = self._ex().extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertIn("Code - Insiders", rec["settings_path"])
+
+    def test_riskiest_channel_wins_and_is_attributed(self):
+        # benign stable + YOLO Insiders: the risk must surface, attributed to Insiders
+        self._w(self.stable / "settings.json", {"chat.agent.enabled": True})
+        self._w(self.insiders / "settings.json", {"chat.tools.global.autoApprove": True})
+        rec = self._ex().extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertIn("Code - Insiders", rec["settings_path"],
+                      "settings_path must point at the channel that carries the risk")
+
+    def test_many_profiles_all_merge_deterministically(self):
+        self._w(self.stable / "settings.json", {"chat.agent.enabled": True})
+        for i in range(20):
+            self._w(self.stable / "profiles" / f"p{i:02d}" / "settings.json",
+                    {"chat.tools.terminal.autoApprove": {f"cmd{i:02d}": True}})
+        first = self._ex().extract_settings()
+        second = self._ex().extract_settings()
+        self.assertEqual(len(first["allow_rules"]), 20, "every profile's rule must merge")
+        self.assertEqual(first["allow_rules"], second["allow_rules"], "order must be deterministic")
+
+    def test_stray_file_under_profiles_is_ignored(self):
+        self._w(self.stable / "settings.json", {"chat.tools.global.autoApprove": True})
+        (self.stable / "profiles").mkdir(parents=True, exist_ok=True)
+        (self.stable / "profiles" / "not-a-dir.txt").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._ex().extract_settings()["permission_mode"], "bypassPermissions")
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_symlinked_profile_dir_escaping_home_is_refused(self):
+        # the profile DIR (not just the leaf) is a link out of the home
+        outside = Path(tempfile.mkdtemp(prefix="chan-outside-"))
+        try:
+            (outside / "settings.json").write_text(
+                json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+            self._w(self.stable / "settings.json", {"chat.agent.enabled": True})
+            (self.stable / "profiles").mkdir(parents=True, exist_ok=True)
+            os.symlink(outside, self.stable / "profiles" / "escape")
+            rec = self._ex().extract_settings()
+            self.assertNotEqual(rec["permission_mode"], "bypassPermissions",
+                                "settings reached through an escaping profile dir must not be read")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)

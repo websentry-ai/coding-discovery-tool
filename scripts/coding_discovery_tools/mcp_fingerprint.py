@@ -733,8 +733,9 @@ def compute_fingerprint(
             or first_scoped_index >= smithery_index
         )
     ):
-        if not runner_package or runner_package in SMITHERY_CLI_PACKAGES:
-            return None
+        if launcher_base in NPM_RUNNERS | {'bun', 'cmd'}:
+            if not runner_package or runner_package in SMITHERY_CLI_PACKAGES:
+                return None
         first_scoped_package = None
 
     # 2. URLs inside args -> url-arg:<identity> (only if all URLs resolve to a single identity)

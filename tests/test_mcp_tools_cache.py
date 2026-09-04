@@ -397,6 +397,21 @@ class TestCacheKey(unittest.TestCase):
             )
         )
 
+    def test_smithery_argument_does_not_erase_non_npm_launcher(self):
+        vectors = [
+            ("uvx", ["real-package", "@smithery/cli"], "pypi:real-package"),
+            ("docker", ["run", "vendor/image", "@smithery/cli"], "docker:vendor/image"),
+            ("custom-server", ["@smithery/cli"], "bin:custom-server"),
+        ]
+        for command, args, expected in vectors:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args,
+                    ),
+                    expected,
+                )
+
     def test_dnx_requires_an_explicit_official_source(self):
         self.assertIsNone(
             compute_cache_key(

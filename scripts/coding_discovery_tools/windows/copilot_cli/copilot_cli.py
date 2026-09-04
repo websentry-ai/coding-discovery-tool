@@ -10,17 +10,19 @@ identical to the macOS layout, with its MCP servers in
 OS-specific overrides: the all-users scan (``is_running_as_admin`` + ``C:\\Users``),
 the binary resolve (``_resolve_windows_binary``: npm ``copilot.cmd`` / WinGet
 ``Links\\copilot.exe`` shims / ``.local/bin`` / ``.bun/bin``, no Homebrew), and
-``get_version`` (``shell=True`` — Windows can't exec the npm ``.cmd`` shim from a
-bare argv list, so the inherited probe would read "unknown"). Everything else is
-inherited from the macOS detector (DRY).
+``get_version`` (a resolved ``.cmd`` shim is read, not run: Windows can't exec it
+from a bare argv list and a shell would let a profile path holding ``&``/``^``
+execute part of itself). Everything else is inherited from the macOS detector (DRY).
 """
 
+import json
 import logging
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ...constants import VERSION_TIMEOUT
+from ...utils import run_command
 from ...windows_extraction_helpers import is_running_as_admin
 from ...macos.copilot_cli.copilot_cli import MacOSCopilotCliDetector, _parse_cli_version
 
@@ -115,14 +117,13 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
         "unknown".
         """
         if binary is not None:
-            # Through _probe_version so the npm .cmd shim runs under shell=True.
-            return self._probe_version([str(binary), "--version"])
+            return self._version_for_binary(binary)
 
         try:
             if self.user_home is not None:
                 resolved = self._resolve_windows_binary(self.user_home)
                 if resolved is not None:
-                    parsed = self._probe_version([str(resolved), "--version"])
+                    parsed = self._version_for_binary(resolved)
                     if parsed:
                         return parsed
         except Exception as exc:
@@ -154,6 +155,32 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
         except (PermissionError, OSError) as exc:
             logger.debug(f"Error resolving Copilot CLI binary for {user_home}: {exc}")
         return None
+
+    def _version_for_binary(self, binary) -> Optional[str]:
+        """Version of a resolved ``copilot`` binary, never via the shell.
+
+        A resolved path carries the profile name, and ``&``/``^`` are legal in
+        Win32 account names, so probing it under ``shell=True`` would let
+        ``C:\\Users\\a&b\\...`` execute part of its own path as SYSTEM. A
+        ``.cmd``/``.bat`` shim is read instead of run; anything else is exec'd
+        directly, which needs no shell.
+        """
+        path = Path(binary)
+        if path.suffix.lower() in (".cmd", ".bat"):
+            return self._version_from_npm_metadata(path)
+        return _parse_cli_version(run_command([str(path), "--version"], VERSION_TIMEOUT))
+
+    @staticmethod
+    def _version_from_npm_metadata(shim: Path) -> Optional[str]:
+        """Version of the npm package an npm shim belongs to, read from its ``package.json``."""
+        package_json = shim.parent / "node_modules" / "@github" / "copilot" / "package.json"
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            logger.debug(f"Could not read Copilot CLI version from {package_json}: {e}")
+            return None
+        version = data.get("version") if isinstance(data, dict) else None
+        return version if isinstance(version, str) else None
 
     @staticmethod
     def _probe_version(command: List[str]) -> Optional[str]:

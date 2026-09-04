@@ -1186,6 +1186,14 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             base = os.path.normcase(os.path.realpath(str(user_home)))
             if not (real == base or real.startswith(base.rstrip(os.sep) + os.sep)):
                 return None
+            # The file must belong to the user whose home it sits in. A hard link
+            # keeps its target's owner while its path stays inside the home, so
+            # containment alone cannot see through one; ownership can. (st_uid is 0
+            # for every file on Windows, where this comparison is a no-op.)
+            home_stat = os.stat(base)
+            if st.st_uid != home_stat.st_uid:
+                logger.debug(f"refusing {path}: owned by uid {st.st_uid}, home is {home_stat.st_uid}")
+                return None
             resolved = os.stat(real)
             if (resolved.st_dev, resolved.st_ino) != (st.st_dev, st.st_ino):
                 return None  # swapped between the open and the check

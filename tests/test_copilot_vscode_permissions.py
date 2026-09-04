@@ -489,3 +489,52 @@ class TestContainmentRace(unittest.TestCase):
         finally:
             shutil.rmtree(home, ignore_errors=True)
             shutil.rmtree(outside, ignore_errors=True)
+
+
+class TestOwnershipContainment(unittest.TestCase):
+    """A user's settings file must belong to that user. A hard link keeps its
+    target's owner while its path stays inside the home, so path containment is
+    blind to it — ownership is what refuses a link to a foreign file."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="own-home-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+        self.ud.joinpath("settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _ex(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex
+
+    def test_same_owner_file_is_read(self):
+        # the ordinary case must keep working
+        self.assertEqual(self._ex().extract_settings()["permission_mode"], "bypassPermissions")
+
+    @unittest.skipUnless(os.name == "posix", "uid ownership is POSIX-specific")
+    def test_file_owned_by_another_user_is_refused(self):
+        # simulate the home belonging to a different uid than the settings file,
+        # which is exactly the state a hard link to a foreign file produces
+        real_stat = os.stat
+        home_real = os.path.realpath(str(self.home))
+
+        class _FakeStat:
+            def __init__(self, base): self._b = base
+            def __getattr__(self, name): return getattr(self._b, name)
+            @property
+            def st_uid(self): return self._b.st_uid + 1  # a different owner
+
+        def patched(p, *a, **k):
+            st = real_stat(p, *a, **k)
+            return _FakeStat(st) if os.path.realpath(str(p)) == home_real else st
+
+        os.stat = patched
+        try:
+            self.assertIsNone(self._ex().extract_settings(),
+                              "a settings file not owned by the home's user must be refused")
+        finally:
+            os.stat = real_stat

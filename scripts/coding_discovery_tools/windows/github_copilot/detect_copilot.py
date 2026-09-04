@@ -248,17 +248,19 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         for ext_root in self._vscode_app_extension_roots(user_home):
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
                 copilot_dir = ext_root / dir_name
-                try:
-                    if not copilot_dir.is_dir():
-                        continue
-                except OSError:
+                if not _safe_descendant_directory(copilot_dir, ext_root):
                     continue
                 # The consolidated built-in "copilot" folder is actually the
                 # Copilot Chat extension (name="copilot-chat") — the MCP consumer
                 # — so label it accordingly (matches the marketplace
                 # github.copilot-chat mapping); a plain "copilot" stays generic.
                 version, name_label = "unknown", "GitHub Copilot (VS Code)"
-                data = _load_jsonc(copilot_dir / "package.json")
+                package_json = copilot_dir / "package.json"
+                data = (
+                    None
+                    if is_symlink_or_junction(package_json)
+                    else _load_jsonc(package_json)
+                )
                 if isinstance(data, dict):
                     version = data.get("version", "unknown")
                     ext_name = str(data.get("name") or "").lower()

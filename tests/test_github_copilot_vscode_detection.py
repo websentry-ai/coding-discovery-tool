@@ -315,6 +315,30 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
 
         self.assertEqual(result, [])
 
+    def test_builtin_copilot_reparse_point_is_ignored(self):
+        self._make_code_user_dir()
+
+        with patch(
+            f"{_WIN_MOD}.is_symlink_or_junction",
+            side_effect=lambda path: path == self.copilot,
+        ):
+            result = self._detect()
+
+        self.assertEqual(result, [])
+
+    def test_builtin_package_reparse_point_is_not_read(self):
+        self._make_code_user_dir()
+        package_json = self.copilot / "package.json"
+
+        with patch(
+            f"{_WIN_MOD}.is_symlink_or_junction",
+            side_effect=lambda path: path == package_json,
+        ):
+            result = self._detect()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["version"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

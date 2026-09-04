@@ -5,6 +5,7 @@ per-user ``~/.vscode/extensions/extensions.json``) was never detected, so the
 user's VS Code MCP servers (``Code/User/mcp.json``) were silently skipped.
 """
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -259,6 +260,84 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
         res = self._detect()
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+
+    def test_builtin_detected_in_versioned_user_install(self):
+        self._make_code_user_dir()
+        copilot = (
+            self.user_home
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "Microsoft VS Code"
+            / "520fb30b2d"
+            / "resources"
+            / "app"
+            / "extensions"
+            / "copilot"
+        )
+        copilot.mkdir(parents=True)
+        (copilot / "package.json").write_text(
+            json.dumps({"name": "copilot-chat", "version": "0.64.0"}),
+            encoding="utf-8",
+        )
+
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", []):
+            res = self.Detector()._detect_vscode_for_user(self.user_home)
+
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot Chat (VS Code)")
+        self.assertEqual(res[0]["version"], "0.64.0")
+        self.assertEqual(res[0]["install_path"], str(copilot))
+
+    def test_versioned_user_install_symlink_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        self._make_code_user_dir()
+        external = Path(self.tmp) / "external-install"
+        copilot = external / "resources" / "app" / "extensions" / "copilot"
+        copilot.mkdir(parents=True)
+        (copilot / "package.json").write_text(
+            json.dumps({"name": "copilot-chat", "version": "0.64.0"}),
+            encoding="utf-8",
+        )
+        install_root = (
+            self.user_home
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "Microsoft VS Code"
+        )
+        install_root.mkdir(parents=True)
+        (install_root / "redirect").symlink_to(external, target_is_directory=True)
+
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", []):
+            result = self.Detector()._detect_vscode_for_user(self.user_home)
+
+        self.assertEqual(result, [])
+
+    def test_builtin_copilot_reparse_point_is_ignored(self):
+        self._make_code_user_dir()
+
+        with patch(
+            f"{_WIN_MOD}.is_symlink_or_junction",
+            side_effect=lambda path: path == self.copilot,
+        ):
+            result = self._detect()
+
+        self.assertEqual(result, [])
+
+    def test_builtin_package_reparse_point_is_not_read(self):
+        self._make_code_user_dir()
+        package_json = self.copilot / "package.json"
+
+        with patch(
+            f"{_WIN_MOD}.is_symlink_or_junction",
+            side_effect=lambda path: path == package_json,
+        ):
+            result = self._detect()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["version"], "unknown")
 
 
 if __name__ == "__main__":

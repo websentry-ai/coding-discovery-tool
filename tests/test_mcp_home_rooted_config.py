@@ -182,10 +182,6 @@ class TestClaudeWalkFileBranchSmoke(unittest.TestCase):
 
 
 class TestUnionMcpServers(unittest.TestCase):
-    """The merge helper combines server lists by name instead of overwriting, so
-    two config sources resolving to the same project path (e.g. a home-rooted
-    ~/.mcp.json and ~/.claude.json projects[<home>]) don't clobber each other."""
-
     def test_disjoint_lists_are_combined(self):
         out = AIToolsDetector._union_mcp_servers([{"name": "alpha"}], [{"name": "beta"}])
         self.assertEqual([s["name"] for s in out], ["alpha", "beta"])
@@ -198,6 +194,25 @@ class TestUnionMcpServers(unittest.TestCase):
         self.assertEqual([s["name"] for s in out], ["playwright", "policycenter"])
         # higher-precedence (earlier-merged) definition is preserved
         self.assertEqual(out[0]["command"], "from-claude-json")
+
+    def test_same_provider_survives_across_vscode_profiles(self):
+        existing = [{
+            "name": "GitKraken",
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "gitkraken",
+            "providerProfileId": "profile-a",
+        }]
+        incoming = [{
+            "name": "GitKraken",
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "gitkraken",
+            "providerProfileId": "profile-b",
+        }]
+
+        self.assertEqual(
+            AIToolsDetector._union_mcp_servers(existing, incoming),
+            existing + incoming,
+        )
 
     def test_handles_empty_and_none(self):
         self.assertEqual(AIToolsDetector._union_mcp_servers([], []), [])

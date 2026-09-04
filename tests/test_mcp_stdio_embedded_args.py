@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools import mcp_tool_scanner as scanner
+from scripts.coding_discovery_tools import mcp_extraction_helpers as mcp_helpers
 
 STUB_BODY = '''\
 import json, sys
@@ -44,7 +45,7 @@ class TestStdioEmbeddedArgs(unittest.TestCase):
 
         self.bindir = root / "bin"
         self.bindir.mkdir()
-        self._write_stub(self.bindir / "stubmcp")
+        self.stub_command = self._write_stub(self.bindir / "stubmcp")
 
         # A real install whose path contains a space, as 19 prod configs do.
         spaced_dir = root / "My App"
@@ -103,6 +104,144 @@ class TestStdioEmbeddedArgs(unittest.TestCase):
         with patch.object(scanner.shlex, "split", side_effect=AssertionError("must not split")):
             result = scanner._scan_stdio("stubmcp", ["--flag"], {}, 10)
         self.assertEqual("scanned", result.get("status"))
+
+    def test_relative_command_resolves_from_configured_cwd(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        command = f".{os.sep}{self._write_stub(cwd / 'local-mcp').name}"
+
+        result = scanner.scan_mcp_server(
+            {"command": command, "args": [], "env": {}, "cwd": str(cwd)}
+        )
+
+        self.assertEqual("scanned", result.get("status"))
+        self.assertEqual(2, len(result.get("tools") or []))
+
+    def test_explicit_relative_command_resolves_from_configured_cwd(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        local_command = self._write_stub(cwd / "stubmcp")
+        command = f".{os.sep}{local_command.name}"
+
+        with patch.object(
+            scanner.subprocess,
+            "Popen",
+            side_effect=FileNotFoundError,
+        ) as popen:
+            scanner._scan_stdio(command, ["--flag"], {}, 10, cwd=str(cwd))
+
+        self.assertEqual(Path(popen.call_args.args[0][0]).resolve(), local_command.resolve())
+
+    def test_bare_command_uses_path_instead_of_configured_cwd(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        self._write_stub(cwd / "stubmcp")
+
+        with patch.object(
+            scanner.subprocess,
+            "Popen",
+            side_effect=FileNotFoundError,
+        ) as popen:
+            scanner._scan_stdio("stubmcp", ["--flag"], {}, 10, cwd=str(cwd))
+
+        self.assertEqual(
+            Path(popen.call_args.args[0][0]).resolve(),
+            self.stub_command.resolve(),
+        )
+
+    def test_elevated_transform_does_not_inspect_stdio_config(self):
+        config = {
+            "local": {
+                "command": str(self.stub_command),
+                "args": ["relative-script.py"],
+                "cwd": str(Path(self.tmp.name) / "provider"),
+            }
+        }
+
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=True,
+        ), patch.object(
+            mcp_helpers,
+            "_scan_servers_in_mapping",
+        ) as scan_servers, patch.object(
+            mcp_helpers,
+            "augment_script_fields",
+        ) as augment_script:
+            servers = mcp_helpers.transform_mcp_servers_to_array(config)
+
+        scan_servers.assert_not_called()
+        augment_script.assert_not_called()
+        error = servers[0]["scan"]["error"]
+        self.assertEqual(error["code"], "privilege_boundary")
+        self.assertEqual(
+            error["details"]["reason"],
+            "configured_stdio_under_elevated_process",
+        )
+
+    def test_elevated_transform_does_not_scan_stdio_without_cwd(self):
+        config = {
+            "local": {
+                "command": str(self.stub_command),
+                "args": ["server.py"],
+            }
+        }
+
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=True,
+        ), patch.object(
+            mcp_helpers,
+            "_scan_servers_in_mapping",
+        ) as scan_servers, patch.object(
+            mcp_helpers,
+            "augment_script_fields",
+        ) as augment_script:
+            servers = mcp_helpers.transform_mcp_servers_to_array(config)
+
+        scan_servers.assert_not_called()
+        augment_script.assert_not_called()
+        self.assertEqual(
+            servers[0]["scan"]["error"]["details"]["reason"],
+            "configured_stdio_under_elevated_process",
+        )
+
+    def test_elevated_transform_still_scans_http_servers(self):
+        config = {
+            "local": {"command": str(self.stub_command)},
+            "remote": {"url": "https://mcp.example.com"},
+        }
+
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=True,
+        ), patch.object(
+            mcp_helpers,
+            "_scan_servers_in_mapping",
+            return_value={},
+        ) as scan_servers, patch.object(
+            mcp_helpers,
+            "augment_script_fields",
+        ) as augment_script:
+            mcp_helpers.transform_mcp_servers_to_array(config)
+
+        scan_servers.assert_called_once_with({"remote": config["remote"]})
+        self.assertEqual(augment_script.call_count, 1)
+        self.assertEqual(augment_script.call_args.args[0]["name"], "remote")
+
+    def test_embedded_command_retry_preserves_configured_cwd(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        command = f".{os.sep}{self._write_stub(cwd / 'local-mcp').name}"
+
+        with patch.object(scanner, "_scan_stdio", wraps=scanner._scan_stdio) as scan_stdio:
+            result = scan_stdio(f"{command} --flag", [], {}, 10, cwd=str(cwd))
+
+        self.assertEqual("scanned", result.get("status"))
+        self.assertEqual(scan_stdio.call_args_list[1].kwargs["cwd"], str(cwd))
 
     def test_posix_false_preserves_windows_backslashes(self):
         """Why the split passes posix=False: POSIX mode eats backslashes. Runs everywhere,

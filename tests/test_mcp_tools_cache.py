@@ -27,7 +27,10 @@ from scripts.coding_discovery_tools.mcp_extraction_helpers import (
     transform_mcp_servers_to_array,
 )
 from scripts.coding_discovery_tools.mcp_fingerprint import compute_fingerprint
-from scripts.coding_discovery_tools.mcp_tools_cache import compute_cache_key
+from scripts.coding_discovery_tools.mcp_tools_cache import (
+    cache_key_for_server,
+    compute_cache_key,
+)
 
 
 class TestContentHash(unittest.TestCase):
@@ -87,6 +90,58 @@ class TestContentHash(unittest.TestCase):
 
 
 class TestCacheKey(unittest.TestCase):
+    def test_vscode_provider_identity_does_not_override_launch_details(self):
+        server = {
+            "name": "GitKraken",
+            "command": "gk",
+            "args": ["mcp"],
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "eamodio.gitlens/GitKraken",
+            "providerProfileId": "profile-a",
+        }
+
+        self.assertEqual(
+            cache_key_for_server(server),
+            "bin:gk",
+        )
+
+    def test_bare_vscode_provider_is_not_a_fingerprint(self):
+        server = {
+            "name": "GitKraken",
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "eamodio.gitlens/GitKraken",
+        }
+        self.assertIsNone(cache_key_for_server(server))
+
+    def test_cached_vscode_provider_keeps_launch_identity(self):
+        server = {
+            "name": "GitKraken",
+            "command": "gk",
+            "args": ["mcp"],
+            "additional_data": {"scope": "vscode-provider-cache"},
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "eamodio.gitlens/GitKraken",
+        }
+        self.assertEqual(
+            cache_key_for_server(server),
+            "bin:gk",
+        )
+
+    def test_http_provider_keeps_url_bound_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="provider",
+                url="https://mcp.example.com/api",
+                command=None,
+                args=[],
+                additional_data={
+                    "providerId": "publisher.extension/provider",
+                    "providerServerId": "publisher.extension/server",
+                },
+            ),
+            "url:mcp.example.com/api",
+        )
+
     """Canonical fingerprint vectors. Fixed vectors are the sync
     contract with the five setup-hook copies — if one changes, the copies have
     diverged."""
@@ -199,6 +254,385 @@ class TestCacheKey(unittest.TestCase):
         self.assertEqual(
             compute_cache_key(name="a", url=None, command="npx", args=["x"]),
             compute_cache_key(name="b", url=None, command="npx", args=["x"]),
+        )
+
+    def test_smithery_cli_uses_scoped_run_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npx",
+                args=["-y", "@smithery/cli@latest", "run", "@vendor/server", "--key", "secret"],
+            ),
+            "smithery:vendor/server",
+        )
+
+    def test_smithery_cli_uses_bare_run_target_through_windows_cmd(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="cmd.exe",
+                args=["/c", "npx", "-y", "@smithery/cli@latest", "run", "example-server"],
+            ),
+            "smithery-unverified:example-server",
+        )
+
+    def test_smithery_current_package_uses_mcp_run_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npx",
+                args=["-y", "smithery@latest", "mcp", "run", "vendor/server"],
+            ),
+            "smithery:vendor/server",
+        )
+
+    def test_smithery_supported_runner_forms(self):
+        vectors = [
+            ("smithery.cmd", ["--verbose", "run", "@vendor/server"], "smithery-unverified:vendor/server"),
+            ("npm", ["exec", "--", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
+            ("bunx", ["--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
+            ("bun", ["x", "--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
+            ("cmd", ["/c", "npx.cmd", "-y", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
+            ("npx", ["-y", "@smithery/cli", "run", "vendor/server"], "smithery-unverified:vendor/server"),
+            ("bunx", ["--no-install", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
+        ]
+        for command, args, expected in vectors:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args
+                    ),
+                    expected,
+                )
+
+    def test_invalid_standalone_smithery_command_fails_closed(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="smithery",
+                args=["list", "vendor/server"],
+            )
+        )
+
+    def test_smithery_config_can_precede_the_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npx",
+                args=["-y", "@smithery/cli@latest", "run", "--config", "{}", "@vendor/server"],
+            ),
+            "smithery:vendor/server",
+        )
+
+    def test_smithery_argument_does_not_override_another_launcher(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="npx",
+                args=["@vendor/wrapper", "@smithery/cli", "run", "@vendor/server"],
+            ),
+            "npm:@vendor/wrapper",
+        )
+
+    def test_smithery_argument_preserves_bare_launcher(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="npx",
+                args=["wrapper-mcp", "@smithery/cli", "run", "@vendor/server"],
+            ),
+            "npm:wrapper-mcp",
+        )
+
+    def test_smithery_argument_preserves_wrapped_npm_launchers(self):
+        vectors = [
+            ("bun", ["x", "wrapper-mcp", "@smithery/cli", "run", "@vendor/server"]),
+            ("cmd", ["/d", "/c", "npx", "wrapper-mcp", "@smithery/cli", "run", "@vendor/server"]),
+        ]
+        for command, args in vectors:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args,
+                    ),
+                    "npm:wrapper-mcp",
+                )
+
+    def test_smithery_argument_does_not_turn_bun_script_into_package(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="alias", url=None, command="bun",
+                args=["wrapper-mcp", "@smithery/cli", "run", "@vendor/server"],
+            )
+        )
+
+    def test_smithery_rejects_execution_changing_inputs(self):
+        vectors = [
+            ("npx", ["--registry=https://packages.example", "@smithery/cli", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli@npm:evil", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli@.", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli@...", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli@.hidden", "run", "@vendor/server"]),
+            ("npx", ["-y", "smithery@..", "mcp", "run", "vendor/server"]),
+            ("npx", ["-y", "@smithery/cli", "run", "@vendor/server@npm:evil"]),
+            ("npm", ["exec", "@smithery/cli", "run", "@vendor/server"]),
+            ("npx", ["-y", "@smithery/cli", "run", "@vendor/server", "--package=evil"]),
+            ("npm", ["exec", "--", "@smithery/cli", "run", "@vendor/server", "--call=evil"]),
+            ("cmd", ["/c", "npx", "@smithery/cli", "run", "@vendor/server", "&", "evil"]),
+            ("npx", ["--workspace", "decoy", "@smithery/cli", "run", "@vendor/server"]),
+            ("bunx", ["--cwd", "decoy", "@smithery/cli", "run", "@vendor/server"]),
+        ]
+        for command, args in vectors:
+            with self.subTest(command=command, args=args):
+                self.assertIsNone(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args,
+                    )
+                )
+
+    def test_smithery_path_qualified_launchers_are_unverified(self):
+        vectors = [
+            ("./smithery", ["run", "@vendor/server"]),
+            ("/tmp/evil/smithery", ["run", "@vendor/server"]),
+            (r"C:\evil\smithery.exe", ["run", "@vendor/server"]),
+            ("./npx", ["-y", "@smithery/cli", "run", "@vendor/server"]),
+        ]
+        for command, args in vectors:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args,
+                    ),
+                    "smithery-unverified:vendor/server",
+                )
+
+    def test_runtime_argument_does_not_claim_smithery_identity(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="alias", url=None, command="python",
+                args=["-c", "npx", "@smithery/cli", "run", "@vendor/server"],
+            )
+        )
+
+    def test_nested_npm_runner_does_not_claim_smithery_identity(self):
+        for nested_runner in ["npm", "npx.cmd", "bun"]:
+            with self.subTest(nested_runner=nested_runner):
+                self.assertIsNone(
+                    compute_cache_key(
+                        name="alias", url=None, command="npx",
+                        args=[nested_runner, "@smithery/cli", "run", "@vendor/server"],
+                    )
+                )
+
+    def test_smithery_argument_does_not_erase_non_npm_launcher(self):
+        vectors = [
+            ("uvx", ["real-package", "@smithery/cli"], "pypi:real-package"),
+            ("docker", ["run", "vendor/image", "@smithery/cli"], "docker:vendor/image"),
+            ("custom-server", ["@smithery/cli"], "bin:custom-server"),
+        ]
+        for command, args, expected in vectors:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    compute_cache_key(
+                        name="alias", url=None, command=command, args=args,
+                    ),
+                    expected,
+                )
+
+    def test_dnx_requires_an_explicit_official_source(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="alias", url=None, command="dnx",
+                args=["Vendor.Server@1.2.3", "serve"],
+            )
+        )
+
+    def test_dotnet_tool_execute_ignores_nuget_source_url(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "execute", "Example.Server@2.0.0",
+                    "--source", "https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_custom_nuget_feed_does_not_share_package_identity(self):
+        self.assertEqual(
+            compute_fingerprint(
+                name="example",
+                command="dotnet",
+                url=None,
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0", "--source",
+                    "https://packages.example.com/v3/index.json",
+                ],
+                additional_data={},
+            ),
+            "url-arg:packages.example.com/v3/index.json",
+        )
+
+    def test_dnx_skips_framework_value_before_package(self):
+        self.assertEqual(
+            compute_fingerprint(
+                name="example",
+                command="dnx",
+                url=None,
+                args=[
+                    "--framework", "net10.0", "-y", "Example.Server@2.0.0",
+                    "--source", "https://api.nuget.org/v3/index.json",
+                ],
+                additional_data={},
+            ),
+            "nuget:example.server",
+        )
+
+    def test_dotnet_dnx_alias_supports_official_options(self):
+        self.assertEqual(
+            compute_fingerprint(
+                name="example",
+                command="dotnet",
+                url=None,
+                args=[
+                    "dnx", "--arch", "x64", "--verbosity", "diag",
+                    "--disable-parallel", "--no-cache", "--no-http-cache",
+                    "--source", "https://api.nuget.org/v3/index.json",
+                    "Example.Server@2.0.0",
+                ],
+                additional_data={},
+            ),
+            "nuget:example.server",
+        )
+
+    def test_dotnet_tool_args_after_separator_keep_package_identity(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="dotnet",
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0", "--source",
+                    "https://api.nuget.org/v3/index.json", "--", "--listen",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_nuget_restore_options_after_package_fail_closed(self):
+        for extra in (
+            "--add-source:https://packages.example/v3/index.json",
+            "--configfile:NuGet.Config",
+            "--unknown-option",
+        ):
+            with self.subTest(extra=extra):
+                self.assertNotEqual(
+                    compute_cache_key(
+                        name="alias",
+                        url=None,
+                        command="dotnet",
+                        args=[
+                            "tool", "exec", "Example.Server@2.0.0",
+                            "--source", "https://api.nuget.org/v3/index.json",
+                            extra,
+                        ],
+                    ),
+                    "nuget:example.server",
+                )
+
+    def test_custom_nuget_config_does_not_share_package_identity(self):
+        self.assertIsNone(
+            compute_fingerprint(
+                name="example",
+                command="dnx",
+                url=None,
+                args=["--configfile", "Vendor.Config", "Example.Server@2.0.0"],
+                additional_data={},
+            )
+        )
+
+    def test_dotnet_tool_exec_requires_an_explicit_official_source(self):
+        self.assertIsNone(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=["tool", "exec", "Example.Server@2.0.0"],
+            )
+        )
+
+    def test_dotnet_requires_an_explicit_version(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "exec", "--source",
+                    "https://api.nuget.org/v3/index.json", "Example.Server",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_dotnet_supports_version_option(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "exec", "--version", "2.0.0", "--source",
+                    "https://api.nuget.org/v3/index.json", "Example.Server",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_nuget_rejects_path_qualified_launcher(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="/tmp/dotnet",
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0", "--source",
+                    "https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_nuget_add_source_does_not_bind_to_nuget_org(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dnx",
+                args=[
+                    "Example.Server@2.0.0", "--add-source",
+                    "https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_attached_nuget_source_cannot_hide_the_real_host(self):
+        self.assertNotEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dnx",
+                args=[
+                    "Example.Server@2.0.0",
+                    "--source=https://api.nuget.org=@evil.com/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
+    def test_colon_attached_nuget_source(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0",
+                    "--source:https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
         )
 
     def test_config_changes_key(self):

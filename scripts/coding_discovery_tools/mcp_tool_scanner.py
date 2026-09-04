@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -92,6 +93,7 @@ def scan_mcp_server(
                 args=list(server_config.get("args") or []),
                 env_extra=dict(server_config.get("env") or {}),
                 timeout=timeout,
+                cwd=server_config.get("cwd"),
             )
             result.setdefault("transport", "stdio")
         elif url:
@@ -330,13 +332,34 @@ def _classify_stderr(stderr_text: str, exit_code: Optional[int]) -> Dict[str, An
     return {"status": "process_exited", "exit_code": exit_code}
 
 
+def _is_cwd_relative_command(command: str, cwd: Optional[str]) -> bool:
+    return bool(
+        cwd
+        and any(separator in command for separator in ("/", "\\"))
+        and not Path(command).is_absolute()
+    )
+
+
+def _resolve_cwd_relative_command(command: str, cwd: Optional[str]) -> Optional[str]:
+    if not _is_cwd_relative_command(command, cwd):
+        return None
+    command_path = Path(command)
+    try:
+        candidate = Path(cwd) / command_path
+        return str(candidate) if candidate.is_file() else None
+    except OSError:
+        return None
+
+
 def _scan_stdio(
     command: str,
     args: List[str],
     env_extra: Dict[str, str],
     timeout: int,
+    cwd: Optional[str] = None,
 ) -> Dict[str, Any]:
-    resolved = shutil.which(command) or command
+    resolved = _resolve_cwd_relative_command(command, cwd)
+    resolved = resolved or shutil.which(command) or command
     env = os.environ.copy()
     for k, v in env_extra.items():
         if isinstance(v, str):
@@ -349,6 +372,7 @@ def _scan_stdio(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            cwd=cwd,
         )
     except FileNotFoundError:
         # Some configs put the whole command line in `command` and leave `args`
@@ -360,9 +384,14 @@ def _scan_stdio(
                 parts = shlex.split(command, posix=(os.name != "nt"))
             except ValueError:
                 parts = []
-            head = shutil.which(parts[0]) if len(parts) > 1 else None
+            head = None
+            if len(parts) > 1:
+                head = (
+                    _resolve_cwd_relative_command(parts[0], cwd)
+                    or shutil.which(parts[0])
+                )
             if head:
-                return _scan_stdio(head, parts[1:], env_extra, timeout)
+                return _scan_stdio(head, parts[1:], env_extra, timeout, cwd=cwd)
         return {"status": "command_not_found", "command": command}
     except OSError as exc:
         return {"status": "spawn_error", "error": f"{type(exc).__name__}: {exc}"}

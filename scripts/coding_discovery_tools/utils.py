@@ -187,7 +187,7 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
     return found
 
 
-_NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*$")
+_NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
 
 
 def windows_node_manager_shims(user_home: Path, tool: str) -> List[Path]:

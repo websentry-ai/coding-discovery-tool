@@ -654,7 +654,7 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
 
     def test_nvm_dir_with_shell_metacharacters_ignored(self):
         """A dir like ``x&&calc`` would inject a command into the shell=True probe."""
-        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20"):
+        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20", "v1.2\n", "v1\n&&calc"):
             with self.subTest(name=name):
                 self._make_exec(
                     self.home / "AppData" / "Roaming" / "nvm" / name / "claude.cmd"

@@ -1007,6 +1007,19 @@ def _vscode_cache_scope_path(
     return None
 
 
+def _vscode_cache_profile_id(
+    code_user_base: Path,
+    db_path: Path,
+) -> Optional[str]:
+    try:
+        relative_parts = db_path.relative_to(code_user_base).parts
+    except ValueError:
+        return None
+    if len(relative_parts) >= 2 and relative_parts[0] == "profiles":
+        return relative_parts[1]
+    return None
+
+
 def _running_with_elevated_privileges(operating_system: str) -> bool:
     if operating_system == "windows":
         try:
@@ -1026,7 +1039,9 @@ def _running_with_elevated_privileges(operating_system: str) -> bool:
         return True
 
 
-def _privilege_boundary_scan_result() -> Dict[str, Any]:
+def _privilege_boundary_scan_result(
+    reason: str = "cached_vscode_launch_under_elevated_process",
+) -> Dict[str, Any]:
     return {
         "scanned_at": (
             datetime.datetime.now(datetime.timezone.utc)
@@ -1037,7 +1052,7 @@ def _privilege_boundary_scan_result() -> Dict[str, Any]:
         "server_info": None,
         "error": {
             "code": "privilege_boundary",
-            "details": {"reason": "cached_vscode_launch_under_elevated_process"},
+            "details": {"reason": reason},
         },
     }
 
@@ -1104,6 +1119,7 @@ def _extract_vscode_cached_mcp_projects(
         )
         if scope_path is None:
             continue
+        profile_id = _vscode_cache_profile_id(code_user_base, db_path)
         provider_cache = _read_vscode_mcp_provider_cache(db_path)
         if not provider_cache:
             continue
@@ -1193,7 +1209,7 @@ def _extract_vscode_cached_mcp_projects(
                 ):
                     continue
 
-                identity = (scope_path, provider_id, server_id)
+                identity = (scope_path, profile_id, provider_id, server_id)
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -1203,6 +1219,11 @@ def _extract_vscode_cached_mcp_projects(
                     **launch_config,
                     "providerId": provider_id,
                     "providerServerId": server_id,
+                    **(
+                        {"providerProfileId": profile_id}
+                        if profile_id is not None
+                        else {}
+                    ),
                 }
                 labels[config_key] = label
                 scopes[config_key] = scope_path
@@ -1339,6 +1360,26 @@ def transform_mcp_servers_to_array(
         for server_name, server_config in mcp_servers.items()
         if server_name not in scan_results
     }
+    cwd_targets = {
+        server_name
+        for server_name, server_config in scan_targets.items()
+        if isinstance(server_config, dict)
+        and isinstance(server_config.get("command"), str)
+        and isinstance(server_config.get("cwd"), str)
+        and bool(server_config["cwd"])
+    }
+    if cwd_targets and _running_with_elevated_privileges(
+        "windows" if platform.system() == "Windows" else platform.system().lower()
+    ):
+        for server_name in cwd_targets:
+            scan_results[server_name] = _privilege_boundary_scan_result(
+                "configured_cwd_under_elevated_process"
+            )
+        scan_targets = {
+            server_name: server_config
+            for server_name, server_config in scan_targets.items()
+            if server_name not in cwd_targets
+        }
     batch_error: Optional[Dict[str, Any]] = None
     if scan_targets:
         try:

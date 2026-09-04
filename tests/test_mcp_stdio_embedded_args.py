@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools import mcp_tool_scanner as scanner
+from scripts.coding_discovery_tools import mcp_extraction_helpers as mcp_helpers
 
 STUB_BODY = '''\
 import json, sys
@@ -146,6 +147,30 @@ class TestStdioEmbeddedArgs(unittest.TestCase):
         self.assertEqual(
             Path(popen.call_args.args[0][0]).resolve(),
             self.stub_command.resolve(),
+        )
+
+    def test_elevated_transform_does_not_scan_configured_cwd(self):
+        config = {
+            "local": {
+                "command": str(self.stub_command),
+                "args": ["relative-script.py"],
+                "cwd": str(Path(self.tmp.name) / "provider"),
+            }
+        }
+
+        with patch.object(
+            mcp_helpers,
+            "_running_with_elevated_privileges",
+            return_value=True,
+        ), patch.object(mcp_helpers, "_scan_servers_in_mapping") as scan_servers:
+            servers = mcp_helpers.transform_mcp_servers_to_array(config)
+
+        scan_servers.assert_not_called()
+        error = servers[0]["scan"]["error"]
+        self.assertEqual(error["code"], "privilege_boundary")
+        self.assertEqual(
+            error["details"]["reason"],
+            "configured_cwd_under_elevated_process",
         )
 
     def test_embedded_command_retry_preserves_configured_cwd(self):

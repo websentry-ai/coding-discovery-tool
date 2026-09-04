@@ -332,12 +332,18 @@ def _classify_stderr(stderr_text: str, exit_code: Optional[int]) -> Dict[str, An
     return {"status": "process_exited", "exit_code": exit_code}
 
 
+def _is_cwd_relative_command(command: str, cwd: Optional[str]) -> bool:
+    return bool(
+        cwd
+        and any(separator in command for separator in ("/", "\\"))
+        and not Path(command).is_absolute()
+    )
+
+
 def _resolve_cwd_relative_command(command: str, cwd: Optional[str]) -> Optional[str]:
-    if not cwd or not any(separator in command for separator in ("/", "\\")):
+    if not _is_cwd_relative_command(command, cwd):
         return None
     command_path = Path(command)
-    if command_path.is_absolute():
-        return None
     try:
         candidate = Path(cwd) / command_path
         return str(candidate) if candidate.is_file() else None

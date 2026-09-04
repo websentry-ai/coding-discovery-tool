@@ -129,13 +129,12 @@ class _GitHubCopilotVscodeMcpMixin:
         create_command: bool = True,
         command_name: str = "gk.exe",
         workspace_uri: str = None,
+        profile_id: str = None,
     ) -> Path:
-        db_path = (
-            self.code_user_base
-            / "workspaceStorage"
-            / workspace_id
-            / "state.vscdb"
-        )
+        storage_base = self.code_user_base
+        if profile_id is not None:
+            storage_base = storage_base / "profiles" / profile_id
+        db_path = storage_base / "workspaceStorage" / workspace_id / "state.vscdb"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         if workspace_uri is None:
             workspace_uri = self._workspace_location(workspace_id)[0]
@@ -341,6 +340,31 @@ class _GitHubCopilotVscodeMcpMixin:
 
         self.assertEqual(len(servers), 1)
         self.assertTrue(servers[0]["command"].endswith("gk-new.exe"))
+
+    def test_same_workspace_preserves_distinct_profile_definitions(self):
+        self._install_gitlens_provider()
+        workspace_uri = self._workspace_location("shared-workspace")[0]
+        self._write_gitkraken_provider_cache(
+            "workspace-a",
+            command_name="gk-a.exe",
+            workspace_uri=workspace_uri,
+            profile_id="profile-a",
+        )
+        self._write_gitkraken_provider_cache(
+            "workspace-b",
+            command_name="gk-b.exe",
+            workspace_uri=workspace_uri,
+            profile_id="profile-b",
+        )
+
+        configs = self._extract()
+        servers = self._all_servers(configs)
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(len(servers), 2)
+        self.assertEqual(
+            {server["providerProfileId"] for server in servers},
+            {"profile-a", "profile-b"},
+        )
 
     def test_workspace_cache_without_scope_metadata_is_ignored(self):
         self._install_gitlens_provider()

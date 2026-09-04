@@ -1216,6 +1216,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         try:
             if not path.is_file():
                 return None
+            if path.stat().st_size > 8 * 1024 * 1024:  # a settings.json this large is pathological
+                logger.debug(f"settings file too large, skipping: {path}")
+                return None
             # utf-8-sig strips a leading BOM (some Windows editors write one) so
             # json.loads doesn't choke on it; plain UTF-8 is read unchanged.
             raw = path.read_text(encoding="utf-8-sig", errors="replace")
@@ -1232,6 +1235,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         raw_settings = {k: data[k] for k in self.SECURITY_RELEVANT_KEYS if k in data}
         if not raw_settings:
             return None  # nothing security-relevant here → no row
+        self._redact_mcp_secrets(raw_settings)
         allow_rules, deny_rules = self._terminal_rules(data)
         mcp_allow, mcp_deny = self._mcp_lists(data)
         record = {
@@ -1287,6 +1291,25 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 elif verdict is False:
                     deny.append(rule)
         return self._dedupe(allow), self._dedupe(deny)
+
+    @staticmethod
+    def _redact_mcp_secrets(raw_settings: Dict) -> None:
+        """An MCP server entry can be an object carrying auth material (a token in a
+        URL, ``headers``, ``env``). Keep only the server name/id in ``raw_settings``
+        so no secret is shipped to or stored in the permission record — the names
+        are the audit signal, and ``_mcp_lists`` already derives the policy lists."""
+        for key in ("chat.mcp.allowedServers", "chat.mcp.deniedServers"):
+            value = raw_settings.get(key)
+            if not isinstance(value, list):
+                continue
+            safe = []
+            for item in value:
+                if isinstance(item, str):
+                    safe.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("id")
+                    safe.append(name if isinstance(name, str) and name else "<redacted>")
+            raw_settings[key] = safe
 
     @staticmethod
     def _mcp_lists(data: Dict) -> Tuple[List[str], List[str]]:

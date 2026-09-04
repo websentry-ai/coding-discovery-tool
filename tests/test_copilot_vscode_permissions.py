@@ -68,12 +68,19 @@ class TestPermissionMapping(unittest.TestCase):
         self.assertNotIn("github.copilot.chat.agent.autoApproveFileChanges", rec["raw_settings"])
         self.assertNotIn("github.copilot.chat.agent.terminalCommands.blocklist", rec["raw_settings"])
 
-    def test_mcp_allow_deny_strings_and_objects(self):
+    def test_mcp_allow_deny_real_entry_shapes(self):
+        # VS Code entries match by serverName / serverUrl / serverCommand (or a bare
+        # string). Each shape resolves to its identity in the policy lists.
         rec = self._rec({
-            "chat.mcp.allowedServers": ["filesystem", {"name": "github-mcp"}, {"url": "https://x"}],
-            "chat.mcp.deniedServers": ["shady"],
+            "chat.mcp.allowedServers": ["filesystem", {"serverName": "github-mcp"},
+                                        {"serverUrl": "https://mcp.contoso.com/*"},
+                                        {"serverCommand": ["/usr/local/bin/legacy-mcp", "--stdio"]}],
+            "chat.mcp.deniedServers": [{"serverName": "shady"}],
         })
-        self.assertEqual(rec["mcp_tool_allowlist"], ["filesystem", "github-mcp", "https://x"])
+        self.assertEqual(
+            rec["mcp_tool_allowlist"],
+            ["filesystem", "github-mcp", "https://mcp.contoso.com/*", "/usr/local/bin/legacy-mcp"],
+        )
         self.assertEqual(rec["mcp_policies"]["deniedMcpServers"], ["shady"])
 
     def test_sandbox_on_off(self):

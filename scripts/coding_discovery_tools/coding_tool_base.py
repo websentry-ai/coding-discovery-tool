@@ -1310,15 +1310,22 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     @staticmethod
     def _mcp_lists(data: Dict) -> Tuple[List[str], List[str]]:
         def names(value) -> List[str]:
+            # Each entry matches a server by name, URL, or command (VS Code's
+            # serverName / serverUrl / serverCommand allow/deny shape).
             out = []
             if isinstance(value, list):
                 for item in value:
                     if isinstance(item, str) and item:
                         out.append(item)
                     elif isinstance(item, dict):
-                        name = item.get("name") or item.get("id") or item.get("url") or item.get("command")
-                        if isinstance(name, str) and name:
-                            out.append(name)
+                        ident = item.get("serverName") or item.get("serverUrl")
+                        cmd = item.get("serverCommand")
+                        if not ident and isinstance(cmd, list) and cmd and isinstance(cmd[0], str):
+                            ident = cmd[0]
+                        elif not ident and isinstance(cmd, str):
+                            ident = cmd
+                        if isinstance(ident, str) and ident:
+                            out.append(ident)
             return out
         allow = names(data.get("chat.mcp.allowedServers"))
         deny = names(data.get("chat.mcp.deniedServers"))

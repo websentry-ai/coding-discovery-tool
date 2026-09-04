@@ -1228,7 +1228,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         try:
             if not path.is_file():
                 return None
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            # utf-8-sig strips a leading BOM (some Windows editors write one) so
+            # json.loads doesn't choke on it; plain UTF-8 is read unchanged.
+            raw = path.read_text(encoding="utf-8-sig", errors="replace")
             data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
             return data if isinstance(data, dict) else None
         except (PermissionError, OSError) as e:

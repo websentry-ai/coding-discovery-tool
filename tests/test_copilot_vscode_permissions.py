@@ -156,6 +156,28 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
         self.assertEqual(rec["permission_mode"], "bypassPermissions", "a YOLO named profile must surface")
         self.assertIn("Bash(rm *)", rec.get("deny_rules", []))
 
+    def test_multi_user_scan_surfaces_the_riskiest_user(self):
+        # Elevated scan over two users: a benign user first, a YOLO user second.
+        # The returned record must be the YOLO user's (its own settings_path), so
+        # the risky posture is never hidden behind the benign first user.
+        homes = []
+        for name, settings in (("benign", {"chat.agent.enabled": True}),
+                               ("yolo", {"chat.tools.global.autoApprove": True})):
+            h = Path(tempfile.mkdtemp(prefix=f"copilot-{name}-", dir=str(Path.home())))
+            ud = h / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            (ud / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+            homes.append(h)
+        try:
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: [cb(h) for h in homes]
+            rec = ex.extract_settings()
+            self.assertEqual(rec["permission_mode"], "bypassPermissions")
+            self.assertIn("yolo", rec["settings_path"], "riskiest user's own settings_path must be preserved")
+        finally:
+            for h in homes:
+                shutil.rmtree(h, ignore_errors=True)
+
     def test_no_copilot_settings_returns_none(self):
         empty_home = Path(tempfile.mkdtemp(prefix="copilot-perm-empty-", dir=str(Path.home())))
         try:

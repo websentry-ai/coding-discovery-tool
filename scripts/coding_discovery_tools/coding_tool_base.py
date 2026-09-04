@@ -1178,9 +1178,20 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         self._scan_users(extract_for_user)
         if not records:
             return None
-        if len(records) > 1:
-            logger.warning(f"Found Copilot settings for {len(records)} users, returning first only")
-        return records[0]
+        # Under an elevated multi-user scan the canonical row carries ONE permissions
+        # record, and the per-user filter keeps it only for the user whose home holds
+        # its settings_path. Return the MOST-PERMISSIVE user's record (with its own
+        # settings_path) so a YOLO user is never hidden behind a benign one — picking
+        # records[0] could surface a locked-down user and drop the risky one.
+        return max(records, key=self._permissiveness)
+
+    @staticmethod
+    def _permissiveness(record: Dict) -> tuple:
+        """Rank a record so the riskiest posture wins: bypass over default first,
+        then more auto-approved terminal rules."""
+        mode_rank = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
+        return (mode_rank.get(record.get("permission_mode"), 0),
+                len(record.get("allow_rules", [])))
 
     def _extract_for_user(self, user_home: Path) -> Optional[Dict]:
         # User scope only: the default profile + every named profile, each channel.

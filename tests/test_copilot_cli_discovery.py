@@ -1048,21 +1048,22 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()):
             self.assertIsNone(WindowsCopilotCliDetector().get_version())
 
-    def test_version_probed_from_per_user_npm_shim(self):
+    def test_version_read_from_per_user_npm_shim(self):
         """When user_home is set (the live per-user path), the per-user
-        ``AppData/Roaming/npm/copilot.cmd`` shim is resolved and probed first —
-        so version populates on an admin MDM all-users scan (H2)."""
-        shim = self.user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+        ``AppData/Roaming/npm/copilot.cmd`` shim is resolved and its version read
+        from npm metadata — so version populates on an admin MDM all-users scan
+        (H2) without ever handing the profile path to a shell."""
+        npm = self.user_home / "AppData" / "Roaming" / "npm"
+        shim = npm / "copilot.cmd"
         shim.parent.mkdir(parents=True)
-        shim.write_text("@echo off\necho GitHub Copilot CLI 0.0.399.\n", encoding="utf-8")
-        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
-        fake = MagicMock(returncode=0, stdout=banner, stderr="")
-        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+        shim.write_text("@echo off\n", encoding="utf-8")
+        pkg = npm / "node_modules" / "@github" / "copilot"
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text('{"version": "0.0.399"}', encoding="utf-8")
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
             version = self.detector.get_version()
         self.assertEqual(version, "0.0.399")
-        # The resolved shim path (not the bare name) is what gets probed.
-        self.assertEqual(run.call_args.args[0], [str(shim), "--version"])
-        self.assertIs(run.call_args.kwargs.get("shell"), True)
+        run.assert_not_called()
 
 
 class TestCopilotCliConfigDirResolution(unittest.TestCase):
@@ -1169,7 +1170,7 @@ class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
     @unittest.skipUnless(
         os.name == "posix",
         "executes a #!/bin/sh stub; Windows exec path is covered by "
-        "test_version_probed_from_per_user_npm_shim",
+        "test_version_read_from_per_user_npm_shim",
     )
     def test_version_resolved_from_local_bin_stub(self):
         _write_copilot_stub(self.user_home / ".local" / "bin" / "copilot")
@@ -1178,7 +1179,7 @@ class TestCopilotCliPerUserBinaryVersion(unittest.TestCase):
     @unittest.skipUnless(
         os.name == "posix",
         "executes a #!/bin/sh stub; Windows exec path is covered by "
-        "test_version_probed_from_per_user_npm_shim",
+        "test_version_read_from_per_user_npm_shim",
     )
     def test_version_resolved_from_nvm_stub(self):
         _write_copilot_stub(
@@ -1348,57 +1349,68 @@ class TestCopilotCliVersionThreadedFromBinary(unittest.TestCase):
 
 
 class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
-    """The Windows override accepts the same ``binary`` param and routes it through
-    ``_probe_version`` (``shell=True`` for the npm ``.cmd`` shim), with no
-    re-resolve and no bare fallback."""
+    """The Windows override accepts the same ``binary`` param, with no re-resolve
+    and no bare fallback. A resolved ``.cmd`` shim is read, never shelled: the path
+    carries the profile name and ``&``/``^`` are legal in Win32 account names."""
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
 
-    def test_get_version_with_binary_uses_probe_version_shell_true(self):
-        shim = r"C:\Users\someone\AppData\Roaming\npm\copilot.cmd"
-        banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
-        fake = MagicMock(returncode=0, stdout=banner, stderr="")
-        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
-            version = WindowsCopilotCliDetector().get_version(shim)
-        self.assertEqual(version, "0.0.399")
-        # Routed through _probe_version -> the resolved shim path, shell=True.
-        self.assertEqual(run.call_args.args[0], [shim, "--version"])
-        self.assertIs(run.call_args.kwargs.get("shell"), True)
+    @staticmethod
+    def _npm_install(parent: Path, version: str = "0.0.399") -> Path:
+        shim = parent / "copilot.cmd"
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        shim.write_text("@echo off\n", encoding="utf-8")
+        pkg = parent / "node_modules" / "@github" / "copilot"
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text('{"version": "%s"}' % version, encoding="utf-8")
+        return shim
+
+    def test_get_version_with_binary_reads_shim_never_shells(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            shim = self._npm_install(Path(tmp) / "npm")
+            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
+                version = WindowsCopilotCliDetector().get_version(str(shim))
+            self.assertEqual(version, "0.0.399")
+            run.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_profile_with_shell_metacharacters_never_shelled(self):
+        """``C:\\Users\\a&b\\...`` under a shell would execute part of its own path."""
+        tmp = tempfile.mkdtemp()
+        try:
+            shim = self._npm_install(Path(tmp) / "a&&calc" / "npm")
+            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
+                version = WindowsCopilotCliDetector().get_version(str(shim))
+            self.assertEqual(version, "0.0.399")
+            run.assert_not_called()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_get_version_with_binary_no_bare_fallback_on_failure(self):
-        """When the resolved-binary probe fails, get_version(binary) returns None
-        WITHOUT a second bare ``copilot`` probe (no double-probe)."""
+        """Unreadable metadata -> None, with no bare ``copilot`` retry."""
         shim = r"C:\Users\someone\AppData\Roaming\npm\copilot.cmd"
-        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()) as run:
+        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
             self.assertIsNone(WindowsCopilotCliDetector().get_version(shim))
-        # Exactly one probe — the resolved binary — and no bare-name retry.
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(run.call_args.args[0], [shim, "--version"])
+        run.assert_not_called()
 
     def test_detect_for_user_threads_binary_into_windows_get_version(self):
-        """Integration: the inherited ``_detect_for_user`` calls the Windows
-        ``get_version(binary)`` override (signature must accept the param), which
-        probes the resolved shim under shell=True -> the emitted row carries the
-        parsed version."""
+        """Integration: ``_detect_for_user`` threads the resolved shim into the
+        Windows ``get_version(binary)`` override -> the row carries the version."""
         tmp = tempfile.mkdtemp()
         try:
             user_home = Path(tmp) / "user"
-            shim = user_home / "AppData" / "Roaming" / "npm" / "copilot.cmd"
-            shim.parent.mkdir(parents=True)
-            shim.write_text("@echo off\n", encoding="utf-8")
-            banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
-            fake = MagicMock(returncode=0, stdout=banner, stderr="")
+            shim = self._npm_install(user_home / "AppData" / "Roaming" / "npm")
             detector = WindowsCopilotCliDetector()
             detector.user_home = None  # the standalone path; binary comes from the param
-            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
                 result = detector._detect_for_user(user_home)
             self.assertIsNotNone(result)
             self.assertEqual(result["install_path"], str(shim))
             self.assertEqual(result["version"], "0.0.399")
-            # Probed the resolved shim (not a bare ``copilot``), shell=True.
-            self.assertEqual(run.call_args.args[0], [str(shim), "--version"])
-            self.assertIs(run.call_args.kwargs.get("shell"), True)
+            run.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

@@ -31,8 +31,16 @@ from scripts.coding_discovery_tools.macos.github_copilot.copilot_rules_extractor
     MacOSGitHubCopilotRulesExtractor,
     find_github_copilot_project_root,
 )
+from scripts.coding_discovery_tools import linux_extraction_helpers as linux_helpers
+from scripts.coding_discovery_tools import macos_extraction_helpers as macos_helpers
 from scripts.coding_discovery_tools.macos.github_copilot.mcp_config_extractor import (
     MacOSGitHubCopilotMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.linux.github_copilot.mcp_config_extractor import (
+    LinuxGitHubCopilotMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.windows.github_copilot.mcp_config_extractor import (
+    WindowsGitHubCopilotMCPConfigExtractor,
 )
 from scripts.coding_discovery_tools.macos.codex.mcp_config_extractor import (
     MacOSCodexMCPConfigExtractor,
@@ -772,6 +780,88 @@ class TestGitHubCopilotWorkspaceMCP(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    # tmp_dir is under /var, which the posix system-dir filters reject; neutralise it so
+    # these tests exercise the SKIP_DIRS interaction rather than the system-dir prefix.
+    def _walk(self, extractor, start, configs):
+        extra = (set(),) if isinstance(extractor, WindowsGitHubCopilotMCPConfigExtractor) else ()
+        with patch.object(macos_helpers, "SKIP_SYSTEM_DIRS", set()), \
+                patch.object(linux_helpers, "_LINUX_SKIP_SYSTEM_DIRS", set()):
+            extractor._walk_for_workspace_mcp(
+                Path(self.tmp_dir), start, configs, *extra, current_depth=1
+            )
+
+    def _write_mcp_json(self, vscode_dir, server_name):
+        vscode_dir.mkdir(parents=True)
+        (vscode_dir / "mcp.json").write_text(json.dumps({
+            "servers": {server_name: {"command": "unbound-test-no-such-binary"}}
+        }), encoding="utf-8")
+
+    def test_walk_reaches_vscode_dir(self):
+        """The walk must reach .vscode; calling _check_vscode_mcp directly hides the bug."""
+        self._write_mcp_json(
+            Path(self.tmp_dir) / "Users" / "alice" / "repo" / ".vscode", "workspace-only"
+        )
+
+        for extractor in (MacOSGitHubCopilotMCPConfigExtractor(),
+                          LinuxGitHubCopilotMCPConfigExtractor(),
+                          WindowsGitHubCopilotMCPConfigExtractor()):
+            with self.subTest(extractor=type(extractor).__name__):
+                configs = []
+                self._walk(extractor, Path(self.tmp_dir) / "Users", configs)
+                names = [s["name"] for c in configs for s in c["mcpServers"]]
+                self.assertEqual(names, ["workspace-only"])
+
+    def test_walk_still_skips_vscode_under_skipped_parents(self):
+        """Exempting the .vscode leaf must not expose .vscode under a skipped parent."""
+        for parent in ("node_modules", ".git", "venv"):
+            self._write_mcp_json(
+                Path(self.tmp_dir) / "Users" / "alice" / "repo" / parent / "pkg" / ".vscode",
+                f"leaked-from-{parent}",
+            )
+
+        for extractor in (MacOSGitHubCopilotMCPConfigExtractor(),
+                          LinuxGitHubCopilotMCPConfigExtractor(),
+                          WindowsGitHubCopilotMCPConfigExtractor()):
+            with self.subTest(extractor=type(extractor).__name__):
+                configs = []
+                self._walk(extractor, Path(self.tmp_dir) / "Users", configs)
+                self.assertEqual(configs, [])
+
+    def test_walk_skips_symlinked_vscode(self):
+        """A .vscode symlink must not pull an out-of-tree config into the project."""
+        outside = Path(self.tmp_dir) / "outside" / ".vscode"
+        self._write_mcp_json(outside, "out-of-tree")
+        project = Path(self.tmp_dir) / "Users" / "alice" / "repo"
+        project.mkdir(parents=True)
+        (project / ".vscode").symlink_to(outside, target_is_directory=True)
+
+        for extractor in (MacOSGitHubCopilotMCPConfigExtractor(),
+                          LinuxGitHubCopilotMCPConfigExtractor(),
+                          WindowsGitHubCopilotMCPConfigExtractor()):
+            with self.subTest(extractor=type(extractor).__name__):
+                configs = []
+                self._walk(extractor, Path(self.tmp_dir) / "Users", configs)
+                self.assertEqual(configs, [])
+
+    def test_walk_skips_symlinked_mcp_json(self):
+        """A symlinked mcp.json must not pull an out-of-tree config into the project."""
+        outside = Path(self.tmp_dir) / "outside"
+        outside.mkdir(parents=True)
+        (outside / "other.json").write_text(json.dumps({
+            "servers": {"out-of-tree": {"command": "unbound-test-no-such-binary"}}
+        }), encoding="utf-8")
+        vscode = Path(self.tmp_dir) / "Users" / "alice" / "repo" / ".vscode"
+        vscode.mkdir(parents=True)
+        (vscode / "mcp.json").symlink_to(outside / "other.json")
+
+        for extractor in (MacOSGitHubCopilotMCPConfigExtractor(),
+                          LinuxGitHubCopilotMCPConfigExtractor(),
+                          WindowsGitHubCopilotMCPConfigExtractor()):
+            with self.subTest(extractor=type(extractor).__name__):
+                configs = []
+                self._walk(extractor, Path(self.tmp_dir) / "Users", configs)
+                self.assertEqual(configs, [])
 
     def test_check_vscode_mcp_finds_and_parses_mcp_json(self):
         vscode_dir = Path(self.tmp_dir) / "myproject" / ".vscode"

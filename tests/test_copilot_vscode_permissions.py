@@ -166,5 +166,59 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
             shutil.rmtree(empty_home, ignore_errors=True)
 
 
+class TestBackendShapeParity(unittest.TestCase):
+    """The record must stay within the Cursor record's vocabulary — that is the
+    shape gateway-data's AIToolPermissions ingest and the fe already accept, so
+    routing Copilot permissions needs no backend/frontend change."""
+
+    # From BaseCursorSettingsExtractor._parse_composer_state (the backend contract).
+    CURSOR_RECORD_KEYS = {
+        "settings_source", "scope", "settings_path", "raw_settings", "permission_mode",
+        "sandbox_enabled", "allow_rules", "deny_rules", "mcp_tool_allowlist",
+        "mcp_servers", "mcp_policies",
+    }
+    REQUIRED = {"permission_mode", "settings_source", "settings_path"}
+
+    def test_record_shape_within_cursor_vocabulary(self):
+        rec = _MapExtractor()._build_record({
+            "chat.tools.global.autoApprove": True,
+            "chat.tools.terminal.autoApprove": {"rm": False},
+            "chat.mcp.allowedServers": ["x"], "chat.mcp.deniedServers": ["y"],
+            "chat.agent.sandbox.enabled": "on",
+        }, Path("/s.json"), "user")
+        extra = set(rec) - self.CURSOR_RECORD_KEYS
+        self.assertEqual(extra, set(), f"keys outside the backend-accepted shape: {extra}")
+        self.assertTrue(self.REQUIRED.issubset(set(rec)), "missing a required backend field")
+
+
+class TestCanonicalRowAttachment(unittest.TestCase):
+    """Permissions attach to exactly the canonical VS Code row and no other — a
+    multi-row install must not double-report, and non-Copilot tools are untouched
+    (the record is freshly built, never shared)."""
+
+    def _detector(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        det._github_copilot_rules_extractor = None      # branch guards None → skipped
+        det._github_copilot_mcp_extractor = None
+        det._get_copilot_cli_skills = lambda: {"user_skills": [], "project_skills": []}
+        det._github_copilot_settings_extractor.extract_settings = lambda: {
+            "permission_mode": "bypassPermissions", "settings_source": "user",
+            "scope": "user", "settings_path": "/x", "raw_settings": {},
+        }
+        det._canonical_vscode_copilot = "github copilot chat (vs code)"
+        return det
+
+    def test_only_canonical_row_gets_permissions(self):
+        det = self._detector()
+        chat = det.process_single_tool(
+            {"name": "GitHub Copilot Chat (VS Code)", "version": "1", "install_path": "/a", "projects": []})
+        plain = det.process_single_tool(
+            {"name": "GitHub Copilot (VS Code)", "version": "1", "install_path": "/b", "projects": []})
+        self.assertIn("permissions", chat)
+        self.assertEqual(chat["permissions"]["permission_mode"], "bypassPermissions")
+        self.assertNotIn("permissions", plain, "a non-canonical Copilot row must not double-attach")
+
+
 if __name__ == "__main__":
     unittest.main()

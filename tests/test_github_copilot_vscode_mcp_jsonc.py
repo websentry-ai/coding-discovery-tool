@@ -184,13 +184,15 @@ class _GitHubCopilotVscodeMcpMixin:
         return db_path
 
     def _workspace_location(self, workspace_id: str):
-        if self.operating_system == "windows":
-            return (
-                f"file:///c%3A/Users/test/{workspace_id}",
-                f"C:\\Users\\test\\{workspace_id}",
-            )
-        home = "/Users/test" if self.operating_system == "macos" else "/home/test"
-        return f"file://{home}/{workspace_id}", f"{home}/{workspace_id}"
+        workspace_path = self.user_home / workspace_id
+        workspace_uri = workspace_path.absolute().as_uri()
+        return (
+            workspace_uri,
+            mcp_helpers._vscode_workspace_uri_for_report(
+                workspace_uri,
+                self.operating_system,
+            ),
+        )
 
     def _write_extension_state(self, db_path: Path, key: str, extension_id: str) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -384,6 +386,18 @@ class _GitHubCopilotVscodeMcpMixin:
 
         self.assertEqual(self._all_servers(self._extract()), [])
 
+    def test_symlinked_workspace_storage_directory_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        self._install_gitlens_provider()
+        db_path = self._write_gitkraken_provider_cache()
+        workspace_dir = db_path.parent
+        external_workspace = Path(self.tmp_dir) / "external-workspace"
+        workspace_dir.replace(external_workspace)
+        workspace_dir.symlink_to(external_workspace, target_is_directory=True)
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
     def test_symlinked_workspace_metadata_is_ignored(self):
         if os.name == "nt":
             self.skipTest("Windows test runners may not permit symlink creation")
@@ -492,6 +506,29 @@ class _GitHubCopilotVscodeMcpMixin:
             encoding="utf-8",
         )
         self._write_gitkraken_provider_cache()
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_symlinked_extension_directory_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        extension_dir = self._install_gitlens_provider()
+        external_extension = Path(self.tmp_dir) / "external-extension"
+        extension_dir.replace(external_extension)
+        extension_dir.symlink_to(external_extension, target_is_directory=True)
+        self._write_gitkraken_provider_cache()
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_workspace_cache_cannot_claim_another_user(self):
+        self._install_gitlens_provider()
+        if self.operating_system == "windows":
+            workspace_uri = "file:///C:/Users/other/project"
+        elif self.operating_system == "macos":
+            workspace_uri = "file:///Users/other/project"
+        else:
+            workspace_uri = "file:///home/other/project"
+        self._write_gitkraken_provider_cache(workspace_uri=workspace_uri)
 
         self.assertEqual(self._all_servers(self._extract()), [])
 
@@ -621,6 +658,42 @@ class _GitHubCopilotVscodeMcpMixin:
             servers = self._all_servers(self._extract())
 
         self.assertEqual([server["name"] for server in servers], ["GitKraken"])
+
+    def test_symlinked_builtin_extension_directory_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        extension_root = self.user_home / "vscode-builtins"
+        external_extension = Path(self.tmp_dir) / "external-builtin"
+        external_extension.mkdir()
+        (external_extension / "package.json").write_text(
+            json.dumps(
+                {
+                    "publisher": "eamodio",
+                    "name": "gitlens",
+                    "contributes": {
+                        "mcpServerDefinitionProviders": [
+                            {"id": "gitlens.gkMcpProvider"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        extension_root.mkdir()
+        (extension_root / "gitlens").symlink_to(
+            external_extension,
+            target_is_directory=True,
+        )
+        self._write_gitkraken_provider_cache()
+
+        with patch.object(
+            mcp_helpers,
+            "_vscode_builtin_extension_roots",
+            return_value=[extension_root],
+        ):
+            servers = self._all_servers(self._extract())
+
+        self.assertEqual(servers, [])
 
     def test_corrupt_extension_provider_cache_does_not_hide_static_config(self):
         self._write_primary(

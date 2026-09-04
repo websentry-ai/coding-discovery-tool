@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Iterable, List, Tuple, Union
 
 from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
+from .constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 
 logger = logging.getLogger(__name__)
 
@@ -1092,6 +1093,271 @@ class BaseCursorSettingsExtractor(ABC):
                     Path(temp_db_path).unlink(missing_ok=True)
                 except Exception:
                     pass
+
+
+class BaseGitHubCopilotSettingsExtractor(ABC):
+    """Extract VS Code GitHub Copilot agent-mode permissions from ``settings.json``.
+
+    Copilot's agent permissions have no dedicated file — they live in VS Code's
+    ``settings.json`` (JSONC): the user-scope file plus any
+    ``<workspace>/.vscode/settings.json``. This reads the security-relevant
+    auto-approve / terminal / MCP keys and emits the same backend-ready record the
+    Cursor extractor does (``permission_mode`` + ``allow_rules`` / ``deny_rules`` /
+    ``mcp_*``), so it routes as tool-level permissions with no backend change.
+    """
+
+    # Keys sourced from Microsoft's enterprise AI-settings reference and the
+    # agent-mode docs. A file with none of these carries no permission signal.
+    SECURITY_RELEVANT_KEYS = {
+        "chat.tools.global.autoApprove", "chat.tools.autoApprove",
+        "chat.tools.eligibleForAutoApproval",
+        "chat.tools.terminal.enableAutoApprove", "chat.tools.terminal.autoApprove",
+        "chat.tools.urls.autoApprove",
+        "github.copilot.chat.agent.autoApproveFileChanges",
+        "github.copilot.chat.agent.autoApproveTerminal",
+        "github.copilot.chat.agent.terminalCommands.blocklist",
+        "chat.agent.enabled", "github.copilot.chat.agent.enabled",
+        "chat.agent.sandbox.enabled",
+        "chat.agent.networkFilter", "chat.agent.allowedNetworkDomains",
+        "chat.agent.deniedNetworkDomains",
+        "chat.mcp.access", "chat.mcp.allowedServers", "chat.mcp.deniedServers",
+        "github.copilot.chat.claudeAgent.enabled",
+    }
+
+    # A truthy global auto-approve removes every confirmation (bypass); auto-approving
+    # only file edits maps to acceptEdits; anything else is the default gated mode.
+    _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove", "chat.tools.autoApprove")
+
+    @abstractmethod
+    def _scan_users(self, callback) -> None:
+        """Call ``callback(user_home)`` for each user home to scan (all users under
+        a root scan, else just the current user)."""
+
+    @abstractmethod
+    def _user_settings_candidates(self, user_home) -> List[Path]:
+        """Return the user-scope ``settings.json`` candidates for this user, most
+        preferred first (stable Code before Insiders)."""
+
+    def _iter_workspace_settings_files(self, user_home) -> Iterable[Path]:
+        """Yield every ``<workspace>/.vscode/settings.json`` under this user.
+
+        ``.vscode`` is in ``SKIP_DIRS`` (the project walk treats it as a config
+        dir, not a subtree to descend), so the general walk never reaches it —
+        exactly as the workspace ``mcp.json`` discovery has to. This walk exempts
+        the ``.vscode`` leaf: it is checked for ``settings.json`` but never
+        descended, every other ``SKIP_DIRS`` entry is pruned, links are not
+        followed, and depth is bounded."""
+        found: List[Path] = []
+        self._walk_workspace_settings(Path(user_home), found, current_depth=0)
+        return found
+
+    def _walk_workspace_settings(self, current_dir: Path, found: List[Path],
+                                 current_depth: int = 0) -> None:
+        if current_depth > MAX_SEARCH_DEPTH:
+            return
+        try:
+            for item in current_dir.iterdir():
+                try:
+                    if not item.is_dir():
+                        continue
+                    if item.name == ".vscode":
+                        settings = item / "settings.json"
+                        if settings.is_file():
+                            found.append(settings)
+                        continue  # never descend the config dir
+                    if item.name in SKIP_DIRS or is_symlink_or_junction(item):
+                        continue
+                    self._walk_workspace_settings(item, found, current_depth + 1)
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            return
+
+    def extract_settings(self) -> Optional[Dict]:
+        """Return one backend-ready permission record (user scope, with any
+        workspace ``.vscode/settings.json`` allow/deny/MCP lists merged in), or
+        None when no Copilot permission setting is present anywhere."""
+        records: List[Dict] = []
+
+        def extract_for_user(user_home) -> None:
+            try:
+                rec = self._extract_for_user(Path(user_home))
+                if rec:
+                    records.append(rec)
+            except Exception as e:
+                logger.debug(f"Error extracting Copilot settings for {user_home}: {e}")
+
+        self._scan_users(extract_for_user)
+        if not records:
+            return None
+        if len(records) > 1:
+            logger.warning(f"Found Copilot settings for {len(records)} users, returning first only")
+        return records[0]
+
+    def _extract_for_user(self, user_home: Path) -> Optional[Dict]:
+        user_record = None
+        for path in self._user_settings_candidates(user_home):
+            data = self._parse_jsonc(path)
+            if data is None:
+                continue
+            record = self._build_record(data, path, "user")
+            if record:
+                logger.info(f"  ✓ Extracted Copilot settings from {path}")
+                user_record = record
+                break  # first existing user file wins (stable Code over Insiders)
+
+        workspace_records = []
+        for path in self._iter_workspace_settings_files(user_home):
+            data = self._parse_jsonc(path)
+            if data is None:
+                continue
+            record = self._build_record(data, path, "project")
+            if record:
+                workspace_records.append(record)
+
+        if user_record is None and not workspace_records:
+            return None
+        base = user_record or workspace_records.pop(0)
+        return self._merge_workspace_records(base, workspace_records)
+
+    @staticmethod
+    def _parse_jsonc(path: Path) -> Optional[Dict]:
+        """Leniently parse a VS Code JSONC settings file (comments + trailing commas
+        tolerated). Returns the dict, or None if missing/unreadable/not a dict.
+        Never raises — this runs on customer machines."""
+        try:
+            if not path.is_file():
+                return None
+            raw = path.read_text(encoding="utf-8", errors="replace")
+            data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
+            return data if isinstance(data, dict) else None
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Permission/OS error reading {path}: {e}")
+            return None
+        except Exception as e:
+            logger.debug(f"Could not parse {path}: {e}")
+            return None
+
+    def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:
+        raw_settings = {k: data[k] for k in self.SECURITY_RELEVANT_KEYS if k in data}
+        if not raw_settings:
+            return None  # nothing security-relevant here → no row
+        allow_rules, deny_rules = self._terminal_rules(data)
+        mcp_allow, mcp_deny = self._mcp_lists(data)
+        record = {
+            "settings_source": scope,
+            "scope": scope,
+            "settings_path": str(path),
+            "raw_settings": raw_settings,
+            "permission_mode": self._permission_mode(data),
+            "sandbox_enabled": self._sandbox_enabled(data),
+        }
+        if allow_rules:
+            record["allow_rules"] = allow_rules
+        if deny_rules:
+            record["deny_rules"] = deny_rules
+        if mcp_allow:
+            record["mcp_tool_allowlist"] = mcp_allow
+        if mcp_allow or mcp_deny:
+            record["mcp_policies"] = {"allowedMcpServers": mcp_allow, "deniedMcpServers": mcp_deny}
+        return record
+
+    def _permission_mode(self, data: Dict) -> str:
+        if any(data.get(k) is True for k in self._GLOBAL_AUTOAPPROVE_KEYS):
+            return "bypassPermissions"
+        if data.get("github.copilot.chat.agent.autoApproveFileChanges") is True:
+            return "acceptEdits"
+        return "default"
+
+    @staticmethod
+    def _sandbox_enabled(data: Dict):
+        val = data.get("chat.agent.sandbox.enabled")
+        if isinstance(val, str):
+            return val.lower() == "on"
+        if isinstance(val, bool):
+            return val
+        return None
+
+    @staticmethod
+    def _clean_terminal_pattern(pattern: str) -> str:
+        """Strip a wrapping ``/…/`` regex so the rule reads as the command."""
+        p = pattern.strip()
+        if len(p) >= 2 and p.startswith("/") and p.endswith("/"):
+            p = p[1:-1]
+        return p
+
+    def _terminal_rules(self, data: Dict) -> Tuple[List[str], List[str]]:
+        allow, deny = [], []
+        auto = data.get("chat.tools.terminal.autoApprove")
+        if isinstance(auto, dict):
+            for pattern, verdict in auto.items():
+                if not isinstance(pattern, str) or not pattern:
+                    continue
+                rule = f"Bash({self._clean_terminal_pattern(pattern)} *)"
+                if verdict is True:
+                    allow.append(rule)
+                elif verdict is False:
+                    deny.append(rule)
+        blocklist = data.get("github.copilot.chat.agent.terminalCommands.blocklist")
+        if isinstance(blocklist, list):
+            for cmd in blocklist:
+                if isinstance(cmd, str) and cmd:
+                    deny.append(f"Bash({cmd} *)")
+        return self._dedupe(allow), self._dedupe(deny)
+
+    @staticmethod
+    def _mcp_lists(data: Dict) -> Tuple[List[str], List[str]]:
+        def names(value) -> List[str]:
+            out = []
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str) and item:
+                        out.append(item)
+                    elif isinstance(item, dict):
+                        name = item.get("name") or item.get("id") or item.get("url") or item.get("command")
+                        if isinstance(name, str) and name:
+                            out.append(name)
+            return out
+        allow = names(data.get("chat.mcp.allowedServers"))
+        deny = names(data.get("chat.mcp.deniedServers"))
+        return BaseGitHubCopilotSettingsExtractor._dedupe(allow), BaseGitHubCopilotSettingsExtractor._dedupe(deny)
+
+    @staticmethod
+    def _dedupe(items: List[str]) -> List[str]:
+        seen, out = set(), []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    def _merge_workspace_records(self, base: Dict, workspace_records: List[Dict]) -> Dict:
+        """Overlay workspace allow/deny/MCP lists onto the base (user) record —
+        concatenated user-first, order-preserving de-dupe — and escalate the mode
+        to the most permissive seen (a workspace can't tighten a user bypass, but a
+        workspace bypass must surface)."""
+        if not workspace_records:
+            return base
+        merged = dict(base)
+        order = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
+        for rec in workspace_records:
+            for field in ("allow_rules", "deny_rules", "mcp_tool_allowlist"):
+                extra = rec.get(field)
+                if extra:
+                    merged[field] = self._dedupe(merged.get(field, []) + extra)
+            if order.get(rec.get("permission_mode"), 0) > order.get(merged.get("permission_mode"), 0):
+                merged["permission_mode"] = rec["permission_mode"]
+            base_pol = merged.get("mcp_policies")
+            rec_pol = rec.get("mcp_policies")
+            if rec_pol:
+                if base_pol:
+                    merged["mcp_policies"] = {
+                        "allowedMcpServers": self._dedupe(base_pol.get("allowedMcpServers", []) + rec_pol.get("allowedMcpServers", [])),
+                        "deniedMcpServers": self._dedupe(base_pol.get("deniedMcpServers", []) + rec_pol.get("deniedMcpServers", [])),
+                    }
+                else:
+                    merged["mcp_policies"] = rec_pol
+        return merged
 
 
 class BaseOpenClawDetector(BaseToolDetector):

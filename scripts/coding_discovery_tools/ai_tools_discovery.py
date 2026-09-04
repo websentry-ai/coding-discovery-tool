@@ -73,6 +73,7 @@ try:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        GitHubCopilotSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -141,6 +142,7 @@ except ImportError:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        GitHubCopilotSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -416,6 +418,7 @@ class AIToolsDetector:
 
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
+            self._github_copilot_settings_extractor = GitHubCopilotSettingsExtractorFactory.create(self.system)
 
             # GitHub Copilot CLI MCP + rules + settings + skills extractors (macOS/Windows; None elsewhere)
             self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
@@ -2548,6 +2551,21 @@ class AIToolsDetector:
                 "install_path": tool.get("install_path"),
                 "projects": projects_list,
             }
+
+            # Attach VS Code Copilot agent permissions (from settings.json) to the
+            # canonical VS Code row only, mirroring the skills attachment above so a
+            # multi-row install reports one permission record. Backend-ready shape.
+            if is_canonical_vscode and self._github_copilot_settings_extractor:
+                logger.info(f"  Extracting {tool_name} permissions...")
+                try:
+                    permissions = self._github_copilot_settings_extractor.extract_settings()
+                    if permissions:
+                        tool_dict["permissions"] = permissions
+                        logger.info(f"  ✓ Added permissions to {tool_name} report")
+                    else:
+                        logger.info("  ℹ No Copilot permissions found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} permissions: {e}", exc_info=True)
 
             return tool_dict
 

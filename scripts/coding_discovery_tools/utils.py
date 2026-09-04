@@ -165,6 +165,28 @@ def resolve_npm_global_tool_bin(
     return None
 
 
+# Diagnostic only — never a detection gate. These dirs survive uninstall and are
+# written by other surfaces, which is why detection moved to the binary. On a
+# ZERO-tool scan their presence separates "machine has no AI tooling" from "a tool
+# ran here and we missed its binary".
+_TOOL_CONFIG_DIRS = (
+    ".claude", ".codex", ".copilot", ".cursor", ".augment",
+    ".gemini", ".windsurf", ".junie", ".openclaw",
+)
+
+
+def tool_config_dirs_present(user_home: Path) -> List[str]:
+    """Names of AI-tool config dirs under ``user_home``. Never raises."""
+    found = []
+    for name in _TOOL_CONFIG_DIRS:
+        try:
+            if (user_home / name).is_dir():
+                found.append(name.lstrip("."))
+        except (PermissionError, OSError):
+            continue
+    return found
+
+
 _NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*$")
 
 
@@ -2133,7 +2155,7 @@ _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
-    "scan_event",
+    "scan_event", "config_dirs_present",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

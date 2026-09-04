@@ -679,3 +679,38 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestToolConfigDirsDiagnostic(unittest.TestCase):
+    """Diagnostic only. On a ZERO-tool scan these dirs separate "machine has no AI
+    tooling" from "a tool ran here and we missed its binary". Never a detection gate
+    — that is what the residue tests above pin."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_no_config_dirs(self):
+        self.assertEqual([], utils_mod.tool_config_dirs_present(self.home))
+
+    def test_reports_each_tool_dir(self):
+        for d in (".claude", ".copilot", ".cursor"):
+            (self.home / d).mkdir()
+        self.assertEqual(["claude", "copilot", "cursor"],
+                         utils_mod.tool_config_dirs_present(self.home))
+
+    def test_ignores_files_and_unknown_dirs(self):
+        (self.home / ".claude").write_text("")      # file, not a dir
+        (self.home / ".notatool").mkdir()
+        self.assertEqual([], utils_mod.tool_config_dirs_present(self.home))
+
+    def test_missing_home_never_raises(self):
+        self.assertEqual([], utils_mod.tool_config_dirs_present(self.home / "nope"))
+
+    def test_is_a_queryable_sentry_tag(self):
+        """Must be a tag, not just context, or it can't be grouped on in Sentry."""
+        self.assertIn("config_dirs_present", utils_mod._SENTRY_TAG_KEYS)

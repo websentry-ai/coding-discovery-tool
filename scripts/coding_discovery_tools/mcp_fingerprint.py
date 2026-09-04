@@ -419,8 +419,11 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
         value = None
         if arg.lower() in source_flags:
             value = tokens[index + 1] if index + 1 < len(tokens) else None
-        elif any(arg.lower().startswith(f'{flag}=') for flag in source_flags):
-            value = arg.split('=', 1)[1]
+        elif any(
+            arg.lower().startswith((f'{flag}=', f'{flag}:'))
+            for flag in source_flags
+        ):
+            value = re.split(r'[=:]', arg, maxsplit=1)[1]
         if value is None:
             continue
         source_seen = True
@@ -455,16 +458,17 @@ def _nuget_package(base: str, args: List[str]) -> Optional[str]:
         if not isinstance(token, str):
             return None
         lower = token.lower()
-        option = lower.split('=', 1)[0]
+        option = re.split(r'[=:]', lower, maxsplit=1)[0]
+        has_attached_value = len(option) < len(token)
         if option in value_options:
             if option == '--version':
-                value = token.split('=', 1)[1] if '=' in token else (
+                value = token[len(option) + 1:] if has_attached_value else (
                     tokens[index + 1] if index + 1 < len(tokens) else None
                 )
                 if not isinstance(value, str) or version is not None:
                     return None
                 version = _unquote(value)
-            index += 1 if '=' in token else 2
+            index += 1 if has_attached_value else 2
             continue
         if lower in flag_options:
             index += 1

@@ -593,6 +593,18 @@ class TestCacheKey(unittest.TestCase):
             "nuget:example.server",
         )
 
+    def test_colon_attached_nuget_source(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias", url=None, command="dotnet",
+                args=[
+                    "tool", "exec", "Example.Server@2.0.0",
+                    "--source:https://api.nuget.org/v3/index.json",
+                ],
+            ),
+            "nuget:example.server",
+        )
+
     def test_config_changes_key(self):
         self.assertNotEqual(
             compute_cache_key(name="s", url=None, command="npx", args=["pkg-a"]),

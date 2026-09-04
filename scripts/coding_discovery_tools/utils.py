@@ -165,6 +165,50 @@ def resolve_npm_global_tool_bin(
     return None
 
 
+# Diagnostic only — never a detection gate. These dirs survive uninstall and are
+# written by other surfaces, which is why detection moved to the binary. On a
+# ZERO-tool scan their presence separates "machine has no AI tooling" from "a tool
+# ran here and we missed its binary".
+_TOOL_CONFIG_DIRS = (
+    ".claude", ".codex", ".copilot", ".cursor", ".augment",
+    ".gemini", ".windsurf", ".junie", ".openclaw",
+)
+
+
+def tool_config_dirs_present(user_home: Path) -> List[str]:
+    """Names of AI-tool config dirs under ``user_home``. Never raises."""
+    found = []
+    for name in _TOOL_CONFIG_DIRS:
+        try:
+            if (user_home / name).is_dir():
+                found.append(name.lstrip("."))
+        except (PermissionError, OSError):
+            continue
+    return found
+
+
+_NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
+
+
+def windows_node_manager_shims(user_home: Path, tool: str) -> List[Path]:
+    """``user_home``-relative shims for Windows Node managers that move the npm global prefix."""
+    roots = [
+        user_home / "AppData" / "Local" / "Volta" / "bin",
+        user_home / "AppData" / "Local" / "pnpm",
+    ]
+    try:
+        nvm_root = user_home / "AppData" / "Roaming" / "nvm"
+        # Version dirs only: the shim is probed under shell=True and `&`/`^` are legal in dir names.
+        roots.extend(
+            d for d in sorted(nvm_root.iterdir())
+            if d.is_dir() and _NVM_WINDOWS_VERSION_DIR.match(d.name)
+        )
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate nvm-windows dirs for {tool}: {e}")
+
+    return [root / f"{tool}{ext}" for root in roots for ext in (".cmd", ".exe")]
+
+
 def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
     """Under a root/MDM multi-user scan, decide whether a MACHINE-GLOBAL binary
     (Homebrew / /usr/local / /usr/bin) should be attributed to ``user_home``.
@@ -2111,7 +2155,7 @@ _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
-    "scan_event",
+    "scan_event", "config_dirs_present",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

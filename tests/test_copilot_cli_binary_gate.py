@@ -25,6 +25,8 @@ from scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli import MacOSCo
 from scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli import LinuxCopilotCliDetector
 from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
 
+_WIN_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli"
+
 _MAC_MOD = "scripts.coding_discovery_tools.macos.copilot_cli.copilot_cli"
 _LINUX_MOD = "scripts.coding_discovery_tools.linux.copilot_cli.copilot_cli"
 _WINDOWS_MOD = "scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli"
@@ -306,6 +308,60 @@ class TestWindowsCopilotCliWinGet(unittest.TestCase):
         binary -> None."""
         _make_hooks_only(self.home)
         self.assertIsNone(self.detector.detect())
+
+
+class TestWindowsCopilotCliVersionNeverShelled(unittest.TestCase):
+    """A resolved path carries the profile name, and ``&``/``^`` are legal in Win32
+    account names, so probing it under ``shell=True`` would let
+    ``C:\\Users\\a&b\\...`` execute part of its own path as SYSTEM. The npm shim is
+    read instead of run."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.detector = WindowsCopilotCliDetector()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_npm_install(self, parent: Path, version: str = "1.0.59") -> Path:
+        shim = parent / "copilot.cmd"
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        shim.write_text("", encoding="utf-8")
+        pkg = parent / "node_modules" / "@github" / "copilot"
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text('{"version": "%s"}' % version, encoding="utf-8")
+        return shim
+
+    def test_cmd_shim_version_read_not_executed(self):
+        shim = self._make_npm_install(self.root)
+        with patch.object(WindowsCopilotCliDetector, "_probe_version",
+                          side_effect=AssertionError("shim must not be shelled")):
+            self.assertEqual("1.0.59", self.detector.get_version(str(shim)))
+
+    def test_profile_with_shell_metacharacters_never_shelled(self):
+        shim = self._make_npm_install(self.root / "a&&calc")
+        with patch.object(WindowsCopilotCliDetector, "_probe_version",
+                          side_effect=AssertionError("shim must not be shelled")):
+            self.assertEqual("1.0.59", self.detector.get_version(str(shim)))
+
+    def test_exe_probed_without_a_shell(self):
+        """A WinGet ``.exe`` needs no shell, so it is exec'd directly."""
+        exe = self.root / "copilot.exe"
+        exe.write_text("", encoding="utf-8")
+        with patch.object(WindowsCopilotCliDetector, "_probe_version",
+                          side_effect=AssertionError("exe must not be shelled")), \
+             patch(f"{_WIN_MOD}.run_command", return_value="GitHub Copilot CLI 1.2.3") as rc:
+            self.assertEqual("1.2.3", self.detector.get_version(str(exe)))
+        rc.assert_called_once()
+
+    def test_missing_package_json_returns_none(self):
+        shim = self.root / "copilot.cmd"
+        shim.write_text("", encoding="utf-8")
+        with patch.object(WindowsCopilotCliDetector, "_probe_version",
+                          side_effect=AssertionError("shim must not be shelled")):
+            self.assertIsNone(self.detector.get_version(str(shim)))
 
 
 if __name__ == "__main__":

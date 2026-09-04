@@ -1252,11 +1252,12 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         if not raw_settings:
             return None  # nothing security-relevant here → no row
         allow_rules, deny_rules = self._terminal_rules(data)
-        mcp_allow, mcp_deny = self._mcp_lists(data)
         record = {
             "settings_source": scope,
             "scope": scope,
             "settings_path": str(path),
+            # chat.mcp.* is VS Code-wide MCP governance, not a Copilot permission —
+            # captured here as context rather than promoted to its own field.
             "raw_settings": raw_settings,
             "permission_mode": self._permission_mode(data),
             "sandbox_enabled": self._sandbox_enabled(data),
@@ -1265,10 +1266,6 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             record["allow_rules"] = allow_rules
         if deny_rules:
             record["deny_rules"] = deny_rules
-        if mcp_allow:
-            record["mcp_tool_allowlist"] = mcp_allow
-        if mcp_allow or mcp_deny:
-            record["mcp_policies"] = {"allowedMcpServers": mcp_allow, "deniedMcpServers": mcp_deny}
         return record
 
     def _permission_mode(self, data: Dict) -> str:
@@ -1308,30 +1305,6 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return self._dedupe(allow), self._dedupe(deny)
 
     @staticmethod
-    def _mcp_lists(data: Dict) -> Tuple[List[str], List[str]]:
-        def names(value) -> List[str]:
-            # Each entry matches a server by name, URL, or command (VS Code's
-            # serverName / serverUrl / serverCommand allow/deny shape).
-            out = []
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, str) and item:
-                        out.append(item)
-                    elif isinstance(item, dict):
-                        ident = item.get("serverName") or item.get("serverUrl")
-                        cmd = item.get("serverCommand")
-                        if not ident and isinstance(cmd, list) and cmd and isinstance(cmd[0], str):
-                            ident = cmd[0]
-                        elif not ident and isinstance(cmd, str):
-                            ident = cmd
-                        if isinstance(ident, str) and ident:
-                            out.append(ident)
-            return out
-        allow = names(data.get("chat.mcp.allowedServers"))
-        deny = names(data.get("chat.mcp.deniedServers"))
-        return BaseGitHubCopilotSettingsExtractor._dedupe(allow), BaseGitHubCopilotSettingsExtractor._dedupe(deny)
-
-    @staticmethod
     def _dedupe(items: List[str]) -> List[str]:
         seen, out = set(), []
         for item in items:
@@ -1341,7 +1314,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return out
 
     def _merge_records(self, base: Dict, others: List[Dict]) -> Dict:
-        """Union the allow/deny/MCP lists across a user's profile records
+        """Union the allow/deny rules across a user's profile records
         — concatenated base-first, order-preserving de-dupe — and escalate the mode
         to the most permissive seen, so one YOLO profile surfaces even when the
         default profile is locked down."""
@@ -1350,22 +1323,12 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         merged = dict(base)
         order = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
         for rec in others:
-            for field in ("allow_rules", "deny_rules", "mcp_tool_allowlist"):
+            for field in ("allow_rules", "deny_rules"):
                 extra = rec.get(field)
                 if extra:
                     merged[field] = self._dedupe(merged.get(field, []) + extra)
             if order.get(rec.get("permission_mode"), 0) > order.get(merged.get("permission_mode"), 0):
                 merged["permission_mode"] = rec["permission_mode"]
-            base_pol = merged.get("mcp_policies")
-            rec_pol = rec.get("mcp_policies")
-            if rec_pol:
-                if base_pol:
-                    merged["mcp_policies"] = {
-                        "allowedMcpServers": self._dedupe(base_pol.get("allowedMcpServers", []) + rec_pol.get("allowedMcpServers", [])),
-                        "deniedMcpServers": self._dedupe(base_pol.get("deniedMcpServers", []) + rec_pol.get("deniedMcpServers", [])),
-                    }
-                else:
-                    merged["mcp_policies"] = rec_pol
         return merged
 
 

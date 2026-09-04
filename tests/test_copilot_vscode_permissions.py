@@ -68,20 +68,18 @@ class TestPermissionMapping(unittest.TestCase):
         self.assertNotIn("github.copilot.chat.agent.autoApproveFileChanges", rec["raw_settings"])
         self.assertNotIn("github.copilot.chat.agent.terminalCommands.blocklist", rec["raw_settings"])
 
-    def test_mcp_allow_deny_real_entry_shapes(self):
-        # VS Code entries match by serverName / serverUrl / serverCommand (or a bare
-        # string). Each shape resolves to its identity in the policy lists.
+    def test_mcp_governance_kept_as_context_not_a_permission_field(self):
+        # chat.mcp.* is VS Code-wide MCP governance, not a Copilot tool permission:
+        # captured in raw_settings for context, never promoted to its own field.
         rec = self._rec({
-            "chat.mcp.allowedServers": ["filesystem", {"serverName": "github-mcp"},
-                                        {"serverUrl": "https://mcp.contoso.com/*"},
-                                        {"serverCommand": ["/usr/local/bin/legacy-mcp", "--stdio"]}],
+            "chat.mcp.access": "registry",
+            "chat.mcp.allowedServers": [{"serverName": "github-mcp"}],
             "chat.mcp.deniedServers": [{"serverName": "shady"}],
         })
-        self.assertEqual(
-            rec["mcp_tool_allowlist"],
-            ["filesystem", "github-mcp", "https://mcp.contoso.com/*", "/usr/local/bin/legacy-mcp"],
-        )
-        self.assertEqual(rec["mcp_policies"]["deniedMcpServers"], ["shady"])
+        self.assertEqual(rec["raw_settings"]["chat.mcp.access"], "registry")
+        self.assertIn("chat.mcp.allowedServers", rec["raw_settings"])
+        self.assertNotIn("mcp_tool_allowlist", rec)
+        self.assertNotIn("mcp_policies", rec)
 
     def test_sandbox_on_off(self):
         self.assertTrue(self._rec({"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
@@ -123,11 +121,11 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
             "chat.tools.global.autoApprove": True,
             "chat.tools.terminal.autoApprove": {"git status": True, "rm": False},
         }), encoding="utf-8")
-        # a named profile that denies an MCP server
+        # a named profile that blocks an extra terminal command
         prof = user_dir / "profiles" / "workp"
         prof.mkdir(parents=True)
         (prof / "settings.json").write_text(json.dumps({
-            "chat.mcp.deniedServers": ["evil-mcp"],
+            "chat.tools.terminal.autoApprove": {"curl": False},
         }), encoding="utf-8")
 
     def tearDown(self):
@@ -141,8 +139,8 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
         self.assertEqual(rec["permission_mode"], "bypassPermissions")
         self.assertIn("Bash(git status *)", rec["allow_rules"])
         self.assertIn("Bash(rm *)", rec["deny_rules"])
-        # profile-scoped MCP denial merged in
-        self.assertIn("evil-mcp", rec["mcp_policies"]["deniedMcpServers"])
+        # the named profile's own deny rule is merged in too
+        self.assertIn("Bash(curl *)", rec["deny_rules"])
 
     def test_named_profile_yolo_is_detected_and_escalates(self):
         # A locked-down default profile but a YOLO *named* profile must surface:
@@ -199,7 +197,7 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
             ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
             ex._scan_users = lambda cb: cb(self.home)
             rec = ex.extract_settings()
-            # only the in-home profile (workp, mcp deny) remains — the escaping YOLO is dropped
+            # only the in-home profile remains — the escaping YOLO is dropped
             self.assertNotEqual(rec and rec.get("permission_mode"), "bypassPermissions",
                                 "content from an out-of-home symlink must not be reported")
         finally:

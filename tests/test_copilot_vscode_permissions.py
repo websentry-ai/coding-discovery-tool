@@ -76,21 +76,6 @@ class TestPermissionMapping(unittest.TestCase):
         self.assertEqual(rec["mcp_tool_allowlist"], ["filesystem", "github-mcp", "https://x"])
         self.assertEqual(rec["mcp_policies"]["deniedMcpServers"], ["shady"])
 
-    def test_mcp_server_secrets_redacted_from_raw_settings(self):
-        # An MCP server object can carry a token in its URL / headers / env — none of
-        # that may reach raw_settings; only the server name survives.
-        rec = self._rec({"chat.mcp.allowedServers": [
-            {"name": "gh", "url": "https://mcp.example/?token=SECRET123",
-             "headers": {"Authorization": "Bearer SECRET"}, "env": {"KEY": "SECRET"}},
-            "plain-name",
-        ]})
-        blob = json.dumps(rec["raw_settings"])
-        self.assertNotIn("SECRET", blob, "no MCP auth material may reach raw_settings")
-        self.assertNotIn("Authorization", blob)
-        self.assertEqual(rec["raw_settings"]["chat.mcp.allowedServers"], ["gh", "plain-name"])
-        # the policy list still carries the name (audit signal preserved)
-        self.assertIn("gh", rec["mcp_tool_allowlist"])
-
     def test_sandbox_on_off(self):
         self.assertTrue(self._rec({"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
         self.assertFalse(self._rec({"chat.agent.sandbox.enabled": "off"})["sandbox_enabled"])

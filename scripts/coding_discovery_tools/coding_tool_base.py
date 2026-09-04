@@ -14,7 +14,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Iterable, List, Tuple, Union
 
-from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
+from .mcp_extraction_helpers import (
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
+    enumerate_vscode_user_files,
+)
 from .constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 
 logger = logging.getLogger(__name__)
@@ -1134,9 +1138,20 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         a root scan, else just the current user)."""
 
     @abstractmethod
-    def _user_settings_candidates(self, user_home) -> List[Path]:
-        """Return the user-scope ``settings.json`` candidates for this user, most
-        preferred first (stable Code before Insiders)."""
+    def _user_config_dirs(self, user_home) -> List[Path]:
+        """Return this user's VS Code ``User`` config dirs (stable Code first, then
+        Insiders) — the parents of ``settings.json`` and ``profiles/``."""
+
+    def _iter_user_settings_files(self, user_home):
+        """Yield the default-profile ``settings.json`` plus every named profile's
+        ``profiles/<id>/settings.json``, for each channel (stable + Insiders), via
+        the same shared VS Code profile enumeration the ``mcp.json`` discovery uses.
+        Each profile is its own permission surface — a YOLO named profile is as real
+        a risk as the default — so all are read (not first-wins) and merged to the
+        most permissive posture."""
+        for user_dir in self._user_config_dirs(Path(user_home)):
+            for path in enumerate_vscode_user_files(user_dir, "settings.json"):
+                yield path
 
     def _iter_workspace_settings_files(self, user_home) -> Iterable[Path]:
         """Yield every ``<workspace>/.vscode/settings.json`` under this user.
@@ -1195,30 +1210,28 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return records[0]
 
     def _extract_for_user(self, user_home: Path) -> Optional[Dict]:
-        user_record = None
-        for path in self._user_settings_candidates(user_home):
+        records = []
+        # User scope: default profile + every named profile, each channel.
+        for path in self._iter_user_settings_files(user_home):
             data = self._parse_jsonc(path)
             if data is None:
                 continue
             record = self._build_record(data, path, "user")
             if record:
                 logger.info(f"  ✓ Extracted Copilot settings from {path}")
-                user_record = record
-                break  # first existing user file wins (stable Code over Insiders)
-
-        workspace_records = []
+                records.append(record)
+        # Project scope: every <workspace>/.vscode/settings.json.
         for path in self._iter_workspace_settings_files(user_home):
             data = self._parse_jsonc(path)
             if data is None:
                 continue
             record = self._build_record(data, path, "project")
             if record:
-                workspace_records.append(record)
+                records.append(record)
 
-        if user_record is None and not workspace_records:
+        if not records:
             return None
-        base = user_record or workspace_records.pop(0)
-        return self._merge_workspace_records(base, workspace_records)
+        return self._merge_records(records[0], records[1:])
 
     @staticmethod
     def _parse_jsonc(path: Path) -> Optional[Dict]:
@@ -1333,16 +1346,16 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 out.append(item)
         return out
 
-    def _merge_workspace_records(self, base: Dict, workspace_records: List[Dict]) -> Dict:
-        """Overlay workspace allow/deny/MCP lists onto the base (user) record —
-        concatenated user-first, order-preserving de-dupe — and escalate the mode
-        to the most permissive seen (a workspace can't tighten a user bypass, but a
-        workspace bypass must surface)."""
-        if not workspace_records:
+    def _merge_records(self, base: Dict, others: List[Dict]) -> Dict:
+        """Union the allow/deny/MCP lists across every profile and workspace record
+        — concatenated base-first, order-preserving de-dupe — and escalate the mode
+        to the most permissive seen, so one YOLO profile or workspace surfaces even
+        when the default profile is locked down."""
+        if not others:
             return base
         merged = dict(base)
         order = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
-        for rec in workspace_records:
+        for rec in others:
             for field in ("allow_rules", "deny_rules", "mcp_tool_allowlist"):
                 extra = rec.get(field)
                 if extra:

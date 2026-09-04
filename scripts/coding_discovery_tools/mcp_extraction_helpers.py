@@ -549,13 +549,14 @@ MCP_CONFIG_JSON_FILENAMES = ["mcp_config.json"]
 MCP_JSON_FILENAMES = ["mcp.json"]
 
 
-def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
-    """Enumerate the ``mcp.json`` files for ONE VS Code data dir (a
-    ``.../Code/User`` or ``.../Code - Insiders/User`` base).
+def enumerate_vscode_user_files(code_user_base: Path, filename: str) -> List[Path]:
+    """Enumerate ``filename`` across the default profile and every named profile
+    for ONE VS Code data dir (a ``.../Code/User`` or ``.../Code - Insiders/User``
+    base). Used for both ``mcp.json`` and ``settings.json``.
 
     Returns existing FILE paths in deterministic order:
-      1. the default ``code_user_base / "mcp.json"`` (only if it exists), then
-      2. each existing ``code_user_base / "profiles" / <id> / "mcp.json"``,
+      1. the default ``code_user_base / filename`` (only if it exists), then
+      2. each existing ``code_user_base / "profiles" / <id> / filename``,
          in sorted order.
 
     Bounded: a single-level glob under ``profiles/`` only — never a recursive
@@ -566,27 +567,33 @@ def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
     Insiders base free.
 
     NEVER raises: all filesystem probes are wrapped; whatever was collected so
-    far is returned. Callers derive attribution as ``mcp_file.parent``.
+    far is returned. Callers derive attribution as ``file.parent``.
     """
     files: List[Path] = []
 
     try:
-        default_file = code_user_base / "mcp.json"
+        default_file = code_user_base / filename
         if default_file.exists():
             files.append(default_file)
     except Exception as exc:
-        logger.debug("enumerate_vscode_mcp_files: skipping default in %s: %s", code_user_base, exc)
+        logger.debug("enumerate_vscode_user_files: skipping default in %s: %s", code_user_base, exc)
 
     try:
         profiles_dir = code_user_base / "profiles"
         if profiles_dir.exists():
-            for profile_mcp in sorted(profiles_dir.glob("*/mcp.json")):
-                if profile_mcp.is_file():
-                    files.append(profile_mcp)
+            for profile_file in sorted(profiles_dir.glob(f"*/{filename}")):
+                if profile_file.is_file():
+                    files.append(profile_file)
     except Exception as exc:
-        logger.debug("enumerate_vscode_mcp_files: skipping profiles in %s: %s", code_user_base, exc)
+        logger.debug("enumerate_vscode_user_files: skipping profiles in %s: %s", code_user_base, exc)
 
     return files
+
+
+def enumerate_vscode_mcp_files(code_user_base: Path) -> List[Path]:
+    """The ``mcp.json`` files for one VS Code data dir (default + profiles).
+    Thin wrapper over ``enumerate_vscode_user_files`` — see it for semantics."""
+    return enumerate_vscode_user_files(code_user_base, "mcp.json")
 
 
 _VSCODE_MCP_PROVIDER_CACHE_KEY = "mcp.extCachedServers"

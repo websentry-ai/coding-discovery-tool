@@ -10,14 +10,12 @@ from ...windows_extraction_helpers import is_running_as_admin
 
 logger = logging.getLogger(__name__)
 
-SETTINGS_FILENAME = "settings.json"
-
-# User-scope VS Code settings.json under %APPDATA% (stable + Insiders), stable first.
+# VS Code ``User`` config dirs under %APPDATA% (stable + Insiders), stable first.
 # Resolved per-user from the user's home — NOT from %APPDATA% of the running
 # process, which under a service/SYSTEM token points at systemprofile, not a user.
-_USER_SETTINGS_SUBPATHS = (
-    ("AppData", "Roaming", "Code", "User", SETTINGS_FILENAME),
-    ("AppData", "Roaming", "Code - Insiders", "User", SETTINGS_FILENAME),
+_USER_CONFIG_SUBPATHS = (
+    ("AppData", "Roaming", "Code", "User"),
+    ("AppData", "Roaming", "Code - Insiders", "User"),
 )
 
 
@@ -40,5 +38,5 @@ class WindowsGitHubCopilotSettingsExtractor(BaseGitHubCopilotSettingsExtractor):
         else:
             callback(Path.home())
 
-    def _user_settings_candidates(self, user_home: Path) -> List[Path]:
-        return [user_home.joinpath(*parts) for parts in _USER_SETTINGS_SUBPATHS]
+    def _user_config_dirs(self, user_home: Path) -> List[Path]:
+        return [user_home.joinpath(*parts) for parts in _USER_CONFIG_SUBPATHS]

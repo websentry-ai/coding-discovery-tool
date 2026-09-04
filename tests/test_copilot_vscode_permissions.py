@@ -24,7 +24,7 @@ class _MapExtractor(BaseGitHubCopilotSettingsExtractor):
     def _scan_users(self, callback):
         pass
 
-    def _user_settings_candidates(self, user_home):
+    def _user_config_dirs(self, user_home):
         return []
 
     def _iter_workspace_settings_files(self, user_home):
@@ -91,7 +91,7 @@ class TestPermissionMapping(unittest.TestCase):
         user = self._rec({"chat.tools.terminal.autoApprove": {"ls": True}})
         ws = self._rec({"chat.tools.global.autoApprove": True,
                         "chat.tools.terminal.autoApprove": {"pwd": True, "ls": True}})
-        merged = self.ex._merge_workspace_records(user, [ws])
+        merged = self.ex._merge_records(user, [ws])
         # a workspace bypass surfaces; allow rules union without duplicating "ls"
         self.assertEqual(merged["permission_mode"], "bypassPermissions")
         self.assertEqual(sorted(merged["allow_rules"]), ["Bash(ls *)", "Bash(pwd *)"])
@@ -137,6 +137,25 @@ class TestMacOSExtractorOverFixture(unittest.TestCase):
         self.assertIn("Bash(rm *)", rec["deny_rules"])
         # workspace-scoped MCP denial merged in
         self.assertIn("evil-mcp", rec["mcp_policies"]["deniedMcpServers"])
+
+    def test_named_profile_yolo_is_detected_and_escalates(self):
+        # A locked-down default profile but a YOLO *named* profile must surface:
+        # the profile is its own permission surface (profiles/<id>/settings.json).
+        base = self.home / "Library" / "Application Support" / "Code" / "User"
+        # default profile: benign
+        (base / "settings.json").write_text(json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        # named profile: YOLO
+        prof = base / "profiles" / "ab12cd"
+        prof.mkdir(parents=True)
+        (prof / "settings.json").write_text(json.dumps({
+            "chat.tools.global.autoApprove": True,
+            "chat.tools.terminal.autoApprove": {"rm": False},
+        }), encoding="utf-8")
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        rec = ex.extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions", "a YOLO named profile must surface")
+        self.assertIn("Bash(rm *)", rec.get("deny_rules", []))
 
     def test_no_copilot_settings_returns_none(self):
         empty_home = Path(tempfile.mkdtemp(prefix="copilot-perm-empty-", dir=str(Path.home())))

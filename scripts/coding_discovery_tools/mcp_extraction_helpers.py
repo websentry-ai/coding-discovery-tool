@@ -1104,7 +1104,12 @@ def _vscode_workspace_path_is_owned(
     normalized_workspace = path_module.normcase(
         path_module.normpath(workspace_path)
     )
-    if not path_module.isabs(normalized_workspace):
+    workspace_is_absolute = path_module.isabs(normalized_workspace) or (
+        operating_system == "windows"
+        and normalized_home.startswith("\\")
+        and normalized_workspace.startswith("\\")
+    )
+    if not workspace_is_absolute:
         return False
     try:
         return path_module.commonpath(
@@ -1154,7 +1159,8 @@ def _vscode_cache_scope_path(
             operating_system,
         ):
             return None
-        return workspace_path
+        path_module = ntpath if operating_system == "windows" else posixpath
+        return path_module.normpath(workspace_path)
 
     if len(relative_parts) >= 3 and relative_parts[0] == "profiles":
         return str(code_user_base / "profiles" / relative_parts[1])

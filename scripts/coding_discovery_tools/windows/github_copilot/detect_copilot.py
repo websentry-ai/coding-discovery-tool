@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseCopilotDetector
+from ...constants import is_symlink_or_junction
 from ...jetbrains_naming_helpers import plugin_entries
 from ...vscode_extension_helpers import find_extension_in_editor
 from ...windows_extraction_helpers import is_running_as_admin
@@ -57,6 +58,24 @@ _VSCODE_USER_DATA_DIRS = [
     Path("AppData/Roaming/Code/User"),
     Path("AppData/Roaming/Code - Insiders/User"),
 ]
+
+
+def _safe_descendant_directory(path: Path, trusted_root: Path) -> bool:
+    try:
+        relative_parts = path.relative_to(trusted_root).parts
+    except ValueError:
+        return False
+    current = trusted_root
+    for part in relative_parts:
+        current /= part
+        if is_symlink_or_junction(current):
+            return False
+        try:
+            if not current.is_dir():
+                return False
+        except OSError:
+            return False
+    return True
 
 
 class WindowsGitHubCopilotDetector(BaseCopilotDetector):
@@ -162,25 +181,47 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         system-wide install locations. Current Windows installers can add a
         version/commit directory between the install root and ``resources``;
         include those one-level-deep roots as well."""
-        direct_roots = []
         local_programs = user_home / "AppData" / "Local" / "Programs"
+        roots = list(_VSCODE_SYSTEM_APP_EXTENSION_ROOTS)
+        install_roots = []
         for app in ("Microsoft VS Code", "Microsoft VS Code Insiders"):
-            direct_roots.append(
-                local_programs / app / "resources" / "app" / "extensions"
-            )
-        direct_roots.extend(_VSCODE_SYSTEM_APP_EXTENSION_ROOTS)
+            install_root = local_programs / app
+            direct_root = install_root / "resources" / "app" / "extensions"
+            if _safe_descendant_directory(direct_root, user_home):
+                roots.append(direct_root)
+            install_roots.append((install_root, user_home))
 
-        roots = list(direct_roots)
-        for direct_root in direct_roots:
+        for direct_root in _VSCODE_SYSTEM_APP_EXTENSION_ROOTS:
             try:
                 install_root = direct_root.parents[2]
-                for versioned_root in sorted(
-                    install_root.glob("*/resources/app/extensions")
-                ):
-                    if versioned_root.is_dir() and versioned_root not in roots:
-                        roots.append(versioned_root)
-            except (IndexError, OSError):
+            except IndexError:
                 continue
+            install_roots.append((install_root, install_root))
+
+        for install_root, trusted_root in install_roots:
+            if install_root == trusted_root:
+                if is_symlink_or_junction(install_root):
+                    continue
+            elif not _safe_descendant_directory(install_root, trusted_root):
+                continue
+            try:
+                with os.scandir(install_root) as entries:
+                    version_dirs = sorted(
+                        Path(entry.path)
+                        for entry in entries
+                        if entry.is_dir(follow_symlinks=False)
+                    )
+            except OSError:
+                continue
+            for version_dir in version_dirs:
+                versioned_root = (
+                    version_dir / "resources" / "app" / "extensions"
+                )
+                if (
+                    _safe_descendant_directory(versioned_root, trusted_root)
+                    and versioned_root not in roots
+                ):
+                    roots.append(versioned_root)
         return roots
 
     def _detect_vscode_builtin_copilot(self, user_home: Path) -> List[Dict]:

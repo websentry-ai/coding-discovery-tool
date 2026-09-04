@@ -23,6 +23,7 @@ scanner (``tests/__init__.py`` patches ``_scan_servers_in_mapping`` -> {}), and
 """
 
 import json
+import ntpath
 import os
 import shutil
 import sqlite3
@@ -300,6 +301,27 @@ class _GitHubCopilotVscodeMcpMixin:
             [server["name"] for server in self._all_servers(configs)],
             ["GitKraken", "GitKraken"],
         )
+
+    def test_workspace_scope_path_is_normalized_before_reporting(self):
+        self._install_gitlens_provider()
+        workspace = self.user_home / "workspace"
+        workspace.mkdir()
+        workspace_uri = (
+            f"file://{self.user_home.as_posix()}/placeholder/../workspace"
+        )
+        self._write_gitkraken_provider_cache(
+            "workspace-normalized",
+            workspace_uri=workspace_uri,
+        )
+
+        configs = self._extract()
+
+        normalize = (
+            ntpath.normpath
+            if self.operating_system == "windows"
+            else os.path.normpath
+        )
+        self.assertEqual([config["path"] for config in configs], [normalize(str(workspace))])
 
     def test_extension_provider_without_optional_cache_nonce_is_preserved(self):
         self._install_gitlens_provider()

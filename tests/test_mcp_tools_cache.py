@@ -117,6 +117,21 @@ class TestCacheKey(unittest.TestCase):
             "eamodio.gitlens/gitkraken",
         )
 
+    def test_cached_vscode_provider_uses_provider_identity(self):
+        server = {
+            "name": "GitKraken",
+            "command": "gk",
+            "args": ["mcp"],
+            "additional_data": {"scope": "vscode-provider-cache"},
+            "providerId": "eamodio.gitlens/gitlens.gkMcpProvider",
+            "providerServerId": "eamodio.gitlens/GitKraken",
+        }
+        self.assertEqual(
+            cache_key_for_server(server),
+            "vscode-provider:eamodio.gitlens/gitlens.gkmcpprovider:"
+            "eamodio.gitlens/gitkraken",
+        )
+
     def test_vscode_provider_identity_respects_storage_limit(self):
         provider_id = f"{'a' * 128}/{'b' * 128}"
         self.assertIsNone(compute_cache_key(

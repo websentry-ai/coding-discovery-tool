@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
 CLAUDE_BUILTIN_PREFIX = 'claude-builtin:'
 
 CLAUDE_CONNECTOR_SCOPE = 'claude-connector'
+VSCODE_PROVIDER_CACHE_SCOPE = 'vscode-provider-cache'
 
 # Claude Code sanitizes display names into runtime names (non-alphanumerics -> '_'), so one
 # server arrives under several spellings. chrome/browser/preview stay separate: different tools.
@@ -693,7 +694,10 @@ def compute_fingerprint(
             return f'url:{identity}'
 
     provider_identity = _vscode_provider_identity(safe_additional_data)
-    if provider_identity and not command and not url and not safe_args:
+    if provider_identity and (
+        safe_additional_data.get('scope') == VSCODE_PROVIDER_CACHE_SCOPE
+        or (not command and not url and not safe_args)
+    ):
         return f'vscode-provider:{provider_identity}'
 
     nuget_package = _nuget_package(base, safe_args)

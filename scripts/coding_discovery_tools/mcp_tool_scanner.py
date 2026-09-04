@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -92,6 +93,7 @@ def scan_mcp_server(
                 args=list(server_config.get("args") or []),
                 env_extra=dict(server_config.get("env") or {}),
                 timeout=timeout,
+                cwd=server_config.get("cwd"),
             )
             result.setdefault("transport", "stdio")
         elif url:
@@ -335,8 +337,15 @@ def _scan_stdio(
     args: List[str],
     env_extra: Dict[str, str],
     timeout: int,
+    cwd: Optional[str] = None,
 ) -> Dict[str, Any]:
-    resolved = shutil.which(command) or command
+    resolved = None
+    command_path = Path(command)
+    if cwd and not command_path.is_absolute():
+        candidate = Path(cwd) / command
+        if candidate.is_file():
+            resolved = str(candidate)
+    resolved = resolved or shutil.which(command) or command
     env = os.environ.copy()
     for k, v in env_extra.items():
         if isinstance(v, str):
@@ -349,6 +358,7 @@ def _scan_stdio(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            cwd=cwd,
         )
     except FileNotFoundError:
         # Some configs put the whole command line in `command` and leave `args`
@@ -360,9 +370,15 @@ def _scan_stdio(
                 parts = shlex.split(command, posix=(os.name != "nt"))
             except ValueError:
                 parts = []
-            head = shutil.which(parts[0]) if len(parts) > 1 else None
+            head = None
+            if len(parts) > 1:
+                candidate = Path(cwd) / parts[0] if cwd else None
+                if candidate is not None and candidate.is_file():
+                    head = str(candidate)
+                else:
+                    head = shutil.which(parts[0])
             if head:
-                return _scan_stdio(head, parts[1:], env_extra, timeout)
+                return _scan_stdio(head, parts[1:], env_extra, timeout, cwd=cwd)
         return {"status": "command_not_found", "command": command}
     except OSError as exc:
         return {"status": "spawn_error", "error": f"{type(exc).__name__}: {exc}"}

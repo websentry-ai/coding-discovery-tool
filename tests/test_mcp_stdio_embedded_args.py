@@ -104,6 +104,43 @@ class TestStdioEmbeddedArgs(unittest.TestCase):
             result = scanner._scan_stdio("stubmcp", ["--flag"], {}, 10)
         self.assertEqual("scanned", result.get("status"))
 
+    def test_relative_command_resolves_from_configured_cwd(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        command = self._write_stub(cwd / "local-mcp").name
+
+        result = scanner.scan_mcp_server(
+            {"command": command, "args": [], "env": {}, "cwd": str(cwd)}
+        )
+
+        self.assertEqual("scanned", result.get("status"))
+        self.assertEqual(2, len(result.get("tools") or []))
+
+    def test_configured_cwd_wins_over_same_named_path_command(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        local_command = self._write_stub(cwd / "stubmcp")
+
+        with patch.object(
+            scanner.subprocess,
+            "Popen",
+            side_effect=FileNotFoundError,
+        ) as popen:
+            scanner._scan_stdio(local_command.name, ["--flag"], {}, 10, cwd=str(cwd))
+
+        self.assertEqual(popen.call_args.args[0][0], str(local_command))
+
+    def test_embedded_command_retry_preserves_configured_cwd(self):
+        cwd = Path(self.tmp.name) / "provider"
+        cwd.mkdir()
+        command = self._write_stub(cwd / "local-mcp").name
+
+        with patch.object(scanner, "_scan_stdio", wraps=scanner._scan_stdio) as scan_stdio:
+            result = scan_stdio(f"{command} --flag", [], {}, 10, cwd=str(cwd))
+
+        self.assertEqual("scanned", result.get("status"))
+        self.assertEqual(scan_stdio.call_args_list[1].kwargs["cwd"], str(cwd))
+
     def test_posix_false_preserves_windows_backslashes(self):
         """Why the split passes posix=False: POSIX mode eats backslashes. Runs everywhere,
         including platforms where the posix=False branch itself never executes."""

@@ -159,12 +159,28 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
     def _vscode_app_extension_roots(self, user_home: Path) -> List[Path]:
         """VS Code install extension roots to probe for built-in Copilot: the
         per-user user-install location (under the user's LocalAppData) plus the
-        system-wide install locations."""
-        roots = []
+        system-wide install locations. Current Windows installers can add a
+        version/commit directory between the install root and ``resources``;
+        include those one-level-deep roots as well."""
+        direct_roots = []
         local_programs = user_home / "AppData" / "Local" / "Programs"
         for app in ("Microsoft VS Code", "Microsoft VS Code Insiders"):
-            roots.append(local_programs / app / "resources" / "app" / "extensions")
-        roots.extend(_VSCODE_SYSTEM_APP_EXTENSION_ROOTS)
+            direct_roots.append(
+                local_programs / app / "resources" / "app" / "extensions"
+            )
+        direct_roots.extend(_VSCODE_SYSTEM_APP_EXTENSION_ROOTS)
+
+        roots = list(direct_roots)
+        for direct_root in direct_roots:
+            try:
+                install_root = direct_root.parents[2]
+                for versioned_root in sorted(
+                    install_root.glob("*/resources/app/extensions")
+                ):
+                    if versioned_root.is_dir() and versioned_root not in roots:
+                        roots.append(versioned_root)
+            except (IndexError, OSError):
+                continue
         return roots
 
     def _detect_vscode_builtin_copilot(self, user_home: Path) -> List[Dict]:

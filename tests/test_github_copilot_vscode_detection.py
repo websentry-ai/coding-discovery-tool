@@ -260,6 +260,34 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
 
+    def test_builtin_detected_in_versioned_user_install(self):
+        self._make_code_user_dir()
+        copilot = (
+            self.user_home
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "Microsoft VS Code"
+            / "520fb30b2d"
+            / "resources"
+            / "app"
+            / "extensions"
+            / "copilot"
+        )
+        copilot.mkdir(parents=True)
+        (copilot / "package.json").write_text(
+            json.dumps({"name": "copilot-chat", "version": "0.64.0"}),
+            encoding="utf-8",
+        )
+
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", []):
+            res = self.Detector()._detect_vscode_for_user(self.user_home)
+
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot Chat (VS Code)")
+        self.assertEqual(res[0]["version"], "0.64.0")
+        self.assertEqual(res[0]["install_path"], str(copilot))
+
 
 if __name__ == "__main__":
     unittest.main()

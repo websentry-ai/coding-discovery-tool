@@ -7,6 +7,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
 from ...mcp_extraction_helpers import (
+    append_vscode_cached_mcp_servers,
     enumerate_vscode_mcp_files,
     extract_ide_global_configs_with_root_support,
     transform_mcp_servers_to_array,
@@ -91,6 +92,12 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                 config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
                 if config:
                     configs.append(config)
+            append_vscode_cached_mcp_servers(
+                configs,
+                code_user_base,
+                user_home,
+                "windows",
+            )
 
         return configs
 

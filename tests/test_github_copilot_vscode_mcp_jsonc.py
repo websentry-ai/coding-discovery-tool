@@ -23,13 +23,22 @@ scanner (``tests/__init__.py`` patches ``_scan_servers_in_mapping`` -> {}), and
 """
 
 import json
+import os
 import shutil
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
+import scripts.coding_discovery_tools.mcp_extraction_helpers as mcp_helpers
 from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+    _normalize_vscode_cached_launch,
+    _read_vscode_state_json,
+    _transform_vscode_cached_mcp_servers,
+    _vscode_cached_url_for_report,
     enumerate_vscode_mcp_files,
 )
 from scripts.coding_discovery_tools.macos.github_copilot.mcp_config_extractor import (
@@ -77,6 +86,115 @@ class _GitHubCopilotVscodeMcpMixin:
     def _extract(self):
         return self.extractor._extract_vscode_configs_for_user(self.user_home)
 
+    def _install_gitlens_provider(self, declares_provider: bool = True) -> Path:
+        extension_dir = (
+            self.user_home
+            / ".vscode"
+            / "extensions"
+            / "eamodio.gitlens-17.10.0"
+        )
+        extension_dir.mkdir(parents=True, exist_ok=True)
+        providers = (
+            [{"id": "gitlens.gkMcpProvider", "label": "GitKraken"}]
+            if declares_provider
+            else []
+        )
+        (extension_dir / "package.json").write_text(
+            json.dumps(
+                {
+                    "publisher": "eamodio",
+                    "name": "gitlens",
+                    "contributes": {"mcpServerDefinitionProviders": providers},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (extension_dir.parent / "extensions.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "identifier": {"id": "eamodio.gitlens"},
+                        "version": "17.10.0",
+                        "relativeLocation": extension_dir.name,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return extension_dir
+
+    def _write_gitkraken_provider_cache(
+        self,
+        workspace_id: str = "workspace-a",
+        create_command: bool = True,
+        command_name: str = "gk.exe",
+    ) -> Path:
+        db_path = (
+            self.code_user_base
+            / "workspaceStorage"
+            / workspace_id
+            / "state.vscdb"
+        )
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        command = (
+            self.code_user_base
+            / "globalStorage"
+            / "eamodio.gitlens"
+            / command_name
+        )
+        if create_command:
+            command.parent.mkdir(parents=True, exist_ok=True)
+            command.touch()
+        cached = {
+            "eamodio.gitlens/gitlens.gkMcpProvider": {
+                "servers": [
+                    {
+                        "id": "eamodio.gitlens/GitKraken",
+                        "label": "GitKraken",
+                        "cacheNonce": "3.1.70",
+                        "launch": {
+                            "type": 1,
+                            "cwd": str(self.code_user_base / "globalStorage" / "eamodio.gitlens"),
+                            "command": str(command),
+                            "args": [
+                                "mcp",
+                                "--host=vscode",
+                                "--source=gitlens",
+                                "--scheme=vscode",
+                            ],
+                            "env": {"SHOULD_NOT_LEAVE_DEVICE": "secret"},
+                        },
+                    }
+                ]
+            }
+        }
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?, ?)",
+                ("mcp.extCachedServers", json.dumps(cached)),
+            )
+            conn.commit()
+        return db_path
+
+    def _write_extension_state(self, db_path: Path, key: str, extension_id: str) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+            conn.execute(
+                "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)",
+                (key, json.dumps([{"id": extension_id}])),
+            )
+            conn.commit()
+
+    @staticmethod
+    def _all_servers(configs):
+        return [
+            server
+            for config in configs
+            for server in config.get("mcpServers", [])
+        ]
+
     def _server_names(self, configs) -> set:
         self.assertEqual(len(configs), 1)
         return {s["name"] for s in configs[0]["mcpServers"]}
@@ -115,6 +233,217 @@ class _GitHubCopilotVscodeMcpMixin:
         """No regression: a plain valid JSON config still surfaces the server."""
         self._write_primary(json.dumps({"servers": {"serena": {"command": "uvx"}}}))
         self.assertIn("serena", self._server_names(self._extract()))
+
+    def test_extension_provider_cache_surfaces_gitkraken(self):
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache()
+
+        servers = self._all_servers(self._extract())
+        self.assertEqual(len(servers), 1)
+        server = servers[0]
+        self.assertEqual(server["name"], "GitKraken")
+        self.assertEqual(server["type"], "stdio")
+        self.assertTrue(server["command"].endswith("gk.exe"))
+        self.assertEqual(server["args"][0], "mcp")
+        self.assertEqual(
+            server["providerId"],
+            "eamodio.gitlens/gitlens.gkMcpProvider",
+        )
+        self.assertEqual(server["providerServerId"], "eamodio.gitlens/GitKraken")
+        self.assertNotIn("providerCacheNonce", server)
+        self.assertNotIn("env", server)
+
+    def test_static_and_extension_provider_servers_are_both_preserved(self):
+        self._write_primary(
+            json.dumps({"servers": {"postman": {"url": "https://mcp.postman.com/minimal"}}})
+        )
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache()
+
+        names = {server["name"] for server in self._all_servers(self._extract())}
+        self.assertEqual(names, {"postman", "GitKraken"})
+
+    def test_duplicate_extension_provider_cache_is_deduplicated(self):
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache("workspace-a")
+        self._write_gitkraken_provider_cache("workspace-b")
+
+        servers = self._all_servers(self._extract())
+        self.assertEqual([server["name"] for server in servers], ["GitKraken"])
+
+    def test_extension_provider_without_optional_cache_nonce_is_preserved(self):
+        self._install_gitlens_provider()
+        db_path = self._write_gitkraken_provider_cache()
+        with closing(sqlite3.connect(db_path)) as conn:
+            row = conn.execute(
+                "SELECT value FROM ItemTable WHERE key = ?",
+                ("mcp.extCachedServers",),
+            ).fetchone()
+            cached = json.loads(row[0])
+            provider = cached["eamodio.gitlens/gitlens.gkMcpProvider"]
+            provider["servers"][0].pop("cacheNonce")
+            conn.execute(
+                "UPDATE ItemTable SET value = ? WHERE key = ?",
+                (json.dumps(cached), "mcp.extCachedServers"),
+            )
+            conn.commit()
+
+        servers = self._all_servers(self._extract())
+
+        self.assertEqual([server["name"] for server in servers], ["GitKraken"])
+
+    def test_newest_usable_cache_wins_for_stable_provider_identity(self):
+        self._install_gitlens_provider()
+        old_db = self._write_gitkraken_provider_cache(
+            "workspace-old",
+            command_name="gk-old.exe",
+        )
+        new_db = self._write_gitkraken_provider_cache(
+            "workspace-new",
+            command_name="gk-new.exe",
+        )
+        os.utime(old_db, (1, 1))
+        os.utime(new_db, (2, 2))
+
+        servers = self._all_servers(self._extract())
+
+        self.assertEqual(len(servers), 1)
+        self.assertTrue(servers[0]["command"].endswith("gk-new.exe"))
+
+    def test_uninstalled_extension_cache_is_ignored(self):
+        self._write_gitkraken_provider_cache()
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_provider_removed_from_live_manifest_is_ignored(self):
+        self._install_gitlens_provider(declares_provider=False)
+        self._write_gitkraken_provider_cache()
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_globally_disabled_extension_cache_is_ignored(self):
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache()
+        self._write_extension_state(
+            self.code_user_base / "globalStorage" / "state.vscdb",
+            "extensionsIdentifiers/disabled",
+            "eamodio.gitlens",
+        )
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_workspace_disabled_extension_cache_is_ignored(self):
+        self._install_gitlens_provider()
+        workspace_db = self._write_gitkraken_provider_cache()
+        self._write_extension_state(
+            workspace_db,
+            "extensionsIdentifiers/disabled",
+            "eamodio.gitlens",
+        )
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_workspace_enablement_overrides_global_disablement(self):
+        self._install_gitlens_provider()
+        workspace_db = self._write_gitkraken_provider_cache()
+        self._write_extension_state(
+            self.code_user_base / "globalStorage" / "state.vscdb",
+            "extensionsIdentifiers/disabled",
+            "eamodio.gitlens",
+        )
+        self._write_extension_state(
+            workspace_db,
+            "extensionsIdentifiers/enabled",
+            "eamodio.gitlens",
+        )
+
+        servers = self._all_servers(self._extract())
+        self.assertEqual([server["name"] for server in servers], ["GitKraken"])
+
+    def test_missing_cached_executable_is_ignored(self):
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache(create_command=False)
+
+        self.assertEqual(self._all_servers(self._extract()), [])
+
+    def test_relative_cached_executable_is_resolved_from_cwd(self):
+        self._install_gitlens_provider()
+        self._write_gitkraken_provider_cache(command_name="gk.exe")
+        db_path = (
+            self.code_user_base
+            / "workspaceStorage"
+            / "workspace-a"
+            / "state.vscdb"
+        )
+        with closing(sqlite3.connect(db_path)) as conn:
+            row = conn.execute(
+                "SELECT value FROM ItemTable WHERE key = ?",
+                ("mcp.extCachedServers",),
+            ).fetchone()
+            cached = json.loads(row[0])
+            provider = cached["eamodio.gitlens/gitlens.gkMcpProvider"]
+            launch = provider["servers"][0]["launch"]
+            launch["command"] = "gk.exe"
+            conn.execute(
+                "UPDATE ItemTable SET value = ? WHERE key = ?",
+                (json.dumps(cached), "mcp.extCachedServers"),
+            )
+            conn.commit()
+
+        servers = self._all_servers(self._extract())
+
+        self.assertEqual([server["name"] for server in servers], ["GitKraken"])
+
+    def test_builtin_extension_provider_is_accepted(self):
+        extension_root = self.user_home / "vscode-builtins"
+        extension_dir = extension_root / "gitlens"
+        extension_dir.mkdir(parents=True)
+        (extension_dir / "package.json").write_text(
+            json.dumps(
+                {
+                    "publisher": "eamodio",
+                    "name": "gitlens",
+                    "contributes": {
+                        "mcpServerDefinitionProviders": [
+                            {"id": "gitlens.gkMcpProvider", "label": "GitKraken"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._write_gitkraken_provider_cache()
+
+        with patch.object(
+            mcp_helpers,
+            "_vscode_builtin_extension_roots",
+            return_value=[extension_root],
+        ):
+            servers = self._all_servers(self._extract())
+
+        self.assertEqual([server["name"] for server in servers], ["GitKraken"])
+
+    def test_corrupt_extension_provider_cache_does_not_hide_static_config(self):
+        self._write_primary(
+            json.dumps({"servers": {"figma": {"url": "https://mcp.figma.com/mcp"}}})
+        )
+        db_path = (
+            self.code_user_base
+            / "workspaceStorage"
+            / "broken"
+            / "state.vscdb"
+        )
+        db_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?, ?)",
+                ("mcp.extCachedServers", "{broken-json"),
+            )
+            conn.commit()
+
+        names = {server["name"] for server in self._all_servers(self._extract())}
+        self.assertEqual(names, {"figma"})
 
     def test_both_top_level_keys_resolve_under_stripping(self):
         """Both ``servers`` and ``mcpServers`` top-level keys resolve, with JSONC."""
@@ -320,6 +649,91 @@ class TestEnumerateVscodeMcpFiles(unittest.TestCase):
         default_file = self._write_default()
         (self.base / "profiles").mkdir()
         self.assertEqual(enumerate_vscode_mcp_files(self.base), [default_file])
+
+
+class TestNormalizeVscodeCachedLaunch(unittest.TestCase):
+    def test_http_uri_components_are_rebuilt(self):
+        config = _normalize_vscode_cached_launch(
+            {
+                "type": 2,
+                "uri": {
+                    "scheme": "https",
+                    "authority": "mcp.example.com",
+                    "path": "/api/mcp",
+                    "query": "mode=minimal",
+                    "fragment": "",
+                },
+                "headers": [["Authorization", "Bearer secret"]],
+            }
+        )
+
+        self.assertEqual(config["type"], "http")
+        self.assertEqual(
+            config["url"],
+            "https://mcp.example.com/api/mcp?mode=minimal",
+        )
+        self.assertEqual(config["headers"], {"Authorization": "Bearer secret"})
+
+    def test_unknown_transport_is_rejected(self):
+        self.assertIsNone(
+            _normalize_vscode_cached_launch(
+                {"type": 99, "command": "node", "args": [], "env": {}}
+            )
+        )
+
+    def test_report_url_drops_credentials_query_and_fragment(self):
+        self.assertEqual(
+            _vscode_cached_url_for_report(
+                "https://alice:secret@mcp.example.com:8443/api/mcp?token=secret#private"
+            ),
+            "https://mcp.example.com:8443/api/mcp",
+        )
+
+    def test_state_value_limit_is_measured_in_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.vscdb"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+                conn.execute(
+                    "INSERT INTO ItemTable (key, value) VALUES (?, ?)",
+                    ("unicode", json.dumps("é", ensure_ascii=False)),
+                )
+                conn.commit()
+
+            self.assertIsNone(_read_vscode_state_json(db_path, "unicode", 3))
+
+    def test_cached_http_credentials_are_not_reported(self):
+        scan = {
+            "scanned_at": None,
+            "tools": [],
+            "tool_count": 0,
+            "server_info": None,
+            "error": None,
+        }
+        configs = {
+            "0": {
+                "type": "http",
+                "url": "https://alice:secret@mcp.example.com/mcp?token=secret",
+                "headers": {"Authorization": "Bearer secret"},
+            }
+        }
+        with patch.object(
+            mcp_helpers,
+            "_scan_servers_in_mapping",
+            return_value={"0": scan},
+        ) as scan_servers:
+            servers = _transform_vscode_cached_mcp_servers(
+                configs,
+                {"0": "Example"},
+            )
+
+        self.assertEqual(
+            scan_servers.call_args.args[0]["0"]["headers"],
+            {"Authorization": "Bearer secret"},
+        )
+        server = servers[0]
+        self.assertEqual(server["url"], "https://mcp.example.com/mcp")
+        self.assertNotIn("headers", server)
 
 
 class TestMacOSGitHubCopilotVscodeMcpJsonc(

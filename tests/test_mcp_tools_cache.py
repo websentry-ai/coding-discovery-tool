@@ -289,24 +289,16 @@ class TestCacheKey(unittest.TestCase):
             "smithery:vendor/server",
         )
 
-    def test_smithery_supported_runner_forms(self):
-        vectors = [
-            ("smithery.cmd", ["--verbose", "run", "@vendor/server"], "smithery:vendor/server"),
-            ("npm", ["exec", "--", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
-            ("bunx", ["--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
-            ("bun", ["x", "--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
-            ("cmd", ["/c", "npx.cmd", "-y", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
-            ("npx", ["-y", "@smithery/cli", "run", "vendor/server"], "smithery:vendor/server"),
-            ("bunx", ["--no-install", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
-        ]
-        for command, args, expected in vectors:
-            with self.subTest(command=command, args=args):
-                self.assertEqual(
-                    compute_cache_key(
-                        name="alias", url=None, command=command, args=args
-                    ),
-                    expected,
-                )
+    def test_smithery_npm_runner_uses_run_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npm",
+                args=["exec", "--", "@smithery/cli@latest", "run", "vendor/server"],
+            ),
+            "smithery:vendor/server",
+        )
 
     def test_invalid_standalone_smithery_command_fails_closed(self):
         self.assertIsNone(
@@ -393,20 +385,24 @@ class TestCacheKey(unittest.TestCase):
                     )
                 )
 
-    def test_smithery_path_qualified_launchers_use_target(self):
+    def test_unverified_smithery_launchers_fail_closed(self):
         vectors = [
+            ("smithery", ["run", "@vendor/server"]),
+            ("smithery.cmd", ["--verbose", "run", "@vendor/server"]),
+            ("bunx", ["--bun", "@smithery/cli@latest", "run", "vendor/server"]),
+            ("bun", ["x", "--bun", "@smithery/cli@latest", "run", "vendor/server"]),
+            ("npx", ["-y", "@smithery/cli", "run", "vendor/server"]),
             ("./smithery", ["run", "@vendor/server"]),
             ("/tmp/evil/smithery", ["run", "@vendor/server"]),
             (r"C:\evil\smithery.exe", ["run", "@vendor/server"]),
-            ("./npx", ["-y", "@smithery/cli", "run", "@vendor/server"]),
+            ("./npx", ["-y", "@smithery/cli@latest", "run", "@vendor/server"]),
         ]
         for command, args in vectors:
             with self.subTest(command=command):
-                self.assertEqual(
+                self.assertIsNone(
                     compute_cache_key(
                         name="alias", url=None, command=command, args=args,
-                    ),
-                    "smithery:vendor/server",
+                    )
                 )
 
     def test_runtime_argument_does_not_claim_smithery_identity(self):

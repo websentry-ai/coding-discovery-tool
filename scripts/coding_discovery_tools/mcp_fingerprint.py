@@ -89,6 +89,7 @@ CLAUDEAI_ALLOWED_ADDITIONAL_DATA = ({}, {'scope': 'claudeai'})
 # npm-package runners: the first positional arg is the package to run.
 NPM_RUNNERS = frozenset({'npx', 'npm', 'bunx'})
 SMITHERY_CLI_PACKAGES = frozenset({'@smithery/cli', 'smithery'})
+SMITHERY_REGISTRY_SPECS = frozenset({'@smithery/cli@latest', 'smithery@latest'})
 SMITHERY_GLOBAL_FLAGS = frozenset({'--verbose', '--debug', '--json', '--table'})
 # Sub-runners under npx/bunx that are not the package themselves (the real
 # target -- usually a local script -- follows).
@@ -315,8 +316,8 @@ def _smithery_run_target(
     args: List[str],
     command_base: str,
 ) -> Optional[str]:
-    if command_base == 'smithery':
-        return _smithery_command_target(args)
+    if command_base not in {'npx', 'npm', 'cmd'}:
+        return None
     if command_base == 'cmd' and any(
         isinstance(arg, str) and re.search(r'[&|<>^\r\n]', arg)
         for arg in args
@@ -326,7 +327,7 @@ def _smithery_run_target(
     for index, arg in enumerate(args):
         if (
             not isinstance(arg, str)
-            or _registry_npm_package(arg) not in SMITHERY_CLI_PACKAGES
+            or _unquote(arg).strip().lower() not in SMITHERY_REGISTRY_SPECS
         ):
             continue
         prefix_tokens = []
@@ -335,47 +336,28 @@ def _smithery_run_target(
                 return None
             prefix_tokens.append(_unquote(prefix_arg).lower())
 
-        def valid_runner_prefix(runner, tokens):
-            safe_flags = {'-y', '--yes'}
-            if runner in {'bunx', 'bun'}:
-                safe_flags.update({'--bun', '--no-install', '--verbose', '--silent'})
-            if runner == 'npm':
-                safe_flags.add('--')
-            if any(token.startswith('-') and token not in safe_flags for token in tokens):
-                return False
-            positional = [token for token in tokens if token not in safe_flags]
-            if runner == 'npm':
-                return tokens[-1:] == ['--'] and positional in (['exec'], ['x'])
-            if runner == 'bun':
-                return positional == ['x']
-            return not positional
-
-        if command_base in NPM_RUNNERS:
-            if not valid_runner_prefix(command_base, prefix_tokens):
+        if command_base == 'npx':
+            if any(token not in {'-y', '--yes'} for token in prefix_tokens):
                 return None
-        elif command_base == 'bun':
-            if not valid_runner_prefix(command_base, prefix_tokens):
+        elif command_base == 'npm':
+            if prefix_tokens not in (['exec', '--'], ['x', '--']):
                 return None
-        elif command_base == 'cmd':
+        else:
             runner_positions = [
                 offset for offset, token in enumerate(prefix_tokens)
-                if _trusted_launcher_base(token) in NPM_RUNNERS | {'bun'}
+                if token in {'npx', 'npx.cmd'}
             ]
             if len(runner_positions) != 1:
                 return None
             runner_index = runner_positions[0]
             shell_prefix = prefix_tokens[:runner_index]
-            if '/c' not in shell_prefix or any(
-                token not in {'/c', '/d', '/s'} for token in shell_prefix
+            runner_flags = prefix_tokens[runner_index + 1:]
+            if (
+                '/c' not in shell_prefix
+                or any(token not in {'/c', '/d', '/s'} for token in shell_prefix)
+                or any(token not in {'-y', '--yes'} for token in runner_flags)
             ):
                 return None
-            if not valid_runner_prefix(
-                _trusted_launcher_base(prefix_tokens[runner_index]),
-                prefix_tokens[runner_index + 1:],
-            ):
-                return None
-        else:
-            return None
         target = _smithery_command_target(args[index + 1:])
         if target is None:
             return None
@@ -779,7 +761,7 @@ def compute_fingerprint(
     if nuget_package:
         return f'nuget:{nuget_package}'
 
-    smithery_target = _smithery_run_target(safe_args, base)
+    smithery_target = _smithery_run_target(safe_args, launcher_base or '')
     if smithery_target:
         return f'smithery:{smithery_target}'
     if base == 'smithery':

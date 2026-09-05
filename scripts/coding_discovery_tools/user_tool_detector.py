@@ -18,6 +18,7 @@ from .coding_tool_base import BaseToolDetector
 from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
+    _read_own_regular_file,
     extract_version_number,
     machine_global_binary_owned_by_user,
     resolve_npm_global_tool_bin,
@@ -130,12 +131,13 @@ def _detect_extension_tool(
     return detector.detect()
 
 
-def _npm_cli_version(path: Path, npm_package: str) -> Optional[str]:
+def _npm_cli_version(path: Path, npm_package: str, user_home: Path) -> Optional[str]:
     """Version of the install at ``path``, read from its npm ``package.json``.
 
     The binary is never executed: it sits in a user-writable directory and the
-    scan runs as root/SYSTEM, so running it would let a user execute code as the
-    scanner. An unreadable layout yields None, and the caller reports "Unknown".
+    scan runs as root/SYSTEM. The metadata is read through
+    ``_read_own_regular_file``, which binds its regular-file, redirect and size
+    checks to the opened fd, so the scanned user cannot swap the path underneath.
     """
     bin_dir = path.parent
     candidates = [
@@ -143,20 +145,17 @@ def _npm_cli_version(path: Path, npm_package: str) -> Optional[str]:
         bin_dir.parent / "lib" / "node_modules" / npm_package / "package.json",
     ]
     for package_json in candidates:
+        raw = _read_own_regular_file(package_json, user_home, MAX_CONFIG_FILE_SIZE)
+        if not raw:
+            continue
         try:
-            # User-writable path read by a root scan. is_file() follows links, so
-            # reject the link itself too: a FIFO would block the read, an oversized
-            # file would exhaust it, and a link could redirect it out of the tree.
-            if (package_json.is_symlink() or not package_json.is_file()
-                    or package_json.stat().st_size > MAX_CONFIG_FILE_SIZE):
-                continue
-            data = json.loads(package_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            data = json.loads(raw)
+        except ValueError:
             continue
         version = data.get("version") if isinstance(data, dict) else None
         if isinstance(version, str):
             return version
-    logger.debug(f"No {npm_package} package.json beside {path}")
+    logger.debug(f"No readable {npm_package} package.json beside {path}")
     return None
 
 
@@ -169,7 +168,7 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
     def found(path) -> Dict:
         return {
             "name": detector.tool_name,
-            "version": _npm_cli_version(Path(path), npm_package) or "Unknown",
+            "version": _npm_cli_version(Path(path), npm_package, user_home) or "Unknown",
             "install_path": str(path),
         }
 

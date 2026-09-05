@@ -92,7 +92,10 @@ class _CliCase(unittest.TestCase):
 
     def _run(self, system="Darwin", is_root=False):
         det = _detector(self.TOOL)
-        with patch(f"{_MOD}.platform.system", return_value=system), \
+        # Replace the module reference in this namespace only: patching
+        # platform.system itself also flips it for utils' safe-read helper.
+        fake_platform = Mock(system=Mock(return_value=system))
+        with patch(f"{_MOD}.platform", fake_platform), \
              patch(f"{_MOD}.is_running_as_root", return_value=is_root), \
              patch(f"{_MOD}.resolve_npm_global_tool_bin", return_value=None), \
              patch(f"{_MOD}.run_command", return_value=None):

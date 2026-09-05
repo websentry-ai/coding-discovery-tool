@@ -1124,6 +1124,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     SECURITY_RELEVANT_KEYS = {
         "chat.tools.global.autoApprove", "chat.tools.autoApprove",  # global YOLO (current + legacy)
         "chat.permissions.default",
+        "chat.defaultConfiguration", "chat.agentSessions.defaultConfiguration",  # + pre-rename
         "chat.tools.eligibleForAutoApproval",
         "chat.tools.terminal.enableAutoApprove", "chat.tools.terminal.autoApprove",
         "chat.tools.edits.autoApprove",
@@ -1139,6 +1140,11 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     # levels of the permissions picker (``chat.permissions.default``).
     _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove", "chat.tools.autoApprove")
     _BYPASS_PERMISSION_LEVELS = ("autoApprove", "autopilot")
+    # The session defaults object, and the name it carried before the rename. Only
+    # ``approvals`` decides confirmations; ``mode`` picks the chat mode, and
+    # autopilot mode still leaves approvals at whatever they are set to.
+    _DEFAULT_CONFIG_KEYS = ("chat.defaultConfiguration",
+                            "chat.agentSessions.defaultConfiguration")
 
     @abstractmethod
     def _scan_users(self, callback) -> None:
@@ -1312,6 +1318,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             return "bypassPermissions"
         if data.get("chat.permissions.default") in self._BYPASS_PERMISSION_LEVELS:
             return "bypassPermissions"
+        for key in self._DEFAULT_CONFIG_KEYS:
+            config = data.get(key)
+            if isinstance(config, dict) and config.get("approvals") == "allowAll":
+                return "bypassPermissions"
         edits = data.get("chat.tools.edits.autoApprove")
         if isinstance(edits, dict) and any(v is True for v in edits.values()):
             return "acceptEdits"

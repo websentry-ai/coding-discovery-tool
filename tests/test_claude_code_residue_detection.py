@@ -735,8 +735,9 @@ class TestToolConfigDirsDiagnostic(unittest.TestCase):
         self.assertEqual([], utils_mod.tool_config_dirs_present(self.home / "nope"))
 
     def test_is_a_queryable_sentry_tag(self):
-        """Must be a tag, not just context, or it can't be grouped on in Sentry."""
+        """Must be tags, not just context, or they can't be grouped on in Sentry."""
         self.assertIn("config_dirs_present", utils_mod._SENTRY_TAG_KEYS)
+        self.assertIn("config_dirs", utils_mod._SENTRY_TAG_KEYS)
 
 
 class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):

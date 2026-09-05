@@ -2133,12 +2133,12 @@ class AIToolsDetector:
         enriched (the IDE branch in process_single_tool reads this). None when
         neither is present."""
         detected_lower = {t.get("name", "").lower() for t in tools}
-        if "github copilot chat (vs code)" in detected_lower:
-            self._canonical_vscode_copilot = "github copilot chat (vs code)"
-        elif "github copilot (vs code)" in detected_lower:
-            self._canonical_vscode_copilot = "github copilot (vs code)"
-        else:
-            self._canonical_vscode_copilot = None
+        for editor in ("vs code", "cursor"):
+            for label in (f"github copilot chat ({editor})", f"github copilot ({editor})"):
+                if label in detected_lower:
+                    self._canonical_vscode_copilot = label
+                    return
+        self._canonical_vscode_copilot = None
 
     # -- Augment Code: memoized shared-config accessors -----------------------
 
@@ -2515,7 +2515,6 @@ class AIToolsDetector:
             # when a VS Code Copilot surface was ALREADY detected).
             is_canonical_vscode = (
                 "ide" not in tool
-                and tool_name.endswith("(vs code)")
                 and tool_name == self._canonical_vscode_copilot
             )
             if is_canonical_vscode:

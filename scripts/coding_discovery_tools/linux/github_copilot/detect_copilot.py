@@ -10,7 +10,6 @@ from ...jetbrains_naming_helpers import plugin_entries
 from ...linux.jetbrains.jetbrains import LinuxJetBrainsDetector
 from ...linux_extraction_helpers import get_linux_user_homes
 from ...vscode_extension_helpers import (
-    VSCODE_EDITOR_NAMES,
     extensions_dir_for_editor,
     find_extension_in_editor,
 )
@@ -65,6 +64,12 @@ def _read_builtin_copilot_identity(ext_dir: Path):
     return name_label, version
 
 
+# Editors whose Copilot rows the rules/MCP extractors can enrich.
+SUPPORTED_IDES = {
+    "Code": "VS Code",
+    "Cursor": "Cursor",
+}
+
 _MARKETPLACE_EXTENSIONS = (
     ("github.copilot", "GitHub Copilot"),
     ("github.copilot-chat", "GitHub Copilot Chat"),
@@ -97,7 +102,7 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
         results = []
         code_found = False
 
-        for ide_key, ide_name in VSCODE_EDITOR_NAMES.items():
+        for ide_key, ide_name in SUPPORTED_IDES.items():
             for ext_id, label in _MARKETPLACE_EXTENSIONS:
                 entry = find_extension_in_editor(user_home, ide_key, ext_id)
                 if entry is None:

@@ -84,7 +84,7 @@ class _GitHubCopilotVscodeMcpMixin:
         self.primary_path.write_text(text, encoding="utf-8")
 
     def _extract(self):
-        return self.extractor._extract_vscode_configs_for_user(self.user_home)
+        return self.extractor._extract_vscode_configs_for_user(self.user_home, ["Code"])
 
     def _install_gitlens_provider(self, declares_provider: bool = True) -> Path:
         extension_dir = (

@@ -1,8 +1,8 @@
-"""Copilot must be detected in VS Code forks, not only stock VS Code.
+"""Copilot must be detected in Cursor, not only stock VS Code.
 
 The marketplace scan read ``~/.vscode/extensions`` alone, so a user running
-Copilot inside Cursor, Windsurf, VSCodium or Antigravity reported no tool at
-all. ``cline``, ``roo_code`` and ``kilocode`` already scan several editors.
+Copilot inside Cursor reported no tool at all. Scope matches what the rules and
+MCP extractors can enrich, so the other forks stay out until they can be too.
 """
 
 import json
@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
+from scripts.coding_discovery_tools.vscode_extension_helpers import vscode_family_editor_dirs
 from scripts.coding_discovery_tools.linux.github_copilot.detect_copilot import (
     LinuxCopilotDetector,
 )
@@ -61,10 +62,7 @@ class _Fixture(unittest.TestCase):
 
 class _EditorCoverageCase(_Fixture):
     def test_detected_in_every_supported_editor(self):
-        for editor, label in (
-            ("Code", "VS Code"), ("Cursor", "Cursor"), ("Windsurf", "Windsurf"),
-            ("VSCodium", "VSCodium"), ("Antigravity", "Antigravity"),
-        ):
+        for editor, label in (("Code", "VS Code"), ("Cursor", "Cursor")):
             with self.subTest(editor=editor):
                 self.tearDown()
                 self.setUp()
@@ -83,11 +81,21 @@ class _EditorCoverageCase(_Fixture):
 
     def test_multiple_editors_each_reported(self):
         self._install("Code", "github.copilot")
-        self._install("Windsurf", "github.copilot")
+        self._install("Cursor", "github.copilot")
         self.assertEqual(
-            {"GitHub Copilot (VS Code)", "GitHub Copilot (Windsurf)"},
+            {"GitHub Copilot (VS Code)", "GitHub Copilot (Cursor)"},
             {r["name"] for r in self._detect()},
         )
+
+    def test_unenrichable_forks_are_not_reported(self):
+        """Detection tracks enrichment: a row we cannot enrich would look clean
+        rather than unscanned."""
+        for editor in ("Windsurf", "VSCodium", "Antigravity"):
+            with self.subTest(editor=editor):
+                self.tearDown()
+                self.setUp()
+                self._install(editor, "github.copilot")
+                self.assertEqual([], self._detect())
 
     def test_nothing_installed_reports_nothing(self):
         self.assertEqual([], self._detect())
@@ -112,7 +120,7 @@ class _BuiltinFallbackCase(_Fixture):
                                          "publisher": "GitHub", "install_path": "/builtin"}]):
             return det._detect_vscode_for_user(self.user_home)
 
-    def test_fork_extension_does_not_suppress_builtin(self):
+    def test_cursor_extension_does_not_suppress_builtin(self):
         self._install("Cursor", "github.copilot")
         names = [r["name"] for r in self._detect_with_builtin()]
         self.assertIn("GitHub Copilot (Cursor)", names)
@@ -149,9 +157,70 @@ class TestLinuxBuiltinFallback(_BuiltinFallbackCase):
     DETECTOR = LinuxCopilotDetector
 
 
-# The bases only carry the cases; running them directly would double-count.
-del _Fixture, _EditorCoverageCase, _BuiltinFallbackCase
-
-
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEditorDirRouting(unittest.TestCase):
+    """A row's editor decides which user-data dir its rules and MCP come from."""
+
+    def test_maps_each_row_to_its_own_editor(self):
+        self.assertEqual(["Code"], vscode_family_editor_dirs("GitHub Copilot (VS Code)"))
+        self.assertEqual(["Cursor"], vscode_family_editor_dirs("GitHub Copilot Chat (Cursor)"))
+
+    def test_jetbrains_row_gets_no_vscode_dirs(self):
+        self.assertEqual([], vscode_family_editor_dirs("GitHub Copilot PyCharm"))
+
+    def test_unnamed_tool_keeps_the_legacy_union(self):
+        self.assertEqual(["Code", "Cursor"], vscode_family_editor_dirs(None))
+
+
+class TestCursorEnrichmentSources(unittest.TestCase):
+    """Cursor rows must read Cursor's own dirs, not VS Code's and not JetBrains'."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp) / "alice"
+        self.app_support = self.home / "Library" / "Application Support"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mcp(self, editor: str, servers: dict) -> Path:
+        path = self.app_support / editor / "User" / "mcp.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"servers": servers}), encoding="utf-8")
+        return path
+
+    def _extract(self, tool_name: str):
+        from scripts.coding_discovery_tools.macos.github_copilot import mcp_config_extractor as mod
+        ex = mod.MacOSGitHubCopilotMCPConfigExtractor()
+        with patch.object(ex, "_extract_workspace_configs", return_value=[]), \
+             patch.object(ex, "_extract_jetbrains_configs", return_value=[{"path": "JETBRAINS"}]), \
+             patch(f"{mod.__name__}.extract_ide_global_configs_with_root_support",
+                   side_effect=lambda fn, tool_name=None: fn(self.home)):
+            return ex.extract_mcp_config(tool_name=tool_name) or {"projects": []}
+
+    def test_cursor_row_reads_cursor_user_dir(self):
+        self._mcp("Cursor", {"cursor-server": {}})
+        self._mcp("Code", {"vscode-server": {}})
+        paths = [p.get("path", "") for p in self._extract("GitHub Copilot (Cursor)")["projects"]]
+        self.assertTrue(any("Cursor" in p for p in paths), paths)
+        self.assertFalse(any(p.endswith("Code/User") for p in paths), paths)
+
+    def test_cursor_row_does_not_read_jetbrains(self):
+        self._mcp("Cursor", {"cursor-server": {}})
+        paths = [p.get("path", "") for p in self._extract("GitHub Copilot (Cursor)")["projects"]]
+        self.assertNotIn("JETBRAINS", paths)
+
+    def test_vscode_row_unchanged(self):
+        self._mcp("Code", {"vscode-server": {}})
+        self._mcp("Cursor", {"cursor-server": {}})
+        paths = [p.get("path", "") for p in self._extract("GitHub Copilot (VS Code)")["projects"]]
+        self.assertTrue(any(p.endswith("Code/User") for p in paths), paths)
+        self.assertFalse(any("Cursor" in p for p in paths), paths)
+
+
+# The bases only carry the cases; running them directly would double-count.
+del _Fixture, _EditorCoverageCase, _BuiltinFallbackCase

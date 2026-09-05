@@ -142,6 +142,7 @@ class _CliCase(unittest.TestCase):
         self.assertEqual(str(binary), result["install_path"])
         self.assertEqual("7.7.7", result["version"])
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs are POSIX-only")
     def test_fifo_metadata_is_skipped_not_read(self):
         """A FIFO in the user's tree would block a root scan indefinitely."""
         shim = self._make(f"AppData/Roaming/npm/{self.TOOL}.cmd")
@@ -159,7 +160,10 @@ class _CliCase(unittest.TestCase):
         outside.write_text('{"version": "leaked"}')
         pkg = shim.parent / "node_modules" / self.PACKAGE / "package.json"
         pkg.parent.mkdir(parents=True, exist_ok=True)
-        pkg.symlink_to(outside)
+        try:
+            pkg.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation not permitted here")
         result, _ = self._run(system="Windows", is_root=True)
         self.assertEqual("Unknown", result["version"])
 

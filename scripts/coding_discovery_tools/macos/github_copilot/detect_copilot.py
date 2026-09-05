@@ -7,7 +7,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseCopilotDetector as BaseCopilotDetectorBase
 from ...jetbrains_naming_helpers import plugin_entries
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
-from ...macos_extraction_helpers import is_running_as_root
+from ...macos_extraction_helpers import MACHINE_APPS_DIR, is_running_as_root
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,18 @@ _VSCODE_APP_EXTENSION_ROOTS = [
     Path("/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/extensions"),
 ]
 _VSCODE_BUILTIN_COPILOT_DIRS = ("copilot", "copilot-chat")
+
+
+def _app_extension_roots(user_home: Path) -> List[Path]:
+    """Bundle extension roots, machine-wide then under the user's ~/Applications."""
+    roots = list(_VSCODE_APP_EXTENSION_ROOTS)
+    for root in _VSCODE_APP_EXTENSION_ROOTS:
+        try:
+            roots.append(user_home / "Applications" / root.relative_to(MACHINE_APPS_DIR))
+        except ValueError:
+            continue
+    return roots
+
 
 # Per-user VS Code data dirs. Their presence means the user actually uses VS Code,
 # so a machine-wide built-in Copilot can be attributed to them (and not to every
@@ -180,7 +192,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
             logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
             return []
 
-        for ext_root in _VSCODE_APP_EXTENSION_ROOTS:
+        for ext_root in _app_extension_roots(user_home):
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
                 copilot_dir = ext_root / dir_name
                 try:

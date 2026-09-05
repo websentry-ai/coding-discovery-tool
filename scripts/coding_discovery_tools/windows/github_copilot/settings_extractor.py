@@ -10,9 +10,8 @@ from ...windows_extraction_helpers import is_running_as_admin
 
 logger = logging.getLogger(__name__)
 
-# VS Code ``User`` config dirs under %APPDATA% (stable + Insiders), stable first.
-# Resolved per-user from the user's home — NOT from %APPDATA% of the running
-# process, which under a service/SYSTEM token points at systemprofile, not a user.
+# Resolved per-user from the user's home, NOT from the running process's %APPDATA%
+# — under a SYSTEM token that points at systemprofile rather than a real user.
 _USER_CONFIG_SUBPATHS = (
     ("AppData", "Roaming", "Code", "User"),
     ("AppData", "Roaming", "Code - Insiders", "User"),

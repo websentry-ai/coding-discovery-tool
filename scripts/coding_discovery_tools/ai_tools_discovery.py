@@ -2552,9 +2552,8 @@ class AIToolsDetector:
                 "projects": projects_list,
             }
 
-            # Attach VS Code Copilot agent permissions (from settings.json) to the
-            # canonical VS Code row only, mirroring the skills attachment above so a
-            # multi-row install reports one permission record. Backend-ready shape.
+            # Canonical row only, mirroring the skills attachment above, so a
+            # multi-row install reports one permission record.
             if is_canonical_vscode and self._github_copilot_settings_extractor:
                 logger.info(f"  Extracting {tool_name} permissions...")
                 try:

@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -280,10 +281,6 @@ class TestCanonicalRowAttachment(unittest.TestCase):
         self.assertNotIn("permissions", plain, "a non-canonical Copilot row must not double-attach")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTerminalRuleEdgeCases(unittest.TestCase):
     """Reachable shapes of chat.tools.terminal.autoApprove."""
 
@@ -538,3 +535,119 @@ class TestOwnershipContainment(unittest.TestCase):
                               "a settings file not owned by the home's user must be refused")
         finally:
             os.stat = real_stat
+
+
+class TestTerminalMasterSwitch(unittest.TestCase):
+    """chat.tools.terminal.enableAutoApprove gates the whole terminal feature."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+        self.auto = {"npm run build": True, "rm": False}
+
+    def _rules(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("allow_rules", []), (rec or {}).get("deny_rules", [])
+
+    def test_switch_off_drops_allow_rules_but_keeps_denies(self):
+        allow, deny = self._rules({"chat.tools.terminal.autoApprove": self.auto,
+                                   "chat.tools.terminal.enableAutoApprove": False})
+        self.assertEqual(allow, [], "nothing is auto-approved while the switch is off")
+        self.assertEqual(deny, ["Bash(rm *)"])
+
+    def test_switch_absent_keeps_allow_rules(self):
+        # the setting defaults to true in VS Code, so absence means enabled
+        allow, _ = self._rules({"chat.tools.terminal.autoApprove": self.auto})
+        self.assertEqual(allow, ["Bash(npm run build *)"])
+
+    def test_switch_on_keeps_allow_rules(self):
+        allow, _ = self._rules({"chat.tools.terminal.autoApprove": self.auto,
+                                "chat.tools.terminal.enableAutoApprove": True})
+        self.assertEqual(allow, ["Bash(npm run build *)"])
+
+
+class TestPermissionLevelAndEdits(unittest.TestCase):
+    """chat.permissions.default (the permissions picker) and edit auto-approval."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _mode(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["permission_mode"]
+
+    def test_auto_approve_level_is_bypass(self):
+        self.assertEqual(self._mode({"chat.permissions.default": "autoApprove"}),
+                         "bypassPermissions")
+
+    def test_autopilot_level_is_bypass(self):
+        self.assertEqual(self._mode({"chat.permissions.default": "autopilot"}),
+                         "bypassPermissions")
+
+    def test_default_level_stays_default(self):
+        self.assertEqual(self._mode({"chat.permissions.default": "default"}), "default")
+
+    def test_edit_auto_approve_is_accept_edits(self):
+        self.assertEqual(self._mode({"chat.tools.edits.autoApprove": {"**/*": True}}),
+                         "acceptEdits")
+
+    def test_edit_deny_only_stays_default(self):
+        self.assertEqual(self._mode({"chat.tools.edits.autoApprove": {"**/.env": False}}),
+                         "default")
+
+    def test_global_bypass_outranks_accept_edits(self):
+        self.assertEqual(self._mode({"chat.tools.edits.autoApprove": {"**/*": True},
+                                     "chat.tools.global.autoApprove": True}),
+                         "bypassPermissions")
+
+
+class TestNonRegularFiles(unittest.TestCase):
+    """A FIFO planted at settings.json must not stall a privileged scan."""
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs are POSIX-only")
+    def test_fifo_is_skipped_without_blocking(self):
+        home = Path(tempfile.mkdtemp(prefix="fifo-home-", dir=str(Path.home())))
+        try:
+            ud = home / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            os.mkfifo(str(ud / "settings.json"))
+
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(home)
+            result = {}
+            worker = threading.Thread(target=lambda: result.setdefault("r", ex.extract_settings()))
+            worker.daemon = True
+            worker.start()
+            worker.join(timeout=15)
+            self.assertFalse(worker.is_alive(), "a planted FIFO hung the scan")
+            self.assertIsNone(result.get("r"))
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+class TestHardLinkContainment(unittest.TestCase):
+    """A hard link keeps its target's contents while its path sits in the home."""
+
+    def test_hard_link_to_outside_file_is_refused(self):
+        home = Path(tempfile.mkdtemp(prefix="link-home-", dir=str(Path.home())))
+        outside = Path(tempfile.mkdtemp(prefix="link-outside-"))
+        try:
+            victim = outside / "victim.json"
+            victim.write_text(json.dumps({"chat.tools.global.autoApprove": True,
+                                          "chat.mcp.access": "OUT-OF-HOME"}), encoding="utf-8")
+            ud = home / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            try:
+                os.link(str(victim), str(ud / "settings.json"))
+            except (OSError, NotImplementedError, AttributeError) as e:
+                self.skipTest(f"hard links unavailable here: {e}")
+
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(home)
+            self.assertNotIn("OUT-OF-HOME", json.dumps(ex.extract_settings() or {}),
+                             "content behind a hard link must never be reported")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

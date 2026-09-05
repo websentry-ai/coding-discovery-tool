@@ -573,7 +573,7 @@ def enumerate_vscode_user_files(code_user_base: Path, filename: str) -> List[Pat
 
     try:
         default_file = code_user_base / filename
-        if default_file.exists():
+        if default_file.is_file():  # not exists(): a FIFO here would hang the read
             files.append(default_file)
     except Exception as exc:
         logger.debug("enumerate_vscode_user_files: skipping default in %s: %s", code_user_base, exc)

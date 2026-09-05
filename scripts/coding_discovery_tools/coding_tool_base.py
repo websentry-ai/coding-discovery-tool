@@ -1104,31 +1104,23 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     """Extract VS Code GitHub Copilot agent-mode permissions from ``settings.json``.
 
     Copilot's agent permissions have no dedicated file — they live in VS Code's
-    ``settings.json`` (JSONC). This reads the **user-scope** file for every VS Code
-    profile (the default profile plus each ``profiles/<id>``, on both the stable
-    and Insiders channels) and emits the same backend-ready record the Cursor
-    extractor does (``permission_mode`` + ``allow_rules`` / ``deny_rules`` /
-    ``mcp_*``), so it routes as tool-level permissions with no backend change.
+    ``settings.json`` (JSONC), read here for every profile on both channels and
+    emitted as the same backend-ready record the Cursor extractor produces.
 
-    Scope is deliberately user + profiles only. The auto-approve keys are
-    user/application-scoped — ``chat.tools.global.autoApprove`` applies globally
-    across all workspaces — and VS Code does not honor them from a workspace
-    ``.vscode/settings.json`` (and ignores workspace settings entirely in an
-    untrusted workspace), so reading them from workspace files would report a
-    posture the tool never applies. The authoritative posture lives in user and
-    profile settings, and every profile is read because a locked-down default with
-    a YOLO named profile is a real risk.
+    User + profile scope only: these keys are user/application-scoped and VS Code
+    does not honour them from a workspace file, so reading workspace settings would
+    report a posture the tool never applies.
     """
 
-    # Every key here was verified to exist in the VS Code configuration registry
-    # (workbench bundle) — blog-era / Business-only keys that the extension does
-    # not actually register are deliberately excluded so we never report a setting
-    # the tool ignores. ``chat.tools.autoApprove`` is the pre-rename name of
-    # ``chat.tools.global.autoApprove``, kept only to read older installs.
+    # Every key was verified against the VS Code configuration registry; keys the
+    # extension does not register are excluded so we never report a setting the
+    # tool ignores. ``chat.tools.autoApprove`` is the pre-rename legacy name.
     SECURITY_RELEVANT_KEYS = {
         "chat.tools.global.autoApprove", "chat.tools.autoApprove",  # global YOLO (current + legacy)
+        "chat.permissions.default",
         "chat.tools.eligibleForAutoApproval",
         "chat.tools.terminal.enableAutoApprove", "chat.tools.terminal.autoApprove",
+        "chat.tools.edits.autoApprove",
         "chat.tools.urls.autoApprove",
         "chat.agent.enabled", "chat.agent.sandbox.enabled",
         "chat.agent.networkFilter", "chat.agent.allowedNetworkDomains",
@@ -1137,10 +1129,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         "github.copilot.chat.claudeAgent.enabled",
     }
 
-    # A truthy global auto-approve removes every confirmation (bypass); there is no
-    # separate file-edit auto-approve setting in the registry, so the mode is either
-    # bypass or the default gated mode.
+    # A truthy global auto-approve removes every confirmation, as do the elevated
+    # levels of the permissions picker (``chat.permissions.default``).
     _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove", "chat.tools.autoApprove")
+    _BYPASS_PERMISSION_LEVELS = ("autoApprove", "autopilot")
 
     @abstractmethod
     def _scan_users(self, callback) -> None:
@@ -1153,12 +1145,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         Insiders) — the parents of ``settings.json`` and ``profiles/``."""
 
     def _iter_user_settings_files(self, user_home):
-        """Yield the default-profile ``settings.json`` plus every named profile's
-        ``profiles/<id>/settings.json``, for each channel (stable + Insiders), via
-        the same shared VS Code profile enumeration the ``mcp.json`` discovery uses.
-        Each profile is its own permission surface — a YOLO named profile is as real
-        a risk as the default — so all are read (not first-wins) and merged to the
-        most permissive posture."""
+        """Yield the default-profile ``settings.json`` plus every named profile's,
+        for each channel. Every profile is read rather than first-wins: a YOLO named
+        profile is as real a risk as the default one."""
         home = Path(user_home)
         for user_dir in self._user_config_dirs(home):
             for path in enumerate_vscode_user_files(user_dir, "settings.json"):
@@ -1166,19 +1155,15 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
 
     @staticmethod
     def _read_contained(path: Path, user_home: Path) -> Optional[str]:
-        """Read ``path`` only if the descriptor we actually hold is a regular file
-        inside the user's home.
-
-        Validating a path and then opening it in a separate step leaves a window in
-        which a user can swap their settings.json for a link out of their home; an
-        elevated scan would then read, and report, a file the user cannot see. So
-        the file is opened once and every check is made against that open
-        descriptor — including comparing its identity to the in-home path's, which
-        refuses a file swapped either side of the open. An in-home symlink
-        (stow/chezmoi) resolves inside and is still read."""
+        """Read ``path`` only if the descriptor we hold is a regular file belonging
+        to the user whose home it sits in. Checks run against that one open
+        descriptor, never a re-resolved path, so a file swapped mid-scan is refused.
+        An in-home symlink (stow/chezmoi) resolves inside and is still read."""
         fd = None
         try:
-            fd = os.open(str(path), os.O_RDONLY)
+            # O_NONBLOCK: opening a FIFO read-only otherwise blocks until a writer
+            # appears, which would hang the whole scan on one planted path.
+            fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 return None
@@ -1186,13 +1171,15 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             base = os.path.normcase(os.path.realpath(str(user_home)))
             if not (real == base or real.startswith(base.rstrip(os.sep) + os.sep)):
                 return None
-            # The file must belong to the user whose home it sits in. A hard link
-            # keeps its target's owner while its path stays inside the home, so
-            # containment alone cannot see through one; ownership can. (st_uid is 0
-            # for every file on Windows, where this comparison is a no-op.)
+            # A hard link keeps its target's owner while its path stays inside the
+            # home, so containment alone cannot see through one. st_nlink catches it
+            # on every platform; st_uid is 0 for all files on Windows.
+            if st.st_nlink > 1:
+                logger.info(f"Refusing {path}: multiply-linked, may not be this user's file")
+                return None
             home_stat = os.stat(base)
             if st.st_uid != home_stat.st_uid:
-                logger.debug(f"refusing {path}: owned by uid {st.st_uid}, home is {home_stat.st_uid}")
+                logger.info(f"Refusing {path}: owned by uid {st.st_uid}, home is {home_stat.st_uid}")
                 return None
             resolved = os.stat(real)
             if (resolved.st_dev, resolved.st_ino) != (st.st_dev, st.st_ino):
@@ -1227,11 +1214,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         self._scan_users(extract_for_user)
         if not records:
             return None
-        # Under an elevated multi-user scan the canonical row carries ONE permissions
-        # record, and the per-user filter keeps it only for the user whose home holds
-        # its settings_path. Return the MOST-PERMISSIVE user's record (with its own
-        # settings_path) so a YOLO user is never hidden behind a benign one — picking
-        # records[0] could surface a locked-down user and drop the risky one.
+        # The canonical row carries one permissions record, so under a multi-user
+        # scan return the riskiest user's rather than whichever was read first.
         return max(records, key=self._permissiveness)
 
     @staticmethod
@@ -1255,9 +1239,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 records.append(record)
         if not records:
             return None
-        # Base the merge on the most-permissive profile/channel so settings_path
-        # attributes to where the risk actually is (e.g. an Insiders YOLO profile),
-        # not just the first file read.
+        # Merge from the most-permissive profile so settings_path attributes to
+        # where the risk is, not to whichever file was read first.
         records.sort(key=self._permissiveness, reverse=True)
         return self._merge_records(records[0], records[1:])
 
@@ -1310,6 +1293,11 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     def _permission_mode(self, data: Dict) -> str:
         if any(data.get(k) is True for k in self._GLOBAL_AUTOAPPROVE_KEYS):
             return "bypassPermissions"
+        if data.get("chat.permissions.default") in self._BYPASS_PERMISSION_LEVELS:
+            return "bypassPermissions"
+        edits = data.get("chat.tools.edits.autoApprove")
+        if isinstance(edits, dict) and any(v is True for v in edits.values()):
+            return "acceptEdits"
         return "default"
 
     @staticmethod
@@ -1332,10 +1320,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     def _terminal_rules(self, data: Dict) -> Tuple[List[str], List[str]]:
         """Split ``chat.tools.terminal.autoApprove`` into allow/deny Bash rules.
 
-        A verdict is either a bare boolean or the object form VS Code also accepts
-        (``{"approve": true, "matchCommandLine": true}``); both decide the same
-        thing, so read ``approve`` out of the object rather than dropping the entry
-        — a missed object-form ``false`` would hide a real denial."""
+        A verdict is a bare boolean or the object form ``{"approve": true, ...}``;
+        both are read, since a missed object-form ``false`` would hide a denial.
+        ``chat.tools.terminal.enableAutoApprove`` (default true) is the master
+        switch — with it off the allow patterns are inert, so only denials stand."""
         allow, deny = [], []
         auto = data.get("chat.tools.terminal.autoApprove")
         if isinstance(auto, dict):
@@ -1353,6 +1341,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                     allow.append(rule)
                 elif approved is False:
                     deny.append(rule)
+        if data.get("chat.tools.terminal.enableAutoApprove") is False:
+            allow = []
         return self._dedupe(allow), self._dedupe(deny)
 
     @staticmethod
@@ -1365,8 +1355,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return out
 
     def _merge_records(self, base: Dict, others: List[Dict]) -> Dict:
-        """Union the allow/deny rules across a user's profile records
-        — concatenated base-first, order-preserving de-dupe — and escalate the mode
+        """Union the allow/deny rules across a user's profiles and escalate the mode
         to the most permissive seen, so one YOLO profile surfaces even when the
         default profile is locked down."""
         if not others:

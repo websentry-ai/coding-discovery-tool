@@ -142,6 +142,23 @@ class _CliCase(unittest.TestCase):
         self.assertEqual(str(binary), result["install_path"])
         self.assertEqual("7.7.7", result["version"])
 
+    def test_fifo_metadata_is_skipped_not_read(self):
+        """A FIFO in the user's tree would block a root scan indefinitely."""
+        shim = self._make(f"AppData/Roaming/npm/{self.TOOL}.cmd")
+        pkg = shim.parent / "node_modules" / self.PACKAGE / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(pkg)
+        result, _ = self._run(system="Windows", is_root=True)
+        self.assertEqual("Unknown", result["version"])
+
+    def test_oversized_metadata_is_skipped(self):
+        shim = self._make(f"AppData/Roaming/npm/{self.TOOL}.cmd")
+        pkg = shim.parent / "node_modules" / self.PACKAGE / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        pkg.write_text('{"version": "1.0.0", "pad": "' + "x" * (60 * 1024) + '"}')
+        result, _ = self._run(system="Windows", is_root=True)
+        self.assertEqual("Unknown", result["version"])
+
     def test_windows_nvm_windows_shim_detected(self):
         shim = self._make(f"AppData/Roaming/nvm/v20.11.0/{self.TOOL}.cmd")
         result, _ = self._run(system="Windows", is_root=True)

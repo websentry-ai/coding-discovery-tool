@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
-from .constants import VERSION_TIMEOUT
+from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
     extract_version_number,
@@ -144,6 +144,10 @@ def _npm_cli_version(path: Path, npm_package: str) -> Optional[str]:
     ]
     for package_json in candidates:
         try:
+            # User-writable path read by a root scan: a FIFO would block it and an
+            # oversized file would exhaust it, so require a bounded regular file.
+            if not package_json.is_file() or package_json.stat().st_size > MAX_CONFIG_FILE_SIZE:
+                continue
             data = json.loads(package_json.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue

@@ -209,7 +209,7 @@ class TestUserPromptsAndInstructions(unittest.TestCase):
             real_path = Path
             mock_path.home.return_value = self.user_home
             mock_path.side_effect = lambda *a, **k: real_path(*a, **k)
-            self.extractor._extract_global_vscode_rules(projects_by_root)
+            self.extractor._extract_global_vscode_rules(projects_by_root, ["Code"])
         from scripts.coding_discovery_tools.macos_extraction_helpers import build_project_list
         return build_project_list(projects_by_root)
 
@@ -266,7 +266,7 @@ class TestVscodeCopilotMcpIdentityScoping(unittest.TestCase):
 
     def setUp(self):
         self.extractor = MacOSGitHubCopilotMCPConfigExtractor()
-        self.extractor._extract_vscode_configs = lambda: [
+        self.extractor._extract_vscode_configs = lambda editor_dirs=None: [
             {"path": "/vscode", "mcpServers": [{"name": "vs"}]}
         ]
         self.extractor._extract_jetbrains_configs = lambda: [

@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 from typing import List, Dict
+from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH
@@ -52,8 +53,9 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
 
         tool_name_lower = tool_name.lower() if tool_name else ""
 
-        if not tool_name or "vs code" in tool_name_lower or "vscode" in tool_name_lower:
-            self._extract_global_vscode_rules(projects_by_root)
+        editor_dirs = vscode_family_editor_dirs(tool_name)
+        if editor_dirs:
+            self._extract_global_vscode_rules(projects_by_root, editor_dirs)
 
         if not tool_name or self._is_jetbrains_tool(tool_name):
             self._extract_global_jetbrains_rules(projects_by_root)
@@ -68,28 +70,32 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         tool_name_lower = tool_name.lower()
         return any(pattern.lower() in tool_name_lower for pattern in self.JETBRAINS_IDE_PATTERNS)
 
-    def _extract_global_vscode_rules(self, projects_by_root: Dict) -> None:
+    def _extract_global_vscode_rules(self, projects_by_root: Dict, editor_dirs: List[str]) -> None:
         def extract_for_user(user_home: Path) -> None:
-            vscode_prompts_path = user_home / ".config" / "Code" / "User" / "prompts"
-            if vscode_prompts_path.exists() and vscode_prompts_path.is_dir():
+            for editor in editor_dirs:
+                prompts_path = user_home / ".config" / editor / "User" / "prompts"
+                if not (prompts_path.exists() and prompts_path.is_dir()):
+                    continue
                 try:
-                    for rule_file in vscode_prompts_path.glob("*.instructions.md"):
-                        if rule_file.is_file():
-                            rule_info = self._extract_rule_with_scope(
-                                rule_file, find_github_copilot_project_root, scope="user"
-                            )
-                            if rule_info:
-                                project_root = rule_info.get("project_root")
-                                if project_root:
-                                    add_rule_to_project(rule_info, project_root, projects_by_root)
+                    for rule_file in prompts_path.glob("*.instructions.md"):
+                        if not rule_file.is_file():
+                            continue
+                        rule_info = self._extract_rule_with_scope(
+                            rule_file, find_github_copilot_project_root, scope="user"
+                        )
+                        if rule_info:
+                            project_root = rule_info.get("project_root")
+                            if project_root:
+                                add_rule_to_project(rule_info, project_root, projects_by_root)
                 except Exception as e:
-                    logger.debug(f"Error extracting GitHub Copilot VS Code rules for {user_home}: {e}")
+                    logger.debug(f"Error extracting GitHub Copilot rules for {user_home}: {e}")
 
         for user_home in get_linux_user_homes():
             try:
                 extract_for_user(user_home)
             except (PermissionError, OSError) as e:
                 logger.debug(f"Skipping {user_home}: {e}")
+
 
     def _extract_global_jetbrains_rules(self, projects_by_root: Dict) -> None:
         def extract_for_user(user_home: Path) -> None:

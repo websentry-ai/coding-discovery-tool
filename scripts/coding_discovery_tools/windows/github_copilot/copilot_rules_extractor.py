@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 from typing import List, Dict
+from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
@@ -78,8 +79,9 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         tool_name_lower = tool_name.lower() if tool_name else ""
 
         # Extract global rules based on tool type
-        if not tool_name or "vs code" in tool_name_lower or "vscode" in tool_name_lower:
-            self._extract_global_vscode_rules(projects_by_root)
+        editor_dirs = vscode_family_editor_dirs(tool_name)
+        if editor_dirs:
+            self._extract_global_vscode_rules(projects_by_root, editor_dirs)
 
         if not tool_name or self._is_jetbrains_tool(tool_name):
             self._extract_global_jetbrains_rules(projects_by_root)
@@ -107,7 +109,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
 
         return False
 
-    def _extract_global_vscode_rules(self, projects_by_root: Dict[str, List[Dict]]) -> None:
+    def _extract_global_vscode_rules(self, projects_by_root: Dict[str, List[Dict]], editor_dirs: List[str]) -> None:
         """
         Extract global GitHub Copilot rules from VS Code.
 
@@ -149,10 +151,11 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             prompt files), ``~/.copilot/instructions`` (Copilot format), and
             ``~/.claude/rules`` (Claude format).
             """
-            add_user_rules(
-                user_home / "AppData" / "Roaming" / "Code" / "User" / "prompts",
-                ("*.instructions.md", "*.prompt.md"),
-            )
+            for editor in editor_dirs:
+                add_user_rules(
+                    user_home / "AppData" / "Roaming" / editor / "User" / "prompts",
+                    ("*.instructions.md", "*.prompt.md"),
+                )
             add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",))
             add_user_rules(user_home / ".claude" / "rules", ("**/*.md",))
 

@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Iterable, List, Tuple, Union
 
+from .constants import is_symlink_or_junction
 from .mcp_extraction_helpers import (
     _strip_jsonc_comments,
     _strip_trailing_commas,
@@ -1106,6 +1107,26 @@ class BaseCursorSettingsExtractor(ABC):
 _VSCODE_SETTINGS_MAX_BYTES = 5 * 1024 * 1024
 
 
+def _parents_are_direct(path: Path, user_home: Path) -> bool:
+    """True unless a directory between the home and the file is a Windows reparse
+    point. A junction there redirects the read out of the home before ``realpath``
+    is consulted, and ``realpath`` silently returns the unresolved path when it
+    cannot resolve one. VS Code never creates a junction in its own config tree.
+
+    POSIX is left to the realpath containment check so a stow/chezmoi symlink that
+    resolves inside the home keeps working.
+    """
+    if os.name != "nt":
+        return True
+    home = Path(user_home)
+    for parent in path.parents:
+        if parent == home:
+            return True
+        if is_symlink_or_junction(parent):
+            return False
+    return True
+
+
 class BaseGitHubCopilotSettingsExtractor(ABC):
     """Extract VS Code GitHub Copilot agent-mode permissions from ``settings.json``.
 
@@ -1167,6 +1188,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         An in-home symlink (stow/chezmoi) resolves inside and is still read."""
         fd = None
         try:
+            if not _parents_are_direct(path, user_home):
+                return None
             # O_NONBLOCK: opening a FIFO read-only otherwise blocks until a writer
             # appears, which would hang the whole scan on one planted path.
             fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))

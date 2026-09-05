@@ -7,6 +7,7 @@ real per-OS extractor over planted settings.json fixtures.
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -17,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from coding_discovery_tools.coding_tool_base import (  # noqa: E402
     _VSCODE_SETTINGS_MAX_BYTES,
+    _parents_are_direct,
     BaseGitHubCopilotSettingsExtractor,
 )
 from coding_discovery_tools.coding_tool_factory import GitHubCopilotSettingsExtractorFactory  # noqa: E402
@@ -685,6 +687,54 @@ class TestSettingsSizeCap(unittest.TestCase):
         self.assertGreater(self.settings.stat().st_size, 2 * 1024 * 1024)
         self.assertLess(self.settings.stat().st_size, _VSCODE_SETTINGS_MAX_BYTES)
         self.assertEqual(self._ex().extract_settings()["permission_mode"], "bypassPermissions")
+
+
+class TestWindowsJunctionParent(unittest.TestCase):
+    """A junction between the home and settings.json redirects the read before
+    realpath is consulted, so the parent chain is checked directly on Windows."""
+
+    def test_posix_defers_to_realpath_containment(self):
+        # POSIX keeps stow/chezmoi working; containment is checked by realpath there
+        if os.name == "nt":
+            self.skipTest("POSIX behaviour")
+        self.assertTrue(_parents_are_direct(Path("/anything/settings.json"), Path("/home/u")))
+
+    @unittest.skipUnless(os.name == "nt", "junctions are Windows-specific")
+    def test_junction_parent_is_refused(self):
+        home = Path(tempfile.mkdtemp(prefix="jn-home-", dir=str(Path.home())))
+        outside = Path(tempfile.mkdtemp(prefix="jn-outside-"))
+        try:
+            (outside / "settings.json").write_text(
+                json.dumps({"chat.tools.global.autoApprove": True,
+                            "chat.mcp.access": "OUT-OF-HOME"}), encoding="utf-8")
+            appdata = home / "AppData" / "Roaming" / "Code"
+            appdata.mkdir(parents=True)
+            rc = subprocess.run(["cmd", "/c", "mklink", "/J", str(appdata / "User"), str(outside)],
+                                capture_output=True, text=True)
+            if rc.returncode != 0:
+                self.skipTest(f"could not create junction: {rc.stderr or rc.stdout}")
+
+            ex = GitHubCopilotSettingsExtractorFactory.create("Windows")
+            ex._scan_users = lambda cb: cb(home)
+            self.assertNotIn("OUT-OF-HOME", json.dumps(ex.extract_settings() or {}),
+                             "a junctioned parent must not redirect the read out of home")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "nt", "junctions are Windows-specific")
+    def test_plain_parent_chain_is_read(self):
+        home = Path(tempfile.mkdtemp(prefix="jn-ok-", dir=str(Path.home())))
+        try:
+            ud = home / "AppData" / "Roaming" / "Code" / "User"
+            ud.mkdir(parents=True)
+            (ud / "settings.json").write_text(
+                json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+            ex = GitHubCopilotSettingsExtractorFactory.create("Windows")
+            ex._scan_users = lambda cb: cb(home)
+            self.assertEqual(ex.extract_settings()["permission_mode"], "bypassPermissions")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
 
 if __name__ == "__main__":

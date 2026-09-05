@@ -268,10 +268,10 @@ class TestCanonicalRowAttachment(unittest.TestCase):
         det._github_copilot_rules_extractor = None      # branch guards None → skipped
         det._github_copilot_mcp_extractor = None
         det._get_copilot_cli_skills = lambda: {"user_skills": [], "project_skills": []}
-        det._github_copilot_settings_extractor.extract_settings = lambda: {
+        det._github_copilot_settings_extractor.extract_settings_by_user = lambda: [{
             "permission_mode": "bypassPermissions", "settings_source": "user",
             "scope": "user", "settings_path": "/x", "raw_settings": {},
-        }
+        }]
         det._canonical_vscode_copilot = "github copilot chat (vs code)"
         return det
 
@@ -475,16 +475,16 @@ class TestContainmentRace(unittest.TestCase):
 
             ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
             ex._scan_users = lambda cb: cb(home)
-            original = ex._iter_user_settings_files
+            original = ex._iter_channel_settings_files
 
-            def swap_then_yield(user_home):
-                for p in list(original(user_home)):
+            def swap_then_yield(config_dir):
+                for p in list(original(config_dir)):
                     if Path(p).name == "settings.json" and Path(p).parent == ud:
                         os.unlink(p)                                  # attacker wins the window
                         os.symlink(outside / "secret.json", p)
                     yield p
 
-            ex._iter_user_settings_files = swap_then_yield
+            ex._iter_channel_settings_files = swap_then_yield
             rec = ex.extract_settings()
             self.assertNotIn("OUT-OF-HOME", json.dumps(rec or {}),
                              "content behind an out-of-home link must never be reported")
@@ -735,6 +735,85 @@ class TestWindowsJunctionParent(unittest.TestCase):
             self.assertEqual(ex.extract_settings()["permission_mode"], "bypassPermissions")
         finally:
             shutil.rmtree(home, ignore_errors=True)
+
+
+class TestPerUserAttribution(unittest.TestCase):
+    """An elevated scan must not hand one user's posture to everyone else, nor
+    strip permissions from every user but the riskiest one."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="peruser-", dir=str(Path.home())))
+        self.locked = self._home("locked", {"chat.agent.enabled": True,
+                                            "chat.tools.terminal.autoApprove": {"rm": False}})
+        self.yolo = self._home("yolo", {"chat.tools.global.autoApprove": True})
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _home(self, name, settings):
+        home = self.root / name
+        ud = home / "Library" / "Application Support" / "Code" / "User"
+        ud.mkdir(parents=True)
+        (ud / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+        return home
+
+    def _by_user(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: [cb(self.locked), cb(self.yolo)]
+        return ex.extract_settings_by_user()
+
+    def test_every_user_keeps_a_record(self):
+        records = self._by_user()
+        self.assertEqual(len(records), 2, "an elevated scan must keep every user's record")
+        self.assertEqual(records[0]["permission_mode"], "bypassPermissions", "riskiest first")
+
+    def test_each_user_report_carries_its_own_posture(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        tool = {"name": "GitHub Copilot Chat (VS Code)", "projects": [],
+                "_permissions_by_user": self._by_user()}
+        tool["permissions"] = tool["_permissions_by_user"][0]
+
+        locked = det.filter_tool_projects_by_user(tool, self.locked)
+        yolo = det.filter_tool_projects_by_user(tool, self.yolo)
+        stranger = det.filter_tool_projects_by_user(tool, self.root / "nobody")
+
+        self.assertEqual(locked["permissions"]["permission_mode"], "default")
+        self.assertIn(str(self.locked), locked["permissions"]["settings_path"])
+        self.assertEqual(yolo["permissions"]["permission_mode"], "bypassPermissions")
+        self.assertNotIn("permissions", stranger, "a user with no settings gets no record")
+        for out in (locked, yolo, stranger):
+            self.assertNotIn("_permissions_by_user", out, "the internal key must not survive")
+
+
+class TestChannelsAreNotMerged(unittest.TestCase):
+    """Stable and Insiders are separate installations, so their policies must not
+    combine into a posture that neither one defines."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="chan-", dir=str(Path.home())))
+        self.support = self.home / "Library" / "Application Support"
+        for channel, settings in (
+            ("Code", {"chat.tools.terminal.autoApprove": {"rm": False}}),
+            ("Code - Insiders", {"chat.tools.global.autoApprove": True,
+                                 "chat.tools.terminal.autoApprove": {"curl": True}}),
+        ):
+            d = self.support / channel / "User"
+            d.mkdir(parents=True)
+            (d / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_riskiest_channel_is_reported_whole(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        rec = ex.extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertIn("Code - Insiders", rec["settings_path"])
+        self.assertEqual(rec.get("allow_rules"), ["Bash(curl *)"])
+        self.assertIsNone(rec.get("deny_rules"),
+                          "stable's deny must not appear on the Insiders record")
 
 
 if __name__ == "__main__":

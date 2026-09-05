@@ -1171,14 +1171,12 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         """Return this user's VS Code ``User`` config dirs (stable Code first, then
         Insiders) — the parents of ``settings.json`` and ``profiles/``."""
 
-    def _iter_user_settings_files(self, user_home):
+    def _iter_channel_settings_files(self, config_dir):
         """Yield the default-profile ``settings.json`` plus every named profile's,
-        for each channel. Every profile is read rather than first-wins: a YOLO named
+        for ONE channel. Every profile is read rather than first-wins: a YOLO named
         profile is as real a risk as the default one."""
-        home = Path(user_home)
-        for user_dir in self._user_config_dirs(home):
-            for path in enumerate_vscode_user_files(user_dir, "settings.json"):
-                yield path
+        for path in enumerate_vscode_user_files(Path(config_dir), "settings.json"):
+            yield path
 
     @staticmethod
     def _read_contained(path: Path, user_home: Path) -> Optional[str]:
@@ -1229,10 +1227,11 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 except OSError:
                     pass
 
-    def extract_settings(self) -> Optional[Dict]:
-        """Return one backend-ready permission record — the most-permissive posture
-        across all of a user's VS Code profiles — or None when no Copilot permission
-        setting is present. User/profile scope only (see the class docstring)."""
+    def extract_settings_by_user(self) -> List[Dict]:
+        """One backend-ready record per user that has Copilot settings, riskiest
+        first. Under an elevated scan the per-user report filter picks the record
+        whose ``settings_path`` is in that user's home, so no user's posture is
+        dropped in favour of another's."""
         records: List[Dict] = []
 
         def extract_for_user(user_home) -> None:
@@ -1244,11 +1243,14 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 logger.debug(f"Error extracting Copilot settings for {user_home}: {e}")
 
         self._scan_users(extract_for_user)
-        if not records:
-            return None
-        # The canonical row carries one permissions record, so under a multi-user
-        # scan return the riskiest user's rather than whichever was read first.
-        return max(records, key=self._permissiveness)
+        records.sort(key=self._permissiveness, reverse=True)
+        return records
+
+    def extract_settings(self) -> Optional[Dict]:
+        """The riskiest user's record — the single-record view for a report that is
+        not scoped to one user. None when no Copilot permission setting is present."""
+        records = self.extract_settings_by_user()
+        return records[0] if records else None
 
     @staticmethod
     def _permissiveness(record: Dict) -> tuple:
@@ -1259,22 +1261,28 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 len(record.get("allow_rules", [])))
 
     def _extract_for_user(self, user_home: Path) -> Optional[Dict]:
-        # User scope only: the default profile + every named profile, each channel.
-        records = []
-        for path in self._iter_user_settings_files(user_home):
-            data = self._parse_jsonc(path, user_home)
-            if data is None:
-                continue
-            record = self._build_record(data, path, "user")
-            if record:
-                logger.info(f"  ✓ Extracted Copilot settings from {path}")
-                records.append(record)
-        if not records:
+        """One record for this user. Profiles merge within a channel; stable and
+        Insiders never merge, so the reported posture is always one that a single
+        installation actually defines. The riskiest channel wins."""
+        per_channel = []
+        for config_dir in self._user_config_dirs(Path(user_home)):
+            records = []
+            for path in self._iter_channel_settings_files(config_dir):
+                data = self._parse_jsonc(path, user_home)
+                if data is None:
+                    continue
+                record = self._build_record(data, path, "user")
+                if record:
+                    logger.info(f"  ✓ Extracted Copilot settings from {path}")
+                    records.append(record)
+            if records:
+                # Merge from the most-permissive profile so settings_path attributes
+                # to where the risk is, not to whichever file was read first.
+                records.sort(key=self._permissiveness, reverse=True)
+                per_channel.append(self._merge_records(records[0], records[1:]))
+        if not per_channel:
             return None
-        # Merge from the most-permissive profile so settings_path attributes to
-        # where the risk is, not to whichever file was read first.
-        records.sort(key=self._permissiveness, reverse=True)
-        return self._merge_records(records[0], records[1:])
+        return max(per_channel, key=self._permissiveness)
 
     @classmethod
     def _parse_jsonc(cls, path: Path, user_home=None) -> Optional[Dict]:

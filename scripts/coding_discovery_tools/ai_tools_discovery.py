@@ -1843,7 +1843,21 @@ class AIToolsDetector:
 
         filtered_tool = tool.copy()
         filtered_tool['projects'] = filtered_projects
-        
+
+        # A tool carrying one record per user reports THIS user's posture; without
+        # it every other user's report loses its permissions to whoever ranked first.
+        by_user = filtered_tool.pop('_permissions_by_user', None)
+        if by_user:
+            own = []
+            for rec in by_user:
+                rec_path = _normalise_path(rec.get('settings_path', ''))
+                if rec_path == user_home_norm or rec_path.startswith(user_home_norm + '/'):
+                    own.append(rec)
+            if own:
+                filtered_tool['permissions'] = own[0]  # already riskiest-first
+            else:
+                filtered_tool.pop('permissions', None)
+
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
@@ -2557,9 +2571,12 @@ class AIToolsDetector:
             if is_canonical_vscode and self._github_copilot_settings_extractor:
                 logger.info(f"  Extracting {tool_name} permissions...")
                 try:
-                    permissions = self._github_copilot_settings_extractor.extract_settings()
-                    if permissions:
-                        tool_dict["permissions"] = permissions
+                    by_user = self._github_copilot_settings_extractor.extract_settings_by_user()
+                    if by_user:
+                        # Riskiest first. The per-user filter narrows this to each
+                        # user's own record; the head is what an unscoped report shows.
+                        tool_dict["_permissions_by_user"] = by_user
+                        tool_dict["permissions"] = by_user[0]
                         logger.info(f"  ✓ Added permissions to {tool_name} report")
                     else:
                         logger.info("  ℹ No Copilot permissions found")

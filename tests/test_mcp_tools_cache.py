@@ -90,6 +90,11 @@ class TestContentHash(unittest.TestCase):
 
 
 class TestCacheKey(unittest.TestCase):
+    def test_redaction_placeholder_is_not_a_binary_identity(self):
+        self.assertIsNone(
+            compute_cache_key(name='redacted', url=None, command='***', args=[])
+        )
+
     def test_vscode_provider_identity_does_not_override_launch_details(self):
         server = {
             "name": "GitKraken",

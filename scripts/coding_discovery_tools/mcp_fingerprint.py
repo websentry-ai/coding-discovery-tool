@@ -125,6 +125,7 @@ BIN_SKIP_COMMANDS = (
 GENERIC_BIN_NAMES = frozenset({
     'mcp-server', 'mcpserver', 'mcp', 'server', 'main', 'index', 'start', 'app',
     'run', 'cli', 'bin', 'tool', 'agent', 'my-command', 'my-mcp-server', 'node-repl',
+    '***',
 })
 
 # Shells / build orchestrators / generic launchers. Their basename is not a

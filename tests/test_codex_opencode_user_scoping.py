@@ -64,6 +64,7 @@ def _detector(name):
 
 class _CliCase(unittest.TestCase):
     TOOL = None
+    PACKAGE = None
     DETECT = None
 
     def setUp(self):
@@ -102,6 +103,23 @@ class _CliCase(unittest.TestCase):
         result, _ = self._run(system="Windows", is_root=True)
         self.assertIsNotNone(result)
         self.assertEqual(str(shim), result["install_path"])
+
+    def test_windows_shim_version_read_from_npm_metadata(self):
+        """Version must come from the resolved binary, not the scanner's PATH."""
+        shim = self._make(f"AppData/Roaming/npm/{self.TOOL}.cmd")
+        pkg = shim.parent / "node_modules" / self.PACKAGE / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        pkg.write_text('{"version": "9.9.9"}')
+        result, det = self._run(system="Windows", is_root=True)
+        self.assertEqual("9.9.9", result["version"])
+        det.get_version.assert_not_called()
+
+    def test_windows_shim_without_metadata_is_unknown(self):
+        """Better unknown than the scanner's version against a user's path."""
+        self._make(f"AppData/Roaming/npm/{self.TOOL}.cmd")
+        result, det = self._run(system="Windows", is_root=True)
+        self.assertEqual("Unknown", result["version"])
+        det.get_version.assert_not_called()
 
     def test_windows_nvm_windows_shim_detected(self):
         shim = self._make(f"AppData/Roaming/nvm/v20.11.0/{self.TOOL}.cmd")
@@ -167,11 +185,13 @@ class _CliCase(unittest.TestCase):
 
 class TestCodexUserScoping(_CliCase):
     TOOL = "codex"
+    PACKAGE = "@openai/codex"
     DETECT = staticmethod(_detect_codex)
 
 
 class TestOpenCodeUserScoping(_CliCase):
     TOOL = "opencode"
+    PACKAGE = "opencode-ai"
     DETECT = staticmethod(_detect_opencode)
 
 

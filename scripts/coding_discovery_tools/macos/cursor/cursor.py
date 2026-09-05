@@ -39,7 +39,7 @@ class MacOSCursorDetector(BaseToolDetector):
 
         return {
             "name": self.tool_name,
-            "version": self.get_version(),
+            "version": self.get_version(app_path),
             "install_path": str(app_path)
         }
 
@@ -54,7 +54,7 @@ class MacOSCursorDetector(BaseToolDetector):
                 continue
         return None
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:
         """
         Extract Cursor version from macOS Info.plist.
         
@@ -62,7 +62,8 @@ class MacOSCursorDetector(BaseToolDetector):
             Version string or None
         """
         try:
-            app_path = self._resolve_app_path()
+            if app_path is None:
+                app_path = self._resolve_app_path()
             if app_path is None:
                 return None
             plist_path = app_path / "Contents" / "Info.plist"

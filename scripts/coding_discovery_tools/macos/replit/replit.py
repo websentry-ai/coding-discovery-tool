@@ -109,13 +109,14 @@ class MacOSReplitDetector(BaseToolDetector):
             Path to Replit.app if found, None otherwise
         """
         user_home = getattr(self, 'user_home', None)
-        try:
-            for candidate in macos_app_candidates(self.APPLICATION_PATH, user_home):
+        for candidate in macos_app_candidates(self.APPLICATION_PATH, user_home):
+            try:
                 if candidate.exists() and candidate.is_dir():
                     logger.debug(f"Found Replit application at: {candidate}")
                     return candidate
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check Replit application path: {e}")
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not check Replit application path: {e}")
+                continue
 
         return None
 

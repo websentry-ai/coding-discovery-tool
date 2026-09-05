@@ -84,6 +84,14 @@ class TestCursorUserApplications(_UserApplicationsCase):
     def test_absent_everywhere_still_none(self):
         self.assertIsNone(self._detect())
 
+    def test_bundle_resolved_once_so_version_matches_path(self):
+        """detect() hands its resolved bundle to get_version()."""
+        self._bundle(self.user_apps, "Cursor.app")
+        with patch.object(self.detector, "_resolve_app_path",
+                          wraps=self.detector._resolve_app_path) as spy:
+            self._detect()
+        self.assertEqual(1, spy.call_count)
+
 
 class TestWindsurfUserApplications(_UserApplicationsCase):
     def setUp(self):
@@ -150,6 +158,35 @@ class TestReplitUserApplications(_UserApplicationsCase):
 
     def test_absent_everywhere_still_none(self):
         self.assertIsNone(self._detect())
+
+
+class TestReplitProbeErrorIsolation(_UserApplicationsCase):
+    """A raising machine-wide probe must not skip the user-local candidate."""
+
+    def setUp(self):
+        super().setUp()
+        from scripts.coding_discovery_tools.macos.replit import replit as mod
+        self.mod = mod
+        self.detector = mod.MacOSReplitDetector()
+        self.detector.user_home = self.user_home
+
+    def test_user_local_found_when_machine_wide_probe_raises(self):
+        app = self._bundle(self.user_apps, "Replit.app")
+        machine = self.machine_apps / "Replit.app"
+        real_exists = Path.exists
+
+        def flaky_exists(self_path):
+            if self_path == machine:
+                raise PermissionError("denied")
+            return real_exists(self_path)
+
+        with patch(f"{_MH}.MACHINE_APPS_DIR", self.machine_apps), \
+             patch.object(self.detector, "APPLICATION_PATH", machine), \
+             patch.object(self.mod, "run_command", return_value="1.8.0"), \
+             patch("pathlib.Path.exists", flaky_exists):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(str(app), result["install_path"])
 
 
 class TestCopilotBuiltinExtensionRoots(unittest.TestCase):

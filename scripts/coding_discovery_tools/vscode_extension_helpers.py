@@ -31,6 +31,15 @@ _EXTENSIONS_DIR_BY_EDITOR = {
 # For callers that scan every editor rather than a fixed SUPPORTED_IDES subset.
 VSCODE_EDITOR_KEYS = tuple(_EXTENSIONS_DIR_BY_EDITOR)
 
+# Display name per editor, for tools that label a row by its host editor.
+VSCODE_EDITOR_NAMES = {
+    "Code": "VS Code",
+    "Cursor": "Cursor",
+    "Windsurf": "Windsurf",
+    "VSCodium": "VSCodium",
+    "Antigravity": "Antigravity",
+}
+
 
 def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     """Return the extensions registry directory for ``ide_key`` under ``user_home``.

@@ -9,18 +9,15 @@ from ...coding_tool_base import BaseCopilotDetector as BaseCopilotDetectorBase
 from ...jetbrains_naming_helpers import plugin_entries
 from ...linux.jetbrains.jetbrains import LinuxJetBrainsDetector
 from ...linux_extraction_helpers import get_linux_user_homes
+from ...vscode_extension_helpers import (
+    VSCODE_EDITOR_NAMES,
+    extensions_dir_for_editor,
+    find_extension_in_editor,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _load_extension_json(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
 
 
 # Recent VS Code ships GitHub Copilot / Copilot Chat as BUILT-IN extensions
@@ -68,6 +65,12 @@ def _read_builtin_copilot_identity(ext_dir: Path):
     return name_label, version
 
 
+_MARKETPLACE_EXTENSIONS = (
+    ("github.copilot", "GitHub Copilot"),
+    ("github.copilot-chat", "GitHub Copilot Chat"),
+)
+
+
 class LinuxCopilotDetector(BaseCopilotDetectorBase):
     """Detects GitHub Copilot across VS Code and all JetBrains IDEs on Linux."""
 
@@ -92,30 +95,27 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
 
     def _detect_vscode_for_user(self, user_home: Path) -> List[Dict]:
         results = []
-        vscode_ext_path = user_home / ".vscode" / "extensions" / "extensions.json"
-        extensions_data = _load_extension_json(vscode_ext_path)
+        code_found = False
 
-        for ext in extensions_data:
-            ext_id = ext.get("identifier", {}).get("id", "").lower()
-            if ext_id == "github.copilot":
+        for ide_key, ide_name in VSCODE_EDITOR_NAMES.items():
+            for ext_id, label in _MARKETPLACE_EXTENSIONS:
+                entry = find_extension_in_editor(user_home, ide_key, ext_id)
+                if entry is None:
+                    continue
+                _location, version = entry
                 results.append({
-                    "name": "GitHub Copilot (VS Code)",
-                    "version": ext.get("version", "unknown"),
+                    "name": f"{label} ({ide_name})",
+                    "version": version or "unknown",
                     "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent),
+                    "install_path": str(extensions_dir_for_editor(user_home, ide_key)),
                 })
-            elif ext_id == "github.copilot-chat":
-                results.append({
-                    "name": "GitHub Copilot Chat (VS Code)",
-                    "version": ext.get("version", "unknown"),
-                    "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent),
-                })
+                if ide_key == "Code":
+                    code_found = True
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
         # marketplace Copilot extension is present, so built-in users — and their
         # VS Code MCP servers (~/.config/Code/User/mcp.json) — aren't missed.
-        if not results:
+        if not code_found:
             results.extend(self._detect_vscode_builtin_copilot(user_home))
 
         return results

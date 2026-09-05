@@ -275,7 +275,7 @@ class TestCacheKey(unittest.TestCase):
                 command="cmd.exe",
                 args=["/c", "npx", "-y", "@smithery/cli@latest", "run", "example-server"],
             ),
-            "smithery-unverified:example-server",
+            "smithery:example-server",
         )
 
     def test_smithery_current_package_uses_mcp_run_target(self):
@@ -291,13 +291,13 @@ class TestCacheKey(unittest.TestCase):
 
     def test_smithery_supported_runner_forms(self):
         vectors = [
-            ("smithery.cmd", ["--verbose", "run", "@vendor/server"], "smithery-unverified:vendor/server"),
+            ("smithery.cmd", ["--verbose", "run", "@vendor/server"], "smithery:vendor/server"),
             ("npm", ["exec", "--", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
-            ("bunx", ["--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("bun", ["x", "--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("cmd", ["/c", "npx.cmd", "-y", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("npx", ["-y", "@smithery/cli", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("bunx", ["--no-install", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
+            ("bunx", ["--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
+            ("bun", ["x", "--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
+            ("cmd", ["/c", "npx.cmd", "-y", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
+            ("npx", ["-y", "@smithery/cli", "run", "vendor/server"], "smithery:vendor/server"),
+            ("bunx", ["--no-install", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
         ]
         for command, args, expected in vectors:
             with self.subTest(command=command, args=args):
@@ -393,7 +393,7 @@ class TestCacheKey(unittest.TestCase):
                     )
                 )
 
-    def test_smithery_path_qualified_launchers_are_unverified(self):
+    def test_smithery_path_qualified_launchers_use_target(self):
         vectors = [
             ("./smithery", ["run", "@vendor/server"]),
             ("/tmp/evil/smithery", ["run", "@vendor/server"]),
@@ -406,7 +406,7 @@ class TestCacheKey(unittest.TestCase):
                     compute_cache_key(
                         name="alias", url=None, command=command, args=args,
                     ),
-                    "smithery-unverified:vendor/server",
+                    "smithery:vendor/server",
                 )
 
     def test_runtime_argument_does_not_claim_smithery_identity(self):

@@ -121,6 +121,27 @@ class _CliCase(unittest.TestCase):
         self.assertEqual("Unknown", result["version"])
         det.get_version.assert_not_called()
 
+    def test_resolved_binary_is_never_executed(self):
+        """The binary sits in a user-writable dir and the scan runs as root, so
+        executing it would let a user run code as the scanner."""
+        binary = self._make(f".local/bin/{self.TOOL}")
+        with patch(f"{_MOD}.run_command") as run:
+            result, det = self._run(is_root=True)
+        self.assertEqual(str(binary), result["install_path"])
+        self.assertEqual("Unknown", result["version"])
+        for call in run.call_args_list:
+            self.assertNotIn(str(binary), str(call))
+
+    def test_posix_npm_prefix_version_read_from_metadata(self):
+        """POSIX npm puts the package under <prefix>/lib/node_modules."""
+        binary = self._make(f".npm-global/bin/{self.TOOL}")
+        pkg = self.home / ".npm-global" / "lib" / "node_modules" / self.PACKAGE / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        pkg.write_text('{"version": "7.7.7"}')
+        result, _ = self._run(is_root=True)
+        self.assertEqual(str(binary), result["install_path"])
+        self.assertEqual("7.7.7", result["version"])
+
     def test_windows_nvm_windows_shim_detected(self):
         shim = self._make(f"AppData/Roaming/nvm/v20.11.0/{self.TOOL}.cmd")
         result, _ = self._run(system="Windows", is_root=True)

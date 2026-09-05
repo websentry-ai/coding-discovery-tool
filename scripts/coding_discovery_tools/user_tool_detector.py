@@ -131,23 +131,28 @@ def _detect_extension_tool(
 
 
 def _npm_cli_version(path: Path, npm_package: str) -> Optional[str]:
-    """Version of the install at ``path``, so it matches the reported binary.
+    """Version of the install at ``path``, read from its npm ``package.json``.
 
-    A ``.cmd``/``.bat`` shim is read, never run: Windows cannot exec one from a
-    bare argv, and a shell would let a profile path holding ``&`` execute part of
-    itself (the #244 fix).
+    The binary is never executed: it sits in a user-writable directory and the
+    scan runs as root/SYSTEM, so running it would let a user execute code as the
+    scanner. An unreadable layout yields None, and the caller reports "Unknown".
     """
-    if path.suffix.lower() in (".cmd", ".bat", ".ps1"):
-        package_json = path.parent / "node_modules" / npm_package / "package.json"
+    bin_dir = path.parent
+    candidates = [
+        bin_dir / "node_modules" / npm_package / "package.json",
+        bin_dir.parent / "lib" / "node_modules" / npm_package / "package.json",
+    ]
+    for package_json in candidates:
         try:
             data = json.loads(package_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            logger.debug(f"Could not read {npm_package} version from {package_json}: {exc}")
-            return None
+        except (OSError, ValueError):
+            continue
         version = data.get("version") if isinstance(data, dict) else None
-        return version if isinstance(version, str) else None
-    output = run_command([str(path), "--version"], VERSION_TIMEOUT)
-    return extract_version_number(output) if output else None
+        if isinstance(version, str):
+            return version
+    logger.debug(f"No {npm_package} package.json beside {path}")
+    return None
+
 
 
 def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: str,

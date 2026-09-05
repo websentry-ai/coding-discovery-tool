@@ -144,9 +144,11 @@ def _npm_cli_version(path: Path, npm_package: str) -> Optional[str]:
     ]
     for package_json in candidates:
         try:
-            # User-writable path read by a root scan: a FIFO would block it and an
-            # oversized file would exhaust it, so require a bounded regular file.
-            if not package_json.is_file() or package_json.stat().st_size > MAX_CONFIG_FILE_SIZE:
+            # User-writable path read by a root scan. is_file() follows links, so
+            # reject the link itself too: a FIFO would block the read, an oversized
+            # file would exhaust it, and a link could redirect it out of the tree.
+            if (package_json.is_symlink() or not package_json.is_file()
+                    or package_json.stat().st_size > MAX_CONFIG_FILE_SIZE):
                 continue
             data = json.loads(package_json.read_text(encoding="utf-8"))
         except (OSError, ValueError):

@@ -151,6 +151,18 @@ class _CliCase(unittest.TestCase):
         result, _ = self._run(system="Windows", is_root=True)
         self.assertEqual("Unknown", result["version"])
 
+    def test_symlinked_metadata_is_skipped(self):
+        """is_file() follows links, so a link could redirect a root read out of
+        the user's tree and surface a field from it as the version."""
+        shim = self._make(f"AppData/Roaming/npm/{self.TOOL}.cmd")
+        outside = self.home / "outside.json"
+        outside.write_text('{"version": "leaked"}')
+        pkg = shim.parent / "node_modules" / self.PACKAGE / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        pkg.symlink_to(outside)
+        result, _ = self._run(system="Windows", is_root=True)
+        self.assertEqual("Unknown", result["version"])
+
     def test_oversized_metadata_is_skipped(self):
         shim = self._make(f"AppData/Roaming/npm/{self.TOOL}.cmd")
         pkg = shim.parent / "node_modules" / self.PACKAGE / "package.json"

@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
+from ...macos_extraction_helpers import macos_app_candidates
 from ...utils import run_command
 from .cursor_rules_extractor import MacOSCursorRulesExtractor
 
@@ -32,16 +33,28 @@ class MacOSCursorDetector(BaseToolDetector):
         Returns:
             Dict with tool info or None if not found
         """
-        if not self.DEFAULT_APP_PATH.exists():
+        app_path = self._resolve_app_path()
+        if app_path is None:
             return None
 
         return {
             "name": self.tool_name,
-            "version": self.get_version(),
-            "install_path": str(self.DEFAULT_APP_PATH)
+            "version": self.get_version(app_path),
+            "install_path": str(app_path)
         }
 
-    def get_version(self) -> Optional[str]:
+    def _resolve_app_path(self) -> Optional[Path]:
+        """The installed bundle: machine-wide, else the scanned user's own."""
+        user_home = getattr(self, 'user_home', None)
+        for candidate in macos_app_candidates(self.DEFAULT_APP_PATH, user_home):
+            try:
+                if candidate.exists():
+                    return candidate
+            except (PermissionError, OSError):
+                continue
+        return None
+
+    def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:
         """
         Extract Cursor version from macOS Info.plist.
         
@@ -49,7 +62,11 @@ class MacOSCursorDetector(BaseToolDetector):
             Version string or None
         """
         try:
-            plist_path = self.DEFAULT_APP_PATH / "Contents" / "Info.plist"
+            if app_path is None:
+                app_path = self._resolve_app_path()
+            if app_path is None:
+                return None
+            plist_path = app_path / "Contents" / "Info.plist"
             if not plist_path.exists():
                 return None
 

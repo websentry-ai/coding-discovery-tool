@@ -16,6 +16,18 @@ from .mcp_extraction_helpers import is_home_dotdir_descendant
 
 logger = logging.getLogger(__name__)
 
+MACHINE_APPS_DIR = Path("/Applications")
+
+
+def macos_app_candidates(app_path: Path, user_home: Optional[Path] = None) -> List[Path]:
+    """``app_path``, then the same bundle under the scanned user's ``~/Applications``,
+    where a non-admin install lands. Only machine-wide paths gain the sibling."""
+    candidates = [app_path]
+    if app_path.parent == MACHINE_APPS_DIR:
+        home = user_home if user_home is not None else Path.home()
+        candidates.append(home / "Applications" / app_path.name)
+    return candidates
+
 
 def is_running_as_root() -> bool:
     """

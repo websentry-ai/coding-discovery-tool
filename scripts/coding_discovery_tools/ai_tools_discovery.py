@@ -3866,7 +3866,7 @@ def main():
                     "used_fallback_user": homes_enumerated == 0,
                     # >0 means a tool ran on this box and we missed its binary.
                     "config_dirs_present": len(config_dirs_seen),
-                    "config_dirs": ",".join(sorted(config_dirs_seen)) or None,
+                    "config_dirs": ",".join(sorted(config_dirs_seen)),
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),
                     "in_container": in_container(),

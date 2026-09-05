@@ -2155,7 +2155,7 @@ _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
-    "scan_event", "config_dirs_present",
+    "scan_event", "config_dirs_present", "config_dirs",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

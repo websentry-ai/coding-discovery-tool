@@ -732,6 +732,23 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
         data = self._read_file()
         self.assertEqual(data["tools"]["Claude Code"]["alice"]["key-flaky"], {"t": "h-old"})
 
+    def test_errored_smithery_key_migrates_legacy_entry(self):
+        mcp_tools_cache.update_user_entries(
+            "Claude Code",
+            "alice",
+            {"smithery-unverified:vendor/server": {"read": "h-old"}},
+            set(),
+        )
+        mcp_tools_cache.update_user_entries(
+            "Claude Code",
+            "alice",
+            {},
+            {"smithery:vendor/server"},
+        )
+
+        entries = self._read_file()["tools"]["Claude Code"]["alice"]
+        self.assertEqual(entries, {"smithery:vendor/server": {"read": "h-old"}})
+
     def test_errored_key_without_previous_entry_stays_absent(self):
         mcp_tools_cache.update_user_entries(
             "Claude Code", "alice", {}, {"key-never-scanned"})

@@ -23,8 +23,7 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     url-arg:<host[:port]/path>   -> from a URL embedded in args (e.g., mcp-remote proxies)
     git:<host/owner/repo>        -> from a git+ install spec in args (npx/uvx git installs)
     npm:<package>                -> from an npm package in args (@scoped, or bare under npx/npm/bunx)
-    smithery:<server>            -> target passed to a registry-resolved Smithery CLI
-    smithery-unverified:<server> -> target passed to a locally resolvable Smithery CLI
+    smithery:<server>            -> target passed to Smithery CLI `run`
     nuget:<package>              -> package run by `dnx` or `dotnet tool exec`
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
@@ -90,6 +89,7 @@ CLAUDEAI_ALLOWED_ADDITIONAL_DATA = ({}, {'scope': 'claudeai'})
 # npm-package runners: the first positional arg is the package to run.
 NPM_RUNNERS = frozenset({'npx', 'npm', 'bunx'})
 SMITHERY_CLI_PACKAGES = frozenset({'@smithery/cli', 'smithery'})
+SMITHERY_REGISTRY_SPECS = frozenset({'@smithery/cli@latest', 'smithery@latest'})
 SMITHERY_GLOBAL_FLAGS = frozenset({'--verbose', '--debug', '--json', '--table'})
 # Sub-runners under npx/bunx that are not the package themselves (the real
 # target -- usually a local script -- follows).
@@ -125,6 +125,7 @@ BIN_SKIP_COMMANDS = (
 GENERIC_BIN_NAMES = frozenset({
     'mcp-server', 'mcpserver', 'mcp', 'server', 'main', 'index', 'start', 'app',
     'run', 'cli', 'bin', 'tool', 'agent', 'my-command', 'my-mcp-server', 'node-repl',
+    '***',
 })
 
 # Shells / build orchestrators / generic launchers. Their basename is not a
@@ -272,13 +273,6 @@ def _smithery_server_identity(value: str) -> Optional[str]:
     return target.lower() if re.fullmatch(pattern, target, re.IGNORECASE) else None
 
 
-def _is_registry_resolved_smithery_cli(value: str) -> bool:
-    return _unquote(value).strip().lower() in {
-        '@smithery/cli@latest',
-        'smithery@latest',
-    }
-
-
 def _smithery_command_target(tokens: List[str]) -> Optional[str]:
     while tokens and str(tokens[0]).lower() in SMITHERY_GLOBAL_FLAGS:
         tokens = tokens[1:]
@@ -322,11 +316,9 @@ def _smithery_command_target(tokens: List[str]) -> Optional[str]:
 def _smithery_run_target(
     args: List[str],
     command_base: str,
-    launcher_trusted: bool,
-) -> Optional[Tuple[str, bool]]:
-    if command_base == 'smithery':
-        target = _smithery_command_target(args)
-        return (target, False) if target else None
+) -> Optional[str]:
+    if command_base not in {'npx', 'npm', 'cmd'}:
+        return None
     if command_base == 'cmd' and any(
         isinstance(arg, str) and re.search(r'[&|<>^\r\n]', arg)
         for arg in args
@@ -336,7 +328,7 @@ def _smithery_run_target(
     for index, arg in enumerate(args):
         if (
             not isinstance(arg, str)
-            or _registry_npm_package(arg) not in SMITHERY_CLI_PACKAGES
+            or _unquote(arg).strip().lower() not in SMITHERY_REGISTRY_SPECS
         ):
             continue
         prefix_tokens = []
@@ -345,56 +337,32 @@ def _smithery_run_target(
                 return None
             prefix_tokens.append(_unquote(prefix_arg).lower())
 
-        def valid_runner_prefix(runner, tokens):
-            safe_flags = {'-y', '--yes'}
-            if runner in {'bunx', 'bun'}:
-                safe_flags.update({'--bun', '--no-install', '--verbose', '--silent'})
-            if runner == 'npm':
-                safe_flags.add('--')
-            if any(token.startswith('-') and token not in safe_flags for token in tokens):
-                return False
-            positional = [token for token in tokens if token not in safe_flags]
-            if runner == 'npm':
-                return tokens[-1:] == ['--'] and positional in (['exec'], ['x'])
-            if runner == 'bun':
-                return positional == ['x']
-            return not positional
-
-        if command_base in NPM_RUNNERS:
-            if not valid_runner_prefix(command_base, prefix_tokens):
+        if command_base == 'npx':
+            if any(token not in {'-y', '--yes'} for token in prefix_tokens):
                 return None
-        elif command_base == 'bun':
-            if not valid_runner_prefix(command_base, prefix_tokens):
+        elif command_base == 'npm':
+            if prefix_tokens not in (['exec', '--'], ['x', '--']):
                 return None
-        elif command_base == 'cmd':
+        else:
             runner_positions = [
                 offset for offset, token in enumerate(prefix_tokens)
-                if _trusted_launcher_base(token) in NPM_RUNNERS | {'bun'}
+                if token in {'npx', 'npx.cmd'}
             ]
             if len(runner_positions) != 1:
                 return None
             runner_index = runner_positions[0]
             shell_prefix = prefix_tokens[:runner_index]
-            if '/c' not in shell_prefix or any(
-                token not in {'/c', '/d', '/s'} for token in shell_prefix
+            runner_flags = prefix_tokens[runner_index + 1:]
+            if (
+                '/c' not in shell_prefix
+                or any(token not in {'/c', '/d', '/s'} for token in shell_prefix)
+                or any(token not in {'-y', '--yes'} for token in runner_flags)
             ):
                 return None
-            if not valid_runner_prefix(
-                _trusted_launcher_base(prefix_tokens[runner_index]),
-                prefix_tokens[runner_index + 1:],
-            ):
-                return None
-        else:
-            return None
         target = _smithery_command_target(args[index + 1:])
         if target is None:
             return None
-        registry_resolved = (
-            launcher_trusted
-            and command_base in {'npx', 'npm'}
-            and _is_registry_resolved_smithery_cli(arg)
-        )
-        return target, registry_resolved
+        return target
     return None
 
 
@@ -794,15 +762,9 @@ def compute_fingerprint(
     if nuget_package:
         return f'nuget:{nuget_package}'
 
-    smithery_match = _smithery_run_target(
-        safe_args,
-        base,
-        launcher_trusted=bool(launcher_base),
-    )
-    if smithery_match:
-        smithery_target, registry_resolved = smithery_match
-        prefix = 'smithery' if registry_resolved else 'smithery-unverified'
-        return f'{prefix}:{smithery_target}'
+    smithery_target = _smithery_run_target(safe_args, launcher_base or '')
+    if smithery_target:
+        return f'smithery:{smithery_target}'
     if base == 'smithery':
         return None
     first_scoped_package = _npm_package_from_args(safe_args)

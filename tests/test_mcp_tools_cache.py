@@ -90,6 +90,11 @@ class TestContentHash(unittest.TestCase):
 
 
 class TestCacheKey(unittest.TestCase):
+    def test_redaction_placeholder_is_not_a_binary_identity(self):
+        self.assertIsNone(
+            compute_cache_key(name='redacted', url=None, command='***', args=[])
+        )
+
     def test_vscode_provider_identity_does_not_override_launch_details(self):
         server = {
             "name": "GitKraken",
@@ -275,7 +280,7 @@ class TestCacheKey(unittest.TestCase):
                 command="cmd.exe",
                 args=["/c", "npx", "-y", "@smithery/cli@latest", "run", "example-server"],
             ),
-            "smithery-unverified:example-server",
+            "smithery:example-server",
         )
 
     def test_smithery_current_package_uses_mcp_run_target(self):
@@ -289,24 +294,16 @@ class TestCacheKey(unittest.TestCase):
             "smithery:vendor/server",
         )
 
-    def test_smithery_supported_runner_forms(self):
-        vectors = [
-            ("smithery.cmd", ["--verbose", "run", "@vendor/server"], "smithery-unverified:vendor/server"),
-            ("npm", ["exec", "--", "@smithery/cli@latest", "run", "vendor/server"], "smithery:vendor/server"),
-            ("bunx", ["--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("bun", ["x", "--bun", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("cmd", ["/c", "npx.cmd", "-y", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("npx", ["-y", "@smithery/cli", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-            ("bunx", ["--no-install", "@smithery/cli@latest", "run", "vendor/server"], "smithery-unverified:vendor/server"),
-        ]
-        for command, args, expected in vectors:
-            with self.subTest(command=command, args=args):
-                self.assertEqual(
-                    compute_cache_key(
-                        name="alias", url=None, command=command, args=args
-                    ),
-                    expected,
-                )
+    def test_smithery_npm_runner_uses_run_target(self):
+        self.assertEqual(
+            compute_cache_key(
+                name="alias",
+                url=None,
+                command="npm",
+                args=["exec", "--", "@smithery/cli@latest", "run", "vendor/server"],
+            ),
+            "smithery:vendor/server",
+        )
 
     def test_invalid_standalone_smithery_command_fails_closed(self):
         self.assertIsNone(
@@ -393,20 +390,24 @@ class TestCacheKey(unittest.TestCase):
                     )
                 )
 
-    def test_smithery_path_qualified_launchers_are_unverified(self):
+    def test_unverified_smithery_launchers_fail_closed(self):
         vectors = [
+            ("smithery", ["run", "@vendor/server"]),
+            ("smithery.cmd", ["--verbose", "run", "@vendor/server"]),
+            ("bunx", ["--bun", "@smithery/cli@latest", "run", "vendor/server"]),
+            ("bun", ["x", "--bun", "@smithery/cli@latest", "run", "vendor/server"]),
+            ("npx", ["-y", "@smithery/cli", "run", "vendor/server"]),
             ("./smithery", ["run", "@vendor/server"]),
             ("/tmp/evil/smithery", ["run", "@vendor/server"]),
             (r"C:\evil\smithery.exe", ["run", "@vendor/server"]),
-            ("./npx", ["-y", "@smithery/cli", "run", "@vendor/server"]),
+            ("./npx", ["-y", "@smithery/cli@latest", "run", "@vendor/server"]),
         ]
         for command, args in vectors:
             with self.subTest(command=command):
-                self.assertEqual(
+                self.assertIsNone(
                     compute_cache_key(
                         name="alias", url=None, command=command, args=args,
-                    ),
-                    "smithery-unverified:vendor/server",
+                    )
                 )
 
     def test_runtime_argument_does_not_claim_smithery_identity(self):
@@ -730,6 +731,23 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
             "Claude Code", "alice", {"key-a": {"read": "h1"}}, {"key-flaky"})
         data = self._read_file()
         self.assertEqual(data["tools"]["Claude Code"]["alice"]["key-flaky"], {"t": "h-old"})
+
+    def test_errored_smithery_key_migrates_legacy_entry(self):
+        mcp_tools_cache.update_user_entries(
+            "Claude Code",
+            "alice",
+            {"smithery-unverified:vendor/server": {"read": "h-old"}},
+            set(),
+        )
+        mcp_tools_cache.update_user_entries(
+            "Claude Code",
+            "alice",
+            {},
+            {"smithery:vendor/server"},
+        )
+
+        entries = self._read_file()["tools"]["Claude Code"]["alice"]
+        self.assertEqual(entries, {"smithery:vendor/server": {"read": "h-old"}})
 
     def test_errored_key_without_previous_entry_stays_absent(self):
         mcp_tools_cache.update_user_entries(

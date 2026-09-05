@@ -7,14 +7,20 @@ and tool detection across different operating systems.
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
+import stat
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Iterable, List, Tuple, Union
 
-from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
+from .mcp_extraction_helpers import (
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
+    enumerate_vscode_user_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1092,6 +1098,295 @@ class BaseCursorSettingsExtractor(ABC):
                     Path(temp_db_path).unlink(missing_ok=True)
                 except Exception:
                     pass
+
+
+# Deliberately generous — a real settings.json is a few KB, so this only stops a
+# planted file from exhausting memory during a privileged scan. Matches the
+# largest sibling VS Code read cap.
+_VSCODE_SETTINGS_MAX_BYTES = 5 * 1024 * 1024
+
+
+class BaseGitHubCopilotSettingsExtractor(ABC):
+    """Extract VS Code GitHub Copilot agent-mode permissions from ``settings.json``.
+
+    Copilot's agent permissions have no dedicated file — they live in VS Code's
+    ``settings.json`` (JSONC), read here for every profile on both channels and
+    emitted as the same backend-ready record the Cursor extractor produces.
+
+    User + profile scope only: these keys are user/application-scoped and VS Code
+    does not honour them from a workspace file, so reading workspace settings would
+    report a posture the tool never applies.
+    """
+
+    # Every key was verified against the VS Code configuration registry; keys the
+    # extension does not register are excluded so we never report a setting the
+    # tool ignores. ``chat.tools.autoApprove`` is the pre-rename legacy name.
+    SECURITY_RELEVANT_KEYS = {
+        "chat.tools.global.autoApprove", "chat.tools.autoApprove",  # global YOLO (current + legacy)
+        "chat.permissions.default",
+        "chat.tools.eligibleForAutoApproval",
+        "chat.tools.terminal.enableAutoApprove", "chat.tools.terminal.autoApprove",
+        "chat.tools.edits.autoApprove",
+        "chat.tools.urls.autoApprove",
+        "chat.agent.enabled", "chat.agent.sandbox.enabled",
+        "chat.agent.networkFilter", "chat.agent.allowedNetworkDomains",
+        "chat.agent.deniedNetworkDomains",
+        "chat.mcp.access", "chat.mcp.allowedServers", "chat.mcp.deniedServers",
+        "github.copilot.chat.claudeAgent.enabled",
+    }
+
+    # A truthy global auto-approve removes every confirmation, as do the elevated
+    # levels of the permissions picker (``chat.permissions.default``).
+    _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove", "chat.tools.autoApprove")
+    _BYPASS_PERMISSION_LEVELS = ("autoApprove", "autopilot")
+
+    @abstractmethod
+    def _scan_users(self, callback) -> None:
+        """Call ``callback(user_home)`` for each user home to scan (all users under
+        a root scan, else just the current user)."""
+
+    @abstractmethod
+    def _user_config_dirs(self, user_home) -> List[Path]:
+        """Return this user's VS Code ``User`` config dirs (stable Code first, then
+        Insiders) — the parents of ``settings.json`` and ``profiles/``."""
+
+    def _iter_channel_settings_files(self, config_dir):
+        """Yield the default-profile ``settings.json`` plus every named profile's,
+        for ONE channel. Every profile is read rather than first-wins: a YOLO named
+        profile is as real a risk as the default one."""
+        for path in enumerate_vscode_user_files(Path(config_dir), "settings.json"):
+            yield path
+
+    @staticmethod
+    def _read_contained(path: Path, user_home: Path) -> Optional[str]:
+        """Read ``path`` only if the descriptor we hold is a regular file belonging
+        to the user whose home it sits in. Checks run against that one open
+        descriptor, never a re-resolved path, so a file swapped mid-scan is refused.
+        An in-home symlink (stow/chezmoi) resolves inside and is still read."""
+        fd = None
+        try:
+            # O_NONBLOCK: opening a FIFO read-only otherwise blocks until a writer
+            # appears, which would hang the whole scan on one planted path.
+            fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            if st.st_size > _VSCODE_SETTINGS_MAX_BYTES:
+                logger.info(f"Refusing {path}: {st.st_size} bytes exceeds the settings read cap")
+                return None
+            real = os.path.normcase(os.path.realpath(str(path)))
+            base = os.path.normcase(os.path.realpath(str(user_home)))
+            if not (real == base or real.startswith(base.rstrip(os.sep) + os.sep)):
+                return None
+            # A hard link keeps its target's owner while its path stays inside the
+            # home, so containment alone cannot see through one. st_nlink catches it
+            # on every platform; st_uid is 0 for all files on Windows.
+            if st.st_nlink > 1:
+                logger.info(f"Refusing {path}: multiply-linked, may not be this user's file")
+                return None
+            home_stat = os.stat(base)
+            if st.st_uid != home_stat.st_uid:
+                logger.info(f"Refusing {path}: owned by uid {st.st_uid}, home is {home_stat.st_uid}")
+                return None
+            resolved = os.stat(real)
+            if (resolved.st_dev, resolved.st_ino) != (st.st_dev, st.st_ino):
+                return None  # swapped between the open and the check
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+                fd = None
+                return handle.read()
+        except OSError as e:
+            logger.debug(f"Could not read {path}: {e}")
+            return None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def extract_settings_by_user(self) -> List[Dict]:
+        """One backend-ready record per user that has Copilot settings, riskiest
+        first. Under an elevated scan the per-user report filter picks the record
+        whose ``settings_path`` is in that user's home, so no user's posture is
+        dropped in favour of another's."""
+        records: List[Dict] = []
+
+        def extract_for_user(user_home) -> None:
+            try:
+                rec = self._extract_for_user(Path(user_home))
+                if rec:
+                    records.append(rec)
+            except Exception as e:
+                logger.debug(f"Error extracting Copilot settings for {user_home}: {e}")
+
+        self._scan_users(extract_for_user)
+        records.sort(key=self._permissiveness, reverse=True)
+        return records
+
+    def extract_settings(self) -> Optional[Dict]:
+        """The riskiest user's record — the single-record view for a report that is
+        not scoped to one user. None when no Copilot permission setting is present."""
+        records = self.extract_settings_by_user()
+        return records[0] if records else None
+
+    @staticmethod
+    def _permissiveness(record: Dict) -> tuple:
+        """Rank a record so the riskiest posture wins: bypass over default first,
+        then more auto-approved terminal rules."""
+        mode_rank = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
+        return (mode_rank.get(record.get("permission_mode"), 0),
+                len(record.get("allow_rules", [])))
+
+    def _extract_for_user(self, user_home: Path) -> Optional[Dict]:
+        """One record for this user. Profiles merge within a channel; stable and
+        Insiders never merge, so the reported posture is always one that a single
+        installation actually defines. The riskiest channel wins."""
+        per_channel = []
+        for config_dir in self._user_config_dirs(Path(user_home)):
+            records = []
+            for path in self._iter_channel_settings_files(config_dir):
+                data = self._parse_jsonc(path, user_home)
+                if data is None:
+                    continue
+                record = self._build_record(data, path, "user")
+                if record:
+                    logger.info(f"  ✓ Extracted Copilot settings from {path}")
+                    records.append(record)
+            if records:
+                # Merge from the most-permissive profile so settings_path attributes
+                # to where the risk is, not to whichever file was read first.
+                records.sort(key=self._permissiveness, reverse=True)
+                per_channel.append(self._merge_records(records[0], records[1:]))
+        if not per_channel:
+            return None
+        return max(per_channel, key=self._permissiveness)
+
+    @classmethod
+    def _parse_jsonc(cls, path: Path, user_home=None) -> Optional[Dict]:
+        """Leniently parse a VS Code JSONC settings file (comments + trailing commas
+        tolerated). Returns the dict, or None if missing/unreadable/not a dict.
+        When ``user_home`` is given the file is read through the containment check
+        so a link out of the home is never read. Never raises — this runs on
+        customer machines."""
+        try:
+            if user_home is not None:
+                raw = cls._read_contained(path, Path(user_home))
+                if raw is None:
+                    return None
+            else:
+                if not path.is_file():
+                    return None
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
+            return data if isinstance(data, dict) else None
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Permission/OS error reading {path}: {e}")
+            return None
+        except Exception as e:
+            logger.debug(f"Could not parse {path}: {e}")
+            return None
+
+    def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:
+        raw_settings = {k: data[k] for k in self.SECURITY_RELEVANT_KEYS if k in data}
+        if not raw_settings:
+            return None  # nothing security-relevant here → no row
+        allow_rules, deny_rules = self._terminal_rules(data)
+        record = {
+            "settings_source": scope,
+            "scope": scope,
+            "settings_path": str(path),
+            # chat.mcp.* is VS Code-wide MCP governance, not a Copilot permission —
+            # captured here as context rather than promoted to its own field.
+            "raw_settings": raw_settings,
+            "permission_mode": self._permission_mode(data),
+            "sandbox_enabled": self._sandbox_enabled(data),
+        }
+        if allow_rules:
+            record["allow_rules"] = allow_rules
+        if deny_rules:
+            record["deny_rules"] = deny_rules
+        return record
+
+    def _permission_mode(self, data: Dict) -> str:
+        if any(data.get(k) is True for k in self._GLOBAL_AUTOAPPROVE_KEYS):
+            return "bypassPermissions"
+        if data.get("chat.permissions.default") in self._BYPASS_PERMISSION_LEVELS:
+            return "bypassPermissions"
+        edits = data.get("chat.tools.edits.autoApprove")
+        if isinstance(edits, dict) and any(v is True for v in edits.values()):
+            return "acceptEdits"
+        return "default"
+
+    @staticmethod
+    def _sandbox_enabled(data: Dict):
+        val = data.get("chat.agent.sandbox.enabled")
+        if isinstance(val, str):
+            return val.lower() == "on"
+        if isinstance(val, bool):
+            return val
+        return None
+
+    @staticmethod
+    def _clean_terminal_pattern(pattern: str) -> str:
+        """Strip a wrapping ``/…/`` regex so the rule reads as the command."""
+        p = pattern.strip()
+        if len(p) >= 2 and p.startswith("/") and p.endswith("/"):
+            p = p[1:-1]
+        return p
+
+    def _terminal_rules(self, data: Dict) -> Tuple[List[str], List[str]]:
+        """Split ``chat.tools.terminal.autoApprove`` into allow/deny Bash rules.
+
+        A verdict is a bare boolean or the object form ``{"approve": true, ...}``;
+        both are read, since a missed object-form ``false`` would hide a denial.
+        ``chat.tools.terminal.enableAutoApprove`` (default true) is the master
+        switch — with it off the allow patterns are inert, so only denials stand."""
+        allow, deny = [], []
+        auto = data.get("chat.tools.terminal.autoApprove")
+        if isinstance(auto, dict):
+            for pattern, verdict in auto.items():
+                if not isinstance(pattern, str) or not pattern:
+                    continue
+                if isinstance(verdict, bool):
+                    approved = verdict
+                elif isinstance(verdict, dict):
+                    approved = verdict.get("approve")
+                else:
+                    approved = None
+                rule = f"Bash({self._clean_terminal_pattern(pattern)} *)"
+                if approved is True:
+                    allow.append(rule)
+                elif approved is False:
+                    deny.append(rule)
+        if data.get("chat.tools.terminal.enableAutoApprove") is False:
+            allow = []
+        return self._dedupe(allow), self._dedupe(deny)
+
+    @staticmethod
+    def _dedupe(items: List[str]) -> List[str]:
+        seen, out = set(), []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    def _merge_records(self, base: Dict, others: List[Dict]) -> Dict:
+        """Union the allow/deny rules across a user's profiles and escalate the mode
+        to the most permissive seen, so one YOLO profile surfaces even when the
+        default profile is locked down."""
+        if not others:
+            return base
+        merged = dict(base)
+        order = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
+        for rec in others:
+            for field in ("allow_rules", "deny_rules"):
+                extra = rec.get(field)
+                if extra:
+                    merged[field] = self._dedupe(merged.get(field, []) + extra)
+            if order.get(rec.get("permission_mode"), 0) > order.get(merged.get("permission_mode"), 0):
+                merged["permission_mode"] = rec["permission_mode"]
+        return merged
 
 
 class BaseOpenClawDetector(BaseToolDetector):

@@ -73,6 +73,7 @@ try:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        GitHubCopilotSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -141,6 +142,7 @@ except ImportError:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        GitHubCopilotSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -416,6 +418,7 @@ class AIToolsDetector:
 
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
+            self._github_copilot_settings_extractor = GitHubCopilotSettingsExtractorFactory.create(self.system)
 
             # GitHub Copilot CLI MCP + rules + settings + skills extractors (macOS/Windows; None elsewhere)
             self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
@@ -1840,7 +1843,21 @@ class AIToolsDetector:
 
         filtered_tool = tool.copy()
         filtered_tool['projects'] = filtered_projects
-        
+
+        # A tool carrying one record per user reports THIS user's posture; without
+        # it every other user's report loses its permissions to whoever ranked first.
+        by_user = filtered_tool.pop('_permissions_by_user', None)
+        if by_user:
+            own = []
+            for rec in by_user:
+                rec_path = _normalise_path(rec.get('settings_path', ''))
+                if rec_path == user_home_norm or rec_path.startswith(user_home_norm + '/'):
+                    own.append(rec)
+            if own:
+                filtered_tool['permissions'] = own[0]  # already riskiest-first
+            else:
+                filtered_tool.pop('permissions', None)
+
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
@@ -2548,6 +2565,23 @@ class AIToolsDetector:
                 "install_path": tool.get("install_path"),
                 "projects": projects_list,
             }
+
+            # Canonical row only, mirroring the skills attachment above, so a
+            # multi-row install reports one permission record.
+            if is_canonical_vscode and self._github_copilot_settings_extractor:
+                logger.info(f"  Extracting {tool_name} permissions...")
+                try:
+                    by_user = self._github_copilot_settings_extractor.extract_settings_by_user()
+                    if by_user:
+                        # Riskiest first. The per-user filter narrows this to each
+                        # user's own record; the head is what an unscoped report shows.
+                        tool_dict["_permissions_by_user"] = by_user
+                        tool_dict["permissions"] = by_user[0]
+                        logger.info(f"  ✓ Added permissions to {tool_name} report")
+                    else:
+                        logger.info("  ℹ No Copilot permissions found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} permissions: {e}", exc_info=True)
 
             return tool_dict
 

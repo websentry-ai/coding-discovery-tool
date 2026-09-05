@@ -15,9 +15,11 @@ from typing import Dict, List, Optional
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
-from .constants import VERSION_TIMEOUT
+from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
+    _read_own_regular_file,
+    extract_version_number,
     machine_global_binary_owned_by_user,
     resolve_npm_global_tool_bin,
     run_command,
@@ -129,82 +131,117 @@ def _detect_extension_tool(
     return detector.detect()
 
 
-def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Codex installation for a user."""
-    # Check user's .nvm versions for codex (npm installs - most common)
-    nvm_versions = user_home / ".nvm" / "versions"
-    # Another user's home is access-denied to a non-elevated scan and .exists() re-raises it; guard the probe the way _detect_gemini_cli already does.
-    try:
-        nvm_present = nvm_versions.exists()
-    except PermissionError:
-        nvm_present = False
-    if nvm_present:
+def _npm_cli_version(path: Path, npm_package: str, user_home: Path) -> Optional[str]:
+    """Version of the install at ``path``, read from its npm ``package.json``.
+
+    The binary is never executed: it sits in a user-writable directory and the
+    scan runs as root/SYSTEM. The metadata is read through
+    ``_read_own_regular_file``, which binds its regular-file, redirect and size
+    checks to the opened fd, so the scanned user cannot swap the path underneath.
+    """
+    bin_dir = path.parent
+    candidates = [
+        bin_dir / "node_modules" / npm_package / "package.json",
+        bin_dir.parent / "lib" / "node_modules" / npm_package / "package.json",
+    ]
+    for package_json in candidates:
+        raw = _read_own_regular_file(package_json, user_home, MAX_CONFIG_FILE_SIZE)
+        if not raw:
+            continue
         try:
-            for version_dir in nvm_versions.iterdir():
-                if version_dir.is_dir():
-                    codex_bin = version_dir / "bin" / "codex"
-                    if codex_bin.exists():
-                        return {
-                            "name": detector.tool_name,
-                            "version": detector.get_version(),
-                            "install_path": str(codex_bin)
-                        }
-        except (PermissionError, OSError):
-            pass
-    
-    # Fallback: Check Bun global binaries
-    bun_bin = user_home / ".bun" / "bin" / "codex"
-    try:
-        bun_present = bun_bin.exists()
-    except PermissionError:
-        bun_present = False
-    if bun_present:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        version = data.get("version") if isinstance(data, dict) else None
+        if isinstance(version, str):
+            return version
+    logger.debug(f"No readable {npm_package} package.json beside {path}")
+    return None
+
+
+
+def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: str,
+                           npm_package: str) -> Optional[Dict]:
+    """Resolve an npm-distributed CLI under ``user_home``: nvm, the per-OS global
+    locations, then Bun. ``detector.detect()`` resolves the SCANNER's PATH, so it
+    is skipped when root (mirrors ``_detect_gemini_cli``)."""
+    def found(path) -> Dict:
         return {
             "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(bun_bin)
+            "version": _npm_cli_version(Path(path), npm_package, user_home) or "Unknown",
+            "install_path": str(path),
         }
 
+    is_root = is_running_as_root()
+
+    nvm_node = user_home / ".nvm" / "versions" / "node"
+    try:
+        version_dirs = sorted(nvm_node.iterdir()) if nvm_node.exists() else []
+    except (PermissionError, OSError):
+        version_dirs = []
+    for version_dir in version_dirs:
+        candidate = version_dir / "bin" / tool
+        try:
+            if candidate.exists():
+                return found(candidate)
+        except OSError:
+            continue
+
+    if platform.system() == "Windows":
+        npm_dir = user_home / "AppData" / "Roaming" / "npm"
+        candidates = [
+            npm_dir / f"{tool}.cmd",
+            npm_dir / f"{tool}.ps1",
+            npm_dir / tool,
+            user_home / ".bun" / "bin" / f"{tool}.exe",
+            *windows_node_manager_shims(user_home, tool),
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    return found(candidate)
+            except OSError:
+                continue
+    else:
+        machine_global = [Path(f"/opt/homebrew/bin/{tool}"), Path(f"/usr/local/bin/{tool}")]
+        user_relative = [
+            user_home / ".local" / "bin" / tool,
+            user_home / ".npm-global" / "bin" / tool,
+        ]
+        for candidate in machine_global + user_relative:
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    if is_root and candidate in machine_global \
+                            and not machine_global_binary_owned_by_user(candidate, user_home):
+                        continue
+                    return found(candidate)
+            except OSError:
+                continue
+
+        npm_resolved = resolve_npm_global_tool_bin(tool, user_home, is_root)
+        if npm_resolved:
+            return found(npm_resolved)
+
+        bun_bin = user_home / ".bun" / "bin" / tool
+        try:
+            if bun_bin.exists():
+                return found(bun_bin)
+        except OSError:
+            pass
+
+    if is_root:
+        return None
     return detector.detect()
+
+
+def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect Codex installation for a user."""
+    return _detect_npm_global_cli(detector, user_home, "codex", "@openai/codex")
 
 
 def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
     """Detect OpenCode installation for a user."""
-    # Check user's .nvm versions for opencode
-    nvm_versions = user_home / ".nvm" / "versions"
-    # Another user's home is access-denied to a non-elevated scan and .exists() re-raises it; guard the probe the way _detect_gemini_cli already does.
-    try:
-        nvm_present = nvm_versions.exists()
-    except PermissionError:
-        nvm_present = False
-    if nvm_present:
-        try:
-            for version_dir in nvm_versions.iterdir():
-                if version_dir.is_dir():
-                    opencode_bin = version_dir / "bin" / "opencode"
-                    if opencode_bin.exists():
-                        return {
-                            "name": detector.tool_name,
-                            "version": detector.get_version(),
-                            "install_path": str(opencode_bin)
-                        }
-        except (PermissionError, OSError):
-            pass
-    
-    # Fallback: Check Bun global binaries
-    bun_bin = user_home / ".bun" / "bin" / "opencode"
-    try:
-        bun_present = bun_bin.exists()
-    except PermissionError:
-        bun_present = False
-    if bun_present:
-        return {
-            "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(bun_bin)
-        }
-
-    return detector.detect()
+    return _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai")
 
 
 def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:

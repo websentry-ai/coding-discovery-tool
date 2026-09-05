@@ -1620,6 +1620,28 @@ class GitHubCopilotRulesExtractorFactory:
             return None
 
 
+class GitHubCopilotSettingsExtractorFactory:
+    """Factory for creating OS-specific VS Code GitHub Copilot settings extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None):
+        """Create the VS Code GitHub Copilot settings/permission extractor for the OS."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.github_copilot.settings_extractor import MacOSGitHubCopilotSettingsExtractor
+            return MacOSGitHubCopilotSettingsExtractor()
+        elif os_name == "Windows":
+            from .windows.github_copilot.settings_extractor import WindowsGitHubCopilotSettingsExtractor
+            return WindowsGitHubCopilotSettingsExtractor()
+        elif os_name == "Linux":
+            from .linux.github_copilot.settings_extractor import LinuxGitHubCopilotSettingsExtractor
+            return LinuxGitHubCopilotSettingsExtractor()
+        else:
+            return None
+
+
 class JunieMCPConfigExtractorFactory:
     """Factory for creating OS-specific Junie MCP config extractors."""
 

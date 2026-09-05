@@ -1100,6 +1100,12 @@ class BaseCursorSettingsExtractor(ABC):
                     pass
 
 
+# Deliberately generous — a real settings.json is a few KB, so this only stops a
+# planted file from exhausting memory during a privileged scan. Matches the
+# largest sibling VS Code read cap.
+_VSCODE_SETTINGS_MAX_BYTES = 5 * 1024 * 1024
+
+
 class BaseGitHubCopilotSettingsExtractor(ABC):
     """Extract VS Code GitHub Copilot agent-mode permissions from ``settings.json``.
 
@@ -1166,6 +1172,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
+                return None
+            if st.st_size > _VSCODE_SETTINGS_MAX_BYTES:
+                logger.info(f"Refusing {path}: {st.st_size} bytes exceeds the settings read cap")
                 return None
             real = os.path.normcase(os.path.realpath(str(path)))
             base = os.path.normcase(os.path.realpath(str(user_home)))

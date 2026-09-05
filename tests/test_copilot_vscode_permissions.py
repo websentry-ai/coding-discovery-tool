@@ -15,7 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from coding_discovery_tools.coding_tool_base import BaseGitHubCopilotSettingsExtractor  # noqa: E402
+from coding_discovery_tools.coding_tool_base import (  # noqa: E402
+    _VSCODE_SETTINGS_MAX_BYTES,
+    BaseGitHubCopilotSettingsExtractor,
+)
 from coding_discovery_tools.coding_tool_factory import GitHubCopilotSettingsExtractorFactory  # noqa: E402
 
 
@@ -647,6 +650,41 @@ class TestHardLinkContainment(unittest.TestCase):
         finally:
             shutil.rmtree(home, ignore_errors=True)
             shutil.rmtree(outside, ignore_errors=True)
+
+
+class TestSettingsSizeCap(unittest.TestCase):
+    """A planted multi-GB settings.json must not be slurped into memory during a
+    privileged scan — without starving a genuinely large real one."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="cap-home-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+        self.settings = self.ud / "settings.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _ex(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex
+
+    def test_oversized_file_is_refused(self):
+        self.settings.write_text(json.dumps({"chat.tools.global.autoApprove": True}),
+                                 encoding="utf-8")
+        # sparse: st_size is what the cap reads, so no gigabyte is actually written
+        os.truncate(str(self.settings), _VSCODE_SETTINGS_MAX_BYTES + 1)
+        self.assertIsNone(self._ex().extract_settings())
+
+    def test_large_real_settings_is_still_read(self):
+        # ~2 MB of legitimate content: well past anything real, still under the cap
+        padding = {f"chat.tools.terminal.autoApprove-note-{i}": "x" * 200 for i in range(10000)}
+        padding["chat.tools.global.autoApprove"] = True
+        self.settings.write_text(json.dumps(padding), encoding="utf-8")
+        self.assertGreater(self.settings.stat().st_size, 2 * 1024 * 1024)
+        self.assertLess(self.settings.stat().st_size, _VSCODE_SETTINGS_MAX_BYTES)
+        self.assertEqual(self._ex().extract_settings()["permission_mode"], "bypassPermissions")
 
 
 if __name__ == "__main__":

@@ -670,6 +670,19 @@ class TestCopilotCliMcpHelpers(unittest.TestCase):
         parsed = json.loads(_strip_jsonc_comments(raw))
         self.assertEqual(parsed, {"a": 1, "b": 2})
 
+    def test_jsonc_drops_a_leading_bom(self):
+        # PowerShell's Set-Content -Encoding UTF8 and older Notepad write one, and
+        # json.loads rejects it outright; the tools themselves read such a file fine
+        raw = "\ufeff" + '{"servers": {"s": {"command": "node"}}}'
+        with self.assertRaises(ValueError):
+            json.loads(raw)
+        parsed = json.loads(_strip_jsonc_comments(raw))
+        self.assertEqual(set(parsed["servers"]), {"s"})
+
+    def test_jsonc_keeps_a_bom_character_inside_a_string(self):
+        raw = '{"a": "x\ufeffy"}'
+        self.assertEqual(json.loads(_strip_jsonc_comments(raw))["a"], "x\ufeffy")
+
     def test_extract_servers_prefers_mcpServers(self):
         obj = {"mcpServers": {"a": {}}, "servers": {"b": {}}, "c": {}}
         self.assertEqual(set(_extract_servers_obj(obj)), {"a"})

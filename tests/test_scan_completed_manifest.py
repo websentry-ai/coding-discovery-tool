@@ -475,6 +475,11 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertNotIn(("alice", "ToolB"), pairs)
 
 
+# chmod-based denial needs POSIX semantics, and root can read a 0o000 dir anyway.
+# Evaluated once, short-circuiting so os.geteuid() is never reached on Windows.
+_NO_POSIX_DENIAL = not hasattr(os, "geteuid") or os.geteuid() == 0
+
+
 class TestProfileProbe(unittest.TestCase):
     """probe_profile separates "nothing installed" from "could not look", and only the
     latter blocks the manifest — an absent home must never disable pruning fleet-wide."""
@@ -506,7 +511,7 @@ class TestProfileProbe(unittest.TestCase):
         self.assertEqual(probe["error"], "FileNotFoundError")
         self.assertFalse(profile_unreadable(probe), "an absent home must not block prune")
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    @unittest.skipIf(_NO_POSIX_DENIAL, "root can read a 0o000 dir")
     def test_denied_profile_is_unreadable(self):
         denied = Path(tempfile.mkdtemp())
         os.chmod(denied, 0o000)
@@ -515,7 +520,7 @@ class TestProfileProbe(unittest.TestCase):
         self.assertEqual(probe["error"], "PermissionError")
         self.assertTrue(profile_unreadable(probe))
 
-    @unittest.skipIf(os.geteuid() == 0, "root can traverse a 0o600 dir")
+    @unittest.skipIf(_NO_POSIX_DENIAL, "root can traverse a 0o600 dir")
     def test_listable_home_with_denied_tool_dir_is_unreadable(self):
         # A home we can list but whose tool dirs we cannot stat is still an unknown:
         # treating it as empty would send a manifest and prune the user's real tools.
@@ -552,7 +557,7 @@ class TestDetectorDenialMarksIncomplete(unittest.TestCase):
         )
         self.assertEqual(failures, set(), "absence must not be reported as a failure")
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    @unittest.skipIf(_NO_POSIX_DENIAL, "root can read a 0o000 dir")
     def test_gemini_denied_nvm_records_failure(self):
         # Gemini's probes catch bare OSError and fall through to "not present", so a denied
         # ~/.nvm read used to leave the failure set empty and let the scan prune.
@@ -567,7 +572,7 @@ class TestDetectorDenialMarksIncomplete(unittest.TestCase):
         self.utd._detect_gemini_cli(self.detector, home, failures)
         self.assertEqual(failures, {"Gemini CLI"})
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read a 0o000 dir")
+    @unittest.skipIf(_NO_POSIX_DENIAL, "root can read a 0o000 dir")
     def test_denied_candidate_records_failure(self):
         home = Path(tempfile.mkdtemp())
         (home / ".local" / "bin").mkdir(parents=True)

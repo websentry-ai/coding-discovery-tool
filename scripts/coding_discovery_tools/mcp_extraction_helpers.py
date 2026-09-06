@@ -1483,13 +1483,19 @@ _TRAILING_COMMA_PATTERN = re.compile(
 
 
 def _strip_jsonc_comments(raw: str) -> str:
-    """Remove // and /* */ comments from JSONC text, preserving string literals."""
+    """Remove // and /* */ comments from JSONC text, preserving string literals.
+
+    Also drops a leading BOM, which ``json.loads`` rejects. Editors and
+    provisioning scripts do write one (PowerShell's ``Set-Content -Encoding
+    UTF8``, older Notepad), and the tools themselves read such a file happily —
+    so without this the config is live but invisible to us.
+    """
     def _replace(match: "re.Match") -> str:
         if match.group(1) is not None:
             return match.group(1)
         return ""
 
-    return _JSONC_PATTERN.sub(_replace, raw)
+    return _JSONC_PATTERN.sub(_replace, raw.lstrip("﻿"))
 
 
 def _strip_trailing_commas(raw: str) -> str:

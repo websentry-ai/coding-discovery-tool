@@ -811,5 +811,37 @@ class TestDefaultConfigurationApprovals(unittest.TestCase):
             self.assertEqual(rec["permission_mode"], "default")
 
 
+class TestByteOrderMark(unittest.TestCase):
+    """A settings.json written with a BOM is still live config: VS Code reads it
+    and preserves the BOM across its own edits, so refusing to parse it hides the
+    user's posture indefinitely."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="bom-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_settings_with_a_bom_is_still_reported(self):
+        # exactly what PowerShell's Set-Content -Encoding UTF8 produces
+        body = json.dumps({"chat.tools.global.autoApprove": True})
+        (self.ud / "settings.json").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        rec = self._extract()
+        self.assertIsNotNone(rec, "a BOM must not make the settings file invisible")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_settings_without_a_bom_is_unchanged(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+
 if __name__ == "__main__":
     unittest.main()

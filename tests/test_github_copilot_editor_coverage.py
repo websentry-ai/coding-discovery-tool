@@ -205,9 +205,10 @@ class TestCursorEnrichmentSources(unittest.TestCase):
     def test_cursor_row_reads_cursor_user_dir(self):
         self._mcp("Cursor", {"cursor-server": {}})
         self._mcp("Code", {"vscode-server": {}})
+        code_user = str(self.app_support / "Code" / "User")
         paths = [p.get("path", "") for p in self._extract("GitHub Copilot (Cursor)")["projects"]]
-        self.assertTrue(any("Cursor" in p for p in paths), paths)
-        self.assertFalse(any(p.endswith("Code/User") for p in paths), paths)
+        self.assertTrue(any(str(self.app_support / "Cursor" / "User") == p for p in paths), paths)
+        self.assertNotIn(code_user, paths)
 
     def test_cursor_row_does_not_read_jetbrains(self):
         self._mcp("Cursor", {"cursor-server": {}})
@@ -218,9 +219,33 @@ class TestCursorEnrichmentSources(unittest.TestCase):
         self._mcp("Code", {"vscode-server": {}})
         self._mcp("Cursor", {"cursor-server": {}})
         paths = [p.get("path", "") for p in self._extract("GitHub Copilot (VS Code)")["projects"]]
-        self.assertTrue(any(p.endswith("Code/User") for p in paths), paths)
-        self.assertFalse(any("Cursor" in p for p in paths), paths)
+        self.assertIn(str(self.app_support / "Code" / "User"), paths)
+        self.assertNotIn(str(self.app_support / "Cursor" / "User"), paths)
 
+
+class TestPermissionsStayWithVscode(unittest.TestCase):
+    """Permissions come from the editor's own settings.json, so a Cursor row must
+    not inherit stock VS Code's posture."""
+
+    def _canonical(self, names):
+        from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector.__new__(AIToolsDetector)
+        det._set_canonical_vscode_copilot([{"name": n} for n in names])
+        return det._canonical_vscode_copilot
+
+    def test_vscode_preferred_when_both_present(self):
+        self.assertEqual(
+            "github copilot chat (vs code)",
+            self._canonical(["GitHub Copilot Chat (VS Code)", "GitHub Copilot (Cursor)"]),
+        )
+
+    def test_cursor_only_user_still_gets_a_canonical_row(self):
+        self.assertEqual("github copilot (cursor)", self._canonical(["GitHub Copilot (Cursor)"]))
+
+    def test_cursor_canonical_row_is_not_a_vscode_row(self):
+        """The permissions branch additionally requires a "(vs code)" suffix."""
+        canonical = self._canonical(["GitHub Copilot (Cursor)"])
+        self.assertFalse(canonical.endswith("(vs code)"))
 
 # The bases only carry the cases; running them directly would double-count.
 del _Fixture, _EditorCoverageCase, _BuiltinFallbackCase

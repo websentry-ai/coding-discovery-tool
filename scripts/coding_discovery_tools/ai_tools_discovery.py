@@ -2567,7 +2567,11 @@ class AIToolsDetector:
 
             # Canonical row only, mirroring the skills attachment above, so a
             # multi-row install reports one permission record.
-            if is_canonical_vscode and self._github_copilot_settings_extractor:
+            # Permissions come from the editor's own settings.json, so only a
+            # stock VS Code row may carry them; shared ~/.copilot skills above
+            # are editor-independent and stay on whichever row is canonical.
+            if (is_canonical_vscode and tool_name.endswith("(vs code)")
+                    and self._github_copilot_settings_extractor):
                 logger.info(f"  Extracting {tool_name} permissions...")
                 try:
                     by_user = self._github_copilot_settings_extractor.extract_settings_by_user()

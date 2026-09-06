@@ -939,3 +939,32 @@ class TestManifestKeyedByInstallPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNpmResolverReportsDenials(unittest.TestCase):
+    """An unreadable npm candidate is not an absent one. Reporting absence would
+    let the completed scan prune a live install."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_denied_candidate_is_recorded(self):
+        denied = set()
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "denied")):
+            utils_mod.resolve_npm_global_tool_bin("gemini", self.home, True, denied)
+        self.assertIn("gemini", denied)
+
+    def test_absent_candidate_is_not_recorded(self):
+        denied = set()
+        result = utils_mod.resolve_npm_global_tool_bin("gemini", self.home, True, denied)
+        self.assertIsNone(result)
+        self.assertEqual(set(), denied)
+
+    def test_opencode_home_dir_is_a_recognised_marker(self):
+        """The opencode extractor reads ~/.opencode, so the probe must see it."""
+        self.assertIn(".opencode", utils_mod.TOOL_CONFIG_DIRS)
+        self.assertIn(".config/opencode", utils_mod.TOOL_CONFIG_DIRS)

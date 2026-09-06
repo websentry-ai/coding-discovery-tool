@@ -101,7 +101,7 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 
 
 def resolve_npm_global_tool_bin(
-    tool: str, user_home: Path, is_root: bool
+    tool: str, user_home: Path, is_root: bool, denied: Optional[set] = None
 ) -> Optional[str]:
     """Resolve the install path of an npm-global Node CLI (e.g. ``gemini``,
     ``openclaw``) whose real binary lives at ``<npm global prefix>/bin/<tool>``.
@@ -122,6 +122,9 @@ def resolve_npm_global_tool_bin(
         tool: The CLI/binary name (e.g. ``"gemini"`` / ``"openclaw"``).
         user_home: Home dir of the user being scanned.
         is_root: Whether the scan is running as root/SYSTEM.
+        denied: Collects ``tool`` when a candidate could not be read. An
+            unreadable path is not an absent one, and reporting absence would
+            let the completed scan prune a live install.
 
     Returns:
         Absolute path to the resolved executable as a string, or None.
@@ -150,16 +153,22 @@ def resolve_npm_global_tool_bin(
                 try:
                     if version_dir.is_dir():
                         candidates.append(version_dir / "bin" / tool)
-                except (PermissionError, OSError):
+                except (PermissionError, OSError) as e:
+                    if denied is not None and not is_absence_error(e):
+                        denied.add(tool)
                     continue
     except (PermissionError, OSError) as e:
         logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
+        if denied is not None and not is_absence_error(e):
+            denied.add(tool)
 
     for candidate in candidates:
         try:
             if candidate.exists() and os.access(str(candidate), os.X_OK):
                 return str(candidate)
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as e:
+            if denied is not None and not is_absence_error(e):
+                denied.add(tool)
             continue
 
     return None
@@ -562,7 +571,7 @@ _NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt serv
 TOOL_CONFIG_DIRS: FrozenSet[str] = frozenset({
     ".antigravity", ".augment", ".claude", ".cline", ".codeium", ".codex",
     ".copilot", ".cursor", ".gemini", ".junie", ".kilocode", ".roo",
-    ".vscode", ".windsurf",
+    ".opencode", ".vscode", ".windsurf",
     ".config/github-copilot", ".config/opencode",
 })
 

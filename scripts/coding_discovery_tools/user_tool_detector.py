@@ -174,7 +174,7 @@ def _npm_cli_version(path: Path, npm_package: str, user_home: Path) -> Optional[
 
 
 def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: str,
-                           npm_package: str) -> Optional[Dict]:
+                           npm_package: str, failures: Optional[set] = None) -> Optional[Dict]:
     """Resolve an npm-distributed CLI under ``user_home``: nvm, the per-OS global
     locations, then Bun. ``detector.detect()`` resolves the SCANNER's PATH, so it
     is skipped when root (mirrors ``_detect_gemini_cli``)."""
@@ -231,7 +231,7 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
             except OSError:
                 continue
 
-        npm_resolved = resolve_npm_global_tool_bin(tool, user_home, is_root)
+        npm_resolved = resolve_npm_global_tool_bin(tool, user_home, is_root, failures)
         if npm_resolved:
             return found(npm_resolved)
 
@@ -247,14 +247,16 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
     return detector.detect()
 
 
-def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_codex(detector: BaseToolDetector, user_home: Path,
+                  failures: Optional[set] = None) -> Optional[Dict]:
     """Detect Codex installation for a user."""
-    return _detect_npm_global_cli(detector, user_home, "codex", "@openai/codex")
+    return _detect_npm_global_cli(detector, user_home, "codex", "@openai/codex", failures)
 
 
-def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_opencode(detector: BaseToolDetector, user_home: Path,
+                     failures: Optional[set] = None) -> Optional[Dict]:
     """Detect OpenCode installation for a user."""
-    return _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai")
+    return _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai", failures)
 
 
 def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Optional[set] = None) -> Optional[Dict]:
@@ -369,7 +371,7 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Op
         # probe ``<prefix>/bin/gemini`` plus pnpm/nvm fallbacks. The dynamic
         # ``npm prefix -g`` probe is root-guarded inside the helper (it resolves
         # the SCANNER's prefix, not the user's — the 93b5fc2 cross-user FP class).
-        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root())
+        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root(), failures)
         if npm_resolved:
             return {
                 "name": detector.tool_name,
@@ -668,7 +670,7 @@ def find_junie_binary_for_user(user_home: Path, denied: Optional[set] = None) ->
 
     # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix
     # -g`` resolves the scanner's prefix, not the user's.
-    npm_resolved = resolve_npm_global_tool_bin("junie", user_home, is_root)
+    npm_resolved = resolve_npm_global_tool_bin("junie", user_home, is_root, denied)
     if npm_resolved:
         return npm_resolved
 
@@ -941,7 +943,7 @@ def find_cursor_agent_binary_for_user(user_home: Path, denied: Optional[set] = N
     # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix -g``
     # resolves the scanner's prefix, not the user's.
     npm_resolved = resolve_npm_global_tool_bin(
-        "cursor-agent", user_home, is_running_as_root()
+        "cursor-agent", user_home, is_running_as_root(), denied
     )
     if npm_resolved:
         return npm_resolved

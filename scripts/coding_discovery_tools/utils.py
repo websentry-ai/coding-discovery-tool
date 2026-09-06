@@ -101,7 +101,8 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 
 
 def resolve_npm_global_tool_bin(
-    tool: str, user_home: Path, is_root: bool, denied: Optional[set] = None
+    tool: str, user_home: Path, is_root: bool, denied: Optional[set] = None,
+    denied_as: Optional[str] = None,
 ) -> Optional[str]:
     """Resolve the install path of an npm-global Node CLI (e.g. ``gemini``,
     ``openclaw``) whose real binary lives at ``<npm global prefix>/bin/<tool>``.
@@ -122,7 +123,10 @@ def resolve_npm_global_tool_bin(
         tool: The CLI/binary name (e.g. ``"gemini"`` / ``"openclaw"``).
         user_home: Home dir of the user being scanned.
         is_root: Whether the scan is running as root/SYSTEM.
-        denied: Collects ``tool`` when a candidate could not be read. An
+        denied_as: Name to record in ``denied``; defaults to ``tool``. Detectors
+            track failures by display name, so they pass theirs to keep one
+            namespace in the set.
+        denied: Collects the tool when a candidate could not be read. An
             unreadable path is not an absent one, and reporting absence would
             let the completed scan prune a live install.
 
@@ -155,12 +159,12 @@ def resolve_npm_global_tool_bin(
                         candidates.append(version_dir / "bin" / tool)
                 except (PermissionError, OSError) as e:
                     if denied is not None and not is_absence_error(e):
-                        denied.add(tool)
+                        denied.add(denied_as or tool)
                     continue
     except (PermissionError, OSError) as e:
         logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
         if denied is not None and not is_absence_error(e):
-            denied.add(tool)
+            denied.add(denied_as or tool)
 
     for candidate in candidates:
         try:
@@ -168,7 +172,7 @@ def resolve_npm_global_tool_bin(
                 return str(candidate)
         except (PermissionError, OSError) as e:
             if denied is not None and not is_absence_error(e):
-                denied.add(tool)
+                denied.add(denied_as or tool)
             continue
 
     return None

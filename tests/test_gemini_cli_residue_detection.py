@@ -343,7 +343,7 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         (self.home / ".gemini").mkdir()  # residue only
         calls = []
 
-        def spy(tool, user_home, is_root, denied=None):
+        def spy(tool, user_home, is_root, denied=None, denied_as=None):
             calls.append((tool, is_root))
             return None
 

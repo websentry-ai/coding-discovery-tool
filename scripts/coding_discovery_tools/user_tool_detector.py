@@ -177,27 +177,40 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
                            npm_package: str, failures: Optional[set] = None) -> Optional[Dict]:
     """Resolve an npm-distributed CLI under ``user_home``: nvm, the per-OS global
     locations, then Bun. ``detector.detect()`` resolves the SCANNER's PATH, so it
-    is skipped when root (mirrors ``_detect_gemini_cli``)."""
+    is skipped when root (mirrors ``_detect_gemini_cli``).
+
+    A probe we could not read is not an absent one, so it is recorded in
+    ``failures`` and the scan is treated as incomplete. Finding the tool later
+    clears that: the denial only mattered while presence was still unknown.
+    """
     def found(path) -> Dict:
+        if failures is not None:
+            failures.discard(detector.tool_name)
         return {
             "name": detector.tool_name,
             "version": _npm_cli_version(Path(path), npm_package, user_home) or "Unknown",
             "install_path": str(path),
         }
 
+    def note(exc: OSError) -> None:
+        if failures is not None and not is_absence_error(exc):
+            failures.add(detector.tool_name)
+
     is_root = is_running_as_root()
 
     nvm_node = user_home / ".nvm" / "versions" / "node"
     try:
         version_dirs = sorted(nvm_node.iterdir()) if nvm_node.exists() else []
-    except (PermissionError, OSError):
+    except (PermissionError, OSError) as e:
+        note(e)
         version_dirs = []
     for version_dir in version_dirs:
         candidate = version_dir / "bin" / tool
         try:
             if candidate.exists():
                 return found(candidate)
-        except OSError:
+        except OSError as e:
+            note(e)
             continue
 
     if platform.system() == "Windows":
@@ -213,7 +226,8 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
             try:
                 if candidate.exists():
                     return found(candidate)
-            except OSError:
+            except OSError as e:
+                note(e)
                 continue
     else:
         machine_global = [Path(f"/opt/homebrew/bin/{tool}"), Path(f"/usr/local/bin/{tool}")]
@@ -228,10 +242,13 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
                             and not machine_global_binary_owned_by_user(candidate, user_home):
                         continue
                     return found(candidate)
-            except OSError:
+            except OSError as e:
+                note(e)
                 continue
 
-        npm_resolved = resolve_npm_global_tool_bin(tool, user_home, is_root, failures)
+        npm_resolved = resolve_npm_global_tool_bin(
+            tool, user_home, is_root, failures, denied_as=detector.tool_name
+        )
         if npm_resolved:
             return found(npm_resolved)
 
@@ -239,8 +256,8 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
         try:
             if bun_bin.exists():
                 return found(bun_bin)
-        except OSError:
-            pass
+        except OSError as e:
+            note(e)
 
     if is_root:
         return None
@@ -371,7 +388,8 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Op
         # probe ``<prefix>/bin/gemini`` plus pnpm/nvm fallbacks. The dynamic
         # ``npm prefix -g`` probe is root-guarded inside the helper (it resolves
         # the SCANNER's prefix, not the user's — the 93b5fc2 cross-user FP class).
-        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root(), failures)
+        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root(), failures,
+                                                   denied_as=detector.tool_name)
         if npm_resolved:
             return {
                 "name": detector.tool_name,

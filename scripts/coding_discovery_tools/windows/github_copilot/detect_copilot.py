@@ -7,7 +7,10 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseCopilotDetector
 from ...constants import is_symlink_or_junction
 from ...jetbrains_naming_helpers import plugin_entries
-from ...vscode_extension_helpers import find_extension_in_editor
+from ...vscode_extension_helpers import (
+    extensions_dir_for_editor,
+    find_extension_in_editor,
+)
 from ...windows_extraction_helpers import is_running_as_admin
 from ..jetbrains.jetbrains import WindowsJetBrainsDetector
 
@@ -76,6 +79,18 @@ def _safe_descendant_directory(path: Path, trusted_root: Path) -> bool:
         except OSError:
             return False
     return True
+
+
+# Editors whose Copilot rows the rules/MCP extractors can enrich.
+SUPPORTED_IDES = {
+    "Code": "VS Code",
+    "Cursor": "Cursor",
+}
+
+_MARKETPLACE_EXTENSIONS = (
+    ("github.copilot", "GitHub Copilot"),
+    ("github.copilot-chat", "GitHub Copilot Chat"),
+)
 
 
 class WindowsGitHubCopilotDetector(BaseCopilotDetector):
@@ -149,28 +164,30 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         for uninstalled Copilot. This matches the SAFE macOS/Linux path.
         """
         results = []
-        vscode_ext_dir = user_home / ".vscode" / "extensions"
+        code_found = False
 
-        for ext_id, name in (
-            ("github.copilot", "GitHub Copilot (VS Code)"),
-            ("github.copilot-chat", "GitHub Copilot Chat (VS Code)"),
-        ):
-            entry = find_extension_in_editor(user_home, "Code", ext_id)
-            if entry is None:
-                continue
-            _location, version = entry
-            results.append({
-                "name": name,
-                "version": version or "unknown",
-                "publisher": "GitHub",
-                "install_path": str(vscode_ext_dir),
-            })
-            logger.info(f"Detected: {name} v{version or 'unknown'} at {vscode_ext_dir}")
+        for ide_key, ide_name in SUPPORTED_IDES.items():
+            for ext_id, label in _MARKETPLACE_EXTENSIONS:
+                entry = find_extension_in_editor(user_home, ide_key, ext_id)
+                if entry is None:
+                    continue
+                _location, version = entry
+                name = f"{label} ({ide_name})"
+                ext_dir = extensions_dir_for_editor(user_home, ide_key)
+                results.append({
+                    "name": name,
+                    "version": version or "unknown",
+                    "publisher": "GitHub",
+                    "install_path": str(ext_dir),
+                })
+                if ide_key == "Code":
+                    code_found = True
+                logger.info(f"Detected: {name} v{version or 'unknown'} at {ext_dir}")
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
         # marketplace Copilot extension is present, so built-in users — and their
         # VS Code MCP servers (%APPDATA%\Code\User\mcp.json) — aren't missed.
-        if not results:
+        if not code_found:
             results.extend(self._detect_vscode_builtin_copilot(user_home))
 
         return results

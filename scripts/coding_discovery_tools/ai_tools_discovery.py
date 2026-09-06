@@ -2133,12 +2133,12 @@ class AIToolsDetector:
         enriched (the IDE branch in process_single_tool reads this). None when
         neither is present."""
         detected_lower = {t.get("name", "").lower() for t in tools}
-        if "github copilot chat (vs code)" in detected_lower:
-            self._canonical_vscode_copilot = "github copilot chat (vs code)"
-        elif "github copilot (vs code)" in detected_lower:
-            self._canonical_vscode_copilot = "github copilot (vs code)"
-        else:
-            self._canonical_vscode_copilot = None
+        for editor in ("vs code", "cursor"):
+            for label in (f"github copilot chat ({editor})", f"github copilot ({editor})"):
+                if label in detected_lower:
+                    self._canonical_vscode_copilot = label
+                    return
+        self._canonical_vscode_copilot = None
 
     # -- Augment Code: memoized shared-config accessors -----------------------
 
@@ -2515,7 +2515,6 @@ class AIToolsDetector:
             # when a VS Code Copilot surface was ALREADY detected).
             is_canonical_vscode = (
                 "ide" not in tool
-                and tool_name.endswith("(vs code)")
                 and tool_name == self._canonical_vscode_copilot
             )
             if is_canonical_vscode:
@@ -2568,7 +2567,11 @@ class AIToolsDetector:
 
             # Canonical row only, mirroring the skills attachment above, so a
             # multi-row install reports one permission record.
-            if is_canonical_vscode and self._github_copilot_settings_extractor:
+            # Permissions come from the editor's own settings.json, so only a
+            # stock VS Code row may carry them; shared ~/.copilot skills above
+            # are editor-independent and stay on whichever row is canonical.
+            if (is_canonical_vscode and tool_name.endswith("(vs code)")
+                    and self._github_copilot_settings_extractor):
                 logger.info(f"  Extracting {tool_name} permissions...")
                 try:
                     by_user = self._github_copilot_settings_extractor.extract_settings_by_user()

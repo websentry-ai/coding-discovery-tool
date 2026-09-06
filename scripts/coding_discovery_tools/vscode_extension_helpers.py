@@ -32,6 +32,23 @@ _EXTENSIONS_DIR_BY_EDITOR = {
 VSCODE_EDITOR_KEYS = tuple(_EXTENSIONS_DIR_BY_EDITOR)
 
 
+def vscode_family_editor_dirs(tool_name: str) -> list:
+    """User-data dir names for a VS Code-family Copilot row.
+
+    Copilot runs in VS Code forks, and each keeps its own user data dir, so the
+    row's editor decides where its prompts and MCP config live. An unnamed tool
+    means the legacy union over every supported editor.
+    """
+    lowered = (tool_name or "").lower()
+    if not tool_name:
+        return ["Code", "Cursor"]
+    if "vs code" in lowered or "vscode" in lowered:
+        return ["Code"]
+    if "cursor" in lowered:
+        return ["Cursor"]
+    return []
+
+
 def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     """Return the extensions registry directory for ``ide_key`` under ``user_home``.
 

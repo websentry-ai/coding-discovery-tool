@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List
+from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
@@ -30,27 +31,26 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         # Scope MCP sources to the surface: a VS Code row gets VS Code global +
         # workspace .vscode/mcp.json; a JetBrains row gets JetBrains global only.
         # tool_name=None keeps the legacy union (back-compat / direct callers).
-        name = (tool_name or "").lower()
-        is_vscode = ("vs code" in name) or ("vscode" in name)
-        want_vscode = (not tool_name) or is_vscode
-        want_jetbrains = (not tool_name) or (not is_vscode)
+        editor_dirs = vscode_family_editor_dirs(tool_name)
+        want_vscode = bool(editor_dirs)
+        want_jetbrains = (not tool_name) or not want_vscode
 
         projects = []
         if want_vscode:
-            projects.extend(self._extract_vscode_configs())
+            projects.extend(self._extract_vscode_configs(editor_dirs))
             projects.extend(self._extract_workspace_configs())
         if want_jetbrains:
             projects.extend(self._extract_jetbrains_configs())
 
         return {"projects": projects} if projects else None
 
-    def _extract_vscode_configs(self) -> List[Dict]:
+    def _extract_vscode_configs(self, editor_dirs: List[str]) -> List[Dict]:
         configs = []
         for user_home in get_linux_user_homes():
-            configs.extend(self._extract_vscode_configs_for_user(user_home))
+            configs.extend(self._extract_vscode_configs_for_user(user_home, editor_dirs))
         return configs
 
-    def _extract_vscode_configs_for_user(self, user_home: Path) -> List[Dict]:
+    def _extract_vscode_configs_for_user(self, user_home: Path, editor_dirs: List[str]) -> List[Dict]:
         """Extract VS Code MCP configs for a specific user.
 
         Covers the default ``.config/Code/User/mcp.json``, each named profile's
@@ -61,10 +61,9 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         configs: List[Dict] = []
 
         config_base = user_home / ".config"
-        code_user_bases = [
-            config_base / "Code" / "User",
-            config_base / "Code - Insiders" / "User",
-        ]
+        code_user_bases = [config_base / editor / "User" for editor in editor_dirs]
+        if "Code" in editor_dirs:
+            code_user_bases.append(config_base / "Code - Insiders" / "User")
 
         for code_user_base in code_user_bases:
             for mcp_file in enumerate_vscode_mcp_files(code_user_base):

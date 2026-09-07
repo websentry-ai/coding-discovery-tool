@@ -246,10 +246,10 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
     account with no local passwd record, a home that is not ``/Users/<dirname>``,
     or the Data-volume firmlink that ``resolve()`` does not collapse.
 
-    Windows returns False unconditionally: it has no POSIX uids, so ``st_uid`` is
-    always 0, which would read as system-wide and attribute every machine-global
-    binary to every user. No Windows caller reaches this today — the guard keeps
-    that safe if one is ever added.
+    POSIX only, by caller: ``machine_global`` is empty on Windows so nothing
+    reaches here. Do not add a Windows caller — ``st_uid`` is always 0 there,
+    indistinguishable from a root-owned system-wide binary, so every shared
+    binary would be attributed to every user.
 
     Never raises: any stat failure returns False (do not attribute).
 
@@ -260,8 +260,6 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
     Returns:
         True if the binary should be attributed to ``user_home``, else False.
     """
-    if os.name == "nt":
-        return False  # see the Windows note above
     try:
         uid = os.stat(str(candidate)).st_uid
     except (OSError, PermissionError):

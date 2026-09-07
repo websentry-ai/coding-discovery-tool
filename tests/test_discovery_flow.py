@@ -1918,18 +1918,6 @@ class TestRejectedBinaryDiagnostics(unittest.TestCase):
         self.assertEqual("claude,codex", field)
         self.assertNotIn("someone", field)
 
-    def test_windows_never_attributes_a_machine_global_binary(self):
-        """st_uid is always 0 on Windows, which would read as system-wide and
-        hand every shared binary to every user."""
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        home = Path(tmp.name)
-        binary = home / "claude.exe"
-        binary.write_text("")
-        with patch.object(utils_mod.os, "name", "nt"), \
-             patch.object(utils_mod.os, "stat", return_value=Mock(st_uid=0)):
-            self.assertFalse(utils_mod.machine_global_binary_owned_by_user(binary, home))
-
     def test_config_dir_age_is_none_without_any_config_dir(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

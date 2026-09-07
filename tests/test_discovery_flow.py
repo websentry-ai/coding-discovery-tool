@@ -1756,6 +1756,11 @@ class TestNoToolsSentryEvent(unittest.TestCase):
             return kwargs["context"]
         return args[1] if len(args) > 1 else {}
 
+    def setUp(self):
+        # Module state is per-process, which is per-scan in production but not
+        # across tests; without this the event inherits another test's rejections.
+        utils_mod.reset_sentry_run_state()
+
     def _run_main(self, detect_return, mock_sentry):
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
 
@@ -1901,6 +1906,17 @@ class TestRejectedBinaryDiagnostics(unittest.TestCase):
         home = Path(tmp.name)
         (home / ".claude").mkdir()
         self.assertEqual(0, utils_mod.newest_tool_config_dir_age_days([home]))
+
+    def test_rejected_tools_carries_basenames_not_paths(self):
+        """A full path can carry a username; the context PII guard forbids it.
+        The tool name is the diagnostic signal, so report only that."""
+        utils_mod.record_rejected_binary("/opt/homebrew/bin/claude", "owner_mismatch")
+        utils_mod.record_rejected_binary("/Users/someone/.local/bin/codex", "owner_mismatch")
+        field = ",".join(
+            sorted({os.path.basename(p) for p, _ in utils_mod.rejected_binaries()})
+        )
+        self.assertEqual("claude,codex", field)
+        self.assertNotIn("someone", field)
 
     def test_windows_never_attributes_a_machine_global_binary(self):
         """st_uid is always 0 on Windows, which would read as system-wide and

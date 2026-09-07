@@ -3919,7 +3919,10 @@ def main():
                     # Found on disk, then not attributed to the scanned user.
                     no_tools_ctx["rejected_count"] = len(rejected)
                     no_tools_ctx["rejected_reasons"] = ",".join(sorted({r for _, r in rejected}))
-                    no_tools_ctx["rejected_binaries"] = [p for p, _ in rejected]
+                    # Basenames only: a full path can carry a username.
+                    no_tools_ctx["rejected_tools"] = ",".join(
+                        sorted({os.path.basename(p) for p, _ in rejected})
+                    )
                 if hasattr(os, "getuid"):
                     no_tools_ctx["is_root"] = os.getuid() == 0
                 elif platform.system() == "Windows":

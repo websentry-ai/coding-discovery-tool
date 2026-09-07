@@ -2193,7 +2193,7 @@ _SENTRY_TAG_KEYS = (
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
     "scan_event", "config_dirs_present", "config_dirs",
-    "rejected_count", "rejected_reasons", "config_dirs_age_days",
+    "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

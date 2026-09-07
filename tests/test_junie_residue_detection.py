@@ -286,5 +286,28 @@ class TestFindJunieBinaryWindows(unittest.TestCase):
             self.assertIsNone(find_junie_binary_for_user(self.home))
 
 
+class TestJunieVersionFromConfigNeverRaises(unittest.TestCase):
+    """An unreadable config dir must not take the whole scan down.
+
+    ``_get_version_from_config`` imported ``json`` inside the loop body, so a
+    config file whose ``exists()`` raised reached the ``except`` clause with
+    ``json`` unbound. That escaped the detector, marked the scan incomplete and
+    suppressed the prune manifest (DISCOVERY-TOOL-SCRIPT-19).
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_permission_error_on_exists_is_handled(self):
+        from scripts.coding_discovery_tools.macos.junie.junie import MacOSJunieDetector
+
+        class _Denied(type(Path())):
+            def exists(self, *args, **kwargs):
+                raise PermissionError(13, "Permission denied")
+
+        det = MacOSJunieDetector.__new__(MacOSJunieDetector)
+        self.assertIsNone(det._get_version_from_config(_Denied("/nonexistent/.junie")))
+
+
 if __name__ == "__main__":
     unittest.main()

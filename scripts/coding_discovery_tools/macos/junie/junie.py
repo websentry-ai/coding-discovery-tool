@@ -2,6 +2,7 @@
 Junie detection for macOS.
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -144,7 +145,6 @@ class MacOSJunieDetector(BaseToolDetector):
         for config_file in config_files:
             try:
                 if config_file.exists():
-                    import json
                     with open(config_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         if isinstance(data, dict) and isinstance(data.get('version'), str):

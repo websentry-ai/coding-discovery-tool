@@ -1700,9 +1700,16 @@ def _windows_process_is_elevated():
     """True/False, or None when the check could not run.
 
     Shares one probe with the detectors so telemetry can never report a
-    privilege the scan did not actually have.
+    privilege the scan did not actually have. SYSTEM is not in the
+    Administrators group, so it must be recognised by SID first, exactly as
+    ``is_running_as_admin`` does; None still means the check could not run.
     """
-    from .windows_extraction_helpers import windows_admin_state
+    from .windows_extraction_helpers import (
+        _running_as_local_system,
+        windows_admin_state,
+    )
+    if _running_as_local_system():
+        return True
     return windows_admin_state()
 
 

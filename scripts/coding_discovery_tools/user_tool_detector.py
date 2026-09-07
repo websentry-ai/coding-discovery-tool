@@ -20,6 +20,7 @@ from .macos_extraction_helpers import is_running_as_root
 from .utils import (
     _read_own_regular_file,
     extract_version_number,
+    is_absence_error,
     machine_global_binary_owned_by_user,
     resolve_npm_global_tool_bin,
     run_command,
@@ -33,11 +34,17 @@ from .vscode_extension_helpers import (
 
 logger = logging.getLogger(__name__)
 
+
+def _note_denied(denied: Optional[set], exc: OSError) -> None:
+    """Record a probe we could not complete. A path that is simply absent is not one."""
+    if denied is not None and not is_absence_error(exc):
+        denied.add(type(exc).__name__)
+
 # Junie CLI version directories look like "1.4.2" / "v2025.1".
 _JUNIE_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*$")
 
 
-def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def detect_tool_for_user(detector: BaseToolDetector, user_home: Path, failures: Optional[set] = None) -> Optional[Dict]:
     """
     Detect a specific tool for a user by checking their paths directly.
 
@@ -50,6 +57,8 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     Args:
         detector: Tool detector instance
         user_home: Path to the user's home directory
+        failures: Optional set; a tool whose probes hit an unreadable path (rather
+            than an absent one) is added, marking its presence unknown for this run
 
     Returns:
         Tool info dict with keys: name, version, install_path
@@ -64,7 +73,7 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     
     # Claude Code detection
     if tool_name == "claude code":
-        return _detect_claude_code(detector, user_home)
+        return _detect_claude_code(detector, user_home, failures)
     
     # Extension-based tools (Roo Code, Cline, Kilo Code)
     elif tool_name in ["roo code", "cline", "kilocode", "kilo code"]:
@@ -72,33 +81,33 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     
     # Codex detection
     elif tool_name == "codex":
-        return _detect_codex(detector, user_home)
+        return _detect_codex(detector, user_home, failures)
     
     # OpenCode detection
     elif tool_name == "opencode":
-        return _detect_opencode(detector, user_home)
+        return _detect_opencode(detector, user_home, failures)
     
     # Gemini CLI detection
     elif tool_name == "gemini cli":
-        return _detect_gemini_cli(detector, user_home)
+        return _detect_gemini_cli(detector, user_home, failures)
 
     # Cursor CLI detection
     elif tool_name == "cursor cli":
-        return _detect_cursor_cli(detector, user_home)
+        return _detect_cursor_cli(detector, user_home, failures)
 
     # Claude Cowork detection
     elif tool_name == "claude cowork":
-        return _detect_claude_cowork(detector, user_home)
+        return _detect_claude_cowork(detector, user_home, failures)
 
     # Junie detection
     elif tool_name == "junie":
-        return _detect_junie(detector, user_home)
+        return _detect_junie(detector, user_home, failures)
 
     # Default: Use detector's standard detection
     return detector.detect()
 
 
-def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_claude_code(detector: BaseToolDetector, user_home: Path, failures: Optional[set] = None) -> Optional[Dict]:
     """Detect Claude Code installation for a user.
 
     Gates on the claude binary, not the ~/.claude config directory. The config
@@ -106,7 +115,8 @@ def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional
     positives. ~/.claude remains available to the rules/MCP extractor, which only
     runs once the tool is detected here.
     """
-    claude_bin = find_claude_binary_for_user(user_home)
+    denied = set()
+    claude_bin = find_claude_binary_for_user(user_home, denied=denied)
     if claude_bin:
         return {
             "name": detector.tool_name,
@@ -114,6 +124,9 @@ def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional
             "install_path": claude_bin
         }
 
+    # Found nothing AND could not read some candidate: presence is unknown, not absent.
+    if denied and failures is not None:
+        failures.add(detector.tool_name)
     return None
 
 
@@ -161,30 +174,43 @@ def _npm_cli_version(path: Path, npm_package: str, user_home: Path) -> Optional[
 
 
 def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: str,
-                           npm_package: str) -> Optional[Dict]:
+                           npm_package: str, failures: Optional[set] = None) -> Optional[Dict]:
     """Resolve an npm-distributed CLI under ``user_home``: nvm, the per-OS global
     locations, then Bun. ``detector.detect()`` resolves the SCANNER's PATH, so it
-    is skipped when root (mirrors ``_detect_gemini_cli``)."""
+    is skipped when root (mirrors ``_detect_gemini_cli``).
+
+    A probe we could not read is not an absent one, so it is recorded in
+    ``failures`` and the scan is treated as incomplete. Finding the tool later
+    clears that: the denial only mattered while presence was still unknown.
+    """
     def found(path) -> Dict:
+        if failures is not None:
+            failures.discard(detector.tool_name)
         return {
             "name": detector.tool_name,
             "version": _npm_cli_version(Path(path), npm_package, user_home) or "Unknown",
             "install_path": str(path),
         }
 
+    def note(exc: OSError) -> None:
+        if failures is not None and not is_absence_error(exc):
+            failures.add(detector.tool_name)
+
     is_root = is_running_as_root()
 
     nvm_node = user_home / ".nvm" / "versions" / "node"
     try:
         version_dirs = sorted(nvm_node.iterdir()) if nvm_node.exists() else []
-    except (PermissionError, OSError):
+    except (PermissionError, OSError) as e:
+        note(e)
         version_dirs = []
     for version_dir in version_dirs:
         candidate = version_dir / "bin" / tool
         try:
             if candidate.exists():
                 return found(candidate)
-        except OSError:
+        except OSError as e:
+            note(e)
             continue
 
     if platform.system() == "Windows":
@@ -200,7 +226,8 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
             try:
                 if candidate.exists():
                     return found(candidate)
-            except OSError:
+            except OSError as e:
+                note(e)
                 continue
     else:
         machine_global = [Path(f"/opt/homebrew/bin/{tool}"), Path(f"/usr/local/bin/{tool}")]
@@ -215,10 +242,13 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
                             and not machine_global_binary_owned_by_user(candidate, user_home):
                         continue
                     return found(candidate)
-            except OSError:
+            except OSError as e:
+                note(e)
                 continue
 
-        npm_resolved = resolve_npm_global_tool_bin(tool, user_home, is_root)
+        npm_resolved = resolve_npm_global_tool_bin(
+            tool, user_home, is_root, failures, denied_as=detector.tool_name
+        )
         if npm_resolved:
             return found(npm_resolved)
 
@@ -226,25 +256,27 @@ def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: st
         try:
             if bun_bin.exists():
                 return found(bun_bin)
-        except OSError:
-            pass
+        except OSError as e:
+            note(e)
 
     if is_root:
         return None
     return detector.detect()
 
 
-def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_codex(detector: BaseToolDetector, user_home: Path,
+                  failures: Optional[set] = None) -> Optional[Dict]:
     """Detect Codex installation for a user."""
-    return _detect_npm_global_cli(detector, user_home, "codex", "@openai/codex")
+    return _detect_npm_global_cli(detector, user_home, "codex", "@openai/codex", failures)
 
 
-def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_opencode(detector: BaseToolDetector, user_home: Path,
+                     failures: Optional[set] = None) -> Optional[Dict]:
     """Detect OpenCode installation for a user."""
-    return _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai")
+    return _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai", failures)
 
 
-def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path, failures: Optional[set] = None) -> Optional[Dict]:
     """Detect Gemini CLI installation for a user.
 
     Gates on the gemini binary, not the ~/.gemini config directory. The config
@@ -257,8 +289,10 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     nvm_versions = user_home / ".nvm" / "versions" / "node"
     try:
         nvm_present = nvm_versions.exists()
-    except OSError:
+    except OSError as e:
         nvm_present = False
+        if failures is not None and not is_absence_error(e):
+            failures.add(detector.tool_name)
     if nvm_present:
         try:
             for version_dir in nvm_versions.iterdir():
@@ -290,8 +324,9 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
                             "version": version or "Unknown",
                             "install_path": str(bin_file)
                         }
-        except (PermissionError, OSError):
-            pass
+        except (PermissionError, OSError) as e:
+            if failures is not None and not is_absence_error(e):
+                failures.add(detector.tool_name)
 
     if platform.system() == "Windows":
         # Windows npm installs drop shims into %APPDATA%\npm (no POSIX X_OK
@@ -311,7 +346,9 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
                         "version": detector.get_version() or "Unknown",
                         "install_path": str(candidate)
                     }
-            except OSError:
+            except OSError as e:
+                if failures is not None and not is_absence_error(e):
+                    failures.add(detector.tool_name)
                 continue
     else:
         # Check common user binary locations the nvm/bun scans miss.
@@ -342,14 +379,17 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
                         "version": detector.get_version() or "Unknown",
                         "install_path": str(candidate)
                     }
-            except OSError:
+            except OSError as e:
+                if failures is not None and not is_absence_error(e):
+                    failures.add(detector.tool_name)
                 continue
 
         # Resolve the npm global prefix (Homebrew node / nvm / pnpm vary) and
         # probe ``<prefix>/bin/gemini`` plus pnpm/nvm fallbacks. The dynamic
         # ``npm prefix -g`` probe is root-guarded inside the helper (it resolves
         # the SCANNER's prefix, not the user's — the 93b5fc2 cross-user FP class).
-        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root())
+        npm_resolved = resolve_npm_global_tool_bin("gemini", user_home, is_running_as_root(), failures,
+                                                   denied_as=detector.tool_name)
         if npm_resolved:
             return {
                 "name": detector.tool_name,
@@ -361,8 +401,10 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     bun_bin = user_home / ".bun" / "bin" / "gemini"
     try:
         bun_present = bun_bin.exists()
-    except OSError:
+    except OSError as e:
         bun_present = False
+        if failures is not None and not is_absence_error(e):
+            failures.add(detector.tool_name)
     if bun_present:
         return {
             "name": detector.tool_name,
@@ -380,14 +422,15 @@ def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     return detector.detect()
 
 
-def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path, failures: Optional[set] = None) -> Optional[Dict]:
     """Detect Cursor CLI (``cursor-agent``) installation for a user.
 
     Gates on the binary, not ``~/.cursor/cli-config.json`` — the Cursor IDE also
     writes ``~/.cursor`` and it survives a CLI uninstall, so gating on it produced
     false positives.
     """
-    cursor_agent_bin = find_cursor_agent_binary_for_user(user_home)
+    denied = set()
+    cursor_agent_bin = find_cursor_agent_binary_for_user(user_home, denied=denied)
     if cursor_agent_bin:
         return {
             "name": detector.tool_name,
@@ -398,10 +441,12 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
             "install_path": cursor_agent_bin
         }
 
+    if denied and failures is not None:
+        failures.add(detector.tool_name)
     return None
 
 
-def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path, failures: Optional[set] = None) -> Optional[Dict]:
     """Detect Claude Cowork installation for a user.
 
     Requires BOTH the on-disk Cowork sessions tree AND a present Claude Desktop
@@ -425,7 +470,9 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     try:
         if not (sessions_dir.exists() and sessions_dir.is_dir()):
             return None
-    except (PermissionError, OSError):
+    except (PermissionError, OSError) as e:
+        if failures is not None and not is_absence_error(e):
+            failures.add(detector.tool_name)
         return None
 
     app_install = None
@@ -437,7 +484,9 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
             # Pass the scanned user's home so an admin/MDM multi-user scan probes
             # THIS user's per-user install dir, not the scanner's (Windows).
             app_install = find_install_dir(user_home)
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as e:
+            if failures is not None and not is_absence_error(e):
+                failures.add(detector.tool_name)
             return None
         if app_install is None:
             return None
@@ -488,7 +537,7 @@ def _junie_version_from_config(user_home: Path) -> Optional[str]:
     return None
 
 
-def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+def _detect_junie(detector: BaseToolDetector, user_home: Path, failures: Optional[set] = None) -> Optional[Dict]:
     """Detect Junie installation for a user.
 
     Gates on a real install signal — the Junie CLI **binary** OR the **Junie
@@ -511,9 +560,12 @@ def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
             return per_user_detect(user_home) or None
         except (PermissionError, OSError) as e:
             logger.debug(f"Junie detection failed for {user_home}: {e}")
+            if failures is not None and not is_absence_error(e):
+                failures.add(detector.tool_name)
             return None
 
-    junie_bin = find_junie_binary_for_user(user_home)
+    denied = set()
+    junie_bin = find_junie_binary_for_user(user_home, denied=denied)
     if junie_bin:
         return {
             "name": detector.tool_name,
@@ -523,10 +575,12 @@ def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
             "install_path": junie_bin,
         }
 
+    if denied and failures is not None:
+        failures.add(detector.tool_name)
     return None
 
 
-def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
+def find_junie_binary_for_user(user_home: Path, denied: Optional[set] = None) -> Optional[str]:
     """Find the absolute path to the ``junie`` CLI binary for a specific user.
 
     Mirrors ``find_claude_binary_for_user``. Junie's CLI ships a shim at
@@ -558,7 +612,8 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
             try:
                 if candidate.exists():
                     return str(candidate)
-            except (PermissionError, OSError):
+            except (PermissionError, OSError) as e:
+                _note_denied(denied, e)
                 continue
 
         # Native installer keeps the real binary under a versioned subdir; pick
@@ -576,9 +631,11 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
                     try:
                         if versioned.exists():
                             return str(versioned)
-                    except (PermissionError, OSError):
+                    except (PermissionError, OSError) as e:
+                        _note_denied(denied, e)
                         continue
         except (PermissionError, OSError) as e:
+            _note_denied(denied, e)
             logger.debug(f"Could not enumerate Windows junie versions: {e}")
         return None
 
@@ -604,7 +661,8 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
                         and not machine_global_binary_owned_by_user(candidate, user_home):
                     continue
                 return str(candidate)
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as e:
+            _note_denied(denied, e)
             continue
 
     # Versioned install dir: pick the newest version's junie.
@@ -621,14 +679,16 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
                 try:
                     if versioned.exists() and os.access(str(versioned), os.X_OK):
                         return str(versioned)
-                except (PermissionError, OSError):
+                except (PermissionError, OSError) as e:
+                    _note_denied(denied, e)
                     continue
     except (PermissionError, OSError) as e:
+        _note_denied(denied, e)
         logger.debug(f"Could not enumerate junie versions: {e}")
 
     # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix
     # -g`` resolves the scanner's prefix, not the user's.
-    npm_resolved = resolve_npm_global_tool_bin("junie", user_home, is_root)
+    npm_resolved = resolve_npm_global_tool_bin("junie", user_home, is_root, denied)
     if npm_resolved:
         return npm_resolved
 
@@ -641,8 +701,8 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
                 resolved = Path(which_path)
                 if resolved.exists() and os.access(str(resolved), os.X_OK):
                     return str(resolved)
-            except (PermissionError, OSError):
-                pass
+            except (PermissionError, OSError) as e:
+                _note_denied(denied, e)
 
     return None
 
@@ -682,7 +742,7 @@ def claude_vscode_extension_binaries(user_home: Path) -> List[Path]:
     return binaries
 
 
-def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
+def find_claude_binary_for_user(user_home: Path, denied: Optional[set] = None) -> Optional[str]:
     """
     Find the absolute path to the claude binary for a specific user.
 
@@ -748,7 +808,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                 logger.debug(
                     f"Claude binary exists but not executable: {candidate}"
                 )
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as e:
+            _note_denied(denied, e)
             continue
 
     # Walk nvm versions directory for node-installed claude binaries
@@ -766,10 +827,11 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                         logger.debug(
                             f"Claude binary exists but not executable: {nvm_candidate}"
                         )
-                except (PermissionError, OSError):
+                except (PermissionError, OSError) as e:
+                    _note_denied(denied, e)
                     continue
-    except (PermissionError, OSError):
-        pass
+    except (PermissionError, OSError) as e:
+        _note_denied(denied, e)
 
     # PATH backstop: catch custom install prefixes the explicit list misses.
     # Only meaningful in the single-user / non-root case — the resolved PATH
@@ -786,8 +848,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
                 resolved = Path(which_path)
                 if resolved.exists() and os.access(str(resolved), os.X_OK):
                     return str(resolved)
-            except (PermissionError, OSError):
-                pass
+            except (PermissionError, OSError) as e:
+                _note_denied(denied, e)
 
     return None
 
@@ -801,7 +863,7 @@ def _cursor_agent_version_key(version_dir: Path):
     return tuple(int(p) for p in version_dir.name.split(".") if p.isdigit())
 
 
-def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
+def find_cursor_agent_binary_for_user(user_home: Path, denied: Optional[set] = None) -> Optional[str]:
     """Find the absolute path to the ``cursor-agent`` binary for a user.
 
     Mirrors ``find_claude_binary_for_user``. Checks the per-user installer
@@ -834,7 +896,8 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
             try:
                 if candidate.exists():
                     return str(candidate)
-            except (PermissionError, OSError):
+            except (PermissionError, OSError) as e:
+                _note_denied(denied, e)
                 continue
 
         # Native installer keeps the real binary under a versioned subdir; pick the
@@ -852,9 +915,11 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
                     try:
                         if versioned.exists():
                             return str(versioned)
-                    except (PermissionError, OSError):
+                    except (PermissionError, OSError) as e:
+                        _note_denied(denied, e)
                         continue
         except (PermissionError, OSError) as e:
+            _note_denied(denied, e)
             logger.debug(f"Could not enumerate Windows cursor-agent versions: {e}")
         return None
 
@@ -867,7 +932,8 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
         try:
             if candidate.exists() and os.access(str(candidate), os.X_OK):
                 return str(candidate)
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as e:
+            _note_denied(denied, e)
             continue
 
     # Versioned install dir: pick the newest version's cursor-agent.
@@ -885,15 +951,17 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
                 try:
                     if versioned.exists() and os.access(str(versioned), os.X_OK):
                         return str(versioned)
-                except (PermissionError, OSError):
+                except (PermissionError, OSError) as e:
+                    _note_denied(denied, e)
                     continue
     except (PermissionError, OSError) as e:
+        _note_denied(denied, e)
         logger.debug(f"Could not enumerate cursor-agent versions: {e}")
 
     # npm-global prefix backstop. Root-guarded inside the helper: ``npm prefix -g``
     # resolves the scanner's prefix, not the user's.
     npm_resolved = resolve_npm_global_tool_bin(
-        "cursor-agent", user_home, is_running_as_root()
+        "cursor-agent", user_home, is_running_as_root(), denied
     )
     if npm_resolved:
         return npm_resolved
@@ -907,7 +975,7 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
                 resolved = Path(which_path)
                 if resolved.exists() and os.access(str(resolved), os.X_OK):
                     return str(resolved)
-            except (PermissionError, OSError):
-                pass
+            except (PermissionError, OSError) as e:
+                _note_denied(denied, e)
 
     return None

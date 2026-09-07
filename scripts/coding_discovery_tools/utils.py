@@ -101,7 +101,8 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 
 
 def resolve_npm_global_tool_bin(
-    tool: str, user_home: Path, is_root: bool
+    tool: str, user_home: Path, is_root: bool, denied: Optional[set] = None,
+    denied_as: Optional[str] = None,
 ) -> Optional[str]:
     """Resolve the install path of an npm-global Node CLI (e.g. ``gemini``,
     ``openclaw``) whose real binary lives at ``<npm global prefix>/bin/<tool>``.
@@ -122,6 +123,12 @@ def resolve_npm_global_tool_bin(
         tool: The CLI/binary name (e.g. ``"gemini"`` / ``"openclaw"``).
         user_home: Home dir of the user being scanned.
         is_root: Whether the scan is running as root/SYSTEM.
+        denied_as: Name to record in ``denied``; defaults to ``tool``. Detectors
+            track failures by display name, so they pass theirs to keep one
+            namespace in the set.
+        denied: Collects the tool when a candidate could not be read. An
+            unreadable path is not an absent one, and reporting absence would
+            let the completed scan prune a live install.
 
     Returns:
         Absolute path to the resolved executable as a string, or None.
@@ -150,16 +157,22 @@ def resolve_npm_global_tool_bin(
                 try:
                     if version_dir.is_dir():
                         candidates.append(version_dir / "bin" / tool)
-                except (PermissionError, OSError):
+                except (PermissionError, OSError) as e:
+                    if denied is not None and not is_absence_error(e):
+                        denied.add(denied_as or tool)
                     continue
     except (PermissionError, OSError) as e:
         logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
+        if denied is not None and not is_absence_error(e):
+            denied.add(denied_as or tool)
 
     for candidate in candidates:
         try:
             if candidate.exists() and os.access(str(candidate), os.X_OK):
                 return str(candidate)
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as e:
+            if denied is not None and not is_absence_error(e):
+                denied.add(denied_as or tool)
             continue
 
     return None
@@ -558,6 +571,69 @@ _NON_HUMAN_USERS: FrozenSet[str] = frozenset(
 # these is a service account, never a human end-user.
 _NON_HUMAN_WINDOWS_DOMAINS: FrozenSet[str] = frozenset({"nt authority", "nt service"})
 
+# Home-relative config dirs that identify a tool wherever its binary was installed from.
+TOOL_CONFIG_DIRS: FrozenSet[str] = frozenset({
+    ".antigravity", ".augment", ".claude", ".cline", ".codeium", ".codex",
+    ".copilot", ".cursor", ".gemini", ".junie", ".kilocode", ".roo",
+    ".opencode", ".vscode", ".windsurf",
+    ".config/github-copilot", ".config/opencode",
+})
+
+
+def probe_profile(home_user: str, user_home: Path) -> Dict:
+    """Record what the scan could actually see in one profile.
+
+    A detector that finds nothing looks identical whether the machine is clean or
+    the profile was unreadable. ``readable``/``entries`` separate those two, and
+    ``config_dirs`` flags a tool whose binary sits outside the candidate paths.
+
+    Markers are gated on the single directory listing rather than ``Path.exists()``,
+    which reports an unreachable path (ENOTDIR/ELOOP, or Windows ERROR_NOT_READY on
+    an unmounted profile container) as plainly absent, then confirmed with ``os.stat``
+    so a denied marker is recorded instead of read as a clean profile.
+    """
+    probe: Dict = {
+        "home_user": home_user,
+        "readable": False,
+        "entries": 0,
+        "config_dirs": [],
+        "error": None,
+    }
+    try:
+        names = {entry.name for entry in user_home.iterdir()}
+    except OSError as e:
+        probe["error"] = type(e).__name__
+        return probe
+
+    probe["readable"] = True
+    probe["entries"] = len(names)
+
+    for marker in sorted(TOOL_CONFIG_DIRS):
+        parts = marker.split("/")
+        if parts[0] not in names:
+            continue
+        try:
+            os.stat(user_home.joinpath(*parts))
+            probe["config_dirs"].append(marker)
+        except OSError as e:
+            if not is_absence_error(e):
+                probe["error"] = probe["error"] or type(e).__name__
+    return probe
+
+
+# A path that isn't there is genuinely absent, not unreadable, so it must not block prune.
+_ABSENT_PROFILE_ERRORS: FrozenSet[str] = frozenset({"FileNotFoundError", "NotADirectoryError"})
+
+
+def is_absence_error(exc: OSError) -> bool:
+    """True when the error means the path is not there, rather than not readable."""
+    return type(exc).__name__ in _ABSENT_PROFILE_ERRORS
+
+
+def profile_unreadable(probe: Dict) -> bool:
+    """True when a profile is on disk but the scan could not inspect it."""
+    return bool(probe["error"]) and probe["error"] not in _ABSENT_PROFILE_ERRORS
+
 
 def _strip_windows_domain(name: str) -> str:
     """Return the bare username from a Windows ``DOMAIN\\username`` string.
@@ -765,6 +841,7 @@ def send_scan_event(
     system_user: Optional[str] = None,
     manifest: Optional[List[Dict]] = None,
     covered_home_users: Optional[List[str]] = None,
+    probe_summary: Optional[List[Dict]] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -786,6 +863,8 @@ def send_scan_event(
             "completed" so the backend set-diffs it to prune the rest.
         covered_home_users: Optional home users covered; sent only on "completed" to
             bound the prune scope.
+        probe_summary: Optional per-profile probe results; sent on "completed" so an
+            empty manifest can be told apart from an unreadable machine.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -816,6 +895,9 @@ def send_scan_event(
 
     if covered_home_users is not None:
         payload["covered_home_users"] = covered_home_users
+
+    if probe_summary is not None:
+        payload["probe_summary"] = probe_summary
 
     return send_report_to_backend(
         backend_url,

@@ -1818,13 +1818,24 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         import scripts.coding_discovery_tools.windows_extraction_helpers as weh
         import scripts.coding_discovery_tools.utils as u
 
-        with patch.object(weh, "windows_admin_state", return_value=None):
+        with patch.object(weh, "_running_as_local_system", return_value=False), \
+                patch.object(weh, "windows_admin_state", return_value=None):
             self.assertIsNone(u._windows_process_is_elevated())
 
         with patch("ctypes.windll", create=True) as windll:
             windll.shell32.IsUserAnAdmin.side_effect = OSError("unavailable")
             self.assertIsNone(weh.windows_admin_state())
             self.assertIs(weh.is_running_as_admin(), False)
+
+    def test_elevated_probe_reports_system(self):
+        """SYSTEM holds no Administrators-group membership, so the telemetry
+        probe must recognise it by SID or an MDM scan reports is_elevated=False."""
+        import scripts.coding_discovery_tools.windows_extraction_helpers as weh
+        import scripts.coding_discovery_tools.utils as u
+
+        with patch.object(weh, "_running_as_local_system", return_value=True), \
+                patch.object(weh, "windows_admin_state", return_value=None):
+            self.assertIs(u._windows_process_is_elevated(), True)
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
     def test_does_not_fire_when_tools_found(self):

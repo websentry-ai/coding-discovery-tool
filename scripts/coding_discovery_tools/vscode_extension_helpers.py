@@ -11,6 +11,7 @@ All I/O is wrapped — this runs on customer machines and must never raise.
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -31,6 +32,23 @@ _EXTENSIONS_DIR_BY_EDITOR = {
 # For callers that scan every editor rather than a fixed SUPPORTED_IDES subset.
 VSCODE_EDITOR_KEYS = tuple(_EXTENSIONS_DIR_BY_EDITOR)
 
+# Editor label used in a row name, keyed by user-data dir name. Detectors and
+# extractors share it so a row's label and its config dirs cannot drift. Insiders
+# is absent by design: the extractors fold it into ``Code``, so a separate row
+# would attribute the same config twice.
+VSCODE_EDITOR_DISPLAY_NAMES = {
+    "Code": "VS Code",
+    "Cursor": "Cursor",
+    "Windsurf": "Windsurf",
+    "VSCodium": "VSCodium",
+    "Antigravity": "Antigravity",
+}
+
+_EDITOR_KEY_BY_DISPLAY = {
+    display.lower(): key for key, display in VSCODE_EDITOR_DISPLAY_NAMES.items()
+}
+_ROW_EDITOR_SUFFIX = re.compile(r"\(([^)]+)\)\s*$")
+
 
 def vscode_family_editor_dirs(tool_name: str) -> list:
     """User-data dir names for a VS Code-family Copilot row.
@@ -39,14 +57,13 @@ def vscode_family_editor_dirs(tool_name: str) -> list:
     row's editor decides where its prompts and MCP config live. An unnamed tool
     means the legacy union over every supported editor.
     """
-    lowered = (tool_name or "").lower()
     if not tool_name:
-        return ["Code", "Cursor"]
-    if "vs code" in lowered or "vscode" in lowered:
-        return ["Code"]
-    if "cursor" in lowered:
-        return ["Cursor"]
-    return []
+        return list(VSCODE_EDITOR_DISPLAY_NAMES)
+    match = _ROW_EDITOR_SUFFIX.search(tool_name)
+    if match is None:
+        return []
+    key = _EDITOR_KEY_BY_DISPLAY.get(match.group(1).strip().lower())
+    return [key] if key else []
 
 
 def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
@@ -93,7 +110,7 @@ def find_extension_in_editor(
     try:
         if not registry.is_file():
             return None
-        entries = json.loads(registry.read_text(encoding="utf-8", errors="replace"))
+        entries = json.loads(registry.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError) as exc:
         logger.debug(f"Could not read extensions registry {registry}: {exc}")
         return None

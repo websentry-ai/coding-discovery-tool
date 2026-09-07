@@ -95,6 +95,7 @@ try:
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
     from . import cache as discovery_cache
@@ -164,6 +165,7 @@ except ImportError:
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools import cache as discovery_cache
@@ -2133,7 +2135,7 @@ class AIToolsDetector:
         enriched (the IDE branch in process_single_tool reads this). None when
         neither is present."""
         detected_lower = {t.get("name", "").lower() for t in tools}
-        for editor in ("vs code", "cursor"):
+        for editor in (name.lower() for name in VSCODE_EDITOR_DISPLAY_NAMES.values()):
             for label in (f"github copilot chat ({editor})", f"github copilot ({editor})"):
                 if label in detected_lower:
                     self._canonical_vscode_copilot = label

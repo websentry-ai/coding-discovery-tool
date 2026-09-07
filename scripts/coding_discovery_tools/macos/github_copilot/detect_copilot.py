@@ -9,6 +9,7 @@ from ...jetbrains_naming_helpers import plugin_entries
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from ...macos_extraction_helpers import MACHINE_APPS_DIR, is_running_as_root
 from ...vscode_extension_helpers import (
+    VSCODE_EDITOR_DISPLAY_NAMES,
     extensions_dir_for_editor,
     find_extension_in_editor,
 )
@@ -76,10 +77,7 @@ def _read_builtin_copilot_identity(ext_dir: Path):
 
 
 # Editors whose Copilot rows the rules/MCP extractors can enrich.
-SUPPORTED_IDES = {
-    "Code": "VS Code",
-    "Cursor": "Cursor",
-}
+SUPPORTED_IDES = VSCODE_EDITOR_DISPLAY_NAMES
 
 _MARKETPLACE_EXTENSIONS = (
     ("github.copilot", "GitHub Copilot"),

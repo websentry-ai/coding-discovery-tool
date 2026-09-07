@@ -568,7 +568,7 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
             if versions_dir.exists():
                 version_dirs = sorted(
                     (d for d in versions_dir.iterdir() if d.is_dir()),
-                    key=_cursor_agent_version_key,
+                    key=_version_sort_key,
                     reverse=True,
                 )
                 for version_dir in version_dirs:
@@ -613,7 +613,7 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
         if versions_dir.exists():
             version_dirs = sorted(
                 (d for d in versions_dir.iterdir() if d.is_dir()),
-                key=_cursor_agent_version_key,
+                key=_version_sort_key,
                 reverse=True,
             )
             for version_dir in version_dirs:
@@ -682,6 +682,23 @@ def claude_vscode_extension_binaries(user_home: Path) -> List[Path]:
     return binaries
 
 
+def claude_native_version_binaries(user_home: Path) -> List[Path]:
+    """Native-install binaries under ``~/.local/share/claude/versions``, newest first.
+
+    ``~/.local/bin/claude`` is a symlink into this directory. A custom or broken
+    launcher leaves every installed version on disk, so these are the fallback.
+    """
+    versions = user_home / ".local" / "share" / "claude" / "versions"
+    try:
+        return sorted(
+            (p for p in versions.iterdir() if p.is_file()),
+            key=_version_sort_key,
+            reverse=True,
+        )
+    except (PermissionError, OSError):
+        return []
+
+
 def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     """
     Find the absolute path to the claude binary for a specific user.
@@ -690,7 +707,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     npm-global, yarn-global, nvm, and a ``which claude`` PATH backstop.
     On Windows: .local/bin, AppData npm (.cmd and bare), AppData Local Programs,
     Bun, and the Node managers (nvm-windows, Volta, pnpm).
-    On both: the VS Code extension's bundled CLI, checked last.
+    On both: the legacy ``migrate-installer`` target, the native versions dir,
+    the VS Code extension's bundled CLI, and the npm global prefix.
 
     Args:
         user_home: Path to the user's home directory
@@ -710,6 +728,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "claude.exe",
             user_home / ".bun" / "bin" / "claude.exe",
             *windows_node_manager_shims(user_home, "claude"),
+            user_home / ".claude" / "local" / "claude.exe",
+            user_home / ".claude" / "local" / "node_modules" / ".bin" / "claude.cmd",
         ]
     else:
         user_relative = [
@@ -718,6 +738,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             user_home / ".npm-global" / "bin" / "claude",  # npm global prefix
             user_home / ".config" / "yarn" / "global"  # yarn global install
             / "node_modules" / ".bin" / "claude",
+            user_home / ".claude" / "local" / "claude",  # legacy migrate-installer
+            user_home / ".claude" / "local" / "node_modules" / ".bin" / "claude",
         ]
         # Homebrew, /usr/local and /usr/bin are MACHINE-GLOBAL — they are
         # ALWAYS probed, but under a root/MDM multi-user scan each is
@@ -731,6 +753,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
         ]
         candidates = machine_global + user_relative
 
+    candidates += claude_native_version_binaries(user_home)
     candidates += claude_vscode_extension_binaries(user_home)
 
     is_root = is_running_as_root()
@@ -771,6 +794,13 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     except (PermissionError, OSError):
         pass
 
+    # POSIX-shaped (``<prefix>/bin/<tool>``), so it must not run on Windows —
+    # the AppData npm and Node-manager candidates above already cover it there.
+    if platform.system() != "Windows":
+        npm_resolved = resolve_npm_global_tool_bin("claude", user_home, is_root)
+        if npm_resolved:
+            return npm_resolved
+
     # PATH backstop: catch custom install prefixes the explicit list misses.
     # Only meaningful in the single-user / non-root case — the resolved PATH
     # is the SCANNER's, not ``user_home``'s. Under a root/MDM multi-user scan
@@ -792,8 +822,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     return None
 
 
-def _cursor_agent_version_key(version_dir: Path):
-    """Numeric (major, minor, patch) key for a "X.Y.Z" version-dir name.
+def _version_sort_key(version_dir: Path):
+    """Numeric (major, minor, patch) key for a "X.Y.Z" version name.
 
     A string sort would order "1.10.0" before "1.9.0" and report a stale version;
     malformed names yield () and sort earliest.
@@ -829,6 +859,11 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
             # extensionless symlink into ~/.local/bin.
             user_home / ".local" / "bin" / "cursor-agent",
             user_home / ".local" / "bin" / "cursor-agent.exe",
+            user_home / "AppData" / "Roaming" / "npm" / "cursor-agent.cmd",
+            user_home / "AppData" / "Roaming" / "npm" / "cursor-agent.exe",
+            user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "cursor-agent.exe",
+            user_home / ".bun" / "bin" / "cursor-agent.exe",
+            *windows_node_manager_shims(user_home, "cursor-agent"),
         ]
         for candidate in candidates:
             try:
@@ -844,7 +879,7 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
             if versions_dir.exists():
                 version_dirs = sorted(
                     (d for d in versions_dir.iterdir() if d.is_dir()),
-                    key=_cursor_agent_version_key,
+                    key=_version_sort_key,
                     reverse=True,
                 )
                 for version_dir in version_dirs:
@@ -877,7 +912,7 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
         if versions_dir.exists():
             version_dirs = sorted(
                 (d for d in versions_dir.iterdir() if d.is_dir()),
-                key=_cursor_agent_version_key,
+                key=_version_sort_key,
                 reverse=True,
             )
             for version_dir in version_dirs:

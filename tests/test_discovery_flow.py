@@ -1802,6 +1802,8 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         self.assertEqual(kwargs.get("level"), "warning")
 
         ctx = self._context_of(call)
+        # Discriminators that separate residue from a binary we found and dropped.
+        self.assertIn("config_dirs_age_days", ctx)
         # get_all_users_linux -> [] means enumeration missed every account, so the
         # current-user fallback supplies the single scanned home.
         self.assertEqual(ctx.get("homes_enumerated"), 0)
@@ -1850,6 +1852,72 @@ class TestNoToolsSentryEvent(unittest.TestCase):
             if self._context_of(c).get("phase") == "no_tools_found"
         ]
         self.assertEqual(no_tools_calls, [], "no_tools_found must not fire when a tool is detected")
+
+
+class TestRejectedBinaryDiagnostics(unittest.TestCase):
+    """A binary found and then not attributed is the one cause a zero-tool event
+    could not previously distinguish, because the rejection was silent."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+
+    tearDown = setUp
+
+    def test_owner_mismatch_is_recorded(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        binary = home / "claude"
+        binary.write_text("")
+        real_stat = os.stat
+
+        def fake_stat(path, *a, **k):
+            if str(path) == str(binary):
+                return Mock(st_uid=502)
+            if str(path) == str(home):
+                return Mock(st_uid=501)
+            return real_stat(path, *a, **k)
+
+        with patch.object(utils_mod.os, "stat", side_effect=fake_stat):
+            self.assertFalse(utils_mod.machine_global_binary_owned_by_user(binary, home))
+        self.assertEqual(
+            [(str(binary), "owner_mismatch")], utils_mod.rejected_binaries()
+        )
+
+    def test_attributed_binary_is_not_recorded(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        binary = home / "claude"
+        binary.write_text("")
+        with patch.object(utils_mod.os, "stat", return_value=Mock(st_uid=501)):
+            self.assertTrue(utils_mod.machine_global_binary_owned_by_user(binary, home))
+        self.assertEqual([], utils_mod.rejected_binaries())
+
+    def test_config_dir_age_reports_the_freshest(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        (home / ".claude").mkdir()
+        self.assertEqual(0, utils_mod.newest_tool_config_dir_age_days([home]))
+
+    def test_windows_never_attributes_a_machine_global_binary(self):
+        """st_uid is always 0 on Windows, which would read as system-wide and
+        hand every shared binary to every user."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        binary = home / "claude.exe"
+        binary.write_text("")
+        with patch.object(utils_mod.os, "name", "nt"), \
+             patch.object(utils_mod.os, "stat", return_value=Mock(st_uid=0)):
+            self.assertFalse(utils_mod.machine_global_binary_owned_by_user(binary, home))
+
+    def test_config_dir_age_is_none_without_any_config_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.assertIsNone(utils_mod.newest_tool_config_dir_age_days([Path(tmp.name)]))
 
 
 if __name__ == "__main__":

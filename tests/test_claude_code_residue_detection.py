@@ -41,14 +41,16 @@ _USR_LOCAL = Path("/usr/local/bin/claude")
 _USR_BIN = Path("/usr/bin/claude")
 
 
-def _stat_for_uid(target: Path, uid: int):
-    """os.stat side_effect: return a fake stat (chosen ``uid``) for ``target``,
-    pass through to the real os.stat for every other path."""
+def _stat_for_uid(target: Path, uid: int, extra: dict = None):
+    """os.stat side_effect: fake ``uid`` for ``target`` (and for any path in
+    ``extra``), pass through to the real os.stat for everything else."""
     real_stat = os.stat
+    owners = {str(target): uid}
+    owners.update({str(k): v for k, v in (extra or {}).items()})
 
     def fake_stat(path, *args, **kwargs):
-        if str(path) == str(target):
-            return Mock(st_uid=uid)
+        if str(path) in owners:
+            return Mock(st_uid=owners[str(path)])
         return real_stat(path, *args, **kwargs)
 
     return fake_stat
@@ -388,14 +390,15 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         self.assertEqual(result, str(self.home / ".local" / "bin" / "claude"))
 
     def test_homebrew_skipped_when_root(self):
-        """Under a root/MDM multi-user scan, the MACHINE-GLOBAL Homebrew /
-        /usr/local candidates must be SKIPPED — probing them per-user would
-        attribute one shared install to EVERY user. With Homebrew "present" but
-        no user_home-relative binary, the finder returns None under root. Fails
-        against the pre-guard code, which probed Homebrew regardless of root."""
+        """Under a root/MDM multi-user scan, a MACHINE-GLOBAL Homebrew /
+        /usr/local binary owned by SOMEONE ELSE must be skipped — attributing it
+        per-user would fan one shared install out to everyone. With Homebrew
+        "present" but no user_home-relative binary, the finder returns None."""
         self._with_abs(_HOMEBREW)  # /opt/homebrew/bin/claude "present"+exec
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 502, {self.home: 501})), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertIsNone(result)
@@ -417,35 +420,48 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
     # claude binary is attributed to its OWNER (Homebrew/usr-local) or to every
     # scanned user when root-owned (apt/dnf /usr/bin), instead of being dropped.
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution")
     def test_homebrew_owned_by_this_user_detected_when_root(self):
-        """W1: root scan, /opt/homebrew/bin/claude present and owned by a uid
-        whose home == the scanned user_home -> attributed (returned). Fails
-        against pre-W1 code, which dropped all machine-global candidates under
-        root."""
+        """W1: root scan, /opt/homebrew/bin/claude present and owned by the same
+        uid as the scanned home -> attributed (returned). Fails against pre-W1
+        code, which dropped all machine-global candidates under root."""
         self._with_abs(_HOMEBREW)  # present + executable
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501)), \
-             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 501, {self.home: 501})), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertEqual(result, str(_HOMEBREW))
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution")
     def test_homebrew_owned_by_other_user_not_detected_when_root(self):
         """W1 (the FP guard): root scan, /opt/homebrew/bin/claude owned by a
-        DIFFERENT user's home -> skipped; with no user-local binary the finder
-        returns None (one user's Homebrew install is not fanned out)."""
+        DIFFERENT uid than the scanned home -> skipped; with no user-local binary
+        the finder returns None (one user's Homebrew install is not fanned out)."""
         self._with_abs(_HOMEBREW)
-        other_home = self.home.parent / "someone_else"
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502)), \
-             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other_home})), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 502, {self.home: 501})), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertIsNone(result)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution")
+    def test_owner_uid_matches_across_the_data_volume_firmlink(self):
+        """/Users/x and /System/Volumes/Data/Users/x are ONE inode that resolve()
+        does not collapse, so comparing home PATHS dropped the owner's own
+        install. Comparing uids cannot see the difference."""
+        self._with_abs(_HOMEBREW)
+        firmlinked = Path("/System/Volumes/Data") / str(self.home).lstrip("/")
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 501, {firmlinked: 501})), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(firmlinked)
+        self.assertEqual(result, str(_HOMEBREW))
 
     def test_usr_bin_root_owned_detected_when_root(self):
         """W1: root scan, /usr/bin/claude owned by uid 0 (apt/dnf system-wide)

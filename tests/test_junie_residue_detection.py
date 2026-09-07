@@ -61,12 +61,14 @@ def _isolate_abs(present: Path = None):
     return patch("pathlib.Path.exists", fake_exists), patch.object(os, "access", fake_access)
 
 
-def _stat_for_uid(target: Path, uid: int):
+def _stat_for_uid(target: Path, uid: int, extra: dict = None):
     real_stat = os.stat
+    owners = {str(target): uid}
+    owners.update({str(k): v for k, v in (extra or {}).items()})
 
     def fake_stat(path, *args, **kwargs):
-        if str(path) == str(target):
-            return Mock(st_uid=uid)
+        if str(path) in owners:
+            return Mock(st_uid=owners[str(path)])
         return real_stat(path, *args, **kwargs)
 
     return fake_stat
@@ -209,7 +211,7 @@ class TestFindJunieBinaryRootAttribution(unittest.TestCase):
         other = self.home.parent / "someone_else"
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502)), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other})), \
              patch(f"{_MOD}.run_command", return_value=None):
             self.assertIsNone(find_junie_binary_for_user(self.home))
@@ -221,7 +223,7 @@ class TestFindJunieBinaryRootAttribution(unittest.TestCase):
         self._install_isolation(_HOMEBREW)
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501)), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})), \
              patch(f"{_MOD}.run_command", return_value=None):
             self.assertEqual(find_junie_binary_for_user(self.home), str(_HOMEBREW))

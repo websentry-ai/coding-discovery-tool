@@ -260,8 +260,12 @@ def update_user_entries(coding_tool: str, home_user: str,
 
     fresh = dict(server_entries)
     for cache_key in (errored_cache_keys or ()):
-        if cache_key not in fresh and isinstance(previous.get(cache_key), dict):
-            fresh[cache_key] = previous[cache_key]
+        previous_entry = previous.get(cache_key)
+        if previous_entry is None and cache_key.startswith('smithery:'):
+            legacy_key = cache_key.replace('smithery:', 'smithery-unverified:', 1)
+            previous_entry = previous.get(legacy_key)
+        if cache_key not in fresh and isinstance(previous_entry, dict):
+            fresh[cache_key] = previous_entry
 
     if fresh:
         by_user[home_user] = fresh

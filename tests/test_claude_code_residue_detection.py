@@ -289,6 +289,37 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(yarn))
 
+    def test_legacy_local_install_detected(self):
+        legacy = self.home / ".claude" / "local" / "claude"
+        self._make_exec(legacy)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(legacy))
+
+    def test_native_versions_dir_detected_newest_first(self):
+        versions = self.home / ".local" / "share" / "claude" / "versions"
+        self._make_exec(versions / "2.1.9")
+        self._make_exec(versions / "2.1.10")
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(versions / "2.1.10"))
+
+    def test_pnpm_global_binary_detected(self):
+        pnpm = self.home / ".local" / "share" / "pnpm" / "claude"
+        self._make_exec(pnpm)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(pnpm))
+
     def test_nvm_binary_detected(self):
         nvm = self.home / ".nvm" / "versions" / "node" / "v20.0.0" / "bin" / "claude"
         self._make_exec(nvm)
@@ -574,6 +605,26 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(cmd))
+
+    def test_legacy_local_install_detected(self):
+        exe = self.home / ".claude" / "local" / "claude.exe"
+        self._make_exec(exe)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(exe))
+
+    def test_native_versions_dir_detected(self):
+        versions = self.home / ".local" / "share" / "claude" / "versions"
+        self._make_exec(versions / "2.1.10")
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(versions / "2.1.10"))
 
     def test_npm_exe_binary_detected(self):
         exe = self.home / "AppData" / "Roaming" / "npm" / "claude.exe"

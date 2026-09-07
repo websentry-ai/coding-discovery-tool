@@ -16,6 +16,54 @@ from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
 
 logger = logging.getLogger(__name__)
 
+_PROFILE_LIST_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+# LOCAL SYSTEM / LOCAL SERVICE / NETWORK SERVICE — S-1-5-18 is what an MDM runs as.
+_SERVICE_PROFILE_SIDS = frozenset({"S-1-5-18", "S-1-5-19", "S-1-5-20"})
+
+
+def registry_profile_paths() -> List[Path]:
+    """Local profile paths Windows records in ``ProfileList``.
+
+    This is the authoritative answer to "who has a profile here", and unlike a
+    ``C:\\Users`` listing it carries the real location, so a profile relocated to
+    another drive is still found. Returns [] on any failure so the caller can
+    fall back to the directory walk.
+
+    UNC paths are skipped: a mandatory/roaming profile on an unreachable share
+    costs ~20s per existence check, and its local cached copy is under
+    ``C:\\Users`` anyway. ``.bak`` keys are kept — Windows renames a key that way
+    when a profile fails to load, and the profile is still a real user's.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    paths: List[Path] = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                try:
+                    sid = winreg.EnumKey(key, index)
+                    base_sid = sid[:-4] if sid.endswith(".bak") else sid
+                    if base_sid in _SERVICE_PROFILE_SIDS:
+                        continue
+                    with winreg.OpenKey(key, sid) as sub_key:
+                        raw, kind = winreg.QueryValueEx(sub_key, "ProfileImagePath")
+                except OSError:
+                    continue
+                if not isinstance(raw, str) or not raw:
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    raw = os.path.expandvars(raw)
+                if raw.startswith("\\\\"):
+                    continue
+                paths.append(Path(raw))
+    except OSError as exc:
+        logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}")
+        return []
+    return paths
+
 
 # Maps the globalStorage IDE-folder key (as used by Cline/Roo ``SUPPORTED_IDES``)
 # to the host editor's Windows ``Programs``/``Program Files`` install-dir names

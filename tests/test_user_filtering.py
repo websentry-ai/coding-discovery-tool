@@ -3,7 +3,7 @@ Tests for macOS and Windows user filtering logic.
 """
 
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import MagicMock, patch
 
 from scripts.coding_discovery_tools.utils import (
@@ -17,6 +17,7 @@ from scripts.coding_discovery_tools.utils import (
     get_all_users_windows,
     get_audit_user,
     get_user_info,
+    windows_user_homes,
 )
 
 EMPTY_BATCH = DsclBatchData(uid_map={}, shell_map={}, hidden_set=frozenset())
@@ -208,6 +209,46 @@ class TestGetAllUsersWindows(unittest.TestCase):
         self.assertIn("bob", result)
         for excluded in ("Public", "Default", "Default User", "All Users", "TEMP", ".hidden"):
             self.assertNotIn(excluded, result)
+
+
+class TestWindowsUserHomes(unittest.TestCase):
+    """The C:\\Users listing cannot see a relocated profile and cannot tell a
+    leftover folder from a user; ProfileList answers both."""
+
+    _WALKED = ("agupta", "t_alice", "t_ghost")
+    _REGISTRY = (r"C:\Users\agupta", r"C:\Users\t_alice", r"D:\Profiles\t_dave")
+
+    def _run(self, registry):
+        walked = [MagicMock(spec=Path) for _ in self._WALKED]
+        for entry, name in zip(walked, self._WALKED):
+            entry.name = name
+            entry.is_dir.return_value = True
+            entry.__str__.return_value = "C:\\Users\\" + name
+        with patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows"), \
+             patch("scripts.coding_discovery_tools.windows_extraction_helpers"
+                   ".registry_profile_paths", return_value=[PureWindowsPath(p) for p in registry]), \
+             patch("scripts.coding_discovery_tools.utils.Path") as MockPath:
+            users_dir = MagicMock()
+            users_dir.exists.return_value = True
+            users_dir.iterdir.return_value = walked
+            MockPath.home.return_value = MagicMock(anchor="C:\\")
+            MockPath.return_value.__truediv__ = MagicMock(return_value=users_dir)
+            return windows_user_homes()
+
+    def test_relocated_profile_is_added_at_its_real_path(self):
+        homes = self._run(self._REGISTRY)
+        self.assertEqual(PureWindowsPath(r"D:\Profiles\t_dave"), homes["t_dave"])
+
+    def test_folder_with_no_profile_record_is_dropped(self):
+        self.assertNotIn("t_ghost", self._run(self._REGISTRY))
+
+    def test_walked_profile_is_kept(self):
+        self.assertIn("t_alice", self._run(self._REGISTRY))
+
+    def test_empty_registry_falls_back_to_the_walk(self):
+        """A registry read failure must never cost us a user."""
+        homes = self._run([])
+        self.assertEqual(set(self._WALKED), set(homes))
 
 
 class TestRealUserOrNone(unittest.TestCase):

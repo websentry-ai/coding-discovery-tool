@@ -421,35 +421,62 @@ def get_all_users_macos() -> List[str]:
     return users
 
 
-def get_all_users_windows() -> List[str]:
+def windows_user_homes() -> Dict[str, Path]:
     """
-    Get all user directory names from C:\\Users on Windows.
+    Map every Windows profile on this machine to its real home directory.
 
-    Filters out hidden directories and well-known system/service
-    directories listed in WINDOWS_SKIP_USER_DIRS.
+    The ``C:\\Users`` listing alone answers neither question we need: it cannot
+    see a profile relocated to another drive, and it treats any leftover folder
+    as a user. ``ProfileList`` is Windows' own record, so the two are combined —
+    a walked folder is kept only when the registry knows about it, and registry
+    profiles the walk missed are added at their real path.
+
+    Falls back to the plain walk whenever the registry yields nothing, so a
+    read failure can only ever lose the extra coverage, never a user.
 
     Returns:
-        List of usernames (directory names under C:\\Users), or an
-        empty list if not running on Windows or the path does not exist.
+        ``{home_user: home path}``, empty when not running on Windows.
     """
     if platform.system() != "Windows":
-        return []
+        return {}
 
+    walked: Dict[str, Path] = {}
     try:
         win_users_dir = Path(Path.home().anchor) / "Users"
-        if not win_users_dir.exists():
-            return []
-
-        users = []
-        for user_dir in win_users_dir.iterdir():
-            if (user_dir.is_dir()
-                    and not user_dir.name.startswith('.')
-                    and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
-                users.append(user_dir.name)
-        return users
+        if win_users_dir.exists():
+            for user_dir in win_users_dir.iterdir():
+                if (user_dir.is_dir()
+                        and not user_dir.name.startswith('.')
+                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
+                    walked[user_dir.name] = user_dir
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from Windows Users directory: {e}")
-        return []
+
+    from .windows_extraction_helpers import registry_profile_paths
+    registry = registry_profile_paths()
+    if not registry:
+        return walked
+
+    known = {os.path.normcase(str(p)) for p in registry}
+    homes = {n: p for n, p in walked.items() if os.path.normcase(str(p)) in known}
+    for path in registry:
+        if path.name and path.name not in homes:
+            homes[path.name] = path
+    return homes
+
+
+def get_all_users_windows() -> List[str]:
+    """
+    Names of the Windows profiles on this machine. See ``windows_user_homes``.
+    """
+    return list(windows_user_homes())
+
+
+def windows_home_for_user(username: str) -> Path:
+    """Home directory for a Windows profile, which is not always under C:\\Users."""
+    return windows_user_homes().get(
+        username, Path(Path.home().anchor) / "Users" / username
+    )
 
 
 def get_all_users_linux() -> List[str]:

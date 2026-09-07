@@ -685,8 +685,8 @@ def claude_vscode_extension_binaries(user_home: Path) -> List[Path]:
 def claude_native_version_binaries(user_home: Path) -> List[Path]:
     """Native-install binaries under ``~/.local/share/claude/versions``, newest first.
 
-    ``~/.local/bin/claude`` is a symlink into this directory. A custom or broken
-    launcher leaves every installed version on disk, so these are the fallback.
+    ``~/.local/bin/claude`` is a symlink into this directory, so a custom or
+    broken launcher leaves the installed versions as the only way to find it.
     """
     versions = user_home / ".local" / "share" / "claude" / "versions"
     try:
@@ -695,7 +695,8 @@ def claude_native_version_binaries(user_home: Path) -> List[Path]:
             key=_version_sort_key,
             reverse=True,
         )
-    except (PermissionError, OSError):
+    except (PermissionError, OSError) as exc:
+        logger.debug(f"Could not list {versions}: {exc}")
         return []
 
 
@@ -794,8 +795,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     except (PermissionError, OSError):
         pass
 
-    # POSIX-shaped (``<prefix>/bin/<tool>``), so it must not run on Windows —
-    # the AppData npm and Node-manager candidates above already cover it there.
+    # POSIX-shaped (``<prefix>/bin/<tool>``); the Windows candidates cover it above.
     if platform.system() != "Windows":
         npm_resolved = resolve_npm_global_tool_bin("claude", user_home, is_root)
         if npm_resolved:

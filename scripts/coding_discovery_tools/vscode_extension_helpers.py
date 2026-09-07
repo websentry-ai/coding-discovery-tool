@@ -32,10 +32,7 @@ _EXTENSIONS_DIR_BY_EDITOR = {
 # For callers that scan every editor rather than a fixed SUPPORTED_IDES subset.
 VSCODE_EDITOR_KEYS = tuple(_EXTENSIONS_DIR_BY_EDITOR)
 
-# Editor label used in a row name, keyed by user-data dir name. Detectors and
-# extractors share it so a row's label and its config dirs cannot drift. Insiders
-# is absent by design: the extractors fold it into ``Code``, so a separate row
-# would attribute the same config twice.
+# Row label per user-data dir name. Insiders is folded into ``Code`` downstream.
 VSCODE_EDITOR_DISPLAY_NAMES = {
     "Code": "VS Code",
     "Cursor": "Cursor",

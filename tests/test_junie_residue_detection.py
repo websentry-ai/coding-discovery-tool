@@ -287,12 +287,10 @@ class TestFindJunieBinaryWindows(unittest.TestCase):
 
 
 class TestJunieVersionFromConfigNeverRaises(unittest.TestCase):
-    """An unreadable config dir must not take the whole scan down.
+    """An unreadable config must not take the scan down.
 
-    ``_get_version_from_config`` imported ``json`` inside the loop body, so a
-    config file whose ``exists()`` raised reached the ``except`` clause with
-    ``json`` unbound. That escaped the detector, marked the scan incomplete and
-    suppressed the prune manifest (DISCOVERY-TOOL-SCRIPT-19).
+    A function-local ``import json`` left the name unbound when ``exists()``
+    raised, so the ``except`` clause itself raised (DISCOVERY-TOOL-SCRIPT-19).
     """
 
     def setUp(self):

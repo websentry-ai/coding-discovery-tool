@@ -1,8 +1,8 @@
-"""Copilot must be detected in Cursor, not only stock VS Code.
+"""Copilot must be detected in every VS Code fork, not only stock VS Code.
 
 The marketplace scan read ``~/.vscode/extensions`` alone, so a user running
-Copilot inside Cursor reported no tool at all. Scope matches what the rules and
-MCP extractors can enrich, so the other forks stay out until they can be too.
+Copilot inside a fork reported no tool at all. Detection and enrichment share one
+editor map, so a detected row always has a user-data dir to read.
 """
 
 import json
@@ -13,7 +13,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
-from scripts.coding_discovery_tools.vscode_extension_helpers import vscode_family_editor_dirs
+from scripts.coding_discovery_tools.vscode_extension_helpers import (
+    VSCODE_EDITOR_DISPLAY_NAMES,
+    vscode_family_editor_dirs,
+)
 from scripts.coding_discovery_tools.linux.github_copilot.detect_copilot import (
     LinuxCopilotDetector,
 )
@@ -62,7 +65,7 @@ class _Fixture(unittest.TestCase):
 
 class _EditorCoverageCase(_Fixture):
     def test_detected_in_every_supported_editor(self):
-        for editor, label in (("Code", "VS Code"), ("Cursor", "Cursor")):
+        for editor, label in VSCODE_EDITOR_DISPLAY_NAMES.items():
             with self.subTest(editor=editor):
                 self.tearDown()
                 self.setUp()
@@ -87,15 +90,16 @@ class _EditorCoverageCase(_Fixture):
             {r["name"] for r in self._detect()},
         )
 
-    def test_unenrichable_forks_are_not_reported(self):
-        """Detection tracks enrichment: a row we cannot enrich would look clean
-        rather than unscanned."""
-        for editor in ("Windsurf", "VSCodium", "Antigravity"):
+    def test_every_detected_row_is_enrichable(self):
+        """Detection tracks enrichment: a row with no user-data dir to read would
+        look clean rather than unscanned."""
+        for editor in VSCODE_EDITOR_DISPLAY_NAMES:
             with self.subTest(editor=editor):
                 self.tearDown()
                 self.setUp()
                 self._install(editor, "github.copilot")
-                self.assertEqual([], self._detect())
+                for row in self._detect():
+                    self.assertEqual([editor], vscode_family_editor_dirs(row["name"]))
 
     def test_nothing_installed_reports_nothing(self):
         self.assertEqual([], self._detect())
@@ -165,14 +169,17 @@ class TestEditorDirRouting(unittest.TestCase):
     """A row's editor decides which user-data dir its rules and MCP come from."""
 
     def test_maps_each_row_to_its_own_editor(self):
-        self.assertEqual(["Code"], vscode_family_editor_dirs("GitHub Copilot (VS Code)"))
+        for editor, label in VSCODE_EDITOR_DISPLAY_NAMES.items():
+            with self.subTest(editor=editor):
+                self.assertEqual([editor], vscode_family_editor_dirs(f"GitHub Copilot ({label})"))
         self.assertEqual(["Cursor"], vscode_family_editor_dirs("GitHub Copilot Chat (Cursor)"))
 
     def test_jetbrains_row_gets_no_vscode_dirs(self):
         self.assertEqual([], vscode_family_editor_dirs("GitHub Copilot PyCharm"))
+        self.assertEqual([], vscode_family_editor_dirs("GitHub Copilot (IntelliJ IDEA)"))
 
     def test_unnamed_tool_keeps_the_legacy_union(self):
-        self.assertEqual(["Code", "Cursor"], vscode_family_editor_dirs(None))
+        self.assertEqual(list(VSCODE_EDITOR_DISPLAY_NAMES), vscode_family_editor_dirs(None))
 
 
 class TestCursorEnrichmentSources(unittest.TestCase):

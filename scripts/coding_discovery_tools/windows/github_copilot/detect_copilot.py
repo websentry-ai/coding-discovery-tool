@@ -8,6 +8,7 @@ from ...coding_tool_base import BaseCopilotDetector
 from ...constants import is_symlink_or_junction
 from ...jetbrains_naming_helpers import plugin_entries
 from ...vscode_extension_helpers import (
+    VSCODE_EDITOR_DISPLAY_NAMES,
     extensions_dir_for_editor,
     find_extension_in_editor,
 )
@@ -82,10 +83,7 @@ def _safe_descendant_directory(path: Path, trusted_root: Path) -> bool:
 
 
 # Editors whose Copilot rows the rules/MCP extractors can enrich.
-SUPPORTED_IDES = {
-    "Code": "VS Code",
-    "Cursor": "Cursor",
-}
+SUPPORTED_IDES = VSCODE_EDITOR_DISPLAY_NAMES
 
 _MARKETPLACE_EXTENSIONS = (
     ("github.copilot", "GitHub Copilot"),

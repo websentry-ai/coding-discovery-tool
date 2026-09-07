@@ -157,6 +157,20 @@ class TestCursorCliBinaryGateWindows(unittest.TestCase):
         exe.write_text("", encoding="utf-8")
         self.assertEqual(self._resolve(), str(exe))
 
+    def test_npm_global_shim_detected(self):
+        """``npm i -g`` drops a ``.cmd`` shim into ``%APPDATA%\\npm`` -> detected."""
+        cmd = self.home / "AppData" / "Roaming" / "npm" / "cursor-agent.cmd"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("", encoding="utf-8")
+        self.assertEqual(self._resolve(), str(cmd))
+
+    def test_winget_links_shim_detected(self):
+        exe = (self.home / "AppData" / "Local" / "Microsoft" / "WinGet"
+               / "Links" / "cursor-agent.exe")
+        exe.parent.mkdir(parents=True)
+        exe.write_text("", encoding="utf-8")
+        self.assertEqual(self._resolve(), str(exe))
+
     def test_localappdata_agent_cmd_detected(self):
         """The ``agent.cmd`` shim variant at the install-dir root -> detected."""
         cmd = self.home / "AppData" / "Local" / "cursor-agent" / "agent.cmd"

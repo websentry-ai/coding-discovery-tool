@@ -349,6 +349,25 @@ def _fetch_dscl_batch_data() -> DsclBatchData:
     return DsclBatchData(uid_map=uid_map, shell_map=shell_map, hidden_set=hidden_set)
 
 
+@functools.lru_cache(maxsize=1)
+def _macos_home_map() -> Dict[str, str]:
+    """Map each account to its NFSHomeDirectory, the path ``~`` actually resolves to."""
+    if platform.system() != "Darwin":
+        return {}
+    try:
+        raw = run_command(["dscl", ".", "-list", "/Users", "NFSHomeDirectory"], timeout=DSCL_TIMEOUT)
+        return _parse_dscl_list_output(raw)
+    except Exception as exc:
+        logger.debug(f"Batch dscl NFSHomeDirectory query failed: {exc}")
+        return {}
+
+
+def macos_home_for_user(username: str) -> Path:
+    """Home directory for ``username``; /Users/<name> is the convention, not the source of truth."""
+    home = _macos_home_map().get(username)
+    return Path(home) if home else Path(f"/Users/{username}")
+
+
 def _is_human_user_macos(username: str, batch_data: DsclBatchData) -> bool:
     """Check if a macOS username is a real human user using batch dscl data.
 
@@ -417,6 +436,20 @@ def get_all_users_macos() -> List[str]:
                 users.append(user_dir.name)
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from /Users: {e}")
+
+    # An account's home can sit outside /Users (network homes, MDM-created admins),
+    # in which case walking /Users alone never sees it.
+    try:
+        for name, home in _macos_home_map().items():
+            if (name not in users
+                    and home.startswith("/")
+                    and not home.startswith("/Users/")
+                    and name not in MACOS_SKIP_USER_DIRS
+                    and _is_human_user_macos(name, batch_data=batch_data)
+                    and Path(home).is_dir()):
+                users.append(name)
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Could not resolve home directories outside /Users: {e}")
 
     return users
 
@@ -2162,7 +2195,7 @@ _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
-    "scan_event", "config_dirs_present", "config_dirs",
+    "scan_event", "config_dirs_present", "config_dirs", "homes_outside_users",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

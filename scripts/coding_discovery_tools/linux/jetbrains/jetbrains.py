@@ -11,6 +11,7 @@ from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
     detect_plan,
+    jetbrains_config_roots,
     looks_like_ide_folder,
     parse_ide_name_and_version,
     parse_plugin_metadata,
@@ -83,8 +84,15 @@ class LinuxJetBrainsDetector(BaseToolDetector):
         return all_detected_ides
 
     def _scan_jetbrains_config_dir(self, user_home: Path) -> List[Dict]:
+        """Scan every JetBrains-family config root for a specific user."""
         detected_ides = []
-        jetbrains_config_dir = user_home / ".config" / "JetBrains"
+        for root in jetbrains_config_roots(user_home / ".config"):
+            detected_ides.extend(self._scan_vendor_config_dir(root))
+        return detected_ides
+
+    def _scan_vendor_config_dir(self, jetbrains_config_dir: Path) -> List[Dict]:
+        """Scan one vendor's config directory for IDE installations."""
+        detected_ides = []
 
         if not jetbrains_config_dir.exists():
             logger.debug(f"JetBrains config directory not found: {jetbrains_config_dir}")

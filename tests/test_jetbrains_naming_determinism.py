@@ -174,6 +174,54 @@ class TestConfigDirScan(_TempHomeTestCase):
         self.assertEqual({(ide["display_name"], ide["version"]) for ide in found}, EXPECTED_SCAN)
 
 
+class TestAndroidStudioVendorDir(_TempHomeTestCase):
+    """Android Studio is an IntelliJ-platform IDE, but Google ships it under its
+    own vendor dir, so a JetBrains-only root never saw it."""
+
+    SETTINGS_DIRS = {
+        MacOSJetBrainsDetector: Path("Library") / "Application Support",
+        LinuxJetBrainsDetector: Path(".config"),
+    }
+
+    def test_android_studio_is_found_beside_jetbrains_ides(self) -> None:
+        for detector_cls, settings_dir in self.SETTINGS_DIRS.items():
+            with self.subTest(detector=detector_cls.__name__):
+                home = self.tmp_path / detector_cls.__name__
+                _make_config_dir(home / settings_dir / "JetBrains", ["IntelliJIdea2025.2"])
+                _make_config_dir(home / settings_dir / "Google", ["AndroidStudio2025.2.3"])
+
+                found = detector_cls()._scan_jetbrains_config_dir(home)
+
+                self.assertEqual(
+                    {(ide["display_name"], ide["version"]) for ide in found},
+                    {("IntelliJ IDEA", "2025.2"), ("Android Studio", "2025.2.3")},
+                )
+
+    def test_windows_scan_covers_both_vendor_dirs(self) -> None:
+        roaming = self.tmp_path / "AppData" / "Roaming"
+        _make_config_dir(roaming / "JetBrains", ["IntelliJIdea2025.2"])
+        _make_config_dir(roaming / "Google", ["AndroidStudio2025.2.3"])
+        detector = WindowsJetBrainsDetector()
+        detector.user_home = self.tmp_path
+
+        found = detector._scan_all_config_dirs()
+
+        self.assertEqual(
+            {(ide["display_name"], ide["version"]) for ide in found},
+            {("IntelliJ IDEA", "2025.2"), ("Android Studio", "2025.2.3")},
+        )
+
+    def test_missing_google_dir_is_not_an_error(self) -> None:
+        """The vendor dir is absent on every machine without Android Studio."""
+        _make_config_dir(
+            self.tmp_path / "Library" / "Application Support" / "JetBrains", ["PyCharm2025.2"]
+        )
+
+        found = MacOSJetBrainsDetector()._scan_jetbrains_config_dir(self.tmp_path)
+
+        self.assertEqual({ide["display_name"] for ide in found}, {"PyCharm"})
+
+
 class TestPrefixCollisionSurvivesFiltering(_TempHomeTestCase):
 
     def test_edu_edition_is_not_dropped_alongside_regular_install(self) -> None:

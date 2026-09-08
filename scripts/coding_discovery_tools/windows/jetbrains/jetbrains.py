@@ -13,6 +13,7 @@ from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
     detect_plan,
+    jetbrains_config_roots,
     looks_like_ide_folder,
     parse_ide_name_and_version,
     parse_plugin_metadata,
@@ -26,21 +27,21 @@ class WindowsJetBrainsDetector(BaseToolDetector):
     """JetBrains IDEs detector for Windows systems."""
 
     @property
-    def jetbrains_config_dir(self) -> Path:
+    def jetbrains_config_dirs(self) -> List[Path]:
         """
-        Dynamic Config Directory (Roaming).
+        Dynamic Config Directories (Roaming), one per JetBrains-family vendor.
 
         Uses self.user_home if available (for scanning other users),
         otherwise falls back to environment variables or Path.home().
         """
         if hasattr(self, 'user_home') and self.user_home:
-            return self.user_home / "AppData" / "Roaming" / "JetBrains"
+            return jetbrains_config_roots(self.user_home / "AppData" / "Roaming")
 
         # Fallback to environment variable
         appdata = os.path.expandvars(r"%APPDATA%")
         if appdata and appdata != r"%APPDATA%":
-            return Path(appdata) / "JetBrains"
-        return Path.home() / "AppData" / "Roaming" / "JetBrains"
+            return jetbrains_config_roots(Path(appdata))
+        return jetbrains_config_roots(Path.home() / "AppData" / "Roaming")
 
     IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
@@ -66,7 +67,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             List of dicts, each containing info for one IDE, or None if not found
         """
-        detected_ides = self._scan_for_ides(self.jetbrains_config_dir)
+        detected_ides = self._scan_all_config_dirs()
 
         if not detected_ides:
             return None
@@ -102,7 +103,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         Returns:
             Comma-separated list of detected IDEs with their plans
         """
-        detected_ides = self._scan_for_ides(self.jetbrains_config_dir)
+        detected_ides = self._scan_all_config_dirs()
 
         if not detected_ides:
             return None
@@ -111,6 +112,13 @@ class WindowsJetBrainsDetector(BaseToolDetector):
             f"{ide['display_name']} {ide['version']} ({ide['plan']})"
             for ide in detected_ides
         )
+
+    def _scan_all_config_dirs(self) -> List[Dict]:
+        """IDEs found across every JetBrains-family vendor config root."""
+        detected_ides = []
+        for config_dir in self.jetbrains_config_dirs:
+            detected_ides.extend(self._scan_for_ides(config_dir))
+        return detected_ides
 
     def _scan_for_ides(self, config_dir: Path) -> List[Dict]:
         """

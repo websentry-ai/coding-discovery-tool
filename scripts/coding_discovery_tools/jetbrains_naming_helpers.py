@@ -9,6 +9,7 @@ and windows/ detectors and drifted; they live here so all three agree.
 import logging
 import re
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
@@ -22,11 +23,21 @@ JETBRAINS_SKIP_FOLDERS: FrozenSet[str] = frozenset({
     "consentOptions", "PrivacyPolicy", "Toolbox",
 })
 
+# Android Studio is an IntelliJ-platform IDE, but Google ships it under its own vendor dir.
+JETBRAINS_VENDOR_DIRS: Tuple[str, ...] = ("JetBrains", "Google")
+
+
+def jetbrains_config_roots(settings_dir: Path) -> List[Path]:
+    """The JetBrains-family config roots under a platform's per-user settings dir."""
+    return [settings_dir / vendor for vendor in JETBRAINS_VENDOR_DIRS]
+
+
 # Read-only: one object aliased into all three detectors, so in-place edits would leak.
 JETBRAINS_IDE_NAME_MAPPING: Mapping[str, str] = MappingProxyType({
     "IntelliJIdea": "IntelliJ IDEA",
     "IdeaIC": "IntelliJ IDEA Community",
     "IdeaIE": "IntelliJ IDEA Educational",
+    "AndroidStudio": "Android Studio",
     "Aqua": "Aqua",
     "PyCharm": "PyCharm",
     "PyCharmCE": "PyCharm Community",

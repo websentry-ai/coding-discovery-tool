@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
+from ...jetbrains_naming_helpers import (
+    JETBRAINS_SKIP_FOLDERS,
+    jetbrains_config_roots,
+    should_skip_folder,
+)
 from ...linux_extraction_helpers import get_linux_user_homes
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
 from ...xml_helpers import safe_xml_parse
@@ -19,7 +23,7 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for JetBrains IDEs MCP config on Linux systems."""
 
     IDE_PATTERNS = [
-        "IntelliJIdea", "IntelliJ", "PyCharm", "WebStorm", "PhpStorm",
+        "IntelliJIdea", "IntelliJ", "AndroidStudio", "PyCharm", "WebStorm", "PhpStorm",
         "GoLand", "Rider", "CLion", "RustRover", "RubyMine", "DataGrip",
         "DataSpell", "Fleet",
     ]
@@ -46,8 +50,15 @@ class LinuxJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         return {"projects": all_projects}
 
     def _extract_jetbrains_projects_for_user(self, user_home: Path) -> List[Dict]:
+        """Extract JetBrains MCP projects for a user, across every vendor root."""
         all_projects = []
-        jetbrains_root = user_home / ".config" / "JetBrains"
+        for root in jetbrains_config_roots(user_home / ".config"):
+            all_projects.extend(self._extract_projects_from_root(root, user_home))
+        return all_projects
+
+    def _extract_projects_from_root(self, jetbrains_root: Path, user_home: Path) -> List[Dict]:
+        """Extract JetBrains MCP projects under one vendor config root."""
+        all_projects = []
 
         if not jetbrains_root.exists():
             return all_projects

@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
+from ...jetbrains_naming_helpers import (
+    JETBRAINS_SKIP_FOLDERS,
+    jetbrains_config_roots,
+    should_skip_folder,
+)
 from ...macos_extraction_helpers import get_file_metadata, read_file_content
 from ...mcp_extraction_helpers import extract_ide_global_configs_with_root_support
 from ...xml_helpers import safe_xml_parse
@@ -53,10 +57,18 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_jetbrains_projects_for_user(self, user_home: Path) -> List[Dict]:
         """
-        Extract JetBrains MCP projects for a specific user.
+        Extract JetBrains MCP projects for a specific user, across every vendor root.
         """
         all_projects = []
-        jetbrains_root = user_home / "Library" / "Application Support" / "JetBrains"
+        for root in jetbrains_config_roots(user_home / "Library" / "Application Support"):
+            all_projects.extend(self._extract_projects_from_root(root))
+        return all_projects
+
+    def _extract_projects_from_root(self, jetbrains_root: Path) -> List[Dict]:
+        """
+        Extract JetBrains MCP projects under one vendor config root.
+        """
+        all_projects = []
 
         logger.info(f"Scanning JetBrains configs at {jetbrains_root}")
 

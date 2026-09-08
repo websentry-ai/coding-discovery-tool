@@ -766,5 +766,85 @@ class TestChannelsAreNotMerged(unittest.TestCase):
                           "stable's deny must not appear on the Insiders record")
 
 
+class TestGuardRemovalKeys(unittest.TestCase):
+    """Settings that take a guard away rather than grant a permission. We read the
+    ones that say "auto-approve is on"; these are the ones that say "the safety
+    rails are gone", and several of them ship permissive."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("raw_settings", {})
+
+    def test_ignoring_the_built_in_deny_rules_is_captured(self):
+        # true discards VS Code's own deny rules, the net that blocks find -delete
+        self.assertIn("chat.tools.terminal.ignoreDefaultAutoApproveRules",
+                      self._raw({"chat.tools.terminal.ignoreDefaultAutoApproveRules": True}))
+
+    def test_workspace_npm_script_auto_approval_is_captured(self):
+        # ships true: a cloned repo's package.json can define a script that runs unprompted
+        self.assertIn("chat.tools.terminal.autoApproveWorkspaceNpmScripts",
+                      self._raw({"chat.tools.terminal.autoApproveWorkspaceNpmScripts": False}))
+
+    def test_sandbox_escape_hatches_are_captured(self):
+        raw = self._raw({
+            "chat.agent.sandbox.allowUnsandboxedCommands": True,
+            "chat.agent.sandbox.allowAutoApprove": True,
+            "chat.agent.sandbox.retryWithAllowNetworkRequests": True,
+        })
+        for key in ("chat.agent.sandbox.allowUnsandboxedCommands",
+                    "chat.agent.sandbox.allowAutoApprove",
+                    "chat.agent.sandbox.retryWithAllowNetworkRequests"):
+            self.assertIn(key, raw)
+
+    def test_third_party_code_surface_is_captured(self):
+        raw = self._raw({"chat.extensionTools.enabled": True, "chat.plugins.enabled": True,
+                         "chat.plugins.marketplaces": ["evil/marketplace"]})
+        self.assertIn("chat.plugins.marketplaces", raw)
+        self.assertIn("chat.extensionTools.enabled", raw)
+
+    def test_autonomy_bounds_are_captured(self):
+        raw = self._raw({"chat.agent.maxRequests": 500, "chat.autoReply": True})
+        self.assertEqual(raw["chat.agent.maxRequests"], 500)
+        self.assertTrue(raw["chat.autoReply"])
+
+    def test_risk_assessment_switch_is_captured(self):
+        # false removes VS Code's own risk check on tool calls
+        self.assertIn("chat.tools.riskAssessment.enabled",
+                      self._raw({"chat.tools.riskAssessment.enabled": False}))
+
+    def test_data_egress_settings_are_captured(self):
+        raw = self._raw({"chat.sessionSync.enabled": True, "chat.allowAnonymousAccess": True})
+        self.assertIn("chat.sessionSync.enabled", raw)
+        self.assertIn("chat.allowAnonymousAccess", raw)
+
+
+class TestTimedEditAcceptance(unittest.TestCase):
+    """chat.editing.autoAcceptDelay applies edits on a timer, with no prompt."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _mode(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["permission_mode"]
+
+    def test_a_delay_auto_accepts_edits(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 5}), "acceptEdits")
+
+    def test_zero_is_the_shipped_default_and_prompts(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 0,
+                                     "chat.agent.enabled": True}), "default")
+
+    def test_a_bool_is_not_a_delay(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": True,
+                                     "chat.agent.enabled": True}), "default")
+
+    def test_global_bypass_still_outranks_a_delay(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 5,
+                                     "chat.tools.global.autoApprove": True}), "bypassPermissions")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1133,6 +1133,39 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         "chat.agent.deniedNetworkDomains",
         "chat.mcp.access", "chat.mcp.allowedServers", "chat.mcp.deniedServers",
         "github.copilot.chat.claudeAgent.enabled",
+        # Guards that can be taken away. Several ship permissive, so their absence
+        # from a settings file does not mean the protection is in place.
+        "chat.tools.terminal.ignoreDefaultAutoApproveRules",
+        "chat.tools.terminal.autoApproveWorkspaceNpmScripts",
+        "chat.tools.terminal.preventShellHistory",
+        "chat.tools.terminal.detachBackgroundProcesses",
+        "chat.tools.terminal.terminalProfile.linux",
+        "chat.tools.terminal.terminalProfile.osx",
+        "chat.tools.terminal.terminalProfile.windows",
+        "chat.agent.sandbox.allowAutoApprove",
+        "chat.agent.sandbox.allowUnsandboxedCommands",
+        "chat.agent.sandbox.retryWithAllowNetworkRequests",
+        "chat.agent.sandbox.advanced.runtime",
+        "chat.agent.sandbox.fileSystem.linux",
+        "chat.agent.sandbox.fileSystem.mac",
+        "chat.agent.sandbox.fileSystem.windows",
+        "chat.tools.riskAssessment.enabled",
+        "chat.assistedPermissions.enabled",
+        "chat.editing.autoAcceptDelay",
+        # What third-party code the agent may run.
+        "chat.extensionTools.enabled",
+        "chat.plugins.enabled", "chat.plugins.enabledPlugins",
+        "chat.plugins.marketplaces", "chat.plugins.extraMarketplaces",
+        "chat.plugins.strictMarketplaces", "chat.pluginLocations",
+        "chat.subagents.allowInvocationsFromSubagents",
+        # How far it may run unattended.
+        "chat.agent.maxRequests", "chat.autoReply", "chat.autopilot.advanced.enabled",
+        # Who may use it, and what leaves the machine.
+        "chat.allowAnonymousAccess", "chat.approvedAccountOrganizations",
+        "chat.sessionSync.enabled", "chat.sessionSync.excludeRepositories",
+        "chat.repoInfo.enabled",
+        "chat.implicitContext.enabled", "chat.implicitContext.includeActiveEditor",
+        "chat.defaultModel",
     }
 
     # A truthy global auto-approve removes every confirmation, as do the elevated
@@ -1315,6 +1348,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         edits = data.get("chat.tools.edits.autoApprove")
         if isinstance(edits, dict) and any(v is True for v in edits.values()):
             return "acceptEdits"
+        delay = data.get("chat.editing.autoAcceptDelay")
+        if isinstance(delay, (int, float)) and not isinstance(delay, bool) and delay > 0:
+            return "acceptEdits"   # edits are accepted on a timer, with no prompt
         return "default"
 
     @staticmethod

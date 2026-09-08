@@ -150,8 +150,12 @@ def _merge_chain(chain: List[Dict[str, Any]]) -> Dict[str, Any]:
             # Suppressed, so the effective mode is unknown and none is reported.
             # Keep the inherited one for ranking: an unknowable mode is not
             # evidence of a tame one, and scoring it as `default` would let this
-            # chain lose selection to a genuinely tamer project.
-            merged["ranking_mode"] = permissions.pop("defaultMode", None)
+            # chain lose selection to a genuinely tamer project. A project can
+            # suppress twice (settings.json and settings.local.json), so only
+            # the first one has anything left to save.
+            suppressed = permissions.pop("defaultMode", None)
+            if suppressed:
+                merged["ranking_mode"] = suppressed
 
         for field in _LIST_FIELDS:
             permissions[field].extend(source.get(field) or [])

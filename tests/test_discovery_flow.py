@@ -739,6 +739,24 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertIn("/repo", result["settings_path"])
         self.assertNotIn("permission_mode", result)
 
+    def test_a_second_suppression_does_not_erase_the_ranking_mode(self):
+        """One project can suppress twice: settings.json and settings.local.json."""
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            {
+                "scope": "project",
+                "settings_path": "/repo/.claude/settings.json",
+                "permissions": {"defaultMode": "auto"},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+
     def test_disable_auto_mode_drops_auto(self):
         settings = [
             {

@@ -20,10 +20,28 @@ from scripts.coding_discovery_tools.jetbrains_naming_helpers import (
     VERSION_SUFFIX,
     should_skip_folder,
 )
+from scripts.coding_discovery_tools.linux.github_copilot.copilot_rules_extractor import (
+    LinuxGitHubCopilotRulesExtractor,
+)
 from scripts.coding_discovery_tools.linux.jetbrains.jetbrains import LinuxJetBrainsDetector
+from scripts.coding_discovery_tools.linux.jetbrains.mcp_config_extractor import (
+    LinuxJetBrainsMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.macos.github_copilot.copilot_rules_extractor import (
+    MacOSGitHubCopilotRulesExtractor,
+)
 from scripts.coding_discovery_tools.macos.jetbrains import jetbrains as jetbrains_macos
 from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import MacOSJetBrainsDetector
+from scripts.coding_discovery_tools.macos.jetbrains.mcp_config_extractor import (
+    MacOSJetBrainsMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.windows.github_copilot.copilot_rules_extractor import (
+    WindowsGitHubCopilotRulesExtractor,
+)
 from scripts.coding_discovery_tools.windows.jetbrains.jetbrains import WindowsJetBrainsDetector
+from scripts.coding_discovery_tools.windows.jetbrains.mcp_config_extractor import (
+    WindowsJetBrainsMCPConfigExtractor,
+)
 
 DETECTORS = [MacOSJetBrainsDetector, LinuxJetBrainsDetector, WindowsJetBrainsDetector]
 
@@ -220,6 +238,34 @@ class TestAndroidStudioVendorDir(_TempHomeTestCase):
         found = MacOSJetBrainsDetector()._scan_jetbrains_config_dir(self.tmp_path)
 
         self.assertEqual({ide["display_name"] for ide in found}, {"PyCharm"})
+
+    def test_mcp_extractors_do_not_filter_out_android_studio(self) -> None:
+        """The extractors gate folders on IDE_PATTERNS, a list separate from the
+        detector's name mapping, so it has to know Android Studio too."""
+        for extractor_cls in (
+            MacOSJetBrainsMCPConfigExtractor,
+            LinuxJetBrainsMCPConfigExtractor,
+            WindowsJetBrainsMCPConfigExtractor,
+        ):
+            with self.subTest(extractor=extractor_cls.__name__):
+                patterns = extractor_cls.IDE_PATTERNS
+                self.assertTrue(
+                    any(p in "AndroidStudio2026.1.4" for p in patterns),
+                    f"{extractor_cls.__name__} would skip the Android Studio config folder",
+                )
+
+    def test_copilot_rules_extractors_treat_android_studio_as_jetbrains(self) -> None:
+        """Global JetBrains Copilot rules live at a shared, IDE-agnostic path, but
+        are only read when the tool name is recognised as a JetBrains IDE."""
+        for extractor_cls in (
+            MacOSGitHubCopilotRulesExtractor,
+            LinuxGitHubCopilotRulesExtractor,
+            WindowsGitHubCopilotRulesExtractor,
+        ):
+            with self.subTest(extractor=extractor_cls.__name__):
+                self.assertTrue(
+                    extractor_cls()._is_jetbrains_tool("GitHub Copilot (Android Studio)")
+                )
 
 
 class TestPrefixCollisionSurvivesFiltering(_TempHomeTestCase):

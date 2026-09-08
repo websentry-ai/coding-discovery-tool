@@ -66,7 +66,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
     """Extractor for GitHub Copilot rules on Windows systems."""
 
     JETBRAINS_IDE_PATTERNS = [
-        "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
+        "IntelliJ", "Android Studio", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
         "Rider", "CLion", "RustRover", "RubyMine", "DataGrip", "DataSpell"
     ]
 

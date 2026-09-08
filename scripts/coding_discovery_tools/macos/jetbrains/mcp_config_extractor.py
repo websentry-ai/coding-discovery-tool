@@ -25,7 +25,7 @@ class MacOSJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for JetBrains IDEs MCP config on macOS systems."""
 
     IDE_PATTERNS = [
-        "IntelliJIdea", "IntelliJ", "PyCharm", "WebStorm", "PhpStorm",
+        "IntelliJIdea", "IntelliJ", "AndroidStudio", "PyCharm", "WebStorm", "PhpStorm",
         "GoLand", "Rider", "CLion", "RustRover", "RubyMine", "DataGrip",
         "DataSpell", "Fleet"
     ]

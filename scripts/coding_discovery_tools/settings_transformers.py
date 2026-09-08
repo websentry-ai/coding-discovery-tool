@@ -56,8 +56,10 @@ def _get_precedence(scope: str) -> int:
     return SETTINGS_PRECEDENCE.get(scope, DEFAULT_PRECEDENCE)
 
 
-# Scopes that apply to every project rather than one of them.
-GLOBAL_SCOPES = ("user", "managed", "managed_plist", "managed_dropin")
+# Enterprise scopes apply to every user on the machine. A `user` scope file does
+# not: a root scan sees every home, and one user's grants must not seed another's.
+MACHINE_SCOPES = ("managed", "managed_plist", "managed_dropin")
+GLOBAL_SCOPES = MACHINE_SCOPES + ("user",)
 
 # These accumulate across a chain; every other field is resolved by precedence.
 _LIST_FIELDS = ("allow", "deny", "ask", "additionalDirectories")
@@ -87,6 +89,15 @@ def _project_key(settings_dict: Dict[str, Any]) -> Optional[str]:
     if _get_scope_value(settings_dict) in GLOBAL_SCOPES:
         return None
     return str(Path(settings_dict.get("settings_path", "")).parent.parent)
+
+
+def _owns(user_settings: Dict[str, Any], project_root: str) -> bool:
+    """Whether a user-scope file's home contains this project."""
+    try:
+        Path(project_root).relative_to(Path(user_settings.get("settings_path", "")).parent.parent)
+        return True
+    except ValueError:
+        return False
 
 
 def _is_set(value: Any) -> bool:
@@ -160,17 +171,22 @@ def _merge_chain(chain: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _effective_settings(settings_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """One merged record per project, each seeded with the global scopes."""
-    global_settings = [s for s in settings_list if _project_key(s) is None]
+    """One merged record per project, seeded with the scopes that apply to it."""
+    machine = [s for s in settings_list if _get_scope_value(s) in MACHINE_SCOPES]
+    users = [s for s in settings_list if _get_scope_value(s) == "user"]
     by_project: Dict[str, List[Dict[str, Any]]] = {}
     for settings_dict in settings_list:
         key = _project_key(settings_dict)
         if key is not None:
             by_project.setdefault(key, []).append(settings_dict)
 
-    if not by_project:
-        return [_merge_chain(global_settings)] if global_settings else []
-    return [_merge_chain(global_settings + chain) for chain in by_project.values()]
+    chains = [_merge_chain(machine + [user]) for user in users]
+    if not chains and machine:
+        chains.append(_merge_chain(machine))
+    for project_root, project_files in by_project.items():
+        owner = [u for u in users if _owns(u, project_root)]
+        chains.append(_merge_chain(machine + owner + project_files))
+    return chains
 
 
 def _permissiveness(settings_dict: Dict[str, Any]) -> tuple:

@@ -658,7 +658,7 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
     def _project(root, allow, **permissions):
         return {
             "scope": "local",
-            "settings_path": f"{root}/.claude/settings.local.json",
+            "settings_path": f"/home/u{root}/.claude/settings.local.json",
             "permissions": {"allow": allow, **permissions},
             "sandbox": {},
         }
@@ -677,7 +677,7 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertFalse(result["sandbox_enabled"])
         self.assertEqual(
             result["contributing_paths"],
-            ["/home/u/.claude/settings.json", "/repo/.claude/settings.local.json"],
+            ["/home/u/.claude/settings.json", "/home/u/repo/.claude/settings.local.json"],
         )
 
     def test_riskiest_project_is_reported(self):
@@ -739,7 +739,7 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
             self._user(defaultMode="bypassPermissions"),
             {
                 "scope": "project",
-                "settings_path": "/repo/.claude/settings.json",
+                "settings_path": "/home/u/repo/.claude/settings.json",
                 "permissions": {"defaultMode": "auto"},
                 "sandbox": {},
             },
@@ -750,6 +750,24 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         result = transform_settings_to_backend_format(settings)
 
         self.assertIn("/repo", result["settings_path"])
+
+    def test_one_users_settings_do_not_seed_another_users_project(self):
+        settings = [
+            self._user(defaultMode="default", allow=["Read(alice)"]),
+            {
+                "scope": "user",
+                "settings_path": "/home/bob/.claude/settings.json",
+                "permissions": {"defaultMode": "bypassPermissions", "allow": ["Bash"]},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["contributing_paths"], ["/home/bob/.claude/settings.json"])
+        self.assertNotIn("Read(alice)", result["allow_rules"])
+        self.assertNotIn("Bash(npm:*)", result["allow_rules"])
 
     def test_disable_auto_mode_drops_auto(self):
         settings = [

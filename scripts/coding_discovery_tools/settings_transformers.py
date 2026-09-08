@@ -1,9 +1,9 @@
 """
 Settings transformers for converting extracted settings to backend API format.
 
-This module transforms individual settings files to the expected backend API structure.
-Settings are extracted from multiple sources, and we send the highest precedence one
-to the backend.
+Settings files compose per key across scopes, and each project on a machine gets
+its own effective configuration. This module merges every chain the agent would
+actually run under, then sends the riskiest one to the backend.
 
 Precedence order (highest to lowest):
     1. managed_plist - macOS MDM plist settings (highest priority)
@@ -56,44 +56,133 @@ def _get_precedence(scope: str) -> int:
     return SETTINGS_PRECEDENCE.get(scope, DEFAULT_PRECEDENCE)
 
 
-def _has_permissions(settings_dict: Dict[str, Any]) -> bool:
-    """Check if settings dict has actual permission rules defined."""
-    permissions = settings_dict.get("permissions", {})
-    return bool(
-        permissions.get("defaultMode") or
-        permissions.get("allow") or
-        permissions.get("deny") or
-        permissions.get("ask")
+# Scopes that apply to every project rather than one of them.
+GLOBAL_SCOPES = ("user", "managed", "managed_plist", "managed_dropin")
+
+# List-valued permission fields accumulate across a chain; the rest are scalars
+# resolved by precedence.
+_LIST_FIELDS = ("allow", "deny", "ask", "additionalDirectories")
+
+# Riskiest posture wins when several projects are configured.
+_MODE_RANK = {
+    "plan": 0,
+    "default": 1,
+    "acceptEdits": 2,
+    "auto": 3,
+    "dontAsk": 3,
+    "bypassPermissions": 4,
+}
+
+# Grants that allow arbitrary execution regardless of the mode.
+_UNRESTRICTED_RULES = frozenset(["Bash", "Shell", "Bash(*)", "Shell(*)", "*", "**"])
+
+# Claude Code ignores these at project/local scope and does not fall back to the
+# user-scope value either, so the effective mode is not knowable from the files.
+# https://code.claude.com/docs/en/permission-modes
+_GLOBAL_ONLY_MODES = ("auto", "bypassPermissions")
+
+
+def _project_key(settings_dict: Dict[str, Any]) -> Optional[str]:
+    """Project a non-global settings file belongs to, or None when it is global."""
+    if _get_scope_value(settings_dict) in GLOBAL_SCOPES:
+        return None
+    return str(Path(settings_dict.get("settings_path", "")).parent.parent)
+
+
+def _dedupe(values: List[Any]) -> List[Any]:
+    seen = set()
+    out = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _merge_chain(chain: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge one precedence chain into a single settings dict.
+
+    Scalars take the highest-precedence file that actually sets them; list fields
+    accumulate. Mirrors how the agent itself composes settings across scopes.
+    """
+    chain = sorted(chain, key=lambda s: _get_precedence(_get_scope_value(s)))
+    top = chain[-1]
+
+    permissions: Dict[str, Any] = {field: [] for field in _LIST_FIELDS}
+    merged: Dict[str, Any] = {
+        "scope": _get_scope_value(top),
+        "settings_path": top.get("settings_path", ""),
+        "raw_settings": top.get("raw_settings", {}),
+        "permissions": permissions,
+        "sandbox": {},
+        "contributing_paths": [],
+    }
+
+    disable_auto = False
+    for settings_dict in chain:
+        source = settings_dict.get("permissions") or {}
+        is_global = _get_scope_value(settings_dict) in GLOBAL_SCOPES
+        raw_permissions = (settings_dict.get("raw_settings") or {}).get("permissions") or {}
+        if raw_permissions.get("disableAutoMode") == "disable":
+            disable_auto = True
+
+        mode = source.get("defaultMode")
+        if mode and (is_global or mode not in _GLOBAL_ONLY_MODES):
+            permissions["defaultMode"] = mode
+        elif mode:
+            permissions.pop("defaultMode", None)
+
+        for field in _LIST_FIELDS:
+            permissions[field].extend(source.get(field) or [])
+
+        sandbox_enabled = (settings_dict.get("sandbox") or {}).get("enabled")
+        if sandbox_enabled is not None:
+            merged["sandbox"]["enabled"] = sandbox_enabled
+
+        for key in ("mcp_servers", "mcp_policies"):
+            if settings_dict.get(key):
+                merged[key] = settings_dict[key]
+
+        merged["contributing_paths"].append(settings_dict.get("settings_path", ""))
+
+    if disable_auto and permissions.get("defaultMode") == "auto":
+        permissions.pop("defaultMode")
+
+    for field in _LIST_FIELDS:
+        permissions[field] = _dedupe(permissions[field])
+    return merged
+
+
+def _effective_settings(settings_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One merged record per project, each seeded with the global scopes."""
+    global_settings = [s for s in settings_list if _project_key(s) is None]
+    by_project: Dict[str, List[Dict[str, Any]]] = {}
+    for settings_dict in settings_list:
+        key = _project_key(settings_dict)
+        if key is not None:
+            by_project.setdefault(key, []).append(settings_dict)
+
+    if not by_project:
+        return [_merge_chain(global_settings)] if global_settings else []
+    return [_merge_chain(global_settings + chain) for chain in by_project.values()]
+
+
+def _permissiveness(settings_dict: Dict[str, Any]) -> tuple:
+    permissions = settings_dict.get("permissions") or {}
+    allow = permissions.get("allow") or []
+    return (
+        _MODE_RANK.get(permissions.get("defaultMode"), 1),
+        any(str(rule).strip() in _UNRESTRICTED_RULES for rule in allow),
+        len(allow),
     )
 
 
 def _get_highest_precedence_setting(settings_list: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Get the settings dict with the highest precedence that has permissions.
-
-    Prioritizes settings with actual permissions defined. Falls back to
-    highest precedence overall if no settings have permissions.
-
-    Args:
-        settings_list: List of settings dicts
-
-    Returns:
-        Settings dict with highest precedence, or None if list is empty
-    """
-    if not settings_list:
+    """Riskiest effective configuration across the projects on this machine."""
+    effective = _effective_settings(settings_list)
+    if not effective:
         return None
-
-    settings_with_permissions = [s for s in settings_list if _has_permissions(s)]
-    if settings_with_permissions:
-        return max(
-            settings_with_permissions,
-            key=lambda s: _get_precedence(_get_scope_value(s))
-        )
-
-    return max(
-        settings_list,
-        key=lambda s: _get_precedence(_get_scope_value(s))
-    )
+    return max(effective, key=_permissiveness)
 
 
 def _read_raw_settings_from_file(settings_path: Path) -> Dict[str, Any]:
@@ -125,9 +214,8 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
     """
     Transform extracted settings list to backend API format.
 
-    This function selects the highest precedence settings file and transforms it
-    to the backend format. No merging is performed - we simply extract and send
-    the settings as-is from the highest precedence source.
+    Files are grouped into one chain per project, each merged per key against the
+    global scopes, and the riskiest resulting configuration is returned.
 
     Args:
         settings_list: List of settings dicts from extractor. Each dict should contain:
@@ -236,5 +324,9 @@ def transform_settings_to_backend_format(settings_list: List[Dict[str, Any]]) ->
     # Include MCP policies if present
     if mcp_policies:
         backend_permissions["mcp_policies"] = mcp_policies
+
+    contributing_paths = highest_precedence.get("contributing_paths")
+    if contributing_paths:
+        backend_permissions["contributing_paths"] = contributing_paths
 
     return backend_permissions

@@ -586,9 +586,9 @@ class TestSentryRunGuards(unittest.TestCase):
 
 
 class TestSettingsTransformPrecedence(unittest.TestCase):
-    """Settings transformation picks highest precedence and maps fields correctly."""
+    """Settings transformation merges scopes and maps fields correctly."""
 
-    def test_managed_wins_over_user(self):
+    def test_managed_scalars_win_and_rules_accumulate(self):
         settings = [
             {
                 "scope": "user",
@@ -613,7 +613,7 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["scope"], "managed")
         self.assertEqual(result["permission_mode"], "deny")
-        self.assertEqual(result["allow_rules"], ["Bash"])
+        self.assertEqual(result["allow_rules"], ["Read", "Bash"])
         self.assertEqual(result["deny_rules"], ["Write"])
         self.assertTrue(result["sandbox_enabled"])
 
@@ -644,6 +644,80 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
 
     def test_empty_settings_returns_none(self):
         self.assertIsNone(transform_settings_to_backend_format([]))
+
+    @staticmethod
+    def _user(**permissions):
+        return {
+            "scope": "user",
+            "settings_path": "/home/u/.claude/settings.json",
+            "permissions": permissions,
+            "sandbox": {"enabled": False},
+        }
+
+    @staticmethod
+    def _project(root, allow, **permissions):
+        return {
+            "scope": "local",
+            "settings_path": f"{root}/.claude/settings.local.json",
+            "permissions": {"allow": allow, **permissions},
+            "sandbox": {},
+        }
+
+    def test_user_scope_mode_survives_a_project_that_only_grants_rules(self):
+        """The project file wins on precedence but never sets defaultMode."""
+        settings = [
+            self._user(defaultMode="auto", allow=["Read"], deny=["Bash(sudo:*)"]),
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["permission_mode"], "auto")
+        self.assertEqual(result["allow_rules"], ["Read", "Bash(npm:*)"])
+        self.assertEqual(result["deny_rules"], ["Bash(sudo:*)"])
+        self.assertFalse(result["sandbox_enabled"])
+        self.assertEqual(
+            result["contributing_paths"],
+            ["/home/u/.claude/settings.json", "/repo/.claude/settings.local.json"],
+        )
+
+    def test_riskiest_project_is_reported(self):
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Read", "Read"]),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_project_scope_auto_is_ignored_and_drops_the_user_value(self):
+        """Claude Code falls back to its built-in default in this case."""
+        settings = [
+            self._user(defaultMode="acceptEdits"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
+
+    def test_disable_auto_mode_drops_auto(self):
+        settings = [
+            {
+                "scope": "managed",
+                "settings_path": "/Library/managed-settings.json",
+                "raw_settings": {"permissions": {"disableAutoMode": "disable"}},
+                "permissions": {},
+                "sandbox": {},
+            },
+            self._user(defaultMode="auto", allow=["Read"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
 
 
 class TestFilterProjectsByUser(unittest.TestCase):

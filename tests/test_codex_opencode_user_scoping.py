@@ -42,13 +42,15 @@ def _isolate_abs(present: Path = None):
     return patch("pathlib.Path.exists", fake_exists), patch.object(os, "access", fake_access)
 
 
-def _stat_for_uid(target: Path, uid: int):
+def _stat_for_uid(target: Path, uid: int, extra: dict = None):
     """os.stat side_effect scoped to ``target``, so Path.exists() stays real."""
     real_stat = os.stat
+    owners = {str(target): uid}
+    owners.update({str(k): v for k, v in (extra or {}).items()})
 
     def fake_stat(path, *args, **kwargs):
-        if str(path) == str(target):
-            return Mock(st_uid=uid)
+        if str(path) in owners:
+            return Mock(st_uid=owners[str(path)])
         return real_stat(path, *args, **kwargs)
 
     return fake_stat
@@ -226,16 +228,14 @@ class _CliCase(unittest.TestCase):
     def test_homebrew_owned_by_this_user_detected_when_root(self):
         brew = Path(f"/opt/homebrew/bin/{self.TOOL}")
         self._isolate(brew)
-        with patch.object(utils_mod.os, "stat", side_effect=_stat_for_uid(brew, 501)), \
-             patch.object(utils_mod, "pwd", Mock(getpwuid=lambda uid: Mock(pw_dir=str(self.home)))):
+        with patch.object(utils_mod.os, "stat", side_effect=_stat_for_uid(brew, 501, {self.home: 501})):
             result, _ = self._run(is_root=True)
         self.assertEqual(str(brew), result["install_path"])
 
     def test_homebrew_owned_by_other_user_not_detected_when_root(self):
         brew = Path(f"/opt/homebrew/bin/{self.TOOL}")
         self._isolate(brew)
-        with patch.object(utils_mod.os, "stat", side_effect=_stat_for_uid(brew, 502)), \
-             patch.object(utils_mod, "pwd", Mock(getpwuid=lambda uid: Mock(pw_dir="/Users/someone-else"))):
+        with patch.object(utils_mod.os, "stat", side_effect=_stat_for_uid(brew, 502, {self.home: 501})):
             result, _ = self._run(is_root=True)
         self.assertIsNone(result)
 

@@ -90,7 +90,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, windows_user_homes, windows_home_for_user
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, rejected_binaries, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -160,7 +160,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, windows_user_homes, windows_home_for_user
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, rejected_binaries, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -3432,6 +3432,7 @@ def main():
         all_tools = []  # Store all unique tools across all users
         tools_by_user = {}  # Track which tools belong to which user
         config_dirs_seen = set()  # no_tools_found discriminator; never a detection gate
+        scanned_homes = []  # same, for the config-dir age discriminator
 
         for user in all_users:
             if platform.system() == "Darwin":
@@ -3443,6 +3444,7 @@ def main():
             else:
                 user_home = Path.home()
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
+            scanned_homes.append(user_home)
             config_dirs_seen.update(tool_config_dirs_present(user_home))
             with time_step("detect_tools", "detect"):
                 user_detect_failures = set()
@@ -3908,7 +3910,18 @@ def main():
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),
                     "in_container": in_container(),
+                    # Old = uninstall residue; recent = in use and we missed it.
+                    "config_dirs_age_days": newest_tool_config_dir_age_days(scanned_homes),
                 }
+                rejected = rejected_binaries()
+                if rejected:
+                    # Found on disk, then not attributed to the scanned user.
+                    no_tools_ctx["rejected_count"] = len(rejected)
+                    no_tools_ctx["rejected_reasons"] = ",".join(sorted({r for _, r in rejected}))
+                    # Basenames only: a full path can carry a username.
+                    no_tools_ctx["rejected_tools"] = ",".join(
+                        sorted({os.path.basename(p) for p, _ in rejected})
+                    )
                 if hasattr(os, "getuid"):
                     no_tools_ctx["is_root"] = os.getuid() == 0
                 elif platform.system() == "Windows":

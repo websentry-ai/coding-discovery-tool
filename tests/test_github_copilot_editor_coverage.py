@@ -254,5 +254,36 @@ class TestPermissionsStayWithVscode(unittest.TestCase):
         canonical = self._canonical(["GitHub Copilot (Cursor)"])
         self.assertFalse(canonical.endswith("(vs code)"))
 
+class TestAllUsersScanIsScopedToTheUser(unittest.TestCase):
+    """The scan runs once per user and is told who it is asking about.
+
+    macOS and Linux ignored that and walked every home, so under a root/MDM scan
+    each user was handed every other user's Copilot. Windows already scoped.
+    """
+
+    DETECTORS = (MacOSCopilotDetector, LinuxCopilotDetector, WindowsGitHubCopilotDetector)
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_vscode_scan_reads_only_the_scoped_home(self):
+        for cls in self.DETECTORS:
+            with self.subTest(detector=cls.__name__):
+                det = cls()
+                det.user_home = Path("/Users/alice")
+                with patch.object(det, "_detect_vscode_for_user", return_value=[]) as per_user:
+                    det._detect_vscode_all_users()
+                per_user.assert_called_once_with(Path("/Users/alice"))
+
+    def test_jetbrains_scan_reads_only_the_scoped_home(self):
+        for cls in (MacOSCopilotDetector, WindowsGitHubCopilotDetector):
+            with self.subTest(detector=cls.__name__):
+                det = cls()
+                det.user_home = Path("/Users/alice")
+                with patch.object(det, "_detect_jetbrains_for_user", return_value=[]) as per_user:
+                    det._detect_jetbrains_all_users()
+                per_user.assert_called_once_with(Path("/Users/alice"))
+
+
 # The bases only carry the cases; running them directly would double-count.
 del _Fixture, _EditorCoverageCase, _BuiltinFallbackCase

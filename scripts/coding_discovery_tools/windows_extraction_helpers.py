@@ -6,6 +6,7 @@ on Windows and macOS to avoid code duplication.
 """
 
 import logging
+import ntpath
 import os
 import shutil
 from datetime import datetime
@@ -15,6 +16,61 @@ from typing import List, Dict, Optional, Tuple, Callable
 from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
 
 logger = logging.getLogger(__name__)
+
+_PROFILE_LIST_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+# LOCAL SYSTEM / LOCAL SERVICE / NETWORK SERVICE — S-1-5-18 is what an MDM runs as.
+_SERVICE_PROFILE_SIDS = frozenset({"S-1-5-18", "S-1-5-19", "S-1-5-20"})
+
+
+def registry_profile_paths() -> Tuple[List[Path], bool]:
+    """Profile paths Windows records in ``ProfileList``, and whether the read was
+    complete.
+
+    This is the authoritative answer to "who has a profile here", and unlike a
+    ``C:\\Users`` listing it carries the real location, so a profile relocated to
+    another drive is still found. ``.bak`` keys are kept — Windows renames a key
+    that way when a profile fails to load, and the profile is still a real user's.
+
+    UNC paths are returned too, even though they must not be scanned: the caller
+    needs them to recognise a roaming profile's local cache under ``C:\\Users``.
+
+    ``complete`` is False when any entry could not be read, so the caller can
+    tell a whole profile list from a partial one and never treat a partial list
+    as proof that a walked profile is not real.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return [], False
+
+    paths: List[Path] = []
+    complete = True
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                sid = None
+                try:
+                    sid = winreg.EnumKey(key, index)
+                    base_sid = sid[:-4] if sid.endswith(".bak") else sid
+                    if base_sid in _SERVICE_PROFILE_SIDS:
+                        continue
+                    with winreg.OpenKey(key, sid) as sub_key:
+                        raw, kind = winreg.QueryValueEx(sub_key, "ProfileImagePath")
+                except OSError as exc:
+                    complete = False
+                    logger.debug(f"Could not read profile {sid or index}: {exc}", exc_info=True)
+                    continue
+                if not isinstance(raw, str) or not raw:
+                    complete = False
+                    logger.debug(f"Profile {sid} has no usable ProfileImagePath")
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    raw = ntpath.expandvars(raw)
+                paths.append(Path(raw))
+    except OSError as exc:
+        logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}", exc_info=True)
+        return [], False
+    return paths, complete
 
 
 # Maps the globalStorage IDE-folder key (as used by Cline/Roo ``SUPPORTED_IDES``)

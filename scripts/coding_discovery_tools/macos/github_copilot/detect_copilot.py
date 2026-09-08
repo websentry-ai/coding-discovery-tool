@@ -114,8 +114,16 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         """
         Detect VS Code Copilot for all users when running as root.
         For regular users, only checks their own directory.
+
+        When ``user_home`` is set the scan is scoped to THAT user, so one user's
+        Copilot is never attributed to every profile on the machine.
         """
         results = []
+
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            # Errors propagate: a read failure must not look like an absent tool.
+            return self._detect_vscode_for_user(Path(scoped_home))
 
         if is_running_as_root():
             users_dir = Path("/Users")
@@ -214,8 +222,15 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """
         Detect JetBrains Copilot for all users when running as root.
+
+        Scoped to ``user_home`` when set, for the same reason as the VS Code scan.
         """
         detected_results = []
+
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            # Errors propagate: a read failure must not look like an absent tool.
+            return self._detect_jetbrains_for_user(Path(scoped_home))
 
         if is_running_as_root():
             users_dir = Path("/Users")

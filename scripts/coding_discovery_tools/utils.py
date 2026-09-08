@@ -190,13 +190,8 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
 def wsl_distros_present(user_home: Path) -> List[str]:
     """Names of WSL distros installed for ``user_home``. Never raises.
 
-    A tool installed inside a distro lives on the Linux filesystem, which no
-    detector traverses, so a zero-tool scan on a WSL machine has an explanation
-    this is the only way to see. Unlike the AI-tool config dirs, nothing we ship
-    creates these, so a hit is always the user's own doing.
-
-    WSL2 keeps the distro in ``LocalState/ext4.vhdx``; WSL1 unpacks it to
-    ``LocalState/rootfs``. A distro relocated by ``wsl --import`` is not found.
+    WSL2 keeps the distro in ``LocalState/ext4.vhdx``, WSL1 in ``LocalState/rootfs``.
+    One relocated by ``wsl --import`` is not found.
     """
     found = []
     try:

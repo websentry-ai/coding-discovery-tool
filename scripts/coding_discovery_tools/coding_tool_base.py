@@ -1268,8 +1268,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             try:
                 if defaults_path is None and config_dir.is_dir():
                     defaults_path = config_dir / "settings.json"
-            except OSError:
-                pass
+            except OSError as e:
+                # Losing this probe silently would make a defaults record go
+                # missing with no trace of why.
+                logger.debug(f"Could not stat Copilot config dir {config_dir}: {e}")
             records = []
             for path in self._iter_channel_settings_files(config_dir):
                 data = self._parse_jsonc(path, user_home)

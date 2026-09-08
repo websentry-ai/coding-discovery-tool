@@ -1445,20 +1445,28 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return out
 
     def _merge_records(self, base: Dict, others: List[Dict]) -> Dict:
-        """Union the allow/deny rules across a user's profiles and escalate the mode
-        to the most permissive seen, so one YOLO profile surfaces even when the
-        default profile is locked down."""
+        """Union the allow/deny rules and settings across a user's profiles and
+        escalate the mode to the most permissive seen, so one YOLO profile surfaces
+        even when the default profile is locked down.
+
+        Settings are unioned too: a guard switched off in a profile that did not
+        win is still switched off there, and keeping only the winner's would hide
+        it. The winning profile takes precedence where both set the same key."""
         if not others:
             return base
         merged = dict(base)
         order = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
+        raw = {}
         for rec in others:
+            raw.update(rec.get("raw_settings") or {})
             for field in ("allow_rules", "deny_rules"):
                 extra = rec.get(field)
                 if extra:
                     merged[field] = self._dedupe(merged.get(field, []) + extra)
             if order.get(rec.get("permission_mode"), 0) > order.get(merged.get("permission_mode"), 0):
                 merged["permission_mode"] = rec["permission_mode"]
+        raw.update(base.get("raw_settings") or {})
+        merged["raw_settings"] = raw
         return merged
 
 

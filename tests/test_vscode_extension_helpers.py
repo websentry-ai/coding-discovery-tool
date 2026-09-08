@@ -145,6 +145,23 @@ class TestFindExtensionInEditor(unittest.TestCase):
             str(self.home / ".vscode" / "extensions" / relative_location),
         )
 
+    def test_native_absolute_path_wins_over_relative_location(self):
+        self._write_registry("Code", [
+            {
+                "identifier": {"id": CLINE_EXT_ID},
+                "location": {"path": "/opt/vscode/extensions/cline"},
+                "relativeLocation": "stale-cline-location",
+            }
+        ])
+
+        location, _version = find_extension_in_editor(
+            self.home,
+            "Code",
+            CLINE_EXT_ID,
+        )
+
+        self.assertEqual(location, "/opt/vscode/extensions/cline")
+
     def test_entry_present_without_version_returns_none_version(self):
         self._write_registry("Code", [{"identifier": {"id": CLINE_EXT_ID}}])
         location, version = find_extension_in_editor(self.home, "Code", CLINE_EXT_ID)

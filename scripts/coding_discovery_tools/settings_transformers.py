@@ -59,32 +59,26 @@ def _get_precedence(scope: str) -> int:
 # Scopes that apply to every project rather than one of them.
 GLOBAL_SCOPES = ("user", "managed", "managed_plist", "managed_dropin")
 
-# List-valued permission fields accumulate across a chain; the rest are scalars
-# resolved by precedence.
+# These accumulate across a chain; every other field is resolved by precedence.
 _LIST_FIELDS = ("allow", "deny", "ask", "additionalDirectories")
 
-# Riskiest posture wins when several projects are configured.
+# Riskiest posture wins. Mirrors what derive_autonomy returns for each mode:
+# dontAsk auto-approves the same set as default, so it ranks with it.
 _MODE_RANK = {
     "plan": 0,
     "default": 1,
+    "dontAsk": 1,
     "acceptEdits": 2,
     "auto": 3,
-    "dontAsk": 3,
-    "bypassPermissions": 4,
+    "bypassPermissions": 3,
 }
 
-# Grants that allow arbitrary execution regardless of the mode. Mirrors the
-# backend's _is_bare_shell and _is_wildcard exactly. It does NOT cover nested
-# interpreter escapes like Bash(bash:*) — matching those needs the backend's
-# parser, and every looser pattern tried against the fleet's 4467 distinct rules
-# traded 9 false negatives for 200+ false positives. Selection can therefore
-# under-rank a project whose only unrestricted grant is an escape; the backend
-# still derives the correct autonomy for whichever project is reported.
+# Mirrors the backend's _is_bare_shell and _is_wildcard. Nested escapes like
+# Bash(bash:*) need its parser, so selection can under-rank a project carrying one.
 _UNRESTRICTED_RULES = frozenset(["Bash", "Shell", "Bash(*)", "Shell(*)", "*", "**"])
 
-# Claude Code ignores these at project/local scope and does not fall back to the
-# user-scope value either, so the effective mode is not knowable from the files.
-# https://code.claude.com/docs/en/permission-modes
+# Ignored at project/local scope, and the user-scope value is dropped rather than
+# inherited: https://code.claude.com/docs/en/permission-modes
 _GLOBAL_ONLY_MODES = ("auto", "bypassPermissions")
 
 
@@ -96,11 +90,7 @@ def _project_key(settings_dict: Dict[str, Any]) -> Optional[str]:
 
 
 def _is_set(value: Any) -> bool:
-    """Whether a value carries content, not just a populated container shape.
-
-    Extractors always emit the `mcp_policies` keys, so a plain truthiness check
-    would let an empty project file erase a user-scope policy.
-    """
+    """Whether a value carries content, not just a populated container shape."""
     if isinstance(value, dict):
         return any(_is_set(item) for item in value.values())
     return bool(value)
@@ -117,11 +107,7 @@ def _dedupe(values: List[Any]) -> List[Any]:
 
 
 def _merge_chain(chain: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge one precedence chain into a single settings dict.
-
-    Scalars take the highest-precedence file that actually sets them; list fields
-    accumulate. Mirrors how the agent itself composes settings across scopes.
-    """
+    """Merge one precedence chain: scalars by precedence, list fields accumulate."""
     chain = sorted(chain, key=lambda s: _get_precedence(_get_scope_value(s)))
     top = chain[-1]
 
@@ -147,12 +133,7 @@ def _merge_chain(chain: List[Dict[str, Any]]) -> Dict[str, Any]:
         if mode and (is_global or mode not in _GLOBAL_ONLY_MODES):
             permissions["defaultMode"] = mode
         elif mode:
-            # Suppressed, so the effective mode is unknown and none is reported.
-            # Keep the inherited one for ranking: an unknowable mode is not
-            # evidence of a tame one, and scoring it as `default` would let this
-            # chain lose selection to a genuinely tamer project. A project can
-            # suppress twice (settings.json and settings.local.json), so only
-            # the first one has anything left to save.
+            # Unknowable is not evidence of tame, so keep it for ranking only.
             suppressed = permissions.pop("defaultMode", None)
             if suppressed:
                 merged["ranking_mode"] = suppressed
@@ -193,11 +174,7 @@ def _effective_settings(settings_list: List[Dict[str, Any]]) -> List[Dict[str, A
 
 
 def _permissiveness(settings_dict: Dict[str, Any]) -> tuple:
-    """Most-permissive-capability-wins, matching how the backend derives autonomy.
-
-    An unrestricted grant runs arbitrary commands whatever the mode says, so it
-    has to raise the rank rather than break ties within it.
-    """
+    """Most-permissive-capability-wins, matching how the backend derives autonomy."""
     permissions = settings_dict.get("permissions") or {}
     allow = permissions.get("allow") or []
     mode = permissions.get("defaultMode") or settings_dict.get("ranking_mode")

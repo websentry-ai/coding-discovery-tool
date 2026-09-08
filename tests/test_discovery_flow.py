@@ -664,7 +664,6 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         }
 
     def test_user_scope_mode_survives_a_project_that_only_grants_rules(self):
-        """The project file wins on precedence but never sets defaultMode."""
         settings = [
             self._user(defaultMode="auto", allow=["Read"], deny=["Bash(sudo:*)"]),
             self._project("/repo", ["Bash(npm:*)"]),
@@ -693,7 +692,6 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertEqual(result["allow_rules"], ["Bash"])
 
     def test_project_scope_auto_is_ignored_and_drops_the_user_value(self):
-        """Claude Code falls back to its built-in default in this case."""
         settings = [
             self._user(defaultMode="acceptEdits"),
             self._project("/repo", ["Read"], defaultMode="auto"),
@@ -704,7 +702,6 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertNotIn("permission_mode", result)
 
     def test_unrestricted_grant_outranks_a_tamer_project_on_a_higher_mode(self):
-        """`Bash` runs anything whatever the mode says, so it cannot lose on mode."""
         settings = [
             self._user(defaultMode="default"),
             self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
@@ -716,7 +713,6 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertEqual(result["allow_rules"], ["Bash"])
 
     def test_empty_policies_do_not_erase_an_inherited_one(self):
-        """Extractors always emit the mcp_policies keys, empty or not."""
         user = self._user(defaultMode="default")
         user["mcp_policies"] = {"allowedMcpServers": ["github"], "deniedMcpServers": []}
         project = self._project("/repo", ["Read"])
@@ -727,7 +723,6 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertEqual(result["mcp_policies"]["allowedMcpServers"], ["github"])
 
     def test_suppressed_mode_still_ranks_at_the_inherited_posture(self):
-        """An unknowable mode is not evidence of a tame one."""
         settings = [
             self._user(defaultMode="bypassPermissions"),
             self._project("/repo", ["Read"], defaultMode="auto"),
@@ -740,7 +735,6 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertNotIn("permission_mode", result)
 
     def test_a_second_suppression_does_not_erase_the_ranking_mode(self):
-        """One project can suppress twice: settings.json and settings.local.json."""
         settings = [
             self._user(defaultMode="bypassPermissions"),
             {

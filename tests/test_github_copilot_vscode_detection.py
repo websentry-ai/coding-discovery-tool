@@ -16,6 +16,9 @@ import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.macos.github_copilot.detect_copilot import (
     MacOSCopilotDetector,
 )
+from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import (
+    MacOSJetBrainsDetector,
+)
 
 _MOD = "scripts.coding_discovery_tools.macos.github_copilot.detect_copilot"
 
@@ -338,6 +341,69 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["version"], "unknown")
+
+
+class TestMacOSScopedToUserHome(unittest.TestCase):
+    """A scoped scan must read only ``user_home``, and must not turn a read
+    failure into an absent tool (which would make the install prunable)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.mkdtemp()
+        self.alice = self._make_home("alice")
+        self.bob = self._make_home("bob")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_home(self, name):
+        return Path(self.tmp) / name
+
+    def _give_vscode_copilot(self, home):
+        p = home / ".vscode" / "extensions" / "extensions.json"
+        p.parent.mkdir(parents=True)
+        p.write_text(
+            json.dumps([{"identifier": {"id": "github.copilot-chat"}, "version": "0.40.1"}]),
+            encoding="utf-8",
+        )
+
+    def _give_jetbrains_ide(self, home, folder):
+        (home / "Library" / "Application Support" / "JetBrains" / folder / "plugins").mkdir(parents=True)
+
+    def _vscode_scan(self, home):
+        det = MacOSCopilotDetector()
+        det.user_home = home
+        return det._detect_vscode_all_users()
+
+    def test_vscode_copilot_only_reported_for_its_owner(self):
+        self._give_vscode_copilot(self.alice)
+        self.bob.mkdir(parents=True)
+
+        self.assertEqual(len(self._vscode_scan(self.alice)), 1)
+        self.assertEqual(self._vscode_scan(self.bob), [])
+
+    def test_jetbrains_scan_reads_only_the_scoped_home(self):
+        self._give_jetbrains_ide(self.alice, "IntelliJIdea2025.2")
+        self._give_jetbrains_ide(self.bob, "PyCharm2024.1")
+
+        det = MacOSJetBrainsDetector()
+        det.user_home = self.alice
+
+        self.assertEqual(
+            [ide["folder_name"] for ide in det._scan_for_ides()], ["IntelliJIdea2025.2"]
+        )
+
+    def test_unreadable_scoped_home_raises_instead_of_reporting_absent(self):
+        det = MacOSJetBrainsDetector()
+        det.user_home = self.alice
+
+        with patch.object(
+            MacOSJetBrainsDetector,
+            "_scan_jetbrains_config_dir",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            with self.assertRaises(PermissionError):
+                det._scan_for_ides()
 
 
 if __name__ == "__main__":

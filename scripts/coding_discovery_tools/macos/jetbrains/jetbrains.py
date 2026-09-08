@@ -102,13 +102,10 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
         scoped_home = getattr(self, 'user_home', None)
         if scoped_home is not None:
-            try:
-                return self._filter_old_versions(
-                    self._scan_jetbrains_config_dir(Path(scoped_home))
-                )
-            except (PermissionError, OSError) as e:
-                logger.debug(f"Skipping JetBrains scan for {scoped_home}: {e}")
-                return []
+            # Errors propagate: a read failure must not look like an absent IDE.
+            return self._filter_old_versions(
+                self._scan_jetbrains_config_dir(Path(scoped_home))
+            )
 
         if is_running_as_root():
             users_dir = Path("/Users")

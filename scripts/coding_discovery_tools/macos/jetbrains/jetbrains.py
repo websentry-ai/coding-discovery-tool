@@ -93,9 +93,22 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         Scan JetBrains config directory for IDE installations.
 
         When running as root, scans all user directories in /Users.
+
+        When ``user_home`` is set the scan is scoped to THAT user, so one user's
+        IDEs are never attributed to every profile on the machine.
         """
         all_detected_ides = []
         scanned_homes = set()
+
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            try:
+                return self._filter_old_versions(
+                    self._scan_jetbrains_config_dir(Path(scoped_home))
+                )
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping JetBrains scan for {scoped_home}: {e}")
+                return []
 
         if is_running_as_root():
             users_dir = Path("/Users")

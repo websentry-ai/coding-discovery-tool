@@ -187,6 +187,26 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
     return found
 
 
+def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
+    """Days since the most recently touched AI-tool config dir across ``user_homes``.
+
+    Separates uninstall residue (old) from a tool in active use whose binary we
+    failed to resolve (recent). None when no config dir is readable.
+    """
+    newest = None
+    for user_home in user_homes:
+        for name in _TOOL_CONFIG_DIRS:
+            try:
+                mtime = (Path(user_home) / name).stat().st_mtime
+            except (PermissionError, OSError):
+                continue
+            if newest is None or mtime > newest:
+                newest = mtime
+    if newest is None:
+        return None
+    return max(0, int((time.time() - newest) // 86400))
+
+
 _NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
 
 
@@ -221,7 +241,17 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
       system-wide and available to every user, so attribute to whoever is being
       scanned.
 
-    Never raises: any stat/pwd failure returns False (do not attribute).
+    Compared by uid against the home's own uid. Resolving the owner to a home
+    PATH instead fails closed when the binary is genuinely theirs: a directory
+    account with no local passwd record, a home that is not ``/Users/<dirname>``,
+    or the Data-volume firmlink that ``resolve()`` does not collapse.
+
+    POSIX only, by caller: ``machine_global`` is empty on Windows so nothing
+    reaches here. Do not add a Windows caller — ``st_uid`` is always 0 there,
+    indistinguishable from a root-owned system-wide binary, so every shared
+    binary would be attributed to every user.
+
+    Never raises: any stat failure returns False (do not attribute).
 
     Args:
         candidate: Absolute path to a machine-global binary.
@@ -236,16 +266,14 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
         return False
     if uid == 0:
         return True  # system-wide -> available to every scanned user
-    if pwd is None:
-        return False  # POSIX-only; should never be hit on Windows
     try:
-        owner_home = Path(pwd.getpwuid(uid).pw_dir)
-    except (KeyError, OSError, AttributeError):
+        owned = uid == os.stat(str(user_home)).st_uid
+    except (OSError, PermissionError):
+        record_rejected_binary(candidate, "home_stat_failed")
         return False
-    try:
-        return owner_home.resolve() == user_home.resolve()
-    except (OSError, RuntimeError):
-        return owner_home == user_home
+    if not owned:
+        record_rejected_binary(candidate, "owner_mismatch")
+    return owned
 
 
 def get_hostname() -> str:
@@ -421,35 +449,82 @@ def get_all_users_macos() -> List[str]:
     return users
 
 
-def get_all_users_windows() -> List[str]:
+@functools.lru_cache(maxsize=1)
+def windows_user_homes() -> Dict[str, Path]:
     """
-    Get all user directory names from C:\\Users on Windows.
+    Map every Windows profile on this machine to its real home directory.
 
-    Filters out hidden directories and well-known system/service
-    directories listed in WINDOWS_SKIP_USER_DIRS.
+    The ``C:\\Users`` listing alone answers neither question we need: it cannot
+    see a profile relocated to another drive, and it treats any leftover folder
+    as a user. ``ProfileList`` is Windows' own record, so the two are combined —
+    a walked folder is kept only when a profile record vouches for the name, and
+    registry profiles the walk missed are added at their real path.
+
+    A profile whose recorded path is a UNC share still vouches for its local
+    ``C:\\Users`` cache, and an incomplete registry read vouches for nothing, so
+    neither can remove a real user. Names are reconciled case-insensitively, as
+    Windows paths are, and reported with the profile record's spelling, so one
+    profile is never scanned twice under two spellings of its name.
+
+    Cached for the process: a scan resolves the same machine throughout, and the
+    call sites would otherwise re-walk ``C:\\Users`` for every tool/user pair.
 
     Returns:
-        List of usernames (directory names under C:\\Users), or an
-        empty list if not running on Windows or the path does not exist.
+        ``{home_user: home path}``, empty when not running on Windows.
     """
     if platform.system() != "Windows":
-        return []
+        return {}
 
+    walked: Dict[str, Path] = {}
     try:
         win_users_dir = Path(Path.home().anchor) / "Users"
-        if not win_users_dir.exists():
-            return []
-
-        users = []
-        for user_dir in win_users_dir.iterdir():
-            if (user_dir.is_dir()
-                    and not user_dir.name.startswith('.')
-                    and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
-                users.append(user_dir.name)
-        return users
+        if win_users_dir.exists():
+            for user_dir in win_users_dir.iterdir():
+                if (user_dir.is_dir()
+                        and not user_dir.name.startswith('.')
+                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
+                    walked[user_dir.name] = user_dir
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from Windows Users directory: {e}")
-        return []
+
+    from .windows_extraction_helpers import registry_profile_paths
+    registry, complete = registry_profile_paths()
+    if not registry:
+        return walked
+
+    homes: Dict[str, Path] = {}
+    vouched: Dict[str, str] = {}
+    for path in registry:
+        if not path.name:
+            continue
+        key = path.name.lower()
+        vouched.setdefault(key, path.name)
+        if not str(path).startswith("\\\\"):
+            homes.setdefault(key, path)
+
+    resolved = {vouched[key]: path for key, path in homes.items()}
+    for name, path in walked.items():
+        key = name.lower()
+        if key in homes:
+            continue
+        if complete and key not in vouched:
+            continue
+        resolved[vouched.get(key, name)] = path
+    return resolved
+
+
+def get_all_users_windows() -> List[str]:
+    """
+    Names of the Windows profiles on this machine. See ``windows_user_homes``.
+    """
+    return list(windows_user_homes())
+
+
+def windows_home_for_user(username: str) -> Path:
+    """Home directory for a Windows profile, which is not always under C:\\Users."""
+    return windows_user_homes().get(
+        username, Path(Path.home().anchor) / "Users" / username
+    )
 
 
 def get_all_users_linux() -> List[str]:
@@ -2163,6 +2238,7 @@ _SENTRY_TAG_KEYS = (
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
     "scan_event", "config_dirs_present", "config_dirs",
+    "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2185,6 +2261,25 @@ _sentry_event_count = 0
 _sentry_consecutive_fails = 0
 _sentry_dead_this_run = False
 
+# Binaries found on disk but not attributed; a silent rejection is otherwise
+# indistinguishable from never having found the tool at all.
+_REJECTED_BINARIES_CAP = 10
+_rejected_binaries = []
+
+
+def record_rejected_binary(candidate, reason: str) -> None:
+    """Note a real binary that was found and then not attributed. Never raises."""
+    try:
+        if len(_rejected_binaries) < _REJECTED_BINARIES_CAP:
+            _rejected_binaries.append((str(candidate), reason))
+    except Exception:
+        pass
+
+
+def rejected_binaries() -> list:
+    """The run's rejected binaries as ``(path, reason)`` pairs."""
+    return list(_rejected_binaries)
+
 
 def reset_sentry_run_state() -> None:
     """Reset the per-run Sentry dedup / circuit-breaker state."""
@@ -2193,6 +2288,7 @@ def reset_sentry_run_state() -> None:
     _sentry_event_count = 0
     _sentry_consecutive_fails = 0
     _sentry_dead_this_run = False
+    _rejected_binaries.clear()
 
 
 def _ip_is_loopback(host: str) -> bool:

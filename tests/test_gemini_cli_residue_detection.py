@@ -27,14 +27,16 @@ _MOD = "scripts.coding_discovery_tools.user_tool_detector"
 _UTILS = "scripts.coding_discovery_tools.utils"
 
 
-def _stat_for_uid(target: Path, uid: int):
-    """os.stat side_effect: return a fake stat (chosen ``uid``) for ``target``,
-    pass through to the real os.stat for every other path."""
+def _stat_for_uid(target: Path, uid: int, extra: dict = None):
+    """os.stat side_effect: fake ``uid`` for ``target`` (and for any path in
+    ``extra``), pass through to the real os.stat for everything else."""
     real_stat = os.stat
+    owners = {str(target): uid}
+    owners.update({str(k): v for k, v in (extra or {}).items()})
 
     def fake_stat(path, *args, **kwargs):
-        if str(path) == str(target):
-            return Mock(st_uid=uid)
+        if str(path) in owners:
+            return Mock(st_uid=owners[str(path)])
         return real_stat(path, *args, **kwargs)
 
     return fake_stat
@@ -392,7 +394,7 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         det = _make_detector()
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501)), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = _detect_gemini_cli(det, self.home)
@@ -410,7 +412,7 @@ class TestGeminiCliResidueDetection(unittest.TestCase):
         det = _make_detector()
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502)), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other_home})), \
              patch(f"{_MOD}.resolve_npm_global_tool_bin", return_value=None), \
              patch(f"{_MOD}.run_command", return_value=None):
@@ -485,7 +487,7 @@ class TestMachineGlobalBinaryOwnedByUser(unittest.TestCase):
             )
 
     def test_owner_home_matches_returns_true(self):
-        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 501)), \
+        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 501, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})):
             self.assertTrue(
                 utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)
@@ -493,7 +495,7 @@ class TestMachineGlobalBinaryOwnedByUser(unittest.TestCase):
 
     def test_owner_home_mismatch_returns_false(self):
         other = self.home.parent / "other_user"
-        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 502)), \
+        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 502, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other})):
             self.assertFalse(
                 utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)
@@ -508,7 +510,7 @@ class TestMachineGlobalBinaryOwnedByUser(unittest.TestCase):
     def test_unknown_owner_uid_returns_false(self):
         """uid resolves via stat but pwd.getpwuid raises KeyError (orphaned uid)
         -> False (do not attribute)."""
-        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 999)), \
+        with patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(self.cand, 999, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({})):
             self.assertFalse(
                 utils_mod.machine_global_binary_owned_by_user(self.cand, self.home)

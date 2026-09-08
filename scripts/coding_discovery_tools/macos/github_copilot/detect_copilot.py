@@ -223,8 +223,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         """
         Detect JetBrains Copilot for all users when running as root.
 
-        When ``user_home`` is set the scan is scoped to THAT user, so one user's
-        Copilot plugin is never attributed to every profile on the machine.
+        Scoped to ``user_home`` when set, for the same reason as the VS Code scan.
         """
         detected_results = []
 

@@ -89,6 +89,17 @@ def _project_key(settings_dict: Dict[str, Any]) -> Optional[str]:
     return str(Path(settings_dict.get("settings_path", "")).parent.parent)
 
 
+def _is_set(value: Any) -> bool:
+    """Whether a value carries content, not just a populated container shape.
+
+    Extractors always emit the `mcp_policies` keys, so a plain truthiness check
+    would let an empty project file erase a user-scope policy.
+    """
+    if isinstance(value, dict):
+        return any(_is_set(item) for item in value.values())
+    return bool(value)
+
+
 def _dedupe(values: List[Any]) -> List[Any]:
     seen = set()
     out = []
@@ -140,7 +151,7 @@ def _merge_chain(chain: List[Dict[str, Any]]) -> Dict[str, Any]:
             merged["sandbox"]["enabled"] = sandbox_enabled
 
         for key in ("mcp_servers", "mcp_policies"):
-            if settings_dict.get(key):
+            if _is_set(settings_dict.get(key)):
                 merged[key] = settings_dict[key]
 
         merged["contributing_paths"].append(settings_dict.get("settings_path", ""))
@@ -168,13 +179,17 @@ def _effective_settings(settings_list: List[Dict[str, Any]]) -> List[Dict[str, A
 
 
 def _permissiveness(settings_dict: Dict[str, Any]) -> tuple:
+    """Most-permissive-capability-wins, matching how the backend derives autonomy.
+
+    An unrestricted grant runs arbitrary commands whatever the mode says, so it
+    has to raise the rank rather than break ties within it.
+    """
     permissions = settings_dict.get("permissions") or {}
     allow = permissions.get("allow") or []
-    return (
-        _MODE_RANK.get(permissions.get("defaultMode"), 1),
-        any(str(rule).strip() in _UNRESTRICTED_RULES for rule in allow),
-        len(allow),
-    )
+    rank = _MODE_RANK.get(permissions.get("defaultMode"), 1)
+    if any(str(rule).strip() in _UNRESTRICTED_RULES for rule in allow):
+        rank = max(rank, _MODE_RANK["bypassPermissions"])
+    return (rank, len(allow))
 
 
 def _get_highest_precedence_setting(settings_list: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

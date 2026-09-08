@@ -703,6 +703,29 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
 
         self.assertNotIn("permission_mode", result)
 
+    def test_unrestricted_grant_outranks_a_tamer_project_on_a_higher_mode(self):
+        """`Bash` runs anything whatever the mode says, so it cannot lose on mode."""
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_empty_policies_do_not_erase_an_inherited_one(self):
+        """Extractors always emit the mcp_policies keys, empty or not."""
+        user = self._user(defaultMode="default")
+        user["mcp_policies"] = {"allowedMcpServers": ["github"], "deniedMcpServers": []}
+        project = self._project("/repo", ["Read"])
+        project["mcp_policies"] = {"allowedMcpServers": [], "deniedMcpServers": []}
+
+        result = transform_settings_to_backend_format([user, project])
+
+        self.assertEqual(result["mcp_policies"]["allowedMcpServers"], ["github"])
+
     def test_disable_auto_mode_drops_auto(self):
         settings = [
             {

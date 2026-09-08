@@ -187,6 +187,27 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
     return found
 
 
+def wsl_distros_present(user_home: Path) -> List[str]:
+    """Names of WSL distros installed for ``user_home``. Never raises.
+
+    WSL2 keeps the distro in ``LocalState/ext4.vhdx``, WSL1 in ``LocalState/rootfs``.
+    One relocated by ``wsl --import`` is not found.
+    """
+    found = []
+    try:
+        packages = user_home / "AppData" / "Local" / "Packages"
+        for package in packages.iterdir():
+            try:
+                state = package / "LocalState"
+                if (state / "ext4.vhdx").exists() or (state / "rootfs").is_dir():
+                    found.append(package.name.split("_")[0])
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+    return found
+
+
 def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
     """Days since the most recently touched AI-tool config dir across ``user_homes``.
 
@@ -2236,8 +2257,9 @@ def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
 _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
-    "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
-    "scan_event", "config_dirs_present", "config_dirs",
+    "is_root", "is_elevated", "detect_scope",
+    "used_fallback_user", "homes_enumerated", "users_scanned",
+    "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
 )
 

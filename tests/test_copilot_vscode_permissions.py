@@ -917,7 +917,9 @@ class TestDefaultPosture(unittest.TestCase):
         self.ud.mkdir(parents=True)
         rec = self._extract()
         self.assertIsNotNone(rec, "a Copilot install with no settings must still report")
-        self.assertEqual(rec["permission_mode"], "acceptEdits")
+        # Copilot asks for everything until the user opts in, so the default
+        # posture is "default" — claiming acceptEdits would overstate it
+        self.assertEqual(rec["permission_mode"], "default")
         self.assertFalse(rec["sandbox_enabled"])
         self.assertEqual(rec["raw_settings"], {})
         self.assertNotIn("allow_rules", rec, "the built-in rules are not the user's choices")
@@ -926,7 +928,7 @@ class TestDefaultPosture(unittest.TestCase):
         self.ud.mkdir(parents=True)
         (self.ud / "settings.json").write_text(
             json.dumps({"editor.fontSize": 13, "workbench.colorTheme": "Dark+"}), encoding="utf-8")
-        self.assertEqual(self._extract()["permission_mode"], "acceptEdits")
+        self.assertEqual(self._extract()["permission_mode"], "default")
 
     def test_configured_user_is_unaffected(self):
         self.ud.mkdir(parents=True)

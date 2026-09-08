@@ -1155,9 +1155,11 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     # Sandbox key for this platform, most specific first. Windows overrides it:
     # VS Code reads a Windows-only key there and ignores the generic one.
     _SANDBOX_KEYS = ("chat.agent.sandbox.enabled",)
-    # Posture of an untouched install: chat.tools.edits.autoApprove ships as
-    # {"**/*": true} with a deny list, so edits are auto-applied out of the box.
-    _DEFAULT_POSTURE_MODE = "acceptEdits"
+    # Posture of an untouched install. Copilot asks for everything out of the box:
+    # terminal auto-approval needs a one-time warning acceptance that starts false,
+    # and the edit auto-approve defaults are forwarded to the agent host rather than
+    # applied to in-editor chat.
+    _DEFAULT_POSTURE_MODE = "default"
 
     @abstractmethod
     def _scan_users(self, callback) -> None:
@@ -1298,11 +1300,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     def _default_posture(self, path: Path) -> Dict:
         """The posture VS Code applies when the user has set none of these keys.
 
-        Copilot ships permissive: file edits are auto-applied across most paths and
-        terminal auto-approval is on. Returning nothing for these users made them
-        indistinguishable from never-scanned, which is most of the fleet. The
-        built-in terminal rules are deliberately NOT synthesised into allow_rules —
-        they are the tool's, not the user's, and would read as chosen risk.
+        Returning nothing for these users made them indistinguishable from
+        never-scanned, which was most of the fleet. The built-in terminal rules are
+        deliberately NOT synthesised into allow_rules — they are the tool's, not the
+        user's, and would read as chosen risk.
         """
         return {
             "settings_source": "user",

@@ -726,6 +726,19 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
 
         self.assertEqual(result["mcp_policies"]["allowedMcpServers"], ["github"])
 
+    def test_suppressed_mode_still_ranks_at_the_inherited_posture(self):
+        """An unknowable mode is not evidence of a tame one."""
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+        self.assertNotIn("permission_mode", result)
+
     def test_disable_auto_mode_drops_auto(self):
         settings = [
             {

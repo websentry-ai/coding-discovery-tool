@@ -73,7 +73,13 @@ _MODE_RANK = {
     "bypassPermissions": 4,
 }
 
-# Grants that allow arbitrary execution regardless of the mode.
+# Grants that allow arbitrary execution regardless of the mode. Mirrors the
+# backend's _is_bare_shell and _is_wildcard exactly. It does NOT cover nested
+# interpreter escapes like Bash(bash:*) — matching those needs the backend's
+# parser, and every looser pattern tried against the fleet's 4467 distinct rules
+# traded 9 false negatives for 200+ false positives. Selection can therefore
+# under-rank a project whose only unrestricted grant is an escape; the backend
+# still derives the correct autonomy for whichever project is reported.
 _UNRESTRICTED_RULES = frozenset(["Bash", "Shell", "Bash(*)", "Shell(*)", "*", "**"])
 
 # Claude Code ignores these at project/local scope and does not fall back to the
@@ -141,7 +147,11 @@ def _merge_chain(chain: List[Dict[str, Any]]) -> Dict[str, Any]:
         if mode and (is_global or mode not in _GLOBAL_ONLY_MODES):
             permissions["defaultMode"] = mode
         elif mode:
-            permissions.pop("defaultMode", None)
+            # Suppressed, so the effective mode is unknown and none is reported.
+            # Keep the inherited one for ranking: an unknowable mode is not
+            # evidence of a tame one, and scoring it as `default` would let this
+            # chain lose selection to a genuinely tamer project.
+            merged["ranking_mode"] = permissions.pop("defaultMode", None)
 
         for field in _LIST_FIELDS:
             permissions[field].extend(source.get(field) or [])
@@ -186,7 +196,8 @@ def _permissiveness(settings_dict: Dict[str, Any]) -> tuple:
     """
     permissions = settings_dict.get("permissions") or {}
     allow = permissions.get("allow") or []
-    rank = _MODE_RANK.get(permissions.get("defaultMode"), 1)
+    mode = permissions.get("defaultMode") or settings_dict.get("ranking_mode")
+    rank = _MODE_RANK.get(mode, 1)
     if any(str(rule).strip() in _UNRESTRICTED_RULES for rule in allow):
         rank = max(rank, _MODE_RANK["bypassPermissions"])
     return (rank, len(allow))

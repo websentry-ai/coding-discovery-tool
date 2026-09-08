@@ -88,7 +88,16 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
         return all_results
 
     def _detect_vscode_all_users(self) -> List[Dict]:
+        """Scoped to ``user_home`` when set, so one user's Copilot is never
+        attributed to every profile on the box."""
         results = []
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            try:
+                return self._detect_vscode_for_user(Path(scoped_home))
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping VS Code Copilot for {scoped_home}: {e}")
+                return []
         for user_home in get_linux_user_homes():
             try:
                 results.extend(self._detect_vscode_for_user(user_home))

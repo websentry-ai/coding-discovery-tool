@@ -187,6 +187,26 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
     return found
 
 
+def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
+    """Days since the most recently touched AI-tool config dir across ``user_homes``.
+
+    Separates uninstall residue (old) from a tool in active use whose binary we
+    failed to resolve (recent). None when no config dir is readable.
+    """
+    newest = None
+    for user_home in user_homes:
+        for name in _TOOL_CONFIG_DIRS:
+            try:
+                mtime = (Path(user_home) / name).stat().st_mtime
+            except (PermissionError, OSError):
+                continue
+            if newest is None or mtime > newest:
+                newest = mtime
+    if newest is None:
+        return None
+    return max(0, int((time.time() - newest) // 86400))
+
+
 _NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
 
 
@@ -221,7 +241,17 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
       system-wide and available to every user, so attribute to whoever is being
       scanned.
 
-    Never raises: any stat/pwd failure returns False (do not attribute).
+    Compared by uid against the home's own uid. Resolving the owner to a home
+    PATH instead fails closed when the binary is genuinely theirs: a directory
+    account with no local passwd record, a home that is not ``/Users/<dirname>``,
+    or the Data-volume firmlink that ``resolve()`` does not collapse.
+
+    POSIX only, by caller: ``machine_global`` is empty on Windows so nothing
+    reaches here. Do not add a Windows caller — ``st_uid`` is always 0 there,
+    indistinguishable from a root-owned system-wide binary, so every shared
+    binary would be attributed to every user.
+
+    Never raises: any stat failure returns False (do not attribute).
 
     Args:
         candidate: Absolute path to a machine-global binary.
@@ -236,16 +266,14 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
         return False
     if uid == 0:
         return True  # system-wide -> available to every scanned user
-    if pwd is None:
-        return False  # POSIX-only; should never be hit on Windows
     try:
-        owner_home = Path(pwd.getpwuid(uid).pw_dir)
-    except (KeyError, OSError, AttributeError):
+        owned = uid == os.stat(str(user_home)).st_uid
+    except (OSError, PermissionError):
+        record_rejected_binary(candidate, "home_stat_failed")
         return False
-    try:
-        return owner_home.resolve() == user_home.resolve()
-    except (OSError, RuntimeError):
-        return owner_home == user_home
+    if not owned:
+        record_rejected_binary(candidate, "owner_mismatch")
+    return owned
 
 
 def get_hostname() -> str:
@@ -2163,6 +2191,7 @@ _SENTRY_TAG_KEYS = (
     "tool_name", "domain", "phase", "http_code",
     "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
     "scan_event", "config_dirs_present", "config_dirs",
+    "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2185,6 +2214,25 @@ _sentry_event_count = 0
 _sentry_consecutive_fails = 0
 _sentry_dead_this_run = False
 
+# Binaries found on disk but not attributed; a silent rejection is otherwise
+# indistinguishable from never having found the tool at all.
+_REJECTED_BINARIES_CAP = 10
+_rejected_binaries = []
+
+
+def record_rejected_binary(candidate, reason: str) -> None:
+    """Note a real binary that was found and then not attributed. Never raises."""
+    try:
+        if len(_rejected_binaries) < _REJECTED_BINARIES_CAP:
+            _rejected_binaries.append((str(candidate), reason))
+    except Exception:
+        pass
+
+
+def rejected_binaries() -> list:
+    """The run's rejected binaries as ``(path, reason)`` pairs."""
+    return list(_rejected_binaries)
+
 
 def reset_sentry_run_state() -> None:
     """Reset the per-run Sentry dedup / circuit-breaker state."""
@@ -2193,6 +2241,7 @@ def reset_sentry_run_state() -> None:
     _sentry_event_count = 0
     _sentry_consecutive_fails = 0
     _sentry_dead_this_run = False
+    _rejected_binaries.clear()
 
 
 def _ip_is_loopback(host: str) -> bool:

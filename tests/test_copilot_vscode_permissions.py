@@ -627,7 +627,10 @@ class TestNonRegularFiles(unittest.TestCase):
             worker.start()
             worker.join(timeout=15)
             self.assertFalse(worker.is_alive(), "a planted FIFO hung the scan")
-            self.assertIsNone(result.get("r"))
+            # VS Code cannot read a FIFO either, so this user really is on the
+            # defaults; what matters is that nothing was read from the pipe
+            rec = result.get("r")
+            self.assertEqual(rec["raw_settings"], {})
         finally:
             shutil.rmtree(home, ignore_errors=True)
 
@@ -891,6 +894,59 @@ class TestNewlyCapturedKeys(unittest.TestCase):
     def test_sandbox_allow_network_is_captured(self):
         self.assertIn("chat.agent.sandbox.allowNetwork",
                       self._raw({"chat.agent.sandbox.allowNetwork": True}))
+
+
+class TestDefaultPosture(unittest.TestCase):
+    """A Copilot user who has set none of these keys is on VS Code's shipped
+    defaults, which auto-apply edits — reporting nothing made them look identical
+    to a device that was never scanned."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="posture-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_no_settings_file_at_all_reports_the_defaults(self):
+        self.ud.mkdir(parents=True)
+        rec = self._extract()
+        self.assertIsNotNone(rec, "a Copilot install with no settings must still report")
+        self.assertEqual(rec["permission_mode"], "acceptEdits")
+        self.assertFalse(rec["sandbox_enabled"])
+        self.assertEqual(rec["raw_settings"], {})
+        self.assertNotIn("allow_rules", rec, "the built-in rules are not the user's choices")
+
+    def test_settings_file_without_relevant_keys_reports_the_defaults(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"editor.fontSize": 13, "workbench.colorTheme": "Dark+"}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "acceptEdits")
+
+    def test_configured_user_is_unaffected(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+    def test_no_vscode_at_all_reports_nothing(self):
+        # absence must still mean absence — this is what keeps "never scanned" legible
+        self.assertIsNone(self._extract())
+
+    def test_unreadable_settings_is_unknown_not_defaults(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text("{ this is not json", encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file we could not read leaves the posture unknown")
+
+    def test_defaults_path_points_at_the_settings_file(self):
+        self.ud.mkdir(parents=True)
+        self.assertEqual(self._extract()["settings_path"], str(self.ud / "settings.json"))
 
 
 if __name__ == "__main__":

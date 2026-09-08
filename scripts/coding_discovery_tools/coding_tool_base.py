@@ -1155,6 +1155,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     # Sandbox key for this platform, most specific first. Windows overrides it:
     # VS Code reads a Windows-only key there and ignores the generic one.
     _SANDBOX_KEYS = ("chat.agent.sandbox.enabled",)
+    # Posture of an untouched install: chat.tools.edits.autoApprove ships as
+    # {"**/*": true} with a deny list, so edits are auto-applied out of the box.
+    _DEFAULT_POSTURE_MODE = "acceptEdits"
 
     @abstractmethod
     def _scan_users(self, callback) -> None:
@@ -1258,11 +1261,22 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         Insiders never merge, so the reported posture is always one that a single
         installation actually defines. The riskiest channel wins."""
         per_channel = []
+        defaults_path: Optional[Path] = None
+        unreadable = False
         for config_dir in self._user_config_dirs(Path(user_home)):
+            config_dir = Path(config_dir)
+            try:
+                if defaults_path is None and config_dir.is_dir():
+                    defaults_path = config_dir / "settings.json"
+            except OSError:
+                pass
             records = []
             for path in self._iter_channel_settings_files(config_dir):
                 data = self._parse_jsonc(path, user_home)
                 if data is None:
+                    # Present but refused or unparseable: their posture is unknown,
+                    # which is not the same as them being on the defaults.
+                    unreadable = True
                     continue
                 record = self._build_record(data, path, "user")
                 if record:
@@ -1274,8 +1288,28 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 records.sort(key=self._permissiveness, reverse=True)
                 per_channel.append(self._merge_records(records[0], records[1:]))
         if not per_channel:
-            return None
+            if unreadable or defaults_path is None:
+                return None
+            return self._default_posture(defaults_path)
         return max(per_channel, key=self._permissiveness)
+
+    def _default_posture(self, path: Path) -> Dict:
+        """The posture VS Code applies when the user has set none of these keys.
+
+        Copilot ships permissive: file edits are auto-applied across most paths and
+        terminal auto-approval is on. Returning nothing for these users made them
+        indistinguishable from never-scanned, which is most of the fleet. The
+        built-in terminal rules are deliberately NOT synthesised into allow_rules —
+        they are the tool's, not the user's, and would read as chosen risk.
+        """
+        return {
+            "settings_source": "user",
+            "scope": "user",
+            "settings_path": str(path),
+            "raw_settings": {},   # empty: nothing here was authored by the user
+            "permission_mode": self._DEFAULT_POSTURE_MODE,
+            "sandbox_enabled": False,   # chat.agent.sandbox.enabled defaults to "off"
+        }
 
     @classmethod
     def _parse_jsonc(cls, path: Path, user_home=None) -> Optional[Dict]:

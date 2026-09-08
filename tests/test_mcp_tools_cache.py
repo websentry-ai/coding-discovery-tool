@@ -495,6 +495,24 @@ class TestCacheKey(unittest.TestCase):
             "url-arg:packages.example.com/v3/index.json",
         )
 
+    def test_prompt_security_wrapper_does_not_inherit_provider_identity(self):
+        self.assertEqual(
+            compute_fingerprint(
+                name="pylance mcp server",
+                command="prompt_security_mcp",
+                url=None,
+                args=["__args__", "http://localhost:51983/stream"],
+                additional_data={
+                    "scope": "vscode-provider-cache",
+                    "providerId": "ms-python.vscode-pylance/pylanceMcp",
+                    "providerServerId": (
+                        "ms-python.vscode-pylance/pylance mcp server"
+                    ),
+                },
+            ),
+            "url:localhost:51983/stream",
+        )
+
     def test_dnx_skips_framework_value_before_package(self):
         self.assertEqual(
             compute_fingerprint(

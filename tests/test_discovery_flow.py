@@ -1821,6 +1821,13 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         for key, value in ctx.items():
             self.assertNotIsInstance(value, list, f"context key {key!r} is a list")
 
+    def test_windows_elevation_is_queryable_like_is_root(self):
+        """POSIX reports is_root as a tag; the Windows equivalents were context-only,
+        so a no-tools scan could not be grouped by whether it saw every profile."""
+        import scripts.coding_discovery_tools.utils as u
+        for key in ("is_root", "is_elevated", "detect_scope"):
+            self.assertIn(key, u._SENTRY_TAG_KEYS)
+
     def test_admin_state_is_never_invented(self):
         import scripts.coding_discovery_tools.windows_extraction_helpers as weh
         import scripts.coding_discovery_tools.utils as u

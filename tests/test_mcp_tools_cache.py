@@ -1155,7 +1155,7 @@ class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
         observation = next(iter(providers.values()))[0]
         self.assertEqual(observation["url"], "http://localhost:51983/stream")
 
-    def test_empty_provider_refresh_clears_stale_observation(self):
+    def test_empty_provider_refresh_preserves_last_good_observation(self):
         projects = [{"mcpServers": [{
             "name": "pylance mcp server",
             "url": "http://localhost:51983/stream",
@@ -1168,16 +1168,15 @@ class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
         ai_tools_discovery._refresh_mcp_tools_cache(
             "GitHub Copilot (VS Code)", "alice", projects
         )
+        before = self._read_file()["provider_servers"]
+
         ai_tools_discovery._refresh_mcp_tools_cache(
             "GitHub Copilot (VS Code)",
             "alice",
             [],
         )
 
-        self.assertNotIn(
-            "GitHub Copilot (VS Code)",
-            self._read_file().get("provider_servers", {}),
-        )
+        self.assertEqual(self._read_file()["provider_servers"], before)
 
     def test_refresh_runs_before_upload_dedup_branch_in_main(self):
         # Regression guard for the ordering itself: the refresh call must sit

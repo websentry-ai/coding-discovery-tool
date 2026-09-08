@@ -239,7 +239,7 @@ def _refresh_mcp_tools_cache(
             user_name,
             server_entries,
             errored_cache_keys,
-            provider_server_observations or None,
+            provider_server_observations,
         )
     except Exception as e:
         logger.warning(f"  Could not update MCP tools cache for {tool_name}/{user_name}: {e}")

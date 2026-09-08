@@ -147,18 +147,24 @@ def find_extension_in_editor_with_status(
 def _resolve_entry_location(entry: dict, extensions_dir: Path) -> str:
     """Resolve the on-disk location string for an ``extensions.json`` entry.
 
-    Prefers the absolute ``location.path``/``location.fsPath`` recorded by the
-    editor, then a ``relativeLocation`` resolved under the extensions dir, and
-    finally the extensions dir itself. Never raises.
+    Prefers the native ``location.fsPath`` recorded by the editor, then a
+    ``relativeLocation`` resolved under the extensions dir. VS Code on Windows
+    records ``location.path`` as a URI path (``/c:/...``), which is not a valid
+    native path. Use it only when neither native form is available. Never raises.
     """
     location = entry.get("location")
     if isinstance(location, dict):
-        abs_path = location.get("fsPath") or location.get("path")
-        if isinstance(abs_path, str) and abs_path:
-            return abs_path
+        fs_path = location.get("fsPath")
+        if isinstance(fs_path, str) and fs_path:
+            return fs_path
 
     rel_location = entry.get("relativeLocation")
     if isinstance(rel_location, str) and rel_location:
         return str(extensions_dir / rel_location)
+
+    if isinstance(location, dict):
+        uri_path = location.get("path")
+        if isinstance(uri_path, str) and uri_path:
+            return uri_path
 
     return str(extensions_dir)

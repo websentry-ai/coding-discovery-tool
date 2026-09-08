@@ -117,6 +117,34 @@ class TestFindExtensionInEditor(unittest.TestCase):
         location, _version = find_extension_in_editor(self.home, "Code", CLINE_EXT_ID)
         self.assertEqual(location, r"c:\Users\alice\.vscode\extensions\cline")
 
+    def test_relative_location_wins_over_windows_uri_path(self):
+        """VS Code on Windows records ``location.path`` as ``/c:/...``."""
+        relative_location = f"{CLINE_EXT_ID}-3.7.0"
+        self._write_registry("Code", [
+            {
+                "identifier": {"id": CLINE_EXT_ID},
+                "location": {
+                    "path": (
+                        "/c:/Users/alice/.vscode/extensions/"
+                        f"{relative_location}"
+                    ),
+                    "scheme": "file",
+                },
+                "relativeLocation": relative_location,
+            }
+        ])
+
+        location, _version = find_extension_in_editor(
+            self.home,
+            "Code",
+            CLINE_EXT_ID,
+        )
+
+        self.assertEqual(
+            location,
+            str(self.home / ".vscode" / "extensions" / relative_location),
+        )
+
     def test_entry_present_without_version_returns_none_version(self):
         self._write_registry("Code", [{"identifier": {"id": CLINE_EXT_ID}}])
         location, version = find_extension_in_editor(self.home, "Code", CLINE_EXT_ID)

@@ -44,7 +44,6 @@ class TestPermissionMapping(unittest.TestCase):
 
     def test_global_autoapprove_is_bypass(self):
         self.assertEqual(self._rec({"chat.tools.global.autoApprove": True})["permission_mode"], "bypassPermissions")
-        self.assertEqual(self._rec({"chat.tools.autoApprove": True})["permission_mode"], "bypassPermissions")
 
     def test_default_mode_when_nothing_auto_approved(self):
         rec = self._rec({"chat.agent.enabled": True})
@@ -88,7 +87,8 @@ class TestPermissionMapping(unittest.TestCase):
     def test_sandbox_on_off(self):
         self.assertTrue(self._rec({"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
         self.assertFalse(self._rec({"chat.agent.sandbox.enabled": "off"})["sandbox_enabled"])
-        self.assertIsNone(self._rec({"chat.agent.enabled": True})["sandbox_enabled"])
+        # the registered default is "off", so an absent key means disabled, not unknown
+        self.assertFalse(self._rec({"chat.agent.enabled": True})["sandbox_enabled"])
 
     def test_raw_settings_excludes_noise(self):
         rec = self._rec({"chat.tools.global.autoApprove": True, "editor.fontSize": 13})
@@ -336,8 +336,14 @@ class TestModeEdgeCases(unittest.TestCase):
         self.assertEqual(self._mode({"chat.tools.global.autoApprove": "true"}), "default")
         self.assertEqual(self._mode({"chat.tools.global.autoApprove": 1}), "default")
 
-    def test_legacy_key_alone_still_bypasses(self):
-        self.assertEqual(self._mode({"chat.tools.autoApprove": True}), "bypassPermissions")
+    def test_pre_rename_global_key_is_not_a_bypass(self):
+        # VS Code never migrated chat.tools.autoApprove and no longer reads it,
+        # so a leftover true grants nothing — reporting bypass would be a false positive
+        self.assertEqual(self._mode({"chat.tools.autoApprove": True}), "default")
+
+    def test_pre_rename_global_key_is_still_captured(self):
+        rec = self.ex._build_record({"chat.tools.autoApprove": True}, Path("/x/settings.json"), "user")
+        self.assertIn("chat.tools.autoApprove", rec["raw_settings"])
 
 
 class TestParseResilience(unittest.TestCase):
@@ -841,6 +847,50 @@ class TestByteOrderMark(unittest.TestCase):
         (self.ud / "settings.json").write_text(
             json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
         self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+
+class TestSandboxKeyPerPlatform(unittest.TestCase):
+    """VS Code reads a Windows-only sandbox key on Windows and ignores the generic
+    one, so the extractor has to read whichever key that platform honours."""
+
+    def _rec(self, os_name, data):
+        ex = GitHubCopilotSettingsExtractorFactory.create(os_name)
+        return ex._build_record(data, Path("/x/settings.json"), "user")
+
+    def test_windows_reads_the_windows_key(self):
+        self.assertTrue(self._rec("Windows", {"chat.agent.sandbox.enabledWindows": "on"})["sandbox_enabled"])
+
+    def test_windows_reads_the_pre_rename_spelling(self):
+        self.assertTrue(self._rec("Windows", {"chat.agent.sandbox.enabled.windows": "on"})["sandbox_enabled"])
+
+    def test_windows_ignores_the_generic_key(self):
+        # VS Code does not honour it on Windows, so neither do we — the default is off
+        self.assertFalse(self._rec("Windows", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+
+    def test_posix_reads_the_generic_key(self):
+        self.assertTrue(self._rec("Darwin", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+        self.assertTrue(self._rec("Linux", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+
+    def test_posix_ignores_the_windows_key(self):
+        self.assertFalse(self._rec("Darwin", {"chat.agent.sandbox.enabledWindows": "on"})["sandbox_enabled"])
+
+
+class TestNewlyCapturedKeys(unittest.TestCase):
+    """Two settings that govern real exposure and were not being read."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_terminal_file_write_block_is_captured(self):
+        self.assertIn("chat.tools.terminal.blockDetectedFileWrites",
+                      self._raw({"chat.tools.terminal.blockDetectedFileWrites": "off"}))
+
+    def test_sandbox_allow_network_is_captured(self):
+        self.assertIn("chat.agent.sandbox.allowNetwork",
+                      self._raw({"chat.agent.sandbox.allowNetwork": True}))
 
 
 if __name__ == "__main__":

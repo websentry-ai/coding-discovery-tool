@@ -1127,9 +1127,13 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         "chat.defaultConfiguration", "chat.agentSessions.defaultConfiguration",  # + pre-rename
         "chat.tools.eligibleForAutoApproval",
         "chat.tools.terminal.enableAutoApprove", "chat.tools.terminal.autoApprove",
+        "chat.tools.terminal.blockDetectedFileWrites",
         "chat.tools.edits.autoApprove",
         "chat.tools.urls.autoApprove",
-        "chat.agent.enabled", "chat.agent.sandbox.enabled",
+        "chat.agent.enabled",
+        "chat.agent.sandbox.enabled", "chat.agent.sandbox.enabledWindows",
+        "chat.agent.sandbox.enabled.windows",  # pre-rename Windows spelling
+        "chat.agent.sandbox.allowNetwork",
         "chat.agent.networkFilter", "chat.agent.allowedNetworkDomains",
         "chat.agent.deniedNetworkDomains",
         "chat.mcp.access", "chat.mcp.allowedServers", "chat.mcp.deniedServers",
@@ -1137,14 +1141,20 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     }
 
     # A truthy global auto-approve removes every confirmation, as do the elevated
-    # levels of the permissions picker (``chat.permissions.default``).
-    _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove", "chat.tools.autoApprove")
+    # levels of the permissions picker (``chat.permissions.default``). The
+    # pre-rename ``chat.tools.autoApprove`` is deliberately NOT here: VS Code
+    # never migrated its value and no longer reads it, so a leftover ``true``
+    # grants nothing. It stays in the key set so the stale value is still visible.
+    _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove",)
     _BYPASS_PERMISSION_LEVELS = ("autoApprove", "autopilot")
     # The session defaults object, and the name it carried before the rename. Only
     # ``approvals`` decides confirmations; ``mode`` picks the chat mode, and
     # autopilot mode still leaves approvals at whatever they are set to.
     _DEFAULT_CONFIG_KEYS = ("chat.defaultConfiguration",
                             "chat.agentSessions.defaultConfiguration")
+    # Sandbox key for this platform, most specific first. Windows overrides it:
+    # VS Code reads a Windows-only key there and ignores the generic one.
+    _SANDBOX_KEYS = ("chat.agent.sandbox.enabled",)
 
     @abstractmethod
     def _scan_users(self, callback) -> None:
@@ -1327,14 +1337,18 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             return "acceptEdits"
         return "default"
 
-    @staticmethod
-    def _sandbox_enabled(data: Dict):
-        val = data.get("chat.agent.sandbox.enabled")
-        if isinstance(val, str):
-            return val.lower() == "on"
-        if isinstance(val, bool):
-            return val
-        return None
+    def _sandbox_enabled(self, data: Dict):
+        """Terminal sandboxing, read from the key this platform actually honours.
+
+        The registered default is "off", so an absent key means sandboxing is
+        disabled — not unknown."""
+        for key in self._SANDBOX_KEYS:
+            val = data.get(key)
+            if isinstance(val, str):
+                return val.lower() == "on"
+            if isinstance(val, bool):
+                return val
+        return False
 
     @staticmethod
     def _clean_terminal_pattern(pattern: str) -> str:

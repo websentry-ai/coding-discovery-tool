@@ -190,8 +190,11 @@ class TestGetAllUsersWindows(unittest.TestCase):
     def test_returns_empty_on_non_windows(self, _mock_sys):
         self.assertEqual(get_all_users_windows(), [])
 
+    @patch("scripts.coding_discovery_tools.windows_extraction_helpers.registry_profile_paths",
+           return_value=([], False))
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
-    def test_filters_system_dirs_via_constant(self, _mock_sys):
+    def test_filters_system_dirs_via_constant(self, _mock_sys, _mock_registry):
+        """The walk's skip-list, isolated from the registry the runner really has."""
         mock_entries = [
             self._make_dir_entry("alice"),
             self._make_dir_entry("Public"),
@@ -329,9 +332,10 @@ class TestWindowsUserHomes(unittest.TestCase):
     _WALKED = ("agupta", "t_alice", "t_ghost")
     _REGISTRY = (r"C:\Users\agupta", r"C:\Users\t_alice", r"D:\Profiles\t_dave")
 
-    def _run(self, registry, complete=True):
-        walked = [MagicMock(spec=Path) for _ in self._WALKED]
-        for entry, name in zip(walked, self._WALKED):
+    def _run(self, registry, complete=True, walked_names=None):
+        walked_names = walked_names or self._WALKED
+        walked = [MagicMock(spec=Path) for _ in walked_names]
+        for entry, name in zip(walked, walked_names):
             entry.name = name
             entry.is_dir.return_value = True
             entry.__str__.return_value = "C:\\Users\\" + name
@@ -374,6 +378,20 @@ class TestWindowsUserHomes(unittest.TestCase):
         self.assertIn("t_alice", homes)
         self.assertEqual(r"C:\Users\t_alice", str(homes["t_alice"]))
         self.assertNotIn("t_ghost", homes)
+
+    def test_one_profile_spelled_two_ways_stays_one_user(self):
+        """Windows paths are case-insensitive, so ``T_Alice`` and ``t_alice`` are
+        the same profile — scanning both would double every row it owns."""
+        homes = self._run((r"C:\Users\T_Alice",), complete=False,
+                          walked_names=("t_alice",))
+        self.assertEqual(["T_Alice"], list(homes))
+
+    def test_case_only_difference_does_not_drop_a_real_user(self):
+        """A roaming profile vouches for its cache under whichever spelling the
+        disk used; matching case-sensitively would lose the user entirely."""
+        homes = self._run((r"\\server\profiles\T_Alice",), walked_names=("t_alice",))
+        self.assertEqual({"T_Alice": r"C:\Users\t_alice"},
+                         {name: str(path) for name, path in homes.items()})
 
 
 class TestRealUserOrNone(unittest.TestCase):

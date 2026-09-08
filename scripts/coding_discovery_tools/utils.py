@@ -434,7 +434,9 @@ def windows_user_homes() -> Dict[str, Path]:
 
     A profile whose recorded path is a UNC share still vouches for its local
     ``C:\\Users`` cache, and an incomplete registry read vouches for nothing, so
-    neither can remove a real user.
+    neither can remove a real user. Names are reconciled case-insensitively, as
+    Windows paths are, and reported with the profile record's spelling, so one
+    profile is never scanned twice under two spellings of its name.
 
     Cached for the process: a scan resolves the same machine throughout, and the
     call sites would otherwise re-walk ``C:\\Users`` for every tool/user pair.
@@ -463,17 +465,24 @@ def windows_user_homes() -> Dict[str, Path]:
         return walked
 
     homes: Dict[str, Path] = {}
+    vouched: Dict[str, str] = {}
     for path in registry:
-        if path.name and not str(path).startswith("\\\\"):
-            homes.setdefault(path.name, path)
-    vouched = {path.name for path in registry if path.name}
+        if not path.name:
+            continue
+        key = path.name.lower()
+        vouched.setdefault(key, path.name)
+        if not str(path).startswith("\\\\"):
+            homes.setdefault(key, path)
+
+    resolved = {vouched[key]: path for key, path in homes.items()}
     for name, path in walked.items():
-        if name in homes:
+        key = name.lower()
+        if key in homes:
             continue
-        if complete and name not in vouched:
+        if complete and key not in vouched:
             continue
-        homes[name] = path
-    return homes
+        resolved[vouched.get(key, name)] = path
+    return resolved
 
 
 def get_all_users_windows() -> List[str]:

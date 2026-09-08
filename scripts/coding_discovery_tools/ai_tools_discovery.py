@@ -90,7 +90,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, rejected_binaries, newest_tool_config_dir_age_days
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, rejected_binaries, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -160,7 +160,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, rejected_binaries, newest_tool_config_dir_age_days
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, rejected_binaries, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -1542,9 +1542,8 @@ class AIToolsDetector:
                             for username in get_all_users_macos():
                                 user_homes.add(str(Path("/Users") / username))
                         elif self.system == "Windows":
-                            win_users_dir = Path(Path.home().anchor) / "Users"
-                            for username in get_all_users_windows():
-                                user_homes.add(str(win_users_dir / username))
+                            for home in windows_user_homes().values():
+                                user_homes.add(str(home))
                         elif self.system == "Linux":
                             for username in get_all_users_linux():
                                 # `root` user's home is /root, not /home/root.
@@ -1600,8 +1599,8 @@ class AIToolsDetector:
                     pass
             elif self.system == "Windows":
                 try:
-                    for username in get_all_users_windows():
-                        user_plugins = Path(Path.home().anchor) / "Users" / username / ".claude" / "plugins"
+                    for home in windows_user_homes().values():
+                        user_plugins = home / ".claude" / "plugins"
                         if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
                             plugins_dirs_to_scan.append(user_plugins)
                 except Exception:
@@ -2627,8 +2626,8 @@ class AIToolsDetector:
                         pass
                 elif self.system == "Windows":
                     try:
-                        for username in get_all_users_windows():
-                            user_plugins = Path(Path.home().anchor) / "Users" / username / ".cursor" / "plugins"
+                        for home in windows_user_homes().values():
+                            user_plugins = home / ".cursor" / "plugins"
                             if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
                                 cursor_plugins_dirs.append(user_plugins)
                     except Exception:
@@ -3439,7 +3438,7 @@ def main():
             if platform.system() == "Darwin":
                 user_home = Path(f"/Users/{user}")
             elif platform.system() == "Windows":
-                user_home = Path(Path.home().anchor) / "Users" / user
+                user_home = windows_home_for_user(user)
             elif platform.system() == "Linux":
                 user_home = linux_home_for_user(user)
             else:
@@ -3536,7 +3535,7 @@ def main():
                     if platform.system() == "Darwin":
                         user_home = Path(f"/Users/{user_name}")
                     elif platform.system() == "Windows":
-                        user_home = Path(Path.home().anchor) / "Users" / user_name
+                        user_home = windows_home_for_user(user_name)
                     elif platform.system() == "Linux":
                         user_home = linux_home_for_user(user_name)
                     else:

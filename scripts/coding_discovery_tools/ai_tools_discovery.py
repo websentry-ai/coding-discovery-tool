@@ -182,11 +182,6 @@ configure_logger()
 # "not yet computed" marker — otherwise the expensive whole-disk walk re-runs on
 # every accessor call whenever the real result is ``None``.
 _AUGMENT_CACHE_UNSET = object()
-_VSCODE_PROVIDER_CACHE_TOOL_NAMES = frozenset({
-    "github copilot (vs code)",
-    "github copilot chat (vs code)",
-})
-
 # Sentry metric keys must match [a-zA-Z_][a-zA-Z0-9_.\-]* — tool names like
 # "Gemini CLI" / "Roo Code" carry spaces, so they cannot be used verbatim.
 _METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
@@ -225,7 +220,6 @@ def _refresh_mcp_tools_cache(
     user_name: str,
     projects: List[Dict],
     sentry_ctx: Optional[Dict] = None,
-    provider_cache_complete: bool = True,
 ) -> None:
     """Refresh the local MCP tools cache (mcp-tools-cache.json) for one
     (tool, user) from the report's projects[].mcpServers[].
@@ -237,17 +231,15 @@ def _refresh_mcp_tools_cache(
     """
     try:
         server_entries, errored_cache_keys = mcp_tools_cache.collect_server_entries(projects)
-        provider_server_observations = None
-        if provider_cache_complete:
-            provider_server_observations = (
-                mcp_tools_cache.collect_provider_server_observations(projects)
-            )
+        provider_server_observations = (
+            mcp_tools_cache.collect_provider_server_observations(projects)
+        )
         mcp_tools_cache.update_user_entries(
             tool_name,
             user_name,
             server_entries,
             errored_cache_keys,
-            provider_server_observations,
+            provider_server_observations or None,
         )
     except Exception as e:
         logger.warning(f"  Could not update MCP tools cache for {tool_name}/{user_name}: {e}")
@@ -2470,10 +2462,6 @@ class AIToolsDetector:
             projects_dict = {}
 
             original_tool_name = tool.get("name", "")
-            is_provider_cache_surface = (
-                tool_name in _VSCODE_PROVIDER_CACHE_TOOL_NAMES
-            )
-            provider_cache_complete = not is_provider_cache_surface
 
             if self._github_copilot_rules_extractor:
                 try:
@@ -2526,12 +2514,6 @@ class AIToolsDetector:
                         log_mcp_details(projects_dict, tool_name)
                     else:
                         logger.info(f"  No GitHub Copilot MCP configs found")
-                    if is_provider_cache_surface:
-                        provider_cache_complete = bool(getattr(
-                            self._github_copilot_mcp_extractor,
-                            "vscode_provider_cache_complete",
-                            False,
-                        ))
                 except Exception as e:
                     logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
 
@@ -2595,10 +2577,6 @@ class AIToolsDetector:
                 "install_path": tool.get("install_path"),
                 "projects": projects_list,
             }
-            if is_provider_cache_surface:
-                tool_dict["_vscode_provider_cache_complete"] = (
-                    provider_cache_complete
-                )
 
             # Canonical row only, mirroring the skills attachment above, so a
             # multi-row install reports one permission record.
@@ -3772,10 +3750,6 @@ def main():
                                 user_name,
                                 projects,
                                 sentry_ctx,
-                                provider_cache_complete=tool_filtered.get(
-                                    "_vscode_provider_cache_complete",
-                                    True,
-                                ),
                             )
 
                         # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.

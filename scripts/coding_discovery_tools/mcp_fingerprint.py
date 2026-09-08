@@ -65,13 +65,13 @@ CLAUDE_CONNECTOR_SCOPE = 'claude-connector'
 VSCODE_PROVIDER_CACHE_SCOPE = 'vscode-provider-cache'
 VSCODE_PROVIDER_PREFIX = 'vscode-provider:'
 DYNAMIC_LOCAL_PORT_MIN = 1024
+_VSCODE_LOCAL_STREAM_URL_RE = re.compile(
+    r'https?://localhost:([0-9]{1,5})/stream/?(?:[?#].*)?',
+    re.IGNORECASE,
+)
 _EXTENSION_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 _PROVIDER_CONTRIBUTION_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 _PROVIDER_SERVER_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ -]{0,127}')
-DYNAMIC_LOCAL_STREAM_PROVIDERS = frozenset({
-    'ms-python.vscode-pylance/pylancemcp:'
-    'ms-python.vscode-pylance/pylance mcp server',
-})
 
 # Claude Code sanitizes display names into runtime names (non-alphanumerics -> '_'), so one
 # server arrives under several spellings. chrome/browser/preview stay separate: different tools.
@@ -719,31 +719,11 @@ def _vscode_provider_local_stream_identity(
     ):
         return None
 
-    raw_url = url_value.strip()
-    raw_path_match = re.match(
-        r'^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*(/[^?#]*)?',
-        raw_url,
-    )
-    raw_path = raw_path_match.group(1) if raw_path_match else ''
-    if '\\' in raw_url or any(
-        re.fullmatch(r'(?:(?:\.|%2e)){1,2}', segment, flags=re.IGNORECASE)
-        for segment in raw_path.split('/')
-    ):
+    url_match = _VSCODE_LOCAL_STREAM_URL_RE.fullmatch(url_value.strip())
+    if not url_match:
         return None
-
-    try:
-        parsed = urlparse(raw_url)
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme.lower() not in {'http', 'https'}
-        or (parsed.hostname or '').lower() != 'localhost'
-        or port is None
-        or port < DYNAMIC_LOCAL_PORT_MIN
-        or port > 65535
-        or (parsed.path or '').rstrip('/') != '/stream'
-    ):
+    port = int(url_match.group(1))
+    if port < DYNAMIC_LOCAL_PORT_MIN or port > 65535:
         return None
 
     provider_id = additional_data.get('providerId')
@@ -765,10 +745,7 @@ def _vscode_provider_local_stream_identity(
         return None
 
     identity = f'{provider_id.strip().lower()}:{provider_server_id.strip().lower()}'
-    if (
-        identity not in DYNAMIC_LOCAL_STREAM_PROVIDERS
-        or len(VSCODE_PROVIDER_PREFIX) + len(identity) > 500
-    ):
+    if len(VSCODE_PROVIDER_PREFIX) + len(identity) > 500:
         return None
     return identity
 
@@ -780,8 +757,6 @@ def compute_fingerprint(
     args: Optional[List[str]],
     additional_data: Optional[Dict[str, Any]],
     script_hash: Optional[str] = None,
-    *,
-    _allow_vscode_provider_identity: bool = True,
 ) -> Optional[str]:
     """
     Derive a stable fingerprint for an MCP server.
@@ -810,9 +785,13 @@ def compute_fingerprint(
                 command=None if inner_url else inner_cmd,
                 url=inner_url,
                 args=inner[1:],
-                additional_data=safe_additional_data,
+                additional_data=(
+                    {}
+                    if safe_additional_data.get('scope')
+                    == VSCODE_PROVIDER_CACHE_SCOPE
+                    else safe_additional_data
+                ),
                 script_hash=script_hash,
-                _allow_vscode_provider_identity=False,
             )
 
     # Claude desktop OAuth remote connector. Named by a per-registration UUID at
@@ -838,15 +817,11 @@ def compute_fingerprint(
     # VS Code provider-cache entries can expose one local HTTP server on a new
     # port each time the extension starts. Use the extension/provider identity
     # only for that exact dynamic transport shape.
-    vscode_provider = (
-        _vscode_provider_local_stream_identity(
-            command,
-            url,
-            safe_args,
-            safe_additional_data,
-        )
-        if _allow_vscode_provider_identity
-        else None
+    vscode_provider = _vscode_provider_local_stream_identity(
+        command,
+        url,
+        safe_args,
+        safe_additional_data,
     )
     if vscode_provider:
         return f'{VSCODE_PROVIDER_PREFIX}{vscode_provider}'

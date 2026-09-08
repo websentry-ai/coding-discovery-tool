@@ -20,7 +20,6 @@ from unittest.mock import patch
 import scripts.coding_discovery_tools.utils as utils_mod
 import scripts.coding_discovery_tools.cache as cache
 from scripts.coding_discovery_tools import ai_tools_discovery
-from scripts.coding_discovery_tools import mcp_extraction_helpers
 from scripts.coding_discovery_tools import mcp_tools_cache
 from scripts.coding_discovery_tools import scan_single_mcp_server
 from scripts.coding_discovery_tools.content_hash import compute_tool_content_hash
@@ -222,6 +221,47 @@ class TestCacheKey(unittest.TestCase):
             mcp_tools_cache.cache_key_for_server(server),
             "vscode-provider:ms-python.vscode-pylance/pylancemcp:"
             "ms-python.vscode-pylance/pylance mcp server",
+        )
+
+    def test_vscode_provider_is_not_extension_allowlisted(self):
+        server = {
+            "name": "server",
+            "url": "http://localhost:51983/stream",
+            "providerId": "publisher.extension/provider",
+            "providerServerId": "publisher.extension/server",
+            "additional_data": {"scope": "vscode-provider-cache"},
+        }
+        self.assertEqual(
+            mcp_tools_cache.cache_key_for_server(server),
+            "vscode-provider:publisher.extension/provider:"
+            "publisher.extension/server",
+        )
+
+    def test_provider_identity_only_applies_to_direct_literal_stream_urls(self):
+        additional_data = {
+            "scope": "vscode-provider-cache",
+            "providerId": "publisher.extension/provider",
+            "providerServerId": "publisher.extension/server",
+        }
+        self.assertEqual(
+            compute_fingerprint(
+                name="server",
+                command=None,
+                url="http://localhost:51983/foo/../stream",
+                args=[],
+                additional_data=additional_data,
+            ),
+            "url:localhost:51983/foo/../stream",
+        )
+        self.assertEqual(
+            compute_fingerprint(
+                name="server",
+                command="prompt_security_mcp",
+                url=None,
+                args=["__args__", "http://localhost:51983/stream"],
+                additional_data=additional_data,
+            ),
+            "url:localhost:51983/stream",
         )
 
     def test_url_credentials_query_and_fragment_do_not_change_key(self):
@@ -493,24 +533,6 @@ class TestCacheKey(unittest.TestCase):
                 additional_data={},
             ),
             "url-arg:packages.example.com/v3/index.json",
-        )
-
-    def test_prompt_security_wrapper_does_not_inherit_provider_identity(self):
-        self.assertEqual(
-            compute_fingerprint(
-                name="pylance mcp server",
-                command="prompt_security_mcp",
-                url=None,
-                args=["__args__", "http://localhost:51983/stream"],
-                additional_data={
-                    "scope": "vscode-provider-cache",
-                    "providerId": "ms-python.vscode-pylance/pylanceMcp",
-                    "providerServerId": (
-                        "ms-python.vscode-pylance/pylance mcp server"
-                    ),
-                },
-            ),
-            "url:localhost:51983/stream",
         )
 
     def test_dnx_skips_framework_value_before_package(self):
@@ -1071,21 +1093,6 @@ class TestCollectProviderServerObservations(unittest.TestCase):
             ["http://localhost:51983/stream", "http://localhost:61000/stream"],
         )
 
-    def test_strips_url_credentials_query_and_fragment_from_observation(self):
-        observed = mcp_tools_cache.collect_provider_server_observations(
-            [{"mcpServers": [self._server(
-                url=(
-                    "http://alice:secret@localhost:51983/stream"
-                    "?token=private#fragment"
-                ),
-            )]}]
-        )
-
-        self.assertEqual(
-            observed[self.KEY][0]["url"],
-            "http://localhost:51983/stream",
-        )
-
     def test_rejects_unvalidated_provider_shapes(self):
         cases = (
             self._server(additional_data={}),
@@ -1148,7 +1155,7 @@ class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
         observation = next(iter(providers.values()))[0]
         self.assertEqual(observation["url"], "http://localhost:51983/stream")
 
-    def test_transient_provider_read_failure_preserves_last_good_observation(self):
+    def test_empty_provider_refresh_preserves_last_good_observation(self):
         projects = [{"mcpServers": [{
             "name": "pylance mcp server",
             "url": "http://localhost:51983/stream",
@@ -1167,35 +1174,9 @@ class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
             "GitHub Copilot (VS Code)",
             "alice",
             [],
-            provider_cache_complete=False,
         )
 
         self.assertEqual(self._read_file()["provider_servers"], before)
-
-    def test_invalid_vscode_state_db_marks_provider_refresh_incomplete(self):
-        state_db = Path(self._tmp) / "state.vscdb"
-        state_db.write_text("not sqlite", encoding="utf-8")
-        configs = []
-        with patch.object(
-            mcp_extraction_helpers,
-            "_enumerate_vscode_state_databases",
-            return_value=([state_db], True),
-        ), patch.object(
-            mcp_extraction_helpers,
-            "_vscode_cache_scope_path",
-            return_value=("/scope", True),
-        ):
-            complete = (
-                mcp_extraction_helpers.append_vscode_cached_mcp_servers(
-                    configs,
-                    Path(self._tmp),
-                    Path(self._tmp),
-                    "macos",
-                )
-            )
-
-        self.assertFalse(complete)
-        self.assertEqual(configs, [])
 
     def test_refresh_runs_before_upload_dedup_branch_in_main(self):
         # Regression guard for the ordering itself: the refresh call must sit

@@ -39,7 +39,6 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         (cross-surface misattribution when both are installed). ``tool_name=None``
         keeps the legacy union. Mirrors the identity-aware rules extractor.
         """
-        self.vscode_provider_cache_complete = True
         editor_dirs = vscode_family_editor_dirs(tool_name)
         want_vscode = bool(editor_dirs)
         want_jetbrains = (not tool_name) or not want_vscode
@@ -92,14 +91,12 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                 config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
                 if config:
                     configs.append(config)
-            complete = append_vscode_cached_mcp_servers(
+            append_vscode_cached_mcp_servers(
                 configs,
                 code_user_base,
                 user_home,
                 "windows",
             )
-            if not complete:
-                self.vscode_provider_cache_complete = False
 
         return configs
 

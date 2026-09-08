@@ -571,30 +571,6 @@ class _GitHubCopilotVscodeMcpMixin:
 
         self.assertEqual(self._all_servers(self._extract()), [])
 
-    def test_transient_extension_manifest_read_failure_marks_cache_incomplete(self):
-        extension_dir = self._install_gitlens_provider()
-        self._write_gitkraken_provider_cache()
-        manifest_path = extension_dir / "package.json"
-        original_open = Path.open
-
-        def fail_manifest_open(path, *args, **kwargs):
-            if path == manifest_path:
-                raise OSError("temporarily unreadable")
-            return original_open(path, *args, **kwargs)
-
-        with patch.object(Path, "open", fail_manifest_open):
-            self.assertEqual(self._all_servers(self._extract()), [])
-
-        self.assertFalse(self.extractor.vscode_provider_cache_complete)
-
-    def test_missing_extension_registry_marks_cache_incomplete(self):
-        extension_dir = self._install_gitlens_provider()
-        self._write_gitkraken_provider_cache()
-        (extension_dir.parent / "extensions.json").unlink()
-
-        self.assertEqual(self._all_servers(self._extract()), [])
-        self.assertFalse(self.extractor.vscode_provider_cache_complete)
-
     def test_globally_disabled_extension_cache_is_ignored(self):
         self._install_gitlens_provider()
         self._write_gitkraken_provider_cache()
@@ -701,7 +677,7 @@ class _GitHubCopilotVscodeMcpMixin:
         with patch.object(
             mcp_helpers,
             "_vscode_builtin_extension_roots",
-            return_value=([extension_root], True),
+            return_value=[extension_root],
         ):
             servers = self._all_servers(self._extract())
 
@@ -737,7 +713,7 @@ class _GitHubCopilotVscodeMcpMixin:
         with patch.object(
             mcp_helpers,
             "_vscode_builtin_extension_roots",
-            return_value=([extension_root], True),
+            return_value=[extension_root],
         ):
             servers = self._all_servers(self._extract())
 
@@ -972,53 +948,6 @@ class TestEnumerateVscodeMcpFiles(unittest.TestCase):
 
 
 class TestNormalizeVscodeCachedLaunch(unittest.TestCase):
-    def test_state_database_enumeration_marks_directory_error_incomplete(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            user_home = Path(tmp) / "user"
-            code_user_base = user_home / ".config" / "Code" / "User"
-            (code_user_base / "workspaceStorage").mkdir(parents=True)
-
-            with patch.object(
-                mcp_helpers.os,
-                "scandir",
-                side_effect=OSError("temporarily unreadable"),
-            ):
-                databases, complete = (
-                    mcp_helpers._enumerate_vscode_state_databases(
-                        code_user_base,
-                        user_home,
-                    )
-                )
-
-            self.assertEqual(databases, [])
-            self.assertFalse(complete)
-
-    def test_state_database_enumeration_marks_safety_cap_incomplete(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            user_home = Path(tmp) / "user"
-            code_user_base = user_home / ".config" / "Code" / "User"
-            workspace_storage = code_user_base / "workspaceStorage"
-            workspace_storage.mkdir(parents=True)
-            for index in range(
-                mcp_helpers._VSCODE_STATE_DATABASE_MAX_COUNT + 1
-            ):
-                workspace = workspace_storage / str(index)
-                workspace.mkdir()
-                (workspace / "state.vscdb").touch()
-
-            databases, complete = (
-                mcp_helpers._enumerate_vscode_state_databases(
-                    code_user_base,
-                    user_home,
-                )
-            )
-
-            self.assertEqual(
-                len(databases),
-                mcp_helpers._VSCODE_STATE_DATABASE_MAX_COUNT,
-            )
-            self.assertFalse(complete)
-
     def test_http_uri_components_are_rebuilt(self):
         config = _normalize_vscode_cached_launch(
             {
@@ -1067,10 +996,7 @@ class TestNormalizeVscodeCachedLaunch(unittest.TestCase):
                 )
                 conn.commit()
 
-            self.assertIs(
-                _read_vscode_state_json(db_path, "unicode", 3),
-                mcp_helpers._VSCODE_STATE_READ_FAILED,
-            )
+            self.assertIsNone(_read_vscode_state_json(db_path, "unicode", 3))
 
     def test_cached_http_credentials_are_not_reported(self):
         scan = {

@@ -846,5 +846,55 @@ class TestTimedEditAcceptance(unittest.TestCase):
                                      "chat.tools.global.autoApprove": True}), "bypassPermissions")
 
 
+class TestCopilotExtensionKeys(unittest.TestCase):
+    """The Copilot extension contributes 191 settings of its own, separately from
+    the ones VS Code registers. We were reading none of them."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("raw_settings", {})
+
+    def test_external_code_ingest_is_captured(self):
+        # ships true: workspace code is sent out for indexing
+        self.assertIn("github.copilot.chat.workspace.codeSearchExternalIngest.enabled",
+                      self._raw({"github.copilot.chat.workspace.codeSearchExternalIngest.enabled": True}))
+
+    def test_github_mcp_server_governance_is_captured(self):
+        raw = self._raw({"github.copilot.chat.githubMcpServer.enabled": True,
+                         "github.copilot.chat.githubMcpServer.lockdown": False,
+                         "github.copilot.chat.githubMcpServer.readonly": False})
+        for key in ("enabled", "lockdown", "readonly"):
+            self.assertIn(f"github.copilot.chat.githubMcpServer.{key}", raw)
+
+    def test_endpoint_overrides_are_captured(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "http://attacker.example/v1",
+                         "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride": "http://x"})
+        self.assertIn("github.copilot.chat.otel.otlpEndpoint", raw)
+        self.assertIn("github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride", raw)
+
+    def test_extension_install_capability_is_captured(self):
+        # the agent installing extensions is a code-execution surface
+        self.assertIn("github.copilot.chat.installExtensionSkill.enabled",
+                      self._raw({"github.copilot.chat.installExtensionSkill.enabled": True}))
+
+    def test_where_the_agent_runs_is_captured(self):
+        raw = self._raw({"github.copilot.chat.cloudAgent.enabled": True,
+                         "github.copilot.chat.backgroundAgent.enabled": True,
+                         "github.copilot.chat.cli.sandbox.enabled": "off"})
+        self.assertEqual(len(raw), 3)
+
+    def test_model_and_prompt_experiment_flags_are_not_captured(self):
+        # 191 settings are contributed; the experiment flags are noise and must
+        # not dilute the record
+        raw = self._raw({"github.copilot.chat.claudeOpus5Prompt.enabled": True,
+                         "github.copilot.chat.gemini3LowReasoningEffort.enabled": True,
+                         "github.copilot.chat.virtualTools.threshold": 128,
+                         "github.copilot.chat.agent.autoFix": True})
+        self.assertEqual(list(raw), ["github.copilot.chat.agent.autoFix"])
+
+
 if __name__ == "__main__":
     unittest.main()

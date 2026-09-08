@@ -31,6 +31,7 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         # Scope MCP sources to the surface: a VS Code row gets VS Code global +
         # workspace .vscode/mcp.json; a JetBrains row gets JetBrains global only.
         # tool_name=None keeps the legacy union (back-compat / direct callers).
+        self.vscode_provider_cache_complete = True
         editor_dirs = vscode_family_editor_dirs(tool_name)
         want_vscode = bool(editor_dirs)
         want_jetbrains = (not tool_name) or not want_vscode
@@ -70,12 +71,14 @@ class LinuxGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                 config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
                 if config:
                     configs.append(config)
-            append_vscode_cached_mcp_servers(
+            complete = append_vscode_cached_mcp_servers(
                 configs,
                 code_user_base,
                 user_home,
                 "linux",
             )
+            if not complete:
+                self.vscode_provider_cache_complete = False
 
         return configs
 

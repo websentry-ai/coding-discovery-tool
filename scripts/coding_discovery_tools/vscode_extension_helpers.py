@@ -97,23 +97,37 @@ def find_extension_in_editor(
     Returns:
         ``(matched_location, version)`` tuple, or None.
     """
+    extension, _complete = find_extension_in_editor_with_status(
+        user_home,
+        ide_key,
+        ext_id,
+    )
+    return extension
+
+
+def find_extension_in_editor_with_status(
+    user_home: Path, ide_key: str, ext_id: str
+) -> Tuple[Optional[Tuple[str, Optional[str]]], bool]:
     extensions_dir = extensions_dir_for_editor(user_home, ide_key)
     if extensions_dir is None:
-        return None
+        return None, True
 
     registry = extensions_dir / "extensions.json"
     target = ext_id.lower()
 
     try:
-        if not registry.is_file():
-            return None
         entries = json.loads(registry.read_text(encoding="utf-8-sig", errors="replace"))
-    except (OSError, ValueError) as exc:
+    except FileNotFoundError:
+        return None, False
+    except OSError as exc:
         logger.debug(f"Could not read extensions registry {registry}: {exc}")
-        return None
+        return None, False
+    except ValueError as exc:
+        logger.debug(f"Could not decode extensions registry {registry}: {exc}")
+        return None, False
 
     if not isinstance(entries, list):
-        return None
+        return None, False
 
     for entry in entries:
         if not isinstance(entry, dict):
@@ -125,9 +139,9 @@ def find_extension_in_editor(
 
         version = entry.get("version")
         version = version if isinstance(version, str) else None
-        return _resolve_entry_location(entry, extensions_dir), version
+        return (_resolve_entry_location(entry, extensions_dir), version), True
 
-    return None
+    return None, True
 
 
 def _resolve_entry_location(entry: dict, extensions_dir: Path) -> str:

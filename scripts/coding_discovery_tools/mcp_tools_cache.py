@@ -19,6 +19,23 @@ File shape::
             }
           }
         }
+      },
+      "provider_servers": {
+        "<coding_tool_name>": {
+          "<home_user>": {
+            "<cache_key>": [
+              {
+                "name": "<runtime server name>",
+                "url": "<sanitized observed URL>",
+                "additional_data": {
+                  "scope": "vscode-provider-cache",
+                  "providerId": "<validated provider id>",
+                  "providerServerId": "<validated provider server id>"
+                }
+              }
+            ]
+          }
+        }
       }
     }
 
@@ -34,6 +51,7 @@ import os
 import tempfile
 import time
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
 from . import cache as _state
 from .content_hash import compute_tool_content_hash
@@ -98,28 +116,31 @@ def compute_cache_key(name: Optional[str], url: Optional[str], command: Optional
     )
 
 
+def _fingerprint_additional_data_for_server(server: Dict) -> object:
+    additional_data = server.get("additional_data")
+    if not isinstance(additional_data, dict):
+        return additional_data
+
+    additional_data = dict(additional_data)
+    if additional_data.get("scope") == "vscode-provider-cache":
+        for key in ("providerId", "providerServerId"):
+            value = server.get(key)
+            if isinstance(value, str):
+                additional_data[key] = value
+    return additional_data
+
+
 def cache_key_for_server(server: Dict) -> Optional[str]:
     """Cache key for one server object as produced by
     transform_mcp_servers_to_array (env/headers already stripped).
     Never raises; None when the server isn't cacheable."""
     try:
-        additional_data = server.get("additional_data")
-        if not isinstance(additional_data, dict):
-            additional_data = {}
-        provider_id = server.get("providerId")
-        provider_server_id = server.get("providerServerId")
-        if isinstance(provider_id, str) and isinstance(provider_server_id, str):
-            additional_data = {
-                **additional_data,
-                "providerId": provider_id,
-                "providerServerId": provider_server_id,
-            }
         return compute_cache_key(
             name=server.get("name"),
             url=server.get("url"),
             command=server.get("command"),
             args=server.get("args"),
-            additional_data=additional_data,
+            additional_data=_fingerprint_additional_data_for_server(server),
             script_hash=server.get("scriptHash"),
         )
     except Exception as e:
@@ -195,6 +216,77 @@ def collect_server_entries(projects: Optional[List[Dict]]) -> Tuple[Dict[str, Di
     return entries, errored
 
 
+def collect_provider_server_observations(
+    projects: Optional[List[Dict]],
+) -> Dict[str, List[Dict]]:
+    """Collect the minimal validated VS Code provider configs needed by the
+    Copilot hook to resolve a live provider-backed tool call.
+
+    Observations are independent of scan success: provider identity and the
+    current localhost port come from the validated extractor, not the tool
+    scan. Multiple ports remain separate observations under one fingerprint.
+    """
+    observations: Dict[str, Dict[Tuple[str, str, str, str, str], Dict]] = {}
+    for project in projects or []:
+        if not isinstance(project, dict):
+            continue
+        for server in project.get("mcpServers") or []:
+            if not isinstance(server, dict):
+                continue
+            additional_data = server.get("additional_data")
+            if not (
+                isinstance(additional_data, dict)
+                and additional_data.get("scope") == "vscode-provider-cache"
+            ):
+                continue
+            cache_key = cache_key_for_server(server)
+            if not (
+                isinstance(cache_key, str)
+                and cache_key.startswith("vscode-provider:")
+            ):
+                continue
+            name = server.get("name")
+            url = server.get("url")
+            provider_id = server.get("providerId")
+            provider_server_id = server.get("providerServerId")
+            if not all(
+                isinstance(value, str) and value
+                for value in (name, url, provider_id, provider_server_id)
+            ):
+                continue
+            try:
+                parsed_url = urlparse(url)
+                sanitized_url = (
+                    f'{parsed_url.scheme.lower()}://localhost:{parsed_url.port}'
+                    f'{parsed_url.path}'
+                )
+            except ValueError:
+                continue
+            projected_additional_data = {
+                "scope": "vscode-provider-cache",
+                "providerId": provider_id,
+                "providerServerId": provider_server_id,
+            }
+            observation = {
+                "name": name,
+                "url": sanitized_url,
+                "additional_data": projected_additional_data,
+            }
+            dedupe_key = (
+                name,
+                sanitized_url,
+                projected_additional_data["scope"],
+                provider_id,
+                provider_server_id,
+            )
+            observations.setdefault(cache_key, {})[dedupe_key] = observation
+
+    return {
+        cache_key: [by_identity[key] for key in sorted(by_identity)]
+        for cache_key, by_identity in sorted(observations.items())
+    }
+
+
 def read_mcp_tools_cache() -> Dict:
     path = _cache_path()
     try:
@@ -245,12 +337,18 @@ def _get_subtree(parent: Dict, key: str) -> Dict:
 
 def update_user_entries(coding_tool: str, home_user: str,
                         server_entries: Dict[str, Dict],
-                        errored_cache_keys: Optional[Set[str]] = None) -> None:
+                        errored_cache_keys: Optional[Set[str]] = None,
+                        provider_server_observations: Optional[
+                            Dict[str, List[Dict]]
+                        ] = None) -> None:
     """Replace the (coding_tool, home_user) subtree with `server_entries`.
 
     Cache keys in `errored_cache_keys` keep their previous entry (a scan error
     must not evict a still-configured server from the hot-path cache).
     Empty subtrees are pruned so the file doesn't accumulate dead keys.
+
+    `provider_server_observations=None` preserves the previous provider
+    inventory. A dict, including an empty one, authoritatively replaces it.
     """
     data = read_mcp_tools_cache()
     tools = _get_subtree(data, "tools")
@@ -273,6 +371,17 @@ def update_user_entries(coding_tool: str, home_user: str,
         by_user.pop(home_user, None)
         if not by_user:
             tools.pop(coding_tool, None)
+
+    if provider_server_observations is not None:
+        provider_servers = _get_subtree(data, "provider_servers")
+        provider_by_user = _get_subtree(provider_servers, coding_tool)
+        fresh_provider_servers = dict(provider_server_observations)
+        if fresh_provider_servers:
+            provider_by_user[home_user] = fresh_provider_servers
+        else:
+            provider_by_user.pop(home_user, None)
+            if not provider_by_user:
+                provider_servers.pop(coding_tool, None)
 
     data["updated_at"] = _state._now_iso()
     _atomic_write(data)

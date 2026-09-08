@@ -2,10 +2,12 @@
 Tests for macOS and Windows user filtering logic.
 """
 
+import os
 import unittest
 from pathlib import Path, PureWindowsPath
 from unittest.mock import MagicMock, patch
 
+import scripts.coding_discovery_tools.windows_extraction_helpers as weh
 from scripts.coding_discovery_tools.utils import (
     DsclBatchData,
     _fetch_dscl_batch_data,
@@ -174,6 +176,10 @@ class TestGetAllUsersMacos(unittest.TestCase):
 
 class TestGetAllUsersWindows(unittest.TestCase):
 
+    def setUp(self):
+        windows_user_homes.cache_clear()
+
+
     def _make_dir_entry(self, name: str, is_dir: bool = True):
         entry = MagicMock(spec=Path)
         entry.name = name
@@ -211,14 +217,119 @@ class TestGetAllUsersWindows(unittest.TestCase):
             self.assertNotIn(excluded, result)
 
 
+class _FakeWinreg:
+    """Enough of ``winreg`` to drive registry_profile_paths from a dict.
+
+    ``entries`` maps SID -> (ProfileImagePath, kind); a value of ``None`` makes
+    that subkey raise, standing in for one profile we are not allowed to read.
+    """
+
+    HKEY_LOCAL_MACHINE = object()
+    REG_SZ = 1
+    REG_EXPAND_SZ = 2
+
+    def __init__(self, entries, open_root_raises=False):
+        self._entries = entries
+        self._open_root_raises = open_root_raises
+
+    def OpenKey(self, root, name):
+        if root is self.HKEY_LOCAL_MACHINE:
+            if self._open_root_raises:
+                raise OSError("access denied")
+            return _FakeKey(list(self._entries))
+        if self._entries.get(name) is None:
+            raise OSError(f"cannot open {name}")
+        return _FakeKey([name])
+
+    def QueryInfoKey(self, key):
+        return (len(key.names), 0, 0)
+
+    def EnumKey(self, key, index):
+        return key.names[index]
+
+    def QueryValueEx(self, key, value_name):
+        return self._entries[key.names[0]]
+
+
+class _FakeKey:
+    def __init__(self, names):
+        self.names = names
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestRegistryProfilePaths(unittest.TestCase):
+    """The ProfileList parser itself, driven through a stand-in winreg."""
+
+    def _run(self, entries, **kwargs):
+        fake = _FakeWinreg(entries, **kwargs)
+        with patch.dict("sys.modules", {"winreg": fake}), \
+             patch.object(weh, "Path", PureWindowsPath):
+            return weh.registry_profile_paths()
+
+    def test_service_sids_excluded(self):
+        paths, complete = self._run({
+            "S-1-5-18": (r"C:\Windows\system32\config\systemprofile", 1),
+            "S-1-5-19": (r"C:\Windows\ServiceProfiles\LocalService", 1),
+            "S-1-5-20": (r"C:\Windows\ServiceProfiles\NetworkService", 1),
+            "S-1-5-21-1-1-1-1000": (r"C:\Users\alice", 1),
+        })
+        self.assertEqual([PureWindowsPath(r"C:\Users\alice")], paths)
+        self.assertTrue(complete)
+
+    def test_bak_key_is_kept(self):
+        """Windows renames a key .bak when a profile fails to load; the user is real."""
+        paths, complete = self._run({"S-1-5-21-1-1-1-1000.bak": (r"C:\Users\alice", 1)})
+        self.assertEqual([PureWindowsPath(r"C:\Users\alice")], paths)
+        self.assertTrue(complete)
+
+    def test_bak_service_sid_still_excluded(self):
+        paths, _ = self._run({"S-1-5-18.bak": (r"C:\Windows\system32\config\systemprofile", 1)})
+        self.assertEqual([], paths)
+
+    def test_expand_sz_is_expanded(self):
+        with patch.dict(os.environ, {"SYSTEMROOT": r"C:\Windows"}):
+            paths, _ = self._run({"S-1-5-21-1-1-1-1000": (r"%SYSTEMROOT%\Users\alice", 2)})
+        self.assertEqual([PureWindowsPath(r"C:\Windows\Users\alice")], paths)
+
+    def test_unc_path_is_returned_for_membership(self):
+        """It must not be scanned, but it still vouches for the local cache."""
+        paths, complete = self._run({"S-1-5-21-1-1-1-1000": (r"\\server\profiles\bob", 1)})
+        self.assertEqual([PureWindowsPath(r"\\server\profiles\bob")], paths)
+        self.assertTrue(complete)
+
+    def test_unreadable_subkey_marks_the_read_incomplete(self):
+        paths, complete = self._run({
+            "S-1-5-21-1-1-1-1000": (r"C:\Users\alice", 1),
+            "S-1-5-21-1-1-1-1001": None,
+        })
+        self.assertEqual([PureWindowsPath(r"C:\Users\alice")], paths)
+        self.assertFalse(complete)
+
+    def test_unreadable_root_returns_nothing(self):
+        self.assertEqual(([], False), self._run({}, open_root_raises=True))
+
+    def test_missing_winreg_returns_nothing(self):
+        with patch.dict("sys.modules", {"winreg": None}):
+            self.assertEqual(([], False), weh.registry_profile_paths())
+
+
 class TestWindowsUserHomes(unittest.TestCase):
     """The C:\\Users listing cannot see a relocated profile and cannot tell a
     leftover folder from a user; ProfileList answers both."""
 
+    def setUp(self):
+        windows_user_homes.cache_clear()
+
+
     _WALKED = ("agupta", "t_alice", "t_ghost")
     _REGISTRY = (r"C:\Users\agupta", r"C:\Users\t_alice", r"D:\Profiles\t_dave")
 
-    def _run(self, registry):
+    def _run(self, registry, complete=True):
         walked = [MagicMock(spec=Path) for _ in self._WALKED]
         for entry, name in zip(walked, self._WALKED):
             entry.name = name
@@ -226,7 +337,8 @@ class TestWindowsUserHomes(unittest.TestCase):
             entry.__str__.return_value = "C:\\Users\\" + name
         with patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows"), \
              patch("scripts.coding_discovery_tools.windows_extraction_helpers"
-                   ".registry_profile_paths", return_value=[PureWindowsPath(p) for p in registry]), \
+                   ".registry_profile_paths",
+                   return_value=([PureWindowsPath(p) for p in registry], complete)), \
              patch("scripts.coding_discovery_tools.utils.Path") as MockPath:
             users_dir = MagicMock()
             users_dir.exists.return_value = True
@@ -249,6 +361,19 @@ class TestWindowsUserHomes(unittest.TestCase):
         """A registry read failure must never cost us a user."""
         homes = self._run([])
         self.assertEqual(set(self._WALKED), set(homes))
+
+    def test_partial_read_keeps_every_walked_profile(self):
+        """One unreadable subkey must not imply the others are not real."""
+        homes = self._run((r"C:\Users\agupta",), complete=False)
+        self.assertEqual(set(self._WALKED), set(homes))
+
+    def test_roaming_profile_keeps_its_local_cache(self):
+        r"""A UNC path must never be scanned, but it still vouches for the
+        C:\Users copy Windows keeps locally."""
+        homes = self._run((r"C:\Users\agupta", r"\\server\profiles\t_alice"))
+        self.assertIn("t_alice", homes)
+        self.assertEqual(r"C:\Users\t_alice", str(homes["t_alice"]))
+        self.assertNotIn("t_ghost", homes)
 
 
 class TestRealUserOrNone(unittest.TestCase):

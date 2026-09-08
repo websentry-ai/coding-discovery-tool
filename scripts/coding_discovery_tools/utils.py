@@ -421,6 +421,7 @@ def get_all_users_macos() -> List[str]:
     return users
 
 
+@functools.lru_cache(maxsize=1)
 def windows_user_homes() -> Dict[str, Path]:
     """
     Map every Windows profile on this machine to its real home directory.
@@ -428,11 +429,15 @@ def windows_user_homes() -> Dict[str, Path]:
     The ``C:\\Users`` listing alone answers neither question we need: it cannot
     see a profile relocated to another drive, and it treats any leftover folder
     as a user. ``ProfileList`` is Windows' own record, so the two are combined —
-    a walked folder is kept only when the registry knows about it, and registry
-    profiles the walk missed are added at their real path.
+    a walked folder is kept only when a profile record vouches for the name, and
+    registry profiles the walk missed are added at their real path.
 
-    Falls back to the plain walk whenever the registry yields nothing, so a
-    read failure can only ever lose the extra coverage, never a user.
+    A profile whose recorded path is a UNC share still vouches for its local
+    ``C:\\Users`` cache, and an incomplete registry read vouches for nothing, so
+    neither can remove a real user.
+
+    Cached for the process: a scan resolves the same machine throughout, and the
+    call sites would otherwise re-walk ``C:\\Users`` for every tool/user pair.
 
     Returns:
         ``{home_user: home path}``, empty when not running on Windows.
@@ -453,15 +458,21 @@ def windows_user_homes() -> Dict[str, Path]:
         logger.warning(f"Could not list users from Windows Users directory: {e}")
 
     from .windows_extraction_helpers import registry_profile_paths
-    registry = registry_profile_paths()
+    registry, complete = registry_profile_paths()
     if not registry:
         return walked
 
-    known = {os.path.normcase(str(p)) for p in registry}
-    homes = {n: p for n, p in walked.items() if os.path.normcase(str(p)) in known}
+    homes: Dict[str, Path] = {}
     for path in registry:
-        if path.name and path.name not in homes:
-            homes[path.name] = path
+        if path.name and not str(path).startswith("\\\\"):
+            homes.setdefault(path.name, path)
+    vouched = {path.name for path in registry if path.name}
+    for name, path in walked.items():
+        if name in homes:
+            continue
+        if complete and name not in vouched:
+            continue
+        homes[name] = path
     return homes
 
 

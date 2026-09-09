@@ -58,6 +58,25 @@ VERSION_SUFFIX = re.compile(r'^([A-Za-z][A-Za-z ._-]*?)((?:\d+\.)+\d+(?:[-.][A-Z
 # Real config folders carry a version ("CLion2025.3"); uninstall leftovers don't ("Clion").
 VERSIONED_FOLDER = re.compile(r'^[A-Za-z][A-Za-z ._-]*\d+(?:\.\d+)+')
 
+# Leading digits of a version segment, so "2-EAP" still orders as 2.
+SEGMENT_NUMBER = re.compile(r'^\d+')
+
+
+def version_sort_key(version: str) -> Tuple[int, ...]:
+    """Ordering key for an IDE version, so newer sorts higher.
+
+    A prerelease segment ("2025.2-EAP") must not sort below the stable it
+    supersedes; taking each segment's leading digits keeps 2025.2-EAP above
+    2025.1. Unparseable versions sort lowest.
+    """
+    parts = []
+    for segment in version.split('.'):
+        match = SEGMENT_NUMBER.match(segment)
+        if not match:
+            break
+        parts.append(int(match.group()))
+    return tuple(parts) if parts else (0,)
+
 
 def should_skip_folder(folder: str, skip_folders: Iterable[str]) -> bool:
     """Whether a config subfolder is internal/system. Entries match as name prefixes."""

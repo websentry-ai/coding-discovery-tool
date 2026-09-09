@@ -515,7 +515,10 @@ class AIToolsDetector:
                         tools.append(tool_info)
             except Exception as e:
                 logger.warning(f"Error detecting {detector.tool_name}: {e}")
-                report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
+                # A home the scan cannot read is the norm on a multi-user box, not a
+                # defect to triage. Still a failure below, so the tool is never pruned.
+                if not isinstance(e, PermissionError):
+                    report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
                 # Detection errored: record the tool so the caller can keep it (presence unknown != uninstalled).
                 if failures is not None:
                     failures.add(detector.tool_name)

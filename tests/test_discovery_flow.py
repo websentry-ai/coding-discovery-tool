@@ -1881,6 +1881,34 @@ class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
         self.assertEqual(context.get("phase"), "extract")
 
 
+class TestDetectErrorReporting(unittest.TestCase):
+    """A home the scan cannot read is routine on a multi-user box. It must still
+    count as a failure so the tool survives reconciliation, but it is not a defect
+    worth an alert."""
+
+    def _run(self, exc):
+        import scripts.coding_discovery_tools.ai_tools_discovery as mod
+        detector = Mock()
+        detector.tool_name = "JetBrains IDEs"
+        instance = mod.AIToolsDetector.__new__(mod.AIToolsDetector)
+        instance._tool_detectors = [detector]
+        failures = set()
+        with patch.object(mod, "detect_tool_for_user", side_effect=exc), \
+                patch.object(mod, "report_to_sentry") as sentry:
+            instance.detect_all_tools(user_home="/Users/other", failures=failures)
+        return sentry.called, failures
+
+    def test_permission_error_is_recorded_but_not_alerted(self):
+        reported, failures = self._run(PermissionError(13, "Permission denied"))
+        self.assertFalse(reported)
+        self.assertEqual({"JetBrains IDEs"}, failures)
+
+    def test_other_errors_still_alert(self):
+        reported, failures = self._run(RuntimeError("boom"))
+        self.assertTrue(reported)
+        self.assertEqual({"JetBrains IDEs"}, failures)
+
+
 class TestNoToolsSentryEvent(unittest.TestCase):
     """main() emits exactly one enriched 'no_tools_found' warning on a zero-tool
     scan (the only signal that distinguishes an enumeration miss from a genuinely

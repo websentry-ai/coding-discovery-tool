@@ -950,6 +950,24 @@ class TestDefaultPosture(unittest.TestCase):
         self.ud.mkdir(parents=True)
         self.assertEqual(self._extract()["settings_path"], str(self.ud / "settings.json"))
 
+    @unittest.skipUnless(os.name == "posix", "chmod 0o111 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses directory permissions, so 0o111 is still listable")
+    def test_unlistable_profiles_dir_is_unknown_not_defaults(self):
+        """An execute-only profiles/ still serves a bypass to VS Code by known
+        path, so it must not be reported as a clean default posture."""
+        self.ud.mkdir(parents=True)
+        profile = self.ud / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.chmod(self.ud / "profiles", 0o111)
+        try:
+            self.assertIsNone(self._extract(),
+                              "a profiles dir we cannot list leaves the posture unknown")
+        finally:
+            os.chmod(self.ud / "profiles", 0o755)
+
 
 if __name__ == "__main__":
     unittest.main()

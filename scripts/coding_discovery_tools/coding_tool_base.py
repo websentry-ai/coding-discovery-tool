@@ -1310,8 +1310,14 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         deliberately to look clean."""
         seen = set(enumerated)
         candidates = [config_dir / "settings.json"]
+        # scandir, not glob: glob swallows a listing error and yields nothing, so
+        # an execute-only profiles/ would read as "no profiles" while VS Code
+        # still loads a bypass from it by known path.
         try:
-            candidates += list((config_dir / "profiles").glob("*/settings.json"))
+            with os.scandir(config_dir / "profiles") as entries:
+                candidates += [Path(e.path) / "settings.json" for e in entries]
+        except FileNotFoundError:
+            pass
         except OSError:
             return True
         for candidate in candidates:

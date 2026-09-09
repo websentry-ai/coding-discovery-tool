@@ -1093,6 +1093,13 @@ class TestCollectProviderServerObservations(unittest.TestCase):
             ["http://localhost:51983/stream", "http://localhost:61000/stream"],
         )
 
+    def test_preserves_ipv6_loopback_brackets(self):
+        observed = mcp_tools_cache.collect_provider_server_observations([
+            {"mcpServers": [self._server(url="http://[::1]:51983/mcp")]},
+        ])
+
+        self.assertEqual(observed[self.KEY][0]["url"], "http://[::1]:51983/mcp")
+
     def test_rejects_unvalidated_provider_shapes(self):
         cases = (
             self._server(additional_data={}),

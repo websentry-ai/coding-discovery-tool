@@ -1369,7 +1369,19 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                          "chat.plugins.strictMarketplaces")
 
     @staticmethod
-    def _strip_url_secrets(value):
+    def _cut_credentials(value: str) -> str:
+        """Drop the userinfo prefix and the query textually, for a value the URL
+        parser rejects — an scp-style git remote (``git@host:owner/repo.git``)
+        is one, and discarding it would lose the marketplace identity."""
+        head = value.split("?", 1)[0]
+        scheme, sep, rest = head.partition("://")
+        if not sep:
+            scheme, rest = "", head
+        rest = rest.rsplit("@", 1)[-1]
+        return f"{scheme}://{rest}" if sep else rest
+
+    @classmethod
+    def _strip_url_secrets(cls, value):
         """Keep scheme, host, port and path; drop userinfo and the query.
 
         A scheme is optional here — ``collector.internal:4318/v1?api-key=…`` is a
@@ -1386,7 +1398,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             host = parts.hostname or ""
             port = parts.port          # raises on a malformed port
         except ValueError:
-            return "<unparseable>"
+            return cls._cut_credentials(value)
         if ":" in host:
             host = f"[{host}]"     # an IPv6 literal is ambiguous without its brackets
         if port:
@@ -1413,7 +1425,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             return [cls._marketplace_without_secrets(v) for v in value]
         if isinstance(value, dict):
             return {k: (sorted(v) if k == "headers" and isinstance(v, dict)
-                        else cls._credentialed_only(v))
+                        else cls._marketplace_without_secrets(v))
                     for k, v in value.items()}
         return cls._credentialed_only(value)
 

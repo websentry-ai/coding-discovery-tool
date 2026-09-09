@@ -994,6 +994,27 @@ class TestMarketplaceRedaction(unittest.TestCase):
         self.assertEqual(raw["chat.plugins.marketplaces"],
                          ["github/copilot-plugins", "github/awesome-copilot#marketplace"])
 
+    def test_an_scp_style_remote_keeps_its_identity(self):
+        """git@host:owner/repo.git is a valid remote the URL parser rejects;
+        losing it would erase the marketplace we are trying to report."""
+        raw = self._raw({"chat.plugins.marketplaces": [
+            "git@github.com:owner/repo.git",
+            "x-access-token:ghp_SEK@github.com:owner/repo.git"]})
+        self.assertEqual(raw["chat.plugins.marketplaces"],
+                         ["github.com:owner/repo.git", "github.com:owner/repo.git"])
+        self.assertNotIn("ghp_SEK", json.dumps(raw))
+
+    def test_a_secret_nested_inside_an_entry_is_still_stripped(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "auth": {"headers": {"Authorization": "Bearer SEK"}},
+             "mirrors": ["https://tok@host/x.git"]}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["auth"]["headers"], ["Authorization"])
+        self.assertEqual(entry["mirrors"], ["https://host/x.git"])
+        self.assertNotIn("SEK", json.dumps(raw))
+        self.assertNotIn("tok@", json.dumps(raw))
+
     def test_an_ipv6_endpoint_keeps_its_brackets(self):
         raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
                          "https://[2001:db8::1]:4318/v1?api-key=S"})

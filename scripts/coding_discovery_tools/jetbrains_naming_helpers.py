@@ -62,20 +62,23 @@ VERSIONED_FOLDER = re.compile(r'^[A-Za-z][A-Za-z ._-]*\d+(?:\.\d+)+')
 SEGMENT_NUMBER = re.compile(r'^\d+')
 
 
-def version_sort_key(version: str) -> Tuple[int, ...]:
+def version_sort_key(version: str) -> Tuple[Tuple[int, ...], int]:
     """Ordering key for an IDE version, so newer sorts higher.
 
-    A prerelease segment ("2025.2-EAP") must not sort below the stable it
-    supersedes; taking each segment's leading digits keeps 2025.2-EAP above
-    2025.1. Unparseable versions sort lowest.
+    Numbers first, then stability, so 2025.1 < 2025.2-EAP < 2025.2: a
+    prerelease outranks the older stable it supersedes but loses to the release
+    it precedes, which is what leaves a lingering EAP config dir behind.
+    Unparseable versions sort lowest.
     """
+    segments = version.split('.')
     parts = []
-    for segment in version.split('.'):
+    for segment in segments:
         match = SEGMENT_NUMBER.match(segment)
         if not match:
             break
         parts.append(int(match.group()))
-    return tuple(parts) if parts else (0,)
+    stable = 1 if parts and all(s.isdigit() for s in segments) else 0
+    return (tuple(parts) if parts else (0,)), stable
 
 
 def should_skip_folder(folder: str, skip_folders: Iterable[str]) -> bool:

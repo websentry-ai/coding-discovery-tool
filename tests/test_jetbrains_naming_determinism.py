@@ -354,18 +354,30 @@ class TestPerUserVersionFiltering(unittest.TestCase):
                 self.assertEqual(["2025.2-EAP"], [ide["version"] for ide in kept])
 
 
+    def test_same_number_stable_beats_eap_whatever_the_scan_order(self) -> None:
+        """Config dirs arrive in os.listdir order, so a tie would resolve by
+        filesystem layout and could drop the stable install's plugins."""
+        stable = {"display_name": "Rider", "version": "2025.2"}
+        eap = {"display_name": "Rider", "version": "2025.2-EAP"}
+        for order in ([stable, eap], [eap, stable]):
+            for detector_cls in DETECTORS:
+                with self.subTest(detector=detector_cls.__name__,
+                                  order=[i["version"] for i in order]):
+                    kept = detector_cls._filter_old_versions(list(order))
+                    self.assertEqual(["2025.2"], [ide["version"] for ide in kept])
+
+
 class TestVersionSortKey(unittest.TestCase):
 
     def test_orders_versions_newest_highest(self) -> None:
         self.assertLess(version_sort_key("2024.3"), version_sort_key("2025.1"))
         self.assertLess(version_sort_key("2025.1"), version_sort_key("2025.2-EAP"))
-        self.assertEqual(version_sort_key("2025.2"), version_sort_key("2025.2-EAP"))
+        self.assertLess(version_sort_key("2025.2-EAP"), version_sort_key("2025.2"))
         self.assertLess(version_sort_key("2025.2"), version_sort_key("2025.2.3"))
 
     def test_unparseable_sorts_lowest(self) -> None:
         for version in ("Unknown", "", "EAP"):
             with self.subTest(version=version):
-                self.assertEqual((0,), version_sort_key(version))
                 self.assertLess(version_sort_key(version), version_sort_key("1.0"))
 
 

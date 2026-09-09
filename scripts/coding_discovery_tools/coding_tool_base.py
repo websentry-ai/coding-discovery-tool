@@ -1356,8 +1356,43 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             logger.debug(f"Could not parse {path}: {e}")
             return None
 
+    # Settings whose posture value is the setting itself, but whose value can
+    # carry a credential: a terminal profile's env map, and endpoint URLs with
+    # userinfo or a query string. Kept, with the secret-bearing part removed.
+    _PROFILE_KEYS = ("chat.tools.terminal.terminalProfile.linux",
+                     "chat.tools.terminal.terminalProfile.osx",
+                     "chat.tools.terminal.terminalProfile.windows")
+    _URL_KEYS = ("github.copilot.chat.otel.otlpEndpoint",
+                 "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride")
+
+    @staticmethod
+    def _strip_url_secrets(value):
+        """Keep scheme, host, port and path; drop userinfo and the query."""
+        if not isinstance(value, str) or "://" not in value:
+            return value
+        try:
+            from urllib.parse import urlsplit, urlunsplit
+            parts = urlsplit(value)
+            host = parts.hostname or ""
+            if parts.port:
+                host = f"{host}:{parts.port}"
+            return urlunsplit((parts.scheme, host, parts.path, "", ""))
+        except ValueError:
+            return "<unparseable>"
+
+    @classmethod
+    def _without_secrets(cls, key: str, value):
+        if key in cls._PROFILE_KEYS and isinstance(value, dict):
+            # env values are commonly API keys; the names still show what is set
+            return {k: (sorted(v) if k == "env" and isinstance(v, dict) else v)
+                    for k, v in value.items()}
+        if key in cls._URL_KEYS:
+            return cls._strip_url_secrets(value)
+        return value
+
     def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:
-        raw_settings = {k: data[k] for k in self.SECURITY_RELEVANT_KEYS if k in data}
+        raw_settings = {k: self._without_secrets(k, data[k])
+                        for k in self.SECURITY_RELEVANT_KEYS if k in data}
         if not raw_settings:
             return None  # nothing security-relevant here → no row
         allow_rules, deny_rules = self._terminal_rules(data)

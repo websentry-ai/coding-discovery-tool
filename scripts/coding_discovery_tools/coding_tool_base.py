@@ -1275,7 +1275,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 # missing with no trace of why.
                 logger.debug(f"Could not stat Copilot config dir {config_dir}: {e}")
             records = []
-            for path in self._iter_channel_settings_files(config_dir):
+            enumerated = list(self._iter_channel_settings_files(config_dir))
+            if self._skipped_a_present_file(config_dir, enumerated):
+                unreadable = True
+            for path in enumerated:
                 data = self._parse_jsonc(path, user_home)
                 if data is None:
                     # Present but refused or unparseable: their posture is unknown,
@@ -1296,6 +1299,30 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 return None
             return self._default_posture(defaults_path)
         return max(per_channel, key=self._permissiveness)
+
+    @staticmethod
+    def _skipped_a_present_file(config_dir: Path, enumerated) -> bool:
+        """True if a settings file is there but was not enumerated.
+
+        Enumeration keeps regular files only, so a FIFO or a device left at one
+        of these paths is dropped before anything is read. That is an unknown
+        posture, not an unconfigured one, and it is the case someone would plant
+        deliberately to look clean."""
+        seen = set(enumerated)
+        candidates = [config_dir / "settings.json"]
+        try:
+            candidates += list((config_dir / "profiles").glob("*/settings.json"))
+        except OSError:
+            return True
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            try:
+                os.lstat(str(candidate))
+            except OSError:
+                continue   # genuinely absent
+            return True
+        return False
 
     def _default_posture(self, path: Path) -> Dict:
         """The posture VS Code applies when the user has set none of these keys.

@@ -6,6 +6,7 @@ bypass and no longer does, and a record where there was none.
 """
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -188,6 +189,57 @@ class D_DefaultPosture(unittest.TestCase):
         other = det.filter_tool_projects_by_user(tool, self.home.parent / "someone-else")
         self.assertIn("permissions", mine)
         self.assertNotIn("permissions", other)
+
+
+class R_SkippedBeforeParsing(unittest.TestCase):
+    """A settings file can be dropped at enumeration, before anything is parsed.
+    That path has to reach the same conclusion as a refused read — unknown —
+    otherwise a pipe left at settings.json reads as a clean default posture."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="nm305r-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs are POSIX-only")
+    def test_a_fifo_at_settings_json_is_unknown_not_default(self):
+        os.mkfifo(str(self.ud / "settings.json"))
+        self.assertIsNone(self._extract(),
+                          "a pipe must not read as a clean default posture")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs are POSIX-only")
+    def test_a_fifo_in_a_profile_is_unknown_too(self):
+        prof = self.ud / "profiles" / "work"
+        prof.mkdir(parents=True)
+        os.mkfifo(str(prof / "settings.json"))
+        self.assertIsNone(self._extract())
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs are POSIX-only")
+    def test_a_fifo_cannot_mask_a_real_bypass_in_another_profile(self):
+        # the case that makes this a security bug rather than a coverage one
+        prof = self.ud / "profiles" / "yolo"
+        prof.mkdir(parents=True)
+        (prof / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.mkfifo(str(self.ud / "settings.json"))
+        rec = self._extract()
+        self.assertIsNotNone(rec, "the readable profile still reports")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_a_directory_named_settings_json_is_unknown(self):
+        (self.ud / "settings.json").mkdir()
+        self.assertIsNone(self._extract())
+
+    def test_an_ordinary_missing_file_is_still_the_defaults(self):
+        self.assertEqual(self._extract()["permission_mode"], "default")
 
 
 if __name__ == "__main__":

@@ -627,10 +627,10 @@ class TestNonRegularFiles(unittest.TestCase):
             worker.start()
             worker.join(timeout=15)
             self.assertFalse(worker.is_alive(), "a planted FIFO hung the scan")
-            # VS Code cannot read a FIFO either, so this user really is on the
-            # defaults; what matters is that nothing was read from the pipe
-            rec = result.get("r")
-            self.assertEqual(rec["raw_settings"], {})
+            # A file that is there but unreadable leaves the posture unknown. A
+            # clean "default" row here would let anyone hide a real bypass behind
+            # a pipe, so absence of a record is the correct answer.
+            self.assertIsNone(result.get("r"))
         finally:
             shutil.rmtree(home, ignore_errors=True)
 

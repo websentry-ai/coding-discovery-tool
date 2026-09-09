@@ -1367,18 +1367,27 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
 
     @staticmethod
     def _strip_url_secrets(value):
-        """Keep scheme, host, port and path; drop userinfo and the query."""
-        if not isinstance(value, str) or "://" not in value:
+        """Keep scheme, host, port and path; drop userinfo and the query.
+
+        A scheme is optional here — ``collector.internal:4318/v1?api-key=…`` is a
+        setting a user really writes, and it carries a credential just as readily
+        as a fully qualified URL, so the authority is parsed either way."""
+        if not isinstance(value, str) or not value.strip():
             return value
+        from urllib.parse import urlsplit
+        scheme, rest = "", value
+        if "://" in value:
+            scheme, rest = value.split("://", 1)
         try:
-            from urllib.parse import urlsplit, urlunsplit
-            parts = urlsplit(value)
+            parts = urlsplit(rest if rest.startswith("//") else "//" + rest)
             host = parts.hostname or ""
-            if parts.port:
-                host = f"{host}:{parts.port}"
-            return urlunsplit((parts.scheme, host, parts.path, "", ""))
+            port = parts.port          # raises on a malformed port
         except ValueError:
             return "<unparseable>"
+        if port:
+            host = f"{host}:{port}"
+        cleaned = host + parts.path
+        return f"{scheme}://{cleaned}" if scheme else cleaned
 
     @classmethod
     def _without_secrets(cls, key: str, value):

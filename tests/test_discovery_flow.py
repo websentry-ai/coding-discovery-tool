@@ -586,9 +586,9 @@ class TestSentryRunGuards(unittest.TestCase):
 
 
 class TestSettingsTransformPrecedence(unittest.TestCase):
-    """Settings transformation picks highest precedence and maps fields correctly."""
+    """Settings transformation merges scopes and maps fields correctly."""
 
-    def test_managed_wins_over_user(self):
+    def test_managed_scalars_win_and_rules_accumulate(self):
         settings = [
             {
                 "scope": "user",
@@ -613,7 +613,7 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["scope"], "managed")
         self.assertEqual(result["permission_mode"], "deny")
-        self.assertEqual(result["allow_rules"], ["Bash"])
+        self.assertEqual(result["allow_rules"], ["Read", "Bash"])
         self.assertEqual(result["deny_rules"], ["Write"])
         self.assertTrue(result["sandbox_enabled"])
 
@@ -644,6 +644,146 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
 
     def test_empty_settings_returns_none(self):
         self.assertIsNone(transform_settings_to_backend_format([]))
+
+    @staticmethod
+    def _user(**permissions):
+        return {
+            "scope": "user",
+            "settings_path": "/home/u/.claude/settings.json",
+            "permissions": permissions,
+            "sandbox": {"enabled": False},
+        }
+
+    @staticmethod
+    def _project(root, allow, **permissions):
+        return {
+            "scope": "local",
+            "settings_path": f"/home/u{root}/.claude/settings.local.json",
+            "permissions": {"allow": allow, **permissions},
+            "sandbox": {},
+        }
+
+    def test_user_scope_mode_survives_a_project_that_only_grants_rules(self):
+        settings = [
+            self._user(defaultMode="auto", allow=["Read"], deny=["Bash(sudo:*)"]),
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["permission_mode"], "auto")
+        self.assertEqual(result["allow_rules"], ["Read", "Bash(npm:*)"])
+        self.assertEqual(result["deny_rules"], ["Bash(sudo:*)"])
+        self.assertFalse(result["sandbox_enabled"])
+        self.assertEqual(
+            result["contributing_paths"],
+            ["/home/u/.claude/settings.json", "/home/u/repo/.claude/settings.local.json"],
+        )
+
+    def test_riskiest_project_is_reported(self):
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Read", "Read"]),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_project_scope_auto_is_ignored_and_drops_the_user_value(self):
+        settings = [
+            self._user(defaultMode="acceptEdits"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
+
+    def test_unrestricted_grant_outranks_a_tamer_project_on_a_higher_mode(self):
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_empty_policies_do_not_erase_an_inherited_one(self):
+        user = self._user(defaultMode="default")
+        user["mcp_policies"] = {"allowedMcpServers": ["github"], "deniedMcpServers": []}
+        project = self._project("/repo", ["Read"])
+        project["mcp_policies"] = {"allowedMcpServers": [], "deniedMcpServers": []}
+
+        result = transform_settings_to_backend_format([user, project])
+
+        self.assertEqual(result["mcp_policies"]["allowedMcpServers"], ["github"])
+
+    def test_suppressed_mode_still_ranks_at_the_inherited_posture(self):
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+        self.assertNotIn("permission_mode", result)
+
+    def test_a_second_suppression_does_not_erase_the_ranking_mode(self):
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            {
+                "scope": "project",
+                "settings_path": "/home/u/repo/.claude/settings.json",
+                "permissions": {"defaultMode": "auto"},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+
+    def test_one_users_settings_do_not_seed_another_users_project(self):
+        settings = [
+            self._user(defaultMode="default", allow=["Read(alice)"]),
+            {
+                "scope": "user",
+                "settings_path": "/home/bob/.claude/settings.json",
+                "permissions": {"defaultMode": "bypassPermissions", "allow": ["Bash"]},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["contributing_paths"], ["/home/bob/.claude/settings.json"])
+        self.assertNotIn("Read(alice)", result["allow_rules"])
+        self.assertNotIn("Bash(npm:*)", result["allow_rules"])
+
+    def test_disable_auto_mode_drops_auto(self):
+        settings = [
+            {
+                "scope": "managed",
+                "settings_path": "/Library/managed-settings.json",
+                "raw_settings": {"permissions": {"disableAutoMode": "disable"}},
+                "permissions": {},
+                "sandbox": {},
+            },
+            self._user(defaultMode="auto", allow=["Read"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
 
 
 class TestFilterProjectsByUser(unittest.TestCase):

@@ -1949,6 +1949,8 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         ctx = self._context_of(call)
         # Discriminators that separate residue from a binary we found and dropped.
         self.assertIn("config_dirs_age_days", ctx)
+        # ...and from a prefix we never got to look under.
+        self.assertIn(ctx.get("npm_prefix"), {"resolved", "unresolved", "not_probed"})
         # get_all_users_linux -> [] means enumeration missed every account, so the
         # current-user fallback supplies the single scanned home.
         self.assertEqual(ctx.get("homes_enumerated"), 0)

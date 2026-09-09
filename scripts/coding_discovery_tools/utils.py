@@ -130,15 +130,9 @@ def resolve_npm_global_tool_bin(
 
     # 1. Dynamic npm global prefix — SCANNER-scoped, so non-root only.
     if not is_root:
-        global _npm_prefix_state
-        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        prefix = _npm_global_prefix()
         if prefix:
-            prefix = prefix.strip()
-            if prefix:
-                _npm_prefix_state = "resolved"
-                candidates.append(Path(prefix) / "bin" / tool)
-        if _npm_prefix_state == "not_probed":
-            _npm_prefix_state = "unresolved"
+            candidates.append(Path(prefix) / "bin" / tool)
 
     # 2. Machine-global Homebrew prefix — non-root only (shared install).
     if not is_root:
@@ -2295,6 +2289,20 @@ _rejected_binaries = []
 
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
+_NPM_PREFIX_UNSET = object()
+_npm_prefix_cached = _NPM_PREFIX_UNSET
+
+
+def _npm_global_prefix() -> Optional[str]:
+    """``npm prefix -g``, resolved once per run. It reports the SCANNER's npm, so it
+    cannot vary between the tools and users a scan walks, and the resolver is called
+    once per pair — 9 call sites times every profile on the machine."""
+    global _npm_prefix_cached, _npm_prefix_state
+    if _npm_prefix_cached is _NPM_PREFIX_UNSET:
+        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        _npm_prefix_cached = prefix.strip() if prefix and prefix.strip() else None
+        _npm_prefix_state = "resolved" if _npm_prefix_cached else "unresolved"
+    return _npm_prefix_cached
 
 
 def record_rejected_binary(candidate, reason: str) -> None:
@@ -2329,8 +2337,9 @@ def reset_sentry_run_state() -> None:
     _sentry_consecutive_fails = 0
     _sentry_dead_this_run = False
     _rejected_binaries.clear()
-    global _npm_prefix_state
+    global _npm_prefix_state, _npm_prefix_cached
     _npm_prefix_state = "not_probed"
+    _npm_prefix_cached = _NPM_PREFIX_UNSET
 
 
 def _ip_is_loopback(host: str) -> bool:

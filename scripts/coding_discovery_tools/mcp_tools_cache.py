@@ -348,7 +348,9 @@ def update_user_entries(coding_tool: str, home_user: str,
     Empty subtrees are pruned so the file doesn't accumulate dead keys.
 
     `provider_server_observations=None` preserves the previous provider
-    inventory. A dict, including an empty one, authoritatively replaces it.
+    inventory. A non-empty dict replaces it. The only caller maps an empty
+    result to None, so a partial VS Code state read cannot evict a live
+    provider from the hot-path cache.
     """
     data = read_mcp_tools_cache()
     tools = _get_subtree(data, "tools")

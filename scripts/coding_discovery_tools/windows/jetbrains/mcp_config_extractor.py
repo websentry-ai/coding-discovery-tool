@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...jetbrains_naming_helpers import JETBRAINS_SKIP_FOLDERS, should_skip_folder
+from ...jetbrains_naming_helpers import (
+    JETBRAINS_SKIP_FOLDERS,
+    jetbrains_config_roots,
+    should_skip_folder,
+)
 from ...windows_extraction_helpers import get_file_metadata, read_file_content
 from ...xml_helpers import safe_xml_parse
 
@@ -20,10 +24,10 @@ logger = logging.getLogger(__name__)
 class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for JetBrains IDEs MCP config on Windows systems."""
 
-    JETBRAINS_CONFIG_DIR = Path.home() / "AppData" / "Roaming" / "JetBrains"
+    JETBRAINS_CONFIG_DIRS = jetbrains_config_roots(Path.home() / "AppData" / "Roaming")
 
     IDE_PATTERNS = [
-        "IntelliJIdea", "IntelliJ", "PyCharm", "WebStorm", "PhpStorm",
+        "IntelliJIdea", "IntelliJ", "AndroidStudio", "PyCharm", "WebStorm", "PhpStorm",
         "GoLand", "Rider", "CLion", "RustRover", "RubyMine", "DataGrip",
         "DataSpell", "Fleet"
     ]
@@ -46,32 +50,33 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         all_projects = []
 
-        if not self.JETBRAINS_CONFIG_DIR.exists():
-            logger.debug(f"JetBrains config directory not found: {self.JETBRAINS_CONFIG_DIR}")
-            return None
+        for config_dir in self.JETBRAINS_CONFIG_DIRS:
+            if not config_dir.exists():
+                logger.debug(f"JetBrains config directory not found: {config_dir}")
+                continue
 
-        try:
-            for folder in os.listdir(self.JETBRAINS_CONFIG_DIR):
-                folder_path = self.JETBRAINS_CONFIG_DIR / folder
+            try:
+                for folder in os.listdir(config_dir):
+                    folder_path = config_dir / folder
 
-                # Skip hidden files and non-directories
-                if folder.startswith('.') or not folder_path.is_dir():
-                    continue
+                    # Skip hidden files and non-directories
+                    if folder.startswith('.') or not folder_path.is_dir():
+                        continue
 
-                # Skip system folders
-                if should_skip_folder(folder, self.SKIP_FOLDERS):
-                    continue
+                    # Skip system folders
+                    if should_skip_folder(folder, self.SKIP_FOLDERS):
+                        continue
 
-                # Check if folder matches any IDE pattern
-                if not any(pattern in folder for pattern in self.IDE_PATTERNS):
-                    continue
+                    # Check if folder matches any IDE pattern
+                    if not any(pattern in folder for pattern in self.IDE_PATTERNS):
+                        continue
 
-                # Extract projects from this IDE's configuration
-                ide_projects = self._extract_ide_projects(folder_path, folder)
-                all_projects.extend(ide_projects)
+                    # Extract projects from this IDE's configuration
+                    ide_projects = self._extract_ide_projects(folder_path, folder)
+                    all_projects.extend(ide_projects)
 
-        except Exception as e:
-            logger.warning(f"Error scanning {self.JETBRAINS_CONFIG_DIR}: {e}")
+            except Exception as e:
+                logger.warning(f"Error scanning {config_dir}: {e}")
 
         # Return None if no projects found
         if not all_projects:

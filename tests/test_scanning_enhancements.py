@@ -20,7 +20,6 @@ from scripts.coding_discovery_tools.settings_transformers import (
     _get_highest_precedence_setting,
     _get_precedence,
     _get_scope_value,
-    _has_permissions,
     _read_raw_settings_from_file,
     transform_settings_to_backend_format,
 )
@@ -293,25 +292,6 @@ class TestGetScopeValue(unittest.TestCase):
 
     def test_defaults_to_user(self):
         self.assertEqual(_get_scope_value({}), "user")
-
-
-class TestHasPermissions(unittest.TestCase):
-    """Tests for _has_permissions helper."""
-
-    def test_returns_true_when_allow_present(self):
-        self.assertTrue(_has_permissions({"permissions": {"allow": ["Read"]}}))
-
-    def test_returns_true_when_deny_present(self):
-        self.assertTrue(_has_permissions({"permissions": {"deny": ["Write"]}}))
-
-    def test_returns_true_when_default_mode_present(self):
-        self.assertTrue(_has_permissions({"permissions": {"defaultMode": "default"}}))
-
-    def test_returns_false_for_empty_permissions(self):
-        self.assertFalse(_has_permissions({"permissions": {}}))
-
-    def test_returns_false_when_no_permissions_key(self):
-        self.assertFalse(_has_permissions({}))
 
 
 class TestReadRawSettingsFromFile(unittest.TestCase):

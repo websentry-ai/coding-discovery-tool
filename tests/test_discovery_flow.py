@@ -586,9 +586,9 @@ class TestSentryRunGuards(unittest.TestCase):
 
 
 class TestSettingsTransformPrecedence(unittest.TestCase):
-    """Settings transformation picks highest precedence and maps fields correctly."""
+    """Settings transformation merges scopes and maps fields correctly."""
 
-    def test_managed_wins_over_user(self):
+    def test_managed_scalars_win_and_rules_accumulate(self):
         settings = [
             {
                 "scope": "user",
@@ -613,7 +613,7 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["scope"], "managed")
         self.assertEqual(result["permission_mode"], "deny")
-        self.assertEqual(result["allow_rules"], ["Bash"])
+        self.assertEqual(result["allow_rules"], ["Read", "Bash"])
         self.assertEqual(result["deny_rules"], ["Write"])
         self.assertTrue(result["sandbox_enabled"])
 
@@ -644,6 +644,146 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
 
     def test_empty_settings_returns_none(self):
         self.assertIsNone(transform_settings_to_backend_format([]))
+
+    @staticmethod
+    def _user(**permissions):
+        return {
+            "scope": "user",
+            "settings_path": "/home/u/.claude/settings.json",
+            "permissions": permissions,
+            "sandbox": {"enabled": False},
+        }
+
+    @staticmethod
+    def _project(root, allow, **permissions):
+        return {
+            "scope": "local",
+            "settings_path": f"/home/u{root}/.claude/settings.local.json",
+            "permissions": {"allow": allow, **permissions},
+            "sandbox": {},
+        }
+
+    def test_user_scope_mode_survives_a_project_that_only_grants_rules(self):
+        settings = [
+            self._user(defaultMode="auto", allow=["Read"], deny=["Bash(sudo:*)"]),
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["permission_mode"], "auto")
+        self.assertEqual(result["allow_rules"], ["Read", "Bash(npm:*)"])
+        self.assertEqual(result["deny_rules"], ["Bash(sudo:*)"])
+        self.assertFalse(result["sandbox_enabled"])
+        self.assertEqual(
+            result["contributing_paths"],
+            ["/home/u/.claude/settings.json", "/home/u/repo/.claude/settings.local.json"],
+        )
+
+    def test_riskiest_project_is_reported(self):
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Read", "Read"]),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_project_scope_auto_is_ignored_and_drops_the_user_value(self):
+        settings = [
+            self._user(defaultMode="acceptEdits"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
+
+    def test_unrestricted_grant_outranks_a_tamer_project_on_a_higher_mode(self):
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_empty_policies_do_not_erase_an_inherited_one(self):
+        user = self._user(defaultMode="default")
+        user["mcp_policies"] = {"allowedMcpServers": ["github"], "deniedMcpServers": []}
+        project = self._project("/repo", ["Read"])
+        project["mcp_policies"] = {"allowedMcpServers": [], "deniedMcpServers": []}
+
+        result = transform_settings_to_backend_format([user, project])
+
+        self.assertEqual(result["mcp_policies"]["allowedMcpServers"], ["github"])
+
+    def test_suppressed_mode_still_ranks_at_the_inherited_posture(self):
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+        self.assertNotIn("permission_mode", result)
+
+    def test_a_second_suppression_does_not_erase_the_ranking_mode(self):
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            {
+                "scope": "project",
+                "settings_path": "/home/u/repo/.claude/settings.json",
+                "permissions": {"defaultMode": "auto"},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+
+    def test_one_users_settings_do_not_seed_another_users_project(self):
+        settings = [
+            self._user(defaultMode="default", allow=["Read(alice)"]),
+            {
+                "scope": "user",
+                "settings_path": "/home/bob/.claude/settings.json",
+                "permissions": {"defaultMode": "bypassPermissions", "allow": ["Bash"]},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["contributing_paths"], ["/home/bob/.claude/settings.json"])
+        self.assertNotIn("Read(alice)", result["allow_rules"])
+        self.assertNotIn("Bash(npm:*)", result["allow_rules"])
+
+    def test_disable_auto_mode_drops_auto(self):
+        settings = [
+            {
+                "scope": "managed",
+                "settings_path": "/Library/managed-settings.json",
+                "raw_settings": {"permissions": {"disableAutoMode": "disable"}},
+                "permissions": {},
+                "sandbox": {},
+            },
+            self._user(defaultMode="auto", allow=["Read"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
 
 
 class TestFilterProjectsByUser(unittest.TestCase):
@@ -1741,6 +1881,34 @@ class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
         self.assertEqual(context.get("phase"), "extract")
 
 
+class TestDetectErrorReporting(unittest.TestCase):
+    """A home the scan cannot read is routine on a multi-user box. It must still
+    count as a failure so the tool survives reconciliation, but it is not a defect
+    worth an alert."""
+
+    def _run(self, exc):
+        import scripts.coding_discovery_tools.ai_tools_discovery as mod
+        detector = Mock()
+        detector.tool_name = "JetBrains IDEs"
+        instance = mod.AIToolsDetector.__new__(mod.AIToolsDetector)
+        instance._tool_detectors = [detector]
+        failures = set()
+        with patch.object(mod, "detect_tool_for_user", side_effect=exc), \
+                patch.object(mod, "report_to_sentry") as sentry:
+            instance.detect_all_tools(user_home="/Users/other", failures=failures)
+        return sentry.called, failures
+
+    def test_permission_error_is_recorded_but_not_alerted(self):
+        reported, failures = self._run(PermissionError(13, "Permission denied"))
+        self.assertFalse(reported)
+        self.assertEqual({"JetBrains IDEs"}, failures)
+
+    def test_other_errors_still_alert(self):
+        reported, failures = self._run(RuntimeError("boom"))
+        self.assertTrue(reported)
+        self.assertEqual({"JetBrains IDEs"}, failures)
+
+
 class TestNoToolsSentryEvent(unittest.TestCase):
     """main() emits exactly one enriched 'no_tools_found' warning on a zero-tool
     scan (the only signal that distinguishes an enumeration miss from a genuinely
@@ -1809,6 +1977,8 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         ctx = self._context_of(call)
         # Discriminators that separate residue from a binary we found and dropped.
         self.assertIn("config_dirs_age_days", ctx)
+        # ...and from a prefix we never got to look under.
+        self.assertIn(ctx.get("npm_prefix"), {"resolved", "unresolved", "not_probed"})
         # get_all_users_linux -> [] means enumeration missed every account, so the
         # current-user fallback supplies the single scanned home.
         self.assertEqual(ctx.get("homes_enumerated"), 0)
@@ -1820,6 +1990,13 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         # PII guard: no list-valued context (e.g. the raw user list) may leak.
         for key, value in ctx.items():
             self.assertNotIsInstance(value, list, f"context key {key!r} is a list")
+
+    def test_windows_elevation_is_queryable_like_is_root(self):
+        """POSIX reports is_root as a tag; the Windows equivalents were context-only,
+        so a no-tools scan could not be grouped by whether it saw every profile."""
+        import scripts.coding_discovery_tools.utils as u
+        for key in ("is_root", "is_elevated", "detect_scope"):
+            self.assertIn(key, u._SENTRY_TAG_KEYS)
 
     def test_admin_state_is_never_invented(self):
         import scripts.coding_discovery_tools.windows_extraction_helpers as weh
@@ -1857,6 +2034,45 @@ class TestNoToolsSentryEvent(unittest.TestCase):
             if self._context_of(c).get("phase") == "no_tools_found"
         ]
         self.assertEqual(no_tools_calls, [], "no_tools_found must not fire when a tool is detected")
+
+
+class TestNpmPrefixDiagnostics(unittest.TestCase):
+    """An npm-global CLI lives under `npm prefix -g`. A scan whose PATH lacks npm
+    never looks there, which until now reported the same as looking and finding
+    nothing."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.home = Path(tempfile.mkdtemp())
+
+    tearDown = setUp
+
+    def _state(self, npm_output, is_root=False):
+        with patch.object(utils_mod, "run_command", return_value=npm_output):
+            utils_mod.resolve_npm_global_tool_bin("copilot", self.home, is_root)
+        return utils_mod.npm_prefix_state()
+
+    def test_resolved_when_npm_answers(self):
+        self.assertEqual("resolved", self._state("/opt/homebrew"))
+
+    def test_unresolved_when_npm_is_not_on_path(self):
+        self.assertEqual("unresolved", self._state(None))
+
+    def test_unresolved_when_npm_answers_blank(self):
+        self.assertEqual("unresolved", self._state("   "))
+
+    def test_not_probed_on_a_root_scan(self):
+        """Root scans skip the probe by design; that is not the same as a failure."""
+        self.assertEqual("not_probed", self._state("/opt/homebrew", is_root=True))
+
+    def test_reset_between_runs(self):
+        self._state("/opt/homebrew")
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual("not_probed", utils_mod.npm_prefix_state())
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("npm_prefix", utils_mod._SENTRY_TAG_KEYS)
 
 
 class TestRejectedBinaryDiagnostics(unittest.TestCase):

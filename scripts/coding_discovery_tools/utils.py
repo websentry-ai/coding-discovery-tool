@@ -130,11 +130,9 @@ def resolve_npm_global_tool_bin(
 
     # 1. Dynamic npm global prefix — SCANNER-scoped, so non-root only.
     if not is_root:
-        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        prefix = _npm_global_prefix()
         if prefix:
-            prefix = prefix.strip()
-            if prefix:
-                candidates.append(Path(prefix) / "bin" / tool)
+            candidates.append(Path(prefix) / "bin" / tool)
 
     # 2. Machine-global Homebrew prefix — non-root only (shared install).
     if not is_root:
@@ -184,6 +182,27 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
                 found.append(name.lstrip("."))
         except (PermissionError, OSError):
             continue
+    return found
+
+
+def wsl_distros_present(user_home: Path) -> List[str]:
+    """Names of WSL distros installed for ``user_home``. Never raises.
+
+    WSL2 keeps the distro in ``LocalState/ext4.vhdx``, WSL1 in ``LocalState/rootfs``.
+    One relocated by ``wsl --import`` is not found.
+    """
+    found = []
+    try:
+        packages = user_home / "AppData" / "Local" / "Packages"
+        for package in packages.iterdir():
+            try:
+                state = package / "LocalState"
+                if (state / "ext4.vhdx").exists() or (state / "rootfs").is_dir():
+                    found.append(package.name.split("_")[0])
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
     return found
 
 
@@ -2236,9 +2255,11 @@ def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
 _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
-    "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
-    "scan_event", "config_dirs_present", "config_dirs",
+    "is_root", "is_elevated", "detect_scope",
+    "used_fallback_user", "homes_enumerated", "users_scanned",
+    "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
+    "npm_prefix",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2266,6 +2287,23 @@ _sentry_dead_this_run = False
 _REJECTED_BINARIES_CAP = 10
 _rejected_binaries = []
 
+# Root scans skip the probe by design, so "not_probed" is expected there.
+_npm_prefix_state = "not_probed"
+_NPM_PREFIX_UNSET = object()
+_npm_prefix_cached = _NPM_PREFIX_UNSET
+
+
+def _npm_global_prefix() -> Optional[str]:
+    """``npm prefix -g``, resolved once per run. It reports the SCANNER's npm, so it
+    cannot vary between the tools and users a scan walks, and the resolver is called
+    once per pair — 9 call sites times every profile on the machine."""
+    global _npm_prefix_cached, _npm_prefix_state
+    if _npm_prefix_cached is _NPM_PREFIX_UNSET:
+        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        _npm_prefix_cached = prefix.strip() if prefix and prefix.strip() else None
+        _npm_prefix_state = "resolved" if _npm_prefix_cached else "unresolved"
+    return _npm_prefix_cached
+
 
 def record_rejected_binary(candidate, reason: str) -> None:
     """Note a real binary that was found and then not attributed. Never raises."""
@@ -2281,6 +2319,16 @@ def rejected_binaries() -> list:
     return list(_rejected_binaries)
 
 
+def npm_prefix_state() -> str:
+    """Whether ``npm prefix -g`` answered this run: resolved, unresolved, or not_probed.
+
+    An npm-global CLI is found under that prefix, so a scan whose PATH lacks npm
+    never looks where the tool actually is — indistinguishable, until now, from
+    looking and finding nothing.
+    """
+    return _npm_prefix_state
+
+
 def reset_sentry_run_state() -> None:
     """Reset the per-run Sentry dedup / circuit-breaker state."""
     global _sentry_event_count, _sentry_consecutive_fails, _sentry_dead_this_run
@@ -2289,6 +2337,9 @@ def reset_sentry_run_state() -> None:
     _sentry_consecutive_fails = 0
     _sentry_dead_this_run = False
     _rejected_binaries.clear()
+    global _npm_prefix_state, _npm_prefix_cached
+    _npm_prefix_state = "not_probed"
+    _npm_prefix_cached = _NPM_PREFIX_UNSET
 
 
 def _ip_is_loopback(host: str) -> bool:

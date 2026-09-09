@@ -961,5 +961,85 @@ class TestCredentialBearingValues(unittest.TestCase):
         self.assertIsNone(raw["chat.tools.terminal.terminalProfile.osx"])
 
 
+class TestMarketplaceRedaction(unittest.TestCase):
+    """A private plugin marketplace is a git remote, so it carries tokens the
+    same way the endpoints do."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_a_token_in_an_extra_marketplace_is_dropped(self):
+        raw = self._raw({"chat.plugins.extraMarketplaces": {
+            "private": "https://x-access-token:ghp_SECRET@github.com/org/repo.git"}})
+        self.assertEqual(raw["chat.plugins.extraMarketplaces"]["private"],
+                         "https://github.com/org/repo.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_strict_marketplace_headers_keep_only_their_names(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git", "url": "https://u:pw@host/o/r.git?token=T",
+             "headers": {"Authorization": "Bearer SEK"}}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["url"], "https://host/o/r.git")
+        self.assertEqual(entry["headers"], ["Authorization"])
+        self.assertNotIn("SEK", json.dumps(raw))
+
+    def test_an_ordinary_marketplace_ref_is_left_alone(self):
+        # the default value carries a #ref; rewriting it would lose that
+        raw = self._raw({"chat.plugins.marketplaces": [
+            "github/copilot-plugins", "github/awesome-copilot#marketplace"]})
+        self.assertEqual(raw["chat.plugins.marketplaces"],
+                         ["github/copilot-plugins", "github/awesome-copilot#marketplace"])
+
+    def test_an_ipv6_endpoint_keeps_its_brackets(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://[2001:db8::1]:4318/v1?api-key=S"})
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "https://[2001:db8::1]:4318/v1")
+
+
+class TestProfileSettingsMerge(unittest.TestCase):
+    """The riskiest profile wins the posture, but a quieter profile's settings
+    are still evidence and must survive the merge."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="merge-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        (self.ud / "profiles" / "work").mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_non_winning_profile_keys_survive_the_merge(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        (self.ud / "profiles" / "work" / "settings.json").write_text(
+            json.dumps({"chat.tools.terminal.ignoreDefaultAutoApproveRules": True}),
+            encoding="utf-8")
+        rec = self._extract()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertTrue(rec["raw_settings"]["chat.tools.global.autoApprove"])
+        self.assertTrue(rec["raw_settings"]["chat.tools.terminal.ignoreDefaultAutoApproveRules"],
+                        "a quieter profile's settings are evidence too")
+
+    def test_the_winning_profile_wins_a_key_collision(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.sandbox.enabled": "off"}), encoding="utf-8")
+        (self.ud / "profiles" / "work" / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True,
+                        "chat.agent.sandbox.enabled": "on"}), encoding="utf-8")
+        rec = self._extract()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertEqual(rec["raw_settings"]["chat.agent.sandbox.enabled"], "on")
+
+
 if __name__ == "__main__":
     unittest.main()

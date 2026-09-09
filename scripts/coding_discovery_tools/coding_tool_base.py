@@ -1364,6 +1364,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                      "chat.tools.terminal.terminalProfile.windows")
     _URL_KEYS = ("github.copilot.chat.otel.otlpEndpoint",
                  "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride")
+    _MARKETPLACE_KEYS = ("chat.plugins.marketplaces",
+                         "chat.plugins.extraMarketplaces",
+                         "chat.plugins.strictMarketplaces")
 
     @staticmethod
     def _strip_url_secrets(value):
@@ -1384,10 +1387,35 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             port = parts.port          # raises on a malformed port
         except ValueError:
             return "<unparseable>"
+        if ":" in host:
+            host = f"[{host}]"     # an IPv6 literal is ambiguous without its brackets
         if port:
             host = f"{host}:{port}"
         cleaned = host + parts.path
         return f"{scheme}://{cleaned}" if scheme else cleaned
+
+    @classmethod
+    def _credentialed_only(cls, value):
+        """Strip a value only when it actually carries userinfo or a query.
+
+        Marketplace entries are ordinarily plain refs like
+        ``github/awesome-copilot#marketplace``, and rewriting those would drop the
+        ref for no gain."""
+        if isinstance(value, str) and ("@" in value or "?" in value):
+            return cls._strip_url_secrets(value)
+        return value
+
+    @classmethod
+    def _marketplace_without_secrets(cls, value):
+        """A private marketplace is a git remote, so it carries a token the same
+        way the endpoints do, and a strict entry can carry auth headers too."""
+        if isinstance(value, list):
+            return [cls._marketplace_without_secrets(v) for v in value]
+        if isinstance(value, dict):
+            return {k: (sorted(v) if k == "headers" and isinstance(v, dict)
+                        else cls._credentialed_only(v))
+                    for k, v in value.items()}
+        return cls._credentialed_only(value)
 
     @classmethod
     def _without_secrets(cls, key: str, value):
@@ -1397,6 +1425,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                     for k, v in value.items()}
         if key in cls._URL_KEYS:
             return cls._strip_url_secrets(value)
+        if key in cls._MARKETPLACE_KEYS:
+            return cls._marketplace_without_secrets(value)
         return value
 
     def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:

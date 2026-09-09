@@ -2006,6 +2006,45 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         self.assertEqual(no_tools_calls, [], "no_tools_found must not fire when a tool is detected")
 
 
+class TestNpmPrefixDiagnostics(unittest.TestCase):
+    """An npm-global CLI lives under `npm prefix -g`. A scan whose PATH lacks npm
+    never looks there, which until now reported the same as looking and finding
+    nothing."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.home = Path(tempfile.mkdtemp())
+
+    tearDown = setUp
+
+    def _state(self, npm_output, is_root=False):
+        with patch.object(utils_mod, "run_command", return_value=npm_output):
+            utils_mod.resolve_npm_global_tool_bin("copilot", self.home, is_root)
+        return utils_mod.npm_prefix_state()
+
+    def test_resolved_when_npm_answers(self):
+        self.assertEqual("resolved", self._state("/opt/homebrew"))
+
+    def test_unresolved_when_npm_is_not_on_path(self):
+        self.assertEqual("unresolved", self._state(None))
+
+    def test_unresolved_when_npm_answers_blank(self):
+        self.assertEqual("unresolved", self._state("   "))
+
+    def test_not_probed_on_a_root_scan(self):
+        """Root scans skip the probe by design; that is not the same as a failure."""
+        self.assertEqual("not_probed", self._state("/opt/homebrew", is_root=True))
+
+    def test_reset_between_runs(self):
+        self._state("/opt/homebrew")
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual("not_probed", utils_mod.npm_prefix_state())
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("npm_prefix", utils_mod._SENTRY_TAG_KEYS)
+
+
 class TestRejectedBinaryDiagnostics(unittest.TestCase):
     """A binary found and then not attributed is the one cause a zero-tool event
     could not previously distinguish, because the rejection was silent."""

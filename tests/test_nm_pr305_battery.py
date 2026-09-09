@@ -242,5 +242,44 @@ class R_SkippedBeforeParsing(unittest.TestCase):
         self.assertEqual(self._extract()["permission_mode"], "default")
 
 
+class R2_InaccessibleConfigDir(unittest.TestCase):
+    """An unreadable config directory looks exactly like an empty one from the
+    outside. Emitting the defaults there would report a clean posture for a user
+    whose settings we were never able to see.
+
+    Both cases already hold: the profiles glob raises on the unreadable parent
+    and short-circuits to unknown. These pin that outcome so it survives a
+    reordering of the candidate list, which would otherwise reopen it silently."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="nm305d-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+
+    def tearDown(self):
+        try:
+            os.chmod(self.ud, 0o755)
+        except OSError:
+            pass
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    @unittest.skipIf(os.geteuid() == 0 if hasattr(os, "geteuid") else False,
+                     "root bypasses directory permissions")
+    def test_an_unreadable_config_dir_is_unknown_not_default(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.chmod(self.ud, 0o000)
+        self.assertIsNone(self._extract(),
+                          "a directory we cannot read must not report a clean posture")
+
+    def test_a_readable_empty_dir_is_still_the_defaults(self):
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+
 if __name__ == "__main__":
     unittest.main()

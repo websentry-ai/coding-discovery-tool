@@ -1319,8 +1319,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 continue
             try:
                 os.lstat(str(candidate))
-            except OSError:
+            except FileNotFoundError:
                 continue   # genuinely absent
+            except OSError:
+                return True   # cannot tell — an unreadable directory reads like this
             return True
         return False
 

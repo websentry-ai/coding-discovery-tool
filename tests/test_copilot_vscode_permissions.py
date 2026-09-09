@@ -950,6 +950,38 @@ class TestDefaultPosture(unittest.TestCase):
         self.ud.mkdir(parents=True)
         self.assertEqual(self._extract()["settings_path"], str(self.ud / "settings.json"))
 
+    def test_a_stray_file_under_profiles_does_not_suppress_the_row(self):
+        """touch profiles/x.txt must not drop the user off the page."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "profiles").mkdir()
+        (self.ud / "profiles" / "not-a-dir.txt").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    def test_a_plain_file_where_profiles_would_be_is_not_a_failure(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "profiles").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    @unittest.skipUnless(os.name == "posix", "chmod 0o111 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses directory permissions, so 0o111 is still listable")
+    def test_an_unlistable_profile_cannot_hide_behind_a_configured_default(self):
+        """A record built from the default file must not present as a clean
+        posture while a profile we could not inspect stays live."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.chmod(self.ud / "profiles", 0o111)
+        try:
+            self.assertIsNone(self._extract(),
+                              "an uninspectable profile leaves the posture unknown")
+        finally:
+            os.chmod(self.ud / "profiles", 0o755)
+
     @unittest.skipUnless(os.name == "posix", "chmod 0o111 is POSIX-specific")
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
                      "root bypasses directory permissions, so 0o111 is still listable")

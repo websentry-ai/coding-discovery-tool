@@ -1265,6 +1265,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         per_channel = []
         defaults_path: Optional[Path] = None
         unreadable = False
+        # A file we never got to look at is not the same as one we read and
+        # rejected: only the former can be hiding a posture VS Code still applies.
+        uninspectable = False
         for config_dir in self._user_config_dirs(Path(user_home)):
             config_dir = Path(config_dir)
             try:
@@ -1278,6 +1281,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             enumerated = list(self._iter_channel_settings_files(config_dir))
             if self._skipped_a_present_file(config_dir, enumerated):
                 unreadable = True
+                uninspectable = True
             for path in enumerated:
                 data = self._parse_jsonc(path, user_home)
                 if data is None:
@@ -1298,7 +1302,13 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             if unreadable or defaults_path is None:
                 return None
             return self._default_posture(defaults_path)
-        return max(per_channel, key=self._permissiveness)
+        winner = max(per_channel, key=self._permissiveness)
+        if uninspectable and winner.get("permission_mode") != "bypassPermissions":
+            # VS Code loads a profile by known path whether or not we could list
+            # it, so what we could not inspect may hold a bypass. Only an already
+            # maximal posture cannot be made worse by what we missed.
+            return None
+        return winner
 
     @staticmethod
     def _skipped_a_present_file(config_dir: Path, enumerated) -> bool:
@@ -1316,8 +1326,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         try:
             with os.scandir(config_dir / "profiles") as entries:
                 candidates += [Path(e.path) / "settings.json" for e in entries]
-        except FileNotFoundError:
-            pass
+        except (FileNotFoundError, NotADirectoryError):
+            pass          # no profiles here, or a stray file where they would be
         except OSError:
             return True
         for candidate in candidates:
@@ -1325,8 +1335,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 continue
             try:
                 os.lstat(str(candidate))
-            except FileNotFoundError:
-                continue   # genuinely absent
+            except (FileNotFoundError, NotADirectoryError):
+                continue   # absent, or its parent is a plain file
             except OSError:
                 return True   # cannot tell — an unreadable directory reads like this
             return True

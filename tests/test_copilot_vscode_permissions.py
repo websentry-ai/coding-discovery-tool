@@ -896,5 +896,70 @@ class TestCopilotExtensionKeys(unittest.TestCase):
         self.assertEqual(list(raw), ["github.copilot.chat.agent.autoFix"])
 
 
+class TestCredentialBearingValues(unittest.TestCase):
+    """Two captured settings are posture signal whose VALUE can carry a secret.
+    Keeping the setting while dropping the secret is the point."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_terminal_profile_env_values_are_not_uploaded(self):
+        raw = self._raw({"chat.tools.terminal.terminalProfile.osx": {
+            "path": "/bin/zsh", "args": ["-l"],
+            "env": {"AWS_SECRET_ACCESS_KEY": "AKIAsecretvalue", "PATH": "/usr/bin"}}})
+        prof = raw["chat.tools.terminal.terminalProfile.osx"]
+        self.assertEqual(prof["path"], "/bin/zsh")
+        self.assertEqual(prof["args"], ["-l"])
+        self.assertEqual(prof["env"], ["AWS_SECRET_ACCESS_KEY", "PATH"],
+                         "env names stay as signal; values must not travel")
+        self.assertNotIn("AKIAsecretvalue", json.dumps(raw))
+
+    def test_endpoint_userinfo_and_query_are_stripped(self):
+        raw = self._raw({
+            "github.copilot.chat.otel.otlpEndpoint": "https://u:p@collector.internal:4318/v1?api-key=SEK",
+            "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride":
+                "https://ado.example.com/search?token=abc123"})
+        blob = json.dumps(raw)
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "https://collector.internal:4318/v1")
+        for secret in ("u:p@", "SEK", "abc123", "api-key", "token="):
+            self.assertNotIn(secret, blob)
+
+    def test_a_scheme_less_endpoint_is_redacted_too(self):
+        """The setting is a plain string, so users write it without a scheme —
+        and it carries a credential just as readily."""
+        raw = self._raw({
+            "github.copilot.chat.otel.otlpEndpoint": "collector.internal:4318/v1?api-key=SECRET",
+            "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride":
+                "user:pw@ado.internal/search?token=abc123"})
+        blob = json.dumps(raw)
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "collector.internal:4318/v1")
+        for secret in ("SECRET", "api-key", "user:pw@", "abc123", "token="):
+            self.assertNotIn(secret, blob)
+
+    def test_a_malformed_endpoint_does_not_leak_on_the_error_path(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "https://h:notaport/x?k=LEAK"})
+        self.assertNotIn("LEAK", json.dumps(raw))
+
+    def test_the_endpoint_host_is_still_reported(self):
+        # the destination is the finding; losing it would defeat capturing the key
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "http://attacker.example/v1?k=1"})
+        self.assertIn("attacker.example", raw["github.copilot.chat.otel.otlpEndpoint"])
+
+    def test_a_profile_without_env_is_untouched(self):
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": {"path": "/bin/bash"}})
+        self.assertEqual(raw["chat.tools.terminal.terminalProfile.linux"], {"path": "/bin/bash"})
+
+    def test_non_url_and_non_dict_values_survive(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "",
+                         "chat.tools.terminal.terminalProfile.osx": None})
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"], "")
+        self.assertIsNone(raw["chat.tools.terminal.terminalProfile.osx"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -256,8 +256,9 @@ def collect_provider_server_observations(
                 continue
             try:
                 parsed_url = urlparse(url)
+                port = f':{parsed_url.port}' if parsed_url.port else ''
                 sanitized_url = (
-                    f'{parsed_url.scheme.lower()}://localhost:{parsed_url.port}'
+                    f'{parsed_url.scheme.lower()}://{parsed_url.hostname}{port}'
                     f'{parsed_url.path}'
                 )
             except ValueError:

@@ -237,7 +237,7 @@ class TestCacheKey(unittest.TestCase):
             "publisher.extension/server",
         )
 
-    def test_provider_identity_only_applies_to_direct_literal_stream_urls(self):
+    def test_provider_identity_only_applies_to_direct_loopback_urls(self):
         additional_data = {
             "scope": "vscode-provider-cache",
             "providerId": "publisher.extension/provider",
@@ -247,11 +247,11 @@ class TestCacheKey(unittest.TestCase):
             compute_fingerprint(
                 name="server",
                 command=None,
-                url="http://localhost:51983/foo/../stream",
+                url="https://api.githubcopilot.com/mcp/",
                 args=[],
                 additional_data=additional_data,
             ),
-            "url:localhost:51983/foo/../stream",
+            "url:api.githubcopilot.com/mcp",
         )
         self.assertEqual(
             compute_fingerprint(
@@ -1098,7 +1098,7 @@ class TestCollectProviderServerObservations(unittest.TestCase):
             self._server(additional_data={}),
             self._server(providerId="evil.publisher/provider"),
             self._server(url="https://remote.example/stream"),
-            self._server(url="http://localhost:51983/not-stream"),
+            self._server(url="https://localhost.evil.com/mcp"),
             self._server(command="python"),
         )
         for server in cases:

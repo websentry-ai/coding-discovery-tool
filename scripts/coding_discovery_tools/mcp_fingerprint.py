@@ -27,8 +27,8 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     nuget:<package>              -> package run by `dnx` or `dotnet tool exec`
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
-    vscode-provider:<provider>:<server> -> VS Code extension provider behind a
-                                    dynamic localhost /stream endpoint
+    vscode-provider:<provider>:<server> -> VS Code extension provider whose
+                                    server listens on a loopback address
     script:<hash>                -> content hash of a local script (supplied by the client)
     bin:<name>                   -> basename of a bespoke local binary (args dropped)
     intellij:<name>              -> from an IntelliJ plugin-managed server (command == "builtin")
@@ -64,9 +64,11 @@ CLAUDE_BUILTIN_PREFIX = 'claude-builtin:'
 CLAUDE_CONNECTOR_SCOPE = 'claude-connector'
 VSCODE_PROVIDER_CACHE_SCOPE = 'vscode-provider-cache'
 VSCODE_PROVIDER_PREFIX = 'vscode-provider:'
-DYNAMIC_LOCAL_PORT_MIN = 1024
-_VSCODE_LOCAL_STREAM_URL_RE = re.compile(
-    r'https?://localhost:([0-9]{1,5})/stream/?(?:[?#].*)?',
+# A loopback address is a throwaway: the port changes on every extension
+# restart, so it names nothing. A real host does, and it is what makes the same
+# remote server group across every tool, so those keep the url: identity.
+_VSCODE_PROVIDER_LOOPBACK_URL_RE = re.compile(
+    r'https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?(?:[/?#].*)?',
     re.IGNORECASE,
 )
 _EXTENSION_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
@@ -705,7 +707,7 @@ def _normalize_bin(command: str) -> Optional[str]:
     return b
 
 
-def _vscode_provider_local_stream_identity(
+def _vscode_provider_loopback_identity(
     command: Optional[str],
     url_value: Optional[str],
     args: List[str],
@@ -719,11 +721,7 @@ def _vscode_provider_local_stream_identity(
     ):
         return None
 
-    url_match = _VSCODE_LOCAL_STREAM_URL_RE.fullmatch(url_value.strip())
-    if not url_match:
-        return None
-    port = int(url_match.group(1))
-    if port < DYNAMIC_LOCAL_PORT_MIN or port > 65535:
+    if not _VSCODE_PROVIDER_LOOPBACK_URL_RE.fullmatch(url_value.strip()):
         return None
 
     provider_id = additional_data.get('providerId')
@@ -814,10 +812,7 @@ def compute_fingerprint(
         if builtin:
             return f'{CLAUDE_BUILTIN_PREFIX}{builtin}'
 
-    # VS Code provider-cache entries can expose one local HTTP server on a new
-    # port each time the extension starts. Use the extension/provider identity
-    # only for that exact dynamic transport shape.
-    vscode_provider = _vscode_provider_local_stream_identity(
+    vscode_provider = _vscode_provider_loopback_identity(
         command,
         url,
         safe_args,

@@ -228,7 +228,16 @@ def _refresh_mcp_tools_cache(tool_name: str, user_name: str, projects: List[Dict
     """
     try:
         server_entries, errored_cache_keys = mcp_tools_cache.collect_server_entries(projects)
-        mcp_tools_cache.update_user_entries(tool_name, user_name, server_entries, errored_cache_keys)
+        provider_server_observations = (
+            mcp_tools_cache.collect_provider_server_observations(projects)
+        )
+        mcp_tools_cache.update_user_entries(
+            tool_name,
+            user_name,
+            server_entries,
+            errored_cache_keys,
+            provider_server_observations or None,
+        )
     except Exception as e:
         logger.warning(f"  Could not update MCP tools cache for {tool_name}/{user_name}: {e}")
         report_to_sentry(

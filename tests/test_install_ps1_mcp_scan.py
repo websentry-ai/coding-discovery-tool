@@ -72,6 +72,9 @@ class TestArgumentRoutingIsDeclared(unittest.TestCase):
         self.assertNotIn("--api-key", line)
         self.assertNotIn("$ApiKey", line)
 
+    def test_mcp_scan_exports_the_api_key_to_the_child_environment(self):
+        self.assertIn("$env:UNBOUND_API_KEY = $ApiKey", self.text)
+
     def test_discovery_args_are_unchanged(self):
         line = _assignment_for(self.text, DISCOVERY_MODULE)
         self.assertIn('"--api-key", $ApiKey', line)
@@ -81,6 +84,10 @@ class TestArgumentRoutingIsDeclared(unittest.TestCase):
         self.assertIn(
             "if ($McpScan -and [string]::IsNullOrWhiteSpace($McpServerName))", self.text
         )
+
+    def test_python_exit_code_is_propagated_after_cleanup(self):
+        self.assertIn("$pythonExitCode = $LASTEXITCODE", self.text)
+        self.assertIn("if ($pythonExitCode -ne 0) { exit $pythonExitCode }", self.text)
 
 
 @unittest.skipUnless(platform.system() == "Windows", "install.ps1 is Windows PowerShell")
@@ -93,7 +100,11 @@ class TestInstallPs1McpScanRouting(unittest.TestCase):
         stubs = (
             'function Get-PythonCommand { return "python3" }\n'
             "function Get-Repository { New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null; return $true }\n"
-            'function python3 { Write-Output ("ARGV " + ($args -join " ")) }\n'
+            'function python3 {\n'
+            '  Write-Output ("ARGV " + ($args -join " "))\n'
+            '  Write-Output ("ENVKEY " + $env:UNBOUND_API_KEY)\n'
+            '  if ($env:TEST_PYTHON_EXIT_CODE) { $global:LASTEXITCODE = [int]$env:TEST_PYTHON_EXIT_CODE } else { $global:LASTEXITCODE = 0 }\n'
+            '}\n'
             "Main\n"
         )
         script = _functions_only(INSTALL_PS1.read_text(encoding="utf-8"))
@@ -102,9 +113,14 @@ class TestInstallPs1McpScanRouting(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.workdir, ignore_errors=True)
 
-    def _run(self, *args):
+    def _run(self, *args, api_key_in_env=True, python_exit_code=None):
         env = dict(os.environ)
-        env["UNBOUND_API_KEY"] = API_KEY
+        if api_key_in_env:
+            env["UNBOUND_API_KEY"] = API_KEY
+        else:
+            env.pop("UNBOUND_API_KEY", None)
+        if python_exit_code is not None:
+            env["TEST_PYTHON_EXIT_CODE"] = str(python_exit_code)
         return subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-File", str(self.harness), "-Domain", DOMAIN, *args],
@@ -130,6 +146,22 @@ class TestInstallPs1McpScanRouting(unittest.TestCase):
         line = self._argv_line(result)
         self.assertNotIn("--api-key", line)
         self.assertNotIn(API_KEY, line)
+
+    def test_mcp_scan_exports_parameter_api_key_to_the_scanner(self):
+        result = self._run(
+            "-ApiKey", API_KEY, "-McpScan", "-McpServerName", "forter",
+            api_key_in_env=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn(f"ENVKEY {API_KEY}", output)
+
+    def test_mcp_scan_propagates_the_scanner_exit_code(self):
+        result = self._run(
+            "-McpScan", "-McpServerName", "forter", python_exit_code=23,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 23, output)
 
     def test_plain_invocation_still_runs_discovery(self):
         result = self._run()

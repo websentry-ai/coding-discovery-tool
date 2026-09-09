@@ -205,6 +205,7 @@ function Main {
         # The scan reads UNBOUND_API_KEY / UNBOUND_MCP_SERVER_JSON from the environment,
         # so the key and the server config stay out of Win32_Process.CommandLine.
         if ($McpScan) {
+            $env:UNBOUND_API_KEY = $ApiKey
             $pythonArgs = @("-m", "scripts.coding_discovery_tools.scan_single_mcp_server", "--name", $McpServerName, "--domain", $Domain)
         } else {
             # NOTE: --api-key appears in the Python process command line (Win32_Process.CommandLine /
@@ -217,11 +218,14 @@ function Main {
         $env:PYTHONWARNINGS = "ignore" # Suppress syntax warnings
 
         if ($pythonCmd -eq "py -3") { & py -3 @pythonArgs } else { & $pythonCmd @pythonArgs }
+        $pythonExitCode = $LASTEXITCODE
     }
     finally {
         Pop-Location
         Remove-TempDirectory
     }
+
+    if ($pythonExitCode -ne 0) { exit $pythonExitCode }
 }
 
 Main

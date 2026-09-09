@@ -193,6 +193,27 @@ class TestConfigDirScan(_TempHomeTestCase):
         self.assertEqual({(ide["display_name"], ide["version"]) for ide in found}, EXPECTED_SCAN)
 
 
+class TestUnreadableConfigDir(_TempHomeTestCase):
+    """``Path.exists()`` raises on an unreadable parent rather than returning False,
+    so probing another user's home on a non-root scan threw out of the detector."""
+
+    SETTINGS_DIRS = {
+        MacOSJetBrainsDetector: Path("Library") / "Application Support",
+        LinuxJetBrainsDetector: Path(".config"),
+    }
+
+    def test_access_denied_is_not_a_scan_failure(self) -> None:
+        for detector_cls, settings_dir in self.SETTINGS_DIRS.items():
+            with self.subTest(detector=detector_cls.__name__):
+                home = self.tmp_path / detector_cls.__name__
+                _make_config_dir(home / settings_dir / "JetBrains", ["Rider2025.2"])
+
+                with mock.patch.object(
+                    Path, "exists", side_effect=PermissionError(13, "Permission denied")
+                ):
+                    self.assertEqual([], detector_cls()._scan_jetbrains_config_dir(home))
+
+
 class TestAndroidStudioVendorDir(_TempHomeTestCase):
     """Android Studio is an IntelliJ-platform IDE, but Google ships it under its
     own vendor dir, so a JetBrains-only root never saw it."""

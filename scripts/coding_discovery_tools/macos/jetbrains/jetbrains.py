@@ -149,7 +149,15 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         """
         detected_ides = []
 
-        if not jetbrains_config_dir.exists():
+        # Another user's config dir is access-denied to a non-root scan and .exists()
+        # re-raises it; the try below covered only the listing.
+        try:
+            config_present = jetbrains_config_dir.exists()
+        except PermissionError as e:
+            logger.debug(f"Could not probe JetBrains config directory {jetbrains_config_dir}: {e}")
+            return detected_ides
+
+        if not config_present:
             logger.debug(f"JetBrains config directory not found: {jetbrains_config_dir}")
             return detected_ides
 

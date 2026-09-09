@@ -62,8 +62,12 @@ class MacOSAntigravityDetector(BaseToolDetector):
         user_home = getattr(self, 'user_home', None)
         for app_path in self.POSSIBLE_APP_PATHS:
             for candidate in macos_app_candidates(app_path, user_home):
-                if candidate.exists():
-                    return candidate
+                # The ~/Applications sibling is another user's dir on a non-root scan.
+                try:
+                    if candidate.exists():
+                        return candidate
+                except PermissionError as e:
+                    logger.debug(f"Could not probe Antigravity candidate {candidate}: {e}")
         return None
 
     def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:

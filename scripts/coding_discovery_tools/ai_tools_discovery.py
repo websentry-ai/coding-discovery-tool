@@ -182,6 +182,7 @@ configure_logger()
 # "not yet computed" marker — otherwise the expensive whole-disk walk re-runs on
 # every accessor call whenever the real result is ``None``.
 _AUGMENT_CACHE_UNSET = object()
+
 # Sentry metric keys must match [a-zA-Z_][a-zA-Z0-9_.\-]* — tool names like
 # "Gemini CLI" / "Roo Code" carry spaces, so they cannot be used verbatim.
 _METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
@@ -215,12 +216,8 @@ def _normalise_path(p: str) -> str:
     return n
 
 
-def _refresh_mcp_tools_cache(
-    tool_name: str,
-    user_name: str,
-    projects: List[Dict],
-    sentry_ctx: Optional[Dict] = None,
-) -> None:
+def _refresh_mcp_tools_cache(tool_name: str, user_name: str, projects: List[Dict],
+                             sentry_ctx: Optional[Dict] = None) -> None:
     """Refresh the local MCP tools cache (mcp-tools-cache.json) for one
     (tool, user) from the report's projects[].mcpServers[].
 
@@ -3745,12 +3742,7 @@ def main():
                         # branch below: the PreToolUse hook reads it on the hot path, so
                         # it must be rewritten every run even when the upload is skipped.
                         with time_step("update_mcp_tools_cache", "process"):
-                            _refresh_mcp_tools_cache(
-                                tool_name,
-                                user_name,
-                                projects,
-                                sentry_ctx,
-                            )
+                            _refresh_mcp_tools_cache(tool_name, user_name, projects, sentry_ctx)
 
                         # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.
                         # Backend already dedups on payload_hash; this short-circuits the upload

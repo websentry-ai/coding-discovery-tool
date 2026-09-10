@@ -11,7 +11,7 @@ from ...macos_extraction_helpers import MACHINE_APPS_DIR, is_running_as_root
 from ...vscode_extension_helpers import (
     VSCODE_EDITOR_DISPLAY_NAMES,
     extensions_dir_for_editor,
-    find_extension_in_editor,
+    find_extension_in_editor_channels,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Copilot folder name.
 _VSCODE_APP_EXTENSION_ROOTS = [
     Path("/Applications/Visual Studio Code.app/Contents/Resources/app/extensions"),
+    Path("/Applications/Code.app/Contents/Resources/app/extensions"),
     Path("/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/extensions"),
 ]
 _VSCODE_BUILTIN_COPILOT_DIRS = ("copilot", "copilot-chat")
@@ -151,15 +152,15 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
 
         for ide_key, ide_name in SUPPORTED_IDES.items():
             for ext_id, label in _MARKETPLACE_EXTENSIONS:
-                entry = find_extension_in_editor(user_home, ide_key, ext_id)
-                if entry is None:
+                found = find_extension_in_editor_channels(user_home, ide_key, ext_id)
+                if found is None:
                     continue
-                _location, version = entry
+                dir_key, version = found
                 results.append({
                     "name": f"{label} ({ide_name})",
                     "version": version or "unknown",
                     "publisher": "GitHub",
-                    "install_path": str(extensions_dir_for_editor(user_home, ide_key))
+                    "install_path": str(extensions_dir_for_editor(user_home, dir_key))
                 })
                 if ide_key == "Code":
                     code_found = True
@@ -188,14 +189,16 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         servers — unlike the marketplace path, where ``github.copilot`` and
         ``github.copilot-chat`` are genuinely separate installs.
         """
+        # os.stat, not Path.exists: 3.14 returns False there for an unreadable path,
+        # and an unreadable home must not look like an absent tool.
         uses_vscode = False
         for rel in _VSCODE_USER_DATA_DIRS:
             try:
-                if (user_home / rel).exists():
-                    uses_vscode = True
-                    break
-            except OSError:
+                os.stat(user_home / rel)
+            except (FileNotFoundError, NotADirectoryError):
                 continue
+            uses_vscode = True
+            break
         if not uses_vscode:
             logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
             return []

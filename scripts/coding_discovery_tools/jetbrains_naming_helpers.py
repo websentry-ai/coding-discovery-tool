@@ -9,6 +9,7 @@ and windows/ detectors and drifted; they live here so all three agree.
 import logging
 import re
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
@@ -22,11 +23,21 @@ JETBRAINS_SKIP_FOLDERS: FrozenSet[str] = frozenset({
     "consentOptions", "PrivacyPolicy", "Toolbox",
 })
 
+# Android Studio is an IntelliJ-platform IDE, but Google ships it under its own vendor dir.
+JETBRAINS_VENDOR_DIRS: Tuple[str, ...] = ("JetBrains", "Google")
+
+
+def jetbrains_config_roots(settings_dir: Path) -> List[Path]:
+    """The JetBrains-family config roots under a platform's per-user settings dir."""
+    return [settings_dir / vendor for vendor in JETBRAINS_VENDOR_DIRS]
+
+
 # Read-only: one object aliased into all three detectors, so in-place edits would leak.
 JETBRAINS_IDE_NAME_MAPPING: Mapping[str, str] = MappingProxyType({
     "IntelliJIdea": "IntelliJ IDEA",
     "IdeaIC": "IntelliJ IDEA Community",
     "IdeaIE": "IntelliJ IDEA Educational",
+    "AndroidStudio": "Android Studio",
     "Aqua": "Aqua",
     "PyCharm": "PyCharm",
     "PyCharmCE": "PyCharm Community",
@@ -46,6 +57,28 @@ VERSION_SUFFIX = re.compile(r'^([A-Za-z][A-Za-z ._-]*?)((?:\d+\.)+\d+(?:[-.][A-Z
 
 # Real config folders carry a version ("CLion2025.3"); uninstall leftovers don't ("Clion").
 VERSIONED_FOLDER = re.compile(r'^[A-Za-z][A-Za-z ._-]*\d+(?:\.\d+)+')
+
+# Leading digits of a version segment, so "2-EAP" still orders as 2.
+SEGMENT_NUMBER = re.compile(r'^\d+')
+
+
+def version_sort_key(version: str) -> Tuple[Tuple[int, ...], int]:
+    """Ordering key for an IDE version, so newer sorts higher.
+
+    Numbers first, then stability, so 2025.1 < 2025.2-EAP < 2025.2: a
+    prerelease outranks the older stable it supersedes but loses to the release
+    it precedes, which is what leaves a lingering EAP config dir behind.
+    Unparseable versions sort lowest.
+    """
+    segments = version.split('.')
+    parts = []
+    for segment in segments:
+        match = SEGMENT_NUMBER.match(segment)
+        if not match:
+            break
+        parts.append(int(match.group()))
+    stable = 1 if parts and all(s.isdigit() for s in segments) else 0
+    return (tuple(parts) if parts else (0,)), stable
 
 
 def should_skip_folder(folder: str, skip_folders: Iterable[str]) -> bool:

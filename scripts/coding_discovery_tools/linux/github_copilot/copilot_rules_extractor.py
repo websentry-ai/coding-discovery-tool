@@ -44,7 +44,7 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
     """Extractor for GitHub Copilot rules on Linux systems."""
 
     JETBRAINS_IDE_PATTERNS = [
-        "IntelliJ", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
+        "IntelliJ", "Android Studio", "PyCharm", "WebStorm", "PhpStorm", "GoLand",
         "Rider", "CLion", "RustRover", "RubyMine", "DataGrip", "DataSpell",
     ]
 

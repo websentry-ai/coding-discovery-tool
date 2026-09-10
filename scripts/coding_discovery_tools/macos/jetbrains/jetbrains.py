@@ -13,10 +13,12 @@ from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
     detect_plan,
+    jetbrains_config_roots,
     looks_like_ide_folder,
     parse_ide_name_and_version,
     parse_plugin_metadata,
     should_skip_folder,
+    version_sort_key,
 )
 from ...macos_extraction_helpers import is_running_as_root
 
@@ -134,10 +136,18 @@ class MacOSJetBrainsDetector(BaseToolDetector):
 
     def _scan_jetbrains_config_dir(self, user_home: Path) -> List[Dict]:
         """
-        Scan JetBrains config directory for a specific user.
+        Scan every JetBrains-family config root for a specific user.
         """
         detected_ides = []
-        jetbrains_config_dir = user_home / "Library" / "Application Support" / "JetBrains"
+        for root in jetbrains_config_roots(user_home / "Library" / "Application Support"):
+            detected_ides.extend(self._scan_vendor_config_dir(root))
+        return detected_ides
+
+    def _scan_vendor_config_dir(self, jetbrains_config_dir: Path) -> List[Dict]:
+        """
+        Scan one vendor's config directory for IDE installations.
+        """
+        detected_ides = []
 
         if not jetbrains_config_dir.exists():
             logger.debug(f"JetBrains config directory not found: {jetbrains_config_dir}")
@@ -200,8 +210,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         latest = {}
         for ide in ide_list:
             name = ide['display_name']
-            parts = [int(x) for x in ide['version'].split('.') if x.isdigit()]
-            ver = tuple(parts) if parts else (0,)
+            ver = version_sort_key(ide['version'])
             if name not in latest or ver > latest[name][1]:
                 latest[name] = (ide, ver)
         return [entry[0] for entry in latest.values()]

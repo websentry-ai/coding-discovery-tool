@@ -10,7 +10,7 @@ from ...jetbrains_naming_helpers import plugin_entries
 from ...vscode_extension_helpers import (
     VSCODE_EDITOR_DISPLAY_NAMES,
     extensions_dir_for_editor,
-    find_extension_in_editor,
+    find_extension_in_editor_channels,
 )
 from ...windows_extraction_helpers import is_running_as_admin
 from ..jetbrains.jetbrains import WindowsJetBrainsDetector
@@ -166,12 +166,12 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
 
         for ide_key, ide_name in SUPPORTED_IDES.items():
             for ext_id, label in _MARKETPLACE_EXTENSIONS:
-                entry = find_extension_in_editor(user_home, ide_key, ext_id)
-                if entry is None:
+                found = find_extension_in_editor_channels(user_home, ide_key, ext_id)
+                if found is None:
                     continue
-                _location, version = entry
+                dir_key, version = found
                 name = f"{label} ({ide_name})"
-                ext_dir = extensions_dir_for_editor(user_home, ide_key)
+                ext_dir = extensions_dir_for_editor(user_home, dir_key)
                 results.append({
                     "name": name,
                     "version": version or "unknown",

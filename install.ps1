@@ -200,6 +200,7 @@ function Main {
 
     if (-not (Get-Repository)) { Write-ErrorMessage "Failed to download repository."; exit 1 }
 
+    $previousApiKey = $env:UNBOUND_API_KEY
     Push-Location $TEMP_DIR
     try {
         # The scan reads UNBOUND_API_KEY / UNBOUND_MCP_SERVER_JSON from the environment,
@@ -221,6 +222,7 @@ function Main {
         $pythonExitCode = $LASTEXITCODE
     }
     finally {
+        $env:UNBOUND_API_KEY = $previousApiKey
         Pop-Location
         Remove-TempDirectory
     }

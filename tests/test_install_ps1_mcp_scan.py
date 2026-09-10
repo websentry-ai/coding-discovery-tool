@@ -85,6 +85,12 @@ class TestArgumentRoutingIsDeclared(unittest.TestCase):
             "if ($McpScan -and [string]::IsNullOrWhiteSpace($McpServerName))", self.text
         )
 
+    def test_api_key_env_is_restored_after_the_scan(self):
+        self.assertIn("$previousApiKey = $env:UNBOUND_API_KEY", self.text)
+        after_save = self.text.split("$previousApiKey = $env:UNBOUND_API_KEY", 1)[1]
+        finally_block = after_save.split("finally {", 1)[1].split("}", 1)[0]
+        self.assertIn("$env:UNBOUND_API_KEY = $previousApiKey", finally_block)
+
     def test_python_exit_code_is_propagated_after_cleanup(self):
         self.assertIn("$pythonExitCode = $LASTEXITCODE", self.text)
         self.assertIn("if ($pythonExitCode -ne 0) { exit $pythonExitCode }", self.text)
@@ -106,6 +112,7 @@ class TestInstallPs1McpScanRouting(unittest.TestCase):
             '  if ($env:TEST_PYTHON_EXIT_CODE) { $global:LASTEXITCODE = [int]$env:TEST_PYTHON_EXIT_CODE } else { $global:LASTEXITCODE = 0 }\n'
             '}\n'
             "Main\n"
+            'Write-Output ("AFTERKEY " + $env:UNBOUND_API_KEY)\n'
         )
         script = _functions_only(INSTALL_PS1.read_text(encoding="utf-8"))
         self.harness.write_text(script + "\n\n" + stubs, encoding="utf-8")
@@ -155,6 +162,25 @@ class TestInstallPs1McpScanRouting(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertIn(f"ENVKEY {API_KEY}", output)
+
+    def _after_key(self, result):
+        output = result.stdout + result.stderr
+        lines = [l for l in output.splitlines() if l.startswith("AFTERKEY")]
+        self.assertEqual(len(lines), 1, output)
+        return lines[0][len("AFTERKEY"):].strip()
+
+    def test_parameter_api_key_does_not_outlive_the_scan(self):
+        result = self._run(
+            "-ApiKey", API_KEY, "-McpScan", "-McpServerName", "forter",
+            api_key_in_env=False,
+        )
+        self.assertEqual(self._after_key(result), "")
+
+    def test_callers_api_key_is_left_as_it_was(self):
+        result = self._run(
+            "-ApiKey", "parameter-key", "-McpScan", "-McpServerName", "forter",
+        )
+        self.assertEqual(self._after_key(result), API_KEY)
 
     def test_mcp_scan_propagates_the_scanner_exit_code(self):
         result = self._run(

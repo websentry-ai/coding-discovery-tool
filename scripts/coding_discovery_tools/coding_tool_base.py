@@ -1283,10 +1283,17 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 unreadable = True
                 uninspectable = True
             for path in enumerated:
-                data = self._parse_jsonc(path, user_home)
+                raw = self._read_contained(path, Path(user_home))
+                if raw is None:
+                    # Refused by our own policy — containment, the size cap, a
+                    # non-regular file. VS Code applies it regardless, so this is
+                    # config we did not get to see, not config that is absent.
+                    unreadable = True
+                    uninspectable = True
+                    continue
+                data = self._parse_jsonc_text(raw)
                 if data is None:
-                    # Present but refused or unparseable: their posture is unknown,
-                    # which is not the same as them being on the defaults.
+                    # Malformed: unknown to us, but VS Code cannot apply it either.
                     unreadable = True
                     continue
                 record = self._build_record(data, path, "user")
@@ -1375,14 +1382,24 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 if not path.is_file():
                     return None
                 raw = path.read_text(encoding="utf-8", errors="replace")
-            data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
-            return data if isinstance(data, dict) else None
+            return cls._parse_jsonc_text(raw)
         except (PermissionError, OSError) as e:
             logger.debug(f"Permission/OS error reading {path}: {e}")
             return None
         except Exception as e:
             logger.debug(f"Could not parse {path}: {e}")
             return None
+
+    @staticmethod
+    def _parse_jsonc_text(raw: str) -> Optional[Dict]:
+        """Parse already-read JSONC text. Separate from the read so a caller can
+        tell a file it was refused from one it read and could not parse."""
+        try:
+            data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
+        except Exception as e:
+            logger.debug(f"Could not parse settings text: {e}")
+            return None
+        return data if isinstance(data, dict) else None
 
     def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:
         raw_settings = {k: data[k] for k in self.SECURITY_RELEVANT_KEYS if k in data}

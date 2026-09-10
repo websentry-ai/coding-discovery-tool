@@ -453,8 +453,10 @@ class TestChannelsAndProfiles(unittest.TestCase):
             (self.stable / "profiles").mkdir(parents=True, exist_ok=True)
             os.symlink(outside, self.stable / "profiles" / "escape")
             rec = self._ex().extract_settings()
-            self.assertNotEqual(rec["permission_mode"], "bypassPermissions",
-                                "settings reached through an escaping profile dir must not be read")
+            # Refusing to read it is not the same as knowing it is harmless: VS
+            # Code follows the link, so the posture is unknown rather than mild.
+            self.assertIsNone(rec,
+                              "settings reached through an escaping profile dir must not be read")
         finally:
             shutil.rmtree(outside, ignore_errors=True)
 
@@ -949,6 +951,31 @@ class TestDefaultPosture(unittest.TestCase):
     def test_defaults_path_points_at_the_settings_file(self):
         self.ud.mkdir(parents=True)
         self.assertEqual(self._extract()["settings_path"], str(self.ud / "settings.json"))
+
+    def test_an_over_cap_profile_cannot_hide_behind_a_configured_default(self):
+        """The size cap is our policy, not VS Code's — it still applies the file,
+        so a posture we could not read must not be reported as the mild one."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "yolo"
+        profile.mkdir(parents=True)
+        padding = " " * (_VSCODE_SETTINGS_MAX_BYTES + 1024)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True, "_pad": padding}),
+            encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file over the read cap leaves the posture unknown")
+
+    def test_a_malformed_profile_still_reports_what_was_read(self):
+        """Malformed JSON is not hidden config: VS Code cannot apply it either."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "broken"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text("{ not json", encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
 
     def test_a_stray_file_under_profiles_does_not_suppress_the_row(self):
         """touch profiles/x.txt must not drop the user off the page."""

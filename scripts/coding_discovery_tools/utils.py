@@ -193,23 +193,33 @@ _VSCODE_USER_DATA_BASE = {
     "Linux": (".config",),
 }
 
+# Reported instead of silence when a probe could not read a path.
+VSCODE_EDITORS_UNREADABLE = "unreadable"
+
 
 def vscode_editors_present(user_home: Path) -> List[str]:
     """VS Code-family editors with a user-data dir under ``user_home``. Never raises.
 
     Diagnostic only. On a ZERO-tool scan it separates "no editor on this machine"
-    from "editor in use and we missed its Copilot extension".
+    from "editor in use and we missed its Copilot extension", so a path it could
+    not read is reported as ``unreadable`` rather than as absence.
     """
     base = _VSCODE_USER_DATA_BASE.get(platform.system())
     if base is None:
         return []
     found = []
     for editor in VSCODE_EDITOR_KEYS:
+        path = user_home.joinpath(*base, editor, "User")
         try:
-            if user_home.joinpath(*base, editor, "User").is_dir():
+            # os.stat, not is_dir(): 3.14 returns False for an unreadable path.
+            if stat.S_ISDIR(os.stat(path).st_mode):
                 found.append(editor)
-        except (PermissionError, OSError):
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        except OSError as e:
+            logger.debug("Could not read VS Code user data dir %s: %s", path, e, exc_info=True)
+            if VSCODE_EDITORS_UNREADABLE not in found:
+                found.append(VSCODE_EDITORS_UNREADABLE)
     return found
 
 

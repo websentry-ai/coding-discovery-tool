@@ -193,8 +193,16 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         servers — unlike the marketplace path, where ``github.copilot`` and
         ``github.copilot-chat`` are genuinely separate installs.
         """
-        # Read errors propagate: an unreadable home must not look like an absent tool.
-        uses_vscode = any((user_home / rel).exists() for rel in _VSCODE_USER_DATA_DIRS)
+        # os.stat, not Path.exists: 3.14 returns False there for an unreadable path,
+        # and an unreadable home must not look like an absent tool.
+        uses_vscode = False
+        for rel in _VSCODE_USER_DATA_DIRS:
+            try:
+                os.stat(user_home / rel)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            uses_vscode = True
+            break
         if not uses_vscode:
             logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
             return []

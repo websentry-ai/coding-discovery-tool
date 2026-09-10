@@ -888,10 +888,13 @@ class TestVscodeEditorsPresent(unittest.TestCase):
         self.home.joinpath(*self.base, "Code").mkdir(parents=True)
         self.assertEqual([], utils_mod.vscode_editors_present(self.home))
 
-    def test_unreadable_home_never_raises(self):
+    def test_unreadable_dir_is_reported_not_passed_off_as_absence(self):
+        """Empty would claim the machine has no editor, which is the one thing
+        this probe exists to rule out."""
         self._make_editor("Code")
-        with patch.object(Path, "is_dir", side_effect=PermissionError(13, "denied")):
-            self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+        with patch("os.stat", side_effect=PermissionError(13, "denied")):
+            self.assertEqual([utils_mod.VSCODE_EDITORS_UNREADABLE],
+                             utils_mod.vscode_editors_present(self.home))
 
     def test_is_a_queryable_sentry_tag(self):
         self.assertIn("vscode_editors", utils_mod._SENTRY_TAG_KEYS)

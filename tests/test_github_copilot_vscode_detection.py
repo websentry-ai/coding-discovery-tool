@@ -410,7 +410,9 @@ class TestMacOSScopedToUserHome(unittest.TestCase):
         det = MacOSCopilotDetector()
         det.user_home = self.alice
 
-        with patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+        # Patches the syscall, not Path.exists: 3.14 returns False there, so a
+        # Path.exists mock would pass while the shipped code still reported absent.
+        with patch("os.stat", side_effect=PermissionError(13, "Permission denied")):
             with self.assertRaises(PermissionError):
                 det._detect_vscode_builtin_copilot(self.alice)
 
@@ -444,7 +446,8 @@ class TestVscodeInsidersCoverage(unittest.TestCase):
         results = det._detect_vscode_for_user(self.home)
 
         self.assertEqual(["GitHub Copilot Chat (VS Code)"], [r["name"] for r in results])
-        self.assertTrue(results[0]["install_path"].endswith(".vscode-insiders/extensions"))
+        self.assertEqual((".vscode-insiders", "extensions"),
+                         Path(results[0]["install_path"]).parts[-2:])
 
     def test_stable_wins_when_both_channels_have_copilot(self):
         self._make_registry(".vscode/extensions")
@@ -455,15 +458,15 @@ class TestVscodeInsidersCoverage(unittest.TestCase):
         results = det._detect_vscode_for_user(self.home)
 
         self.assertEqual(1, len(results))
-        self.assertTrue(results[0]["install_path"].endswith(".vscode/extensions"))
+        self.assertEqual((".vscode", "extensions"), Path(results[0]["install_path"]).parts[-2:])
 
     def test_short_app_bundle_name_is_probed(self):
         """Some installs keep ``Code.app``; Cline and Roo Code already accept both."""
-        roots = [str(p) for p in detect_copilot_mod._VSCODE_APP_EXTENSION_ROOTS]
-        self.assertIn("/Applications/Code.app/Contents/Resources/app/extensions", roots)
-        self.assertIn(
-            "/Applications/Visual Studio Code.app/Contents/Resources/app/extensions", roots
-        )
+        roots = detect_copilot_mod._VSCODE_APP_EXTENSION_ROOTS
+        for bundle in ("Code.app", "Visual Studio Code.app"):
+            self.assertIn(
+                Path(f"/Applications/{bundle}/Contents/Resources/app/extensions"), roots
+            )
 
 
 if __name__ == "__main__":

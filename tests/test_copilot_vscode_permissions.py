@@ -967,6 +967,18 @@ class TestDefaultPosture(unittest.TestCase):
         self.assertIsNone(self._extract(),
                           "a file over the read cap leaves the posture unknown")
 
+    def test_a_profile_our_parser_chokes_on_is_unknown_not_mild(self):
+        """Our parser failing is not proof the editor cannot read the file — the
+        BOM this change fixes was exactly that case."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "deep"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text("[" * 20000 + "]" * 20000, encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file our parser could not handle leaves the posture unknown")
+
     def test_a_malformed_profile_still_reports_what_was_read(self):
         """Malformed JSON is not hidden config: VS Code cannot apply it either."""
         self.ud.mkdir(parents=True)

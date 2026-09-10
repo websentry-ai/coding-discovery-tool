@@ -193,10 +193,6 @@ _VSCODE_USER_DATA_BASE = {
     "Linux": (".config",),
 }
 
-# Reported instead of silence when a probe could not read a path.
-VSCODE_EDITORS_UNREADABLE = "unreadable"
-
-
 def vscode_editors_present(user_home: Path) -> List[str]:
     """VS Code-family editors with a user-data dir under ``user_home``. Never raises.
 
@@ -218,8 +214,8 @@ def vscode_editors_present(user_home: Path) -> List[str]:
             continue
         except OSError as e:
             logger.debug("Could not read VS Code user data dir %s: %s", path, e, exc_info=True)
-            if VSCODE_EDITORS_UNREADABLE not in found:
-                found.append(VSCODE_EDITORS_UNREADABLE)
+            if "unreadable" not in found:
+                found.append("unreadable")
     return found
 
 

@@ -893,8 +893,7 @@ class TestVscodeEditorsPresent(unittest.TestCase):
         this probe exists to rule out."""
         self._make_editor("Code")
         with patch("os.stat", side_effect=PermissionError(13, "denied")):
-            self.assertEqual([utils_mod.VSCODE_EDITORS_UNREADABLE],
-                             utils_mod.vscode_editors_present(self.home))
+            self.assertEqual(["unreadable"], utils_mod.vscode_editors_present(self.home))
 
     def test_is_a_queryable_sentry_tag(self):
         self.assertIn("vscode_editors", utils_mod._SENTRY_TAG_KEYS)

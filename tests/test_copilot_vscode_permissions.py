@@ -994,6 +994,30 @@ class TestMarketplaceRedaction(unittest.TestCase):
         self.assertEqual(raw["chat.plugins.marketplaces"],
                          ["github/copilot-plugins", "github/awesome-copilot#marketplace"])
 
+    def test_marketplace_identity_fields_are_not_rewritten(self):
+        """@scope/name and a wildcard pattern are identity, not credentials."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "npm", "package": "@scope/name", "hostPattern": "*.exam?le.com"}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["package"], "@scope/name")
+        self.assertEqual(entry["hostPattern"], "*.exam?le.com")
+
+    def test_a_token_in_the_endpoint_path_does_not_ship(self):
+        """A webhook-style endpoint carries its secret in the path."""
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://hooks.internal/services/T123/B456/SECRETTOKEN"})
+        value = raw["github.copilot.chat.otel.otlpEndpoint"]
+        self.assertEqual(value, "https://hooks.internal/services")
+        self.assertNotIn("SECRETTOKEN", json.dumps(raw))
+
+    def test_an_unencoded_question_mark_in_userinfo_does_not_leak(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://user:pa?ss@collector.internal/v1"})
+        value = raw["github.copilot.chat.otel.otlpEndpoint"]
+        self.assertEqual(value, "https://collector.internal/v1",
+                         "the host is the evidence and the credential must be gone")
+        self.assertNotIn("user:pa", json.dumps(raw))
+
     def test_an_scp_style_remote_keeps_its_identity(self):
         """git@host:owner/repo.git is a valid remote the URL parser rejects;
         losing it would erase the marketplace we are trying to report."""

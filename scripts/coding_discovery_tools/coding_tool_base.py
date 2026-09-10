@@ -1367,18 +1367,36 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     _MARKETPLACE_KEYS = ("chat.plugins.marketplaces",
                          "chat.plugins.extraMarketplaces",
                          "chat.plugins.strictMarketplaces")
+    _MARKETPLACE_URL_FIELDS = ("url",)
 
     @staticmethod
     def _cut_credentials(value: str) -> str:
         """Drop the userinfo prefix and the query textually, for a value the URL
         parser rejects — an scp-style git remote (``git@host:owner/repo.git``)
-        is one, and discarding it would lose the marketplace identity."""
-        head = value.split("?", 1)[0]
-        scheme, sep, rest = head.partition("://")
+        is one, and discarding it would lose the marketplace identity.
+
+        Userinfo goes first: an unencoded ``?`` inside a password would otherwise
+        cut the string before the ``@`` and keep half the credential."""
+        scheme, sep, rest = value.partition("://")
         if not sep:
-            scheme, rest = "", head
-        rest = rest.rsplit("@", 1)[-1]
+            scheme, rest = "", value
+        authority, slash, path = rest.partition("/")
+        rest = authority.rsplit("@", 1)[-1] + slash + path
+        rest = rest.split("?", 1)[0]
         return f"{scheme}://{rest}" if sep else rest
+
+    @staticmethod
+    def _authority(value: str) -> str:
+        """The part before the path, with any scheme removed."""
+        return value.split("://", 1)[-1].split("/", 1)[0]
+
+    @classmethod
+    def _looks_credentialed(cls, value) -> bool:
+        """Userinfo in the authority, or a query string. An npm scope such as
+        ``@scope/name`` has nothing before its ``@`` and is not a credential."""
+        if not isinstance(value, str):
+            return False
+        return "?" in value or cls._authority(value).find("@") > 0
 
     @classmethod
     def _strip_url_secrets(cls, value):
@@ -1413,21 +1431,58 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         Marketplace entries are ordinarily plain refs like
         ``github/awesome-copilot#marketplace``, and rewriting those would drop the
         ref for no gain."""
-        if isinstance(value, str) and ("@" in value or "?" in value):
+        if cls._looks_credentialed(value):
             return cls._strip_url_secrets(value)
         return value
 
     @classmethod
+    def _remotes_without_secrets(cls, value):
+        """``marketplaces`` and ``extraMarketplaces`` hold remotes directly — a
+        list of them, or a name → remote map — and a private one carries a token
+        the same way the endpoints do."""
+        if isinstance(value, list):
+            return [cls._remotes_without_secrets(v) for v in value]
+        if isinstance(value, dict):
+            return {k: cls._remotes_without_secrets(v) for k, v in value.items()}
+        return cls._credentialed_only(value)
+
+    @classmethod
     def _marketplace_without_secrets(cls, value):
-        """A private marketplace is a git remote, so it carries a token the same
-        way the endpoints do, and a strict entry can carry auth headers too."""
+        """``strictMarketplaces`` holds entry objects instead, where the remote
+        lives under a named field and the rest is identity."""
         if isinstance(value, list):
             return [cls._marketplace_without_secrets(v) for v in value]
         if isinstance(value, dict):
-            return {k: (sorted(v) if k == "headers" and isinstance(v, dict)
-                        else cls._marketplace_without_secrets(v))
-                    for k, v in value.items()}
+            return {k: cls._marketplace_field(k, v) for k, v in value.items()}
         return cls._credentialed_only(value)
+
+    @classmethod
+    def _marketplace_field(cls, key, value):
+        """Inside an entry only ``url`` carries a URL and only ``headers`` carries
+        auth; ``package``, ``ref`` and the wildcard patterns are identity, and
+        rewriting them as URLs corrupts the record."""
+        if key == "headers" and isinstance(value, dict):
+            return sorted(value)
+        if key in cls._MARKETPLACE_URL_FIELDS:
+            return cls._credentialed_only(value)
+        if isinstance(value, (list, dict)):
+            return cls._marketplace_without_secrets(value)
+        return value
+
+    @classmethod
+    def _endpoint_without_secrets(cls, value):
+        """An endpoint's path can be the credential itself (webhook-style), so
+        only the first segment is kept — enough to name the destination."""
+        cleaned = cls._strip_url_secrets(value)
+        if not isinstance(cleaned, str):
+            return cleaned
+        scheme, sep, rest = cleaned.partition("://")
+        if not sep:
+            scheme, rest = "", cleaned
+        authority, slash, path = rest.partition("/")
+        if path:
+            rest = authority + slash + path.split("/", 1)[0]
+        return f"{scheme}://{rest}" if sep else rest
 
     @classmethod
     def _without_secrets(cls, key: str, value):
@@ -1436,9 +1491,11 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             return {k: (sorted(v) if k == "env" and isinstance(v, dict) else v)
                     for k, v in value.items()}
         if key in cls._URL_KEYS:
-            return cls._strip_url_secrets(value)
-        if key in cls._MARKETPLACE_KEYS:
+            return cls._endpoint_without_secrets(value)
+        if key == "chat.plugins.strictMarketplaces":
             return cls._marketplace_without_secrets(value)
+        if key in cls._MARKETPLACE_KEYS:
+            return cls._remotes_without_secrets(value)
         return value
 
     def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:

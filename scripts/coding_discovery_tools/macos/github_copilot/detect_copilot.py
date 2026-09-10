@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 # Copilot folder name.
 _VSCODE_APP_EXTENSION_ROOTS = [
     Path("/Applications/Visual Studio Code.app/Contents/Resources/app/extensions"),
-    # Some installs keep the bundle's short name; Cline and Roo Code already accept both.
     Path("/Applications/Code.app/Contents/Resources/app/extensions"),
     Path("/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/extensions"),
 ]

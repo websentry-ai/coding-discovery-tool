@@ -207,6 +207,63 @@ class TestCacheKey(unittest.TestCase):
             "url:mcp.linear.app/sse",
         )
 
+    def test_vscode_provider_localhost_stream_vector(self):
+        server = {
+            "name": "pylance mcp server",
+            "url": "http://localhost:51983/stream",
+            "providerId": "ms-python.vscode-pylance/pylanceMcp",
+            "providerServerId": (
+                "ms-python.vscode-pylance/pylance mcp server"
+            ),
+            "additional_data": {"scope": "vscode-provider-cache"},
+        }
+        self.assertEqual(
+            mcp_tools_cache.cache_key_for_server(server),
+            "vscode-provider:ms-python.vscode-pylance/pylancemcp:"
+            "ms-python.vscode-pylance/pylance mcp server",
+        )
+
+    def test_vscode_provider_is_not_extension_allowlisted(self):
+        server = {
+            "name": "server",
+            "url": "http://localhost:51983/stream",
+            "providerId": "publisher.extension/provider",
+            "providerServerId": "publisher.extension/server",
+            "additional_data": {"scope": "vscode-provider-cache"},
+        }
+        self.assertEqual(
+            mcp_tools_cache.cache_key_for_server(server),
+            "vscode-provider:publisher.extension/provider:"
+            "publisher.extension/server",
+        )
+
+    def test_provider_identity_only_applies_to_direct_loopback_urls(self):
+        additional_data = {
+            "scope": "vscode-provider-cache",
+            "providerId": "publisher.extension/provider",
+            "providerServerId": "publisher.extension/server",
+        }
+        self.assertEqual(
+            compute_fingerprint(
+                name="server",
+                command=None,
+                url="https://api.githubcopilot.com/mcp/",
+                args=[],
+                additional_data=additional_data,
+            ),
+            "url:api.githubcopilot.com/mcp",
+        )
+        self.assertEqual(
+            compute_fingerprint(
+                name="server",
+                command="prompt_security_mcp",
+                url=None,
+                args=["__args__", "http://localhost:51983/stream"],
+                additional_data=additional_data,
+            ),
+            "url:localhost:51983/stream",
+        )
+
     def test_url_credentials_query_and_fragment_do_not_change_key(self):
         self.assertEqual(
             compute_cache_key(
@@ -705,6 +762,24 @@ class _CacheDirMixin:
 
 class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
 
+    _PROVIDER_KEY = (
+        "vscode-provider:ms-python.vscode-pylance/pylancemcp:"
+        "ms-python.vscode-pylance/pylance mcp server"
+    )
+    _PROVIDER_OBSERVATIONS = {
+        _PROVIDER_KEY: [{
+            "name": "pylance mcp server",
+            "url": "http://localhost:51983/stream",
+            "additional_data": {
+                "scope": "vscode-provider-cache",
+                "providerId": "ms-python.vscode-pylance/pylanceMcp",
+                "providerServerId": (
+                    "ms-python.vscode-pylance/pylance mcp server"
+                ),
+            },
+        }],
+    }
+
     def test_write_and_read_roundtrip(self):
         entries = {"a" * 64: {"read": "h1", "write": "h2"}}
         mcp_tools_cache.update_user_entries("Claude Code", "alice", entries, set())
@@ -721,6 +796,34 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
         data = self._read_file()
         self.assertEqual(data["tools"]["Claude Code"]["alice"],
                          {"key-a": {"read": "h1-new"}})
+
+    def test_provider_observations_replace_and_prune_with_full_refresh(self):
+        mcp_tools_cache.update_user_entries(
+            "GitHub Copilot", "alice", {}, set(), self._PROVIDER_OBSERVATIONS
+        )
+        self.assertEqual(
+            self._read_file()["provider_servers"]["GitHub Copilot"]["alice"],
+            self._PROVIDER_OBSERVATIONS,
+        )
+
+        mcp_tools_cache.update_user_entries(
+            "GitHub Copilot", "alice", {}, set(), {}
+        )
+        self.assertNotIn(
+            "GitHub Copilot", self._read_file().get("provider_servers", {})
+        )
+
+    def test_old_writer_call_preserves_provider_observations(self):
+        mcp_tools_cache.update_user_entries(
+            "GitHub Copilot", "alice", {}, set(), self._PROVIDER_OBSERVATIONS
+        )
+        mcp_tools_cache.update_user_entries(
+            "GitHub Copilot", "alice", {"ordinary": {"read": "hash"}}, set()
+        )
+        self.assertEqual(
+            self._read_file()["provider_servers"]["GitHub Copilot"]["alice"],
+            self._PROVIDER_OBSERVATIONS,
+        )
 
     def test_errored_key_preserves_previous_entry(self):
         mcp_tools_cache.update_user_entries(
@@ -781,13 +884,18 @@ class TestMcpToolsCacheReadWrite(_CacheDirMixin, unittest.TestCase):
     def test_upsert_merges_single_server_without_clobbering_siblings(self):
         mcp_tools_cache.update_user_entries(
             "Claude Code", "alice",
-            {"kA": {"read": "h1"}, "kB": {"t": "h2"}}, set())
+            {"kA": {"read": "h1"}, "kB": {"t": "h2"}}, set(),
+            self._PROVIDER_OBSERVATIONS)
         mcp_tools_cache.upsert_server_entry("Claude Code", "alice", "kB", {"t": "h2-new"})
         data = self._read_file()
         self.assertEqual(data["tools"]["Claude Code"]["alice"], {
             "kA": {"read": "h1"},
             "kB": {"t": ["h2", "h2-new"]},
         })
+        self.assertEqual(
+            data["provider_servers"]["Claude Code"]["alice"],
+            self._PROVIDER_OBSERVATIONS,
+        )
 
     def test_upsert_skips_when_no_cache_file_exists(self):
         # Single-server scan must never create the cache — only the full
@@ -928,6 +1036,88 @@ class TestCollectServerEntries(_CacheDirMixin, unittest.TestCase):
         self.assertEqual(errored, {"url:n.example/mcp"})
 
 
+class TestCollectProviderServerObservations(unittest.TestCase):
+
+    KEY = (
+        "vscode-provider:ms-python.vscode-pylance/pylancemcp:"
+        "ms-python.vscode-pylance/pylance mcp server"
+    )
+
+    @staticmethod
+    def _server(port=51983, **overrides):
+        server = {
+            "name": "pylance mcp server",
+            "url": f"http://localhost:{port}/stream",
+            "providerId": "ms-python.vscode-pylance/pylanceMcp",
+            "providerServerId": "ms-python.vscode-pylance/pylance mcp server",
+            "providerProfileId": "private-profile-id",
+            "providerCacheNonce": "private-nonce",
+            "env": {"SECRET": "value"},
+            "headers": {"Authorization": "secret"},
+            "additional_data": {"scope": "vscode-provider-cache"},
+            "scan": {"error": {"code": "timeout"}},
+        }
+        server.update(overrides)
+        return server
+
+    def test_collects_minimal_observation_even_when_scan_failed(self):
+        observed = mcp_tools_cache.collect_provider_server_observations(
+            [{"mcpServers": [self._server()]}]
+        )
+
+        self.assertEqual(observed, {self.KEY: [{
+            "name": "pylance mcp server",
+            "url": "http://localhost:51983/stream",
+            "additional_data": {
+                "scope": "vscode-provider-cache",
+                "providerId": "ms-python.vscode-pylance/pylanceMcp",
+                "providerServerId": "ms-python.vscode-pylance/pylance mcp server",
+            },
+        }]})
+        serialized = json.dumps(observed)
+        for secret in (
+            "private-profile-id", "private-nonce", "SECRET", "value", "Authorization",
+        ):
+            self.assertNotIn(secret, serialized)
+
+    def test_preserves_distinct_ports_and_deduplicates_identical_rows(self):
+        first = self._server(port=51983)
+        second = self._server(port=61000)
+        observed = mcp_tools_cache.collect_provider_server_observations([
+            {"mcpServers": [second, first]},
+            {"mcpServers": [first]},
+        ])
+
+        self.assertEqual(
+            [item["url"] for item in observed[self.KEY]],
+            ["http://localhost:51983/stream", "http://localhost:61000/stream"],
+        )
+
+    def test_preserves_ipv6_loopback_brackets(self):
+        observed = mcp_tools_cache.collect_provider_server_observations([
+            {"mcpServers": [self._server(url="http://[::1]:51983/mcp")]},
+        ])
+
+        self.assertEqual(observed[self.KEY][0]["url"], "http://[::1]:51983/mcp")
+
+    def test_rejects_unvalidated_provider_shapes(self):
+        cases = (
+            self._server(additional_data={}),
+            self._server(providerId="evil.publisher/provider"),
+            self._server(url="https://remote.example/stream"),
+            self._server(url="https://localhost.evil.com/mcp"),
+            self._server(command="python"),
+        )
+        for server in cases:
+            with self.subTest(server=server):
+                self.assertEqual(
+                    mcp_tools_cache.collect_provider_server_observations(
+                        [{"mcpServers": [server]}]
+                    ),
+                    {},
+                )
+
+
 class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
     """The mcp-tools-cache refresh is a hot-path artifact for the PreToolUse
     hooks: it must run on every discovery run for a (tool, user), even when
@@ -950,6 +1140,50 @@ class TestEveryRunCacheRefresh(_CacheDirMixin, unittest.TestCase):
 
         data = self._read_file()
         self.assertIn(self._EXPECTED_KEY, data["tools"]["Claude Code"]["alice"])
+
+    def test_refresh_writes_provider_observation_without_successful_scan(self):
+        projects = [{"mcpServers": [{
+            "name": "pylance mcp server",
+            "url": "http://localhost:51983/stream",
+            "providerId": "ms-python.vscode-pylance/pylanceMcp",
+            "providerServerId": "ms-python.vscode-pylance/pylance mcp server",
+            "additional_data": {"scope": "vscode-provider-cache"},
+            "scan": {"error": {"code": "timeout"}},
+        }]}]
+
+        ai_tools_discovery._refresh_mcp_tools_cache(
+            "GitHub Copilot (VS Code)", "alice", projects
+        )
+
+        providers = self._read_file()["provider_servers"][
+            "GitHub Copilot (VS Code)"
+        ]["alice"]
+        self.assertEqual(len(providers), 1)
+        observation = next(iter(providers.values()))[0]
+        self.assertEqual(observation["url"], "http://localhost:51983/stream")
+
+    def test_empty_provider_refresh_preserves_last_good_observation(self):
+        projects = [{"mcpServers": [{
+            "name": "pylance mcp server",
+            "url": "http://localhost:51983/stream",
+            "providerId": "ms-python.vscode-pylance/pylanceMcp",
+            "providerServerId": (
+                "ms-python.vscode-pylance/pylance mcp server"
+            ),
+            "additional_data": {"scope": "vscode-provider-cache"},
+        }]}]
+        ai_tools_discovery._refresh_mcp_tools_cache(
+            "GitHub Copilot (VS Code)", "alice", projects
+        )
+        before = self._read_file()["provider_servers"]
+
+        ai_tools_discovery._refresh_mcp_tools_cache(
+            "GitHub Copilot (VS Code)",
+            "alice",
+            [],
+        )
+
+        self.assertEqual(self._read_file()["provider_servers"], before)
 
     def test_refresh_runs_before_upload_dedup_branch_in_main(self):
         # Regression guard for the ordering itself: the refresh call must sit

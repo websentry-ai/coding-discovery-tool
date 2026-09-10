@@ -27,6 +27,8 @@ Prefix conventions encode the signal source so the fingerprint is self-describin
     nuget:<package>              -> package run by `dnx` or `dotnet tool exec`
     pypi:<package>               -> from a Python package run via uvx / uv / pipx
     docker:<image>               -> from `docker run ... <image>`
+    vscode-provider:<provider>:<server> -> VS Code extension provider whose
+                                    server listens on a loopback address
     script:<hash>                -> content hash of a local script (supplied by the client)
     bin:<name>                   -> basename of a bespoke local binary (args dropped)
     intellij:<name>              -> from an IntelliJ plugin-managed server (command == "builtin")
@@ -60,6 +62,18 @@ logger = logging.getLogger(__name__)
 CLAUDE_BUILTIN_PREFIX = 'claude-builtin:'
 
 CLAUDE_CONNECTOR_SCOPE = 'claude-connector'
+VSCODE_PROVIDER_CACHE_SCOPE = 'vscode-provider-cache'
+VSCODE_PROVIDER_PREFIX = 'vscode-provider:'
+# A loopback address is a throwaway: the port changes on every extension
+# restart, so it names nothing. A real host does, and it is what makes the same
+# remote server group across every tool, so those keep the url: identity.
+_VSCODE_PROVIDER_LOOPBACK_URL_RE = re.compile(
+    r'https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::([0-9]{1,5}))?(?:[/?#].*)?',
+    re.IGNORECASE,
+)
+_EXTENSION_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+_PROVIDER_CONTRIBUTION_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+_PROVIDER_SERVER_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ -]{0,127}')
 
 # Claude Code sanitizes display names into runtime names (non-alphanumerics -> '_'), so one
 # server arrives under several spellings. chrome/browser/preview stay separate: different tools.
@@ -693,6 +707,51 @@ def _normalize_bin(command: str) -> Optional[str]:
     return b
 
 
+def _vscode_provider_loopback_identity(
+    command: Optional[str],
+    url_value: Optional[str],
+    args: List[str],
+    additional_data: Dict[str, Any],
+) -> Optional[str]:
+    if (
+        command
+        or args
+        or additional_data.get('scope') != VSCODE_PROVIDER_CACHE_SCOPE
+        or not isinstance(url_value, str)
+    ):
+        return None
+
+    url_match = _VSCODE_PROVIDER_LOOPBACK_URL_RE.fullmatch(url_value.strip())
+    if not url_match:
+        return None
+    # Five digits can still exceed a port; urlparse().port raises on those.
+    if url_match.group(1) and int(url_match.group(1)) > 65535:
+        return None
+
+    provider_id = additional_data.get('providerId')
+    provider_server_id = additional_data.get('providerServerId')
+    if not isinstance(provider_id, str) or not isinstance(provider_server_id, str):
+        return None
+
+    provider_parts = provider_id.strip().split('/')
+    server_parts = provider_server_id.strip().split('/')
+    if (
+        len(provider_parts) != 2
+        or len(server_parts) != 2
+        or not _EXTENSION_ID_RE.fullmatch(provider_parts[0])
+        or not _PROVIDER_CONTRIBUTION_RE.fullmatch(provider_parts[1])
+        or not _EXTENSION_ID_RE.fullmatch(server_parts[0])
+        or not _PROVIDER_SERVER_NAME_RE.fullmatch(server_parts[1])
+        or provider_parts[0].lower() != server_parts[0].lower()
+    ):
+        return None
+
+    identity = f'{provider_id.strip().lower()}:{provider_server_id.strip().lower()}'
+    if len(VSCODE_PROVIDER_PREFIX) + len(identity) > 500:
+        return None
+    return identity
+
+
 def compute_fingerprint(
     name: Optional[str],
     command: Optional[str],
@@ -728,7 +787,12 @@ def compute_fingerprint(
                 command=None if inner_url else inner_cmd,
                 url=inner_url,
                 args=inner[1:],
-                additional_data=safe_additional_data,
+                additional_data=(
+                    {}
+                    if safe_additional_data.get('scope')
+                    == VSCODE_PROVIDER_CACHE_SCOPE
+                    else safe_additional_data
+                ),
                 script_hash=script_hash,
             )
 
@@ -751,6 +815,15 @@ def compute_fingerprint(
         builtin = claude_builtin_identity(safe_name)
         if builtin:
             return f'{CLAUDE_BUILTIN_PREFIX}{builtin}'
+
+    vscode_provider = _vscode_provider_loopback_identity(
+        command,
+        url,
+        safe_args,
+        safe_additional_data,
+    )
+    if vscode_provider:
+        return f'{VSCODE_PROVIDER_PREFIX}{vscode_provider}'
 
     # 1. url field -> url:<host[:port]/path>
     if url:

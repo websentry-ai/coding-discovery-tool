@@ -21,6 +21,11 @@ _USER_CONFIG_SUBPATHS = (
 class WindowsGitHubCopilotSettingsExtractor(BaseGitHubCopilotSettingsExtractor):
     """Extractor for VS Code GitHub Copilot permissions on Windows."""
 
+    # VS Code reads a Windows-only sandbox key here and ignores the generic one;
+    # the dotted spelling is what shipped before the id was corrected.
+    _SANDBOX_KEYS = ("chat.agent.sandbox.enabledWindows",
+                     "chat.agent.sandbox.enabled.windows")
+
     def _scan_users(self, callback) -> None:
         if is_running_as_admin():
             users_dir = Path("C:\\Users")

@@ -28,6 +28,7 @@ except ImportError:
     pwd = None  # Not available on Windows
 
 from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
+from .vscode_extension_helpers import VSCODE_EDITOR_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,39 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
                 found.append(name.lstrip("."))
         except (PermissionError, OSError):
             continue
+    return found
+
+
+# Where each platform keeps a VS Code-family editor's per-user data dir.
+_VSCODE_USER_DATA_BASE = {
+    "Darwin": ("Library", "Application Support"),
+    "Windows": ("AppData", "Roaming"),
+    "Linux": (".config",),
+}
+
+def vscode_editors_present(user_home: Path) -> List[str]:
+    """VS Code-family editors with a user-data dir under ``user_home``. Never raises.
+
+    Diagnostic only. On a ZERO-tool scan it separates "no editor on this machine"
+    from "editor in use and we missed its Copilot extension", so a path it could
+    not read is reported as ``unreadable`` rather than as absence.
+    """
+    base = _VSCODE_USER_DATA_BASE.get(platform.system())
+    if base is None:
+        return []
+    found = []
+    for editor in VSCODE_EDITOR_KEYS:
+        path = user_home.joinpath(*base, editor, "User")
+        try:
+            # os.stat, not is_dir(): 3.14 returns False for an unreadable path.
+            if stat.S_ISDIR(os.stat(path).st_mode):
+                found.append(editor)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as e:
+            logger.debug("Could not read VS Code user data dir %s: %s", path, e, exc_info=True)
+            if "unreadable" not in found:
+                found.append("unreadable")
     return found
 
 
@@ -2259,7 +2293,7 @@ _SENTRY_TAG_KEYS = (
     "used_fallback_user", "homes_enumerated", "users_scanned",
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
-    "npm_prefix",
+    "npm_prefix", "vscode_editors",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

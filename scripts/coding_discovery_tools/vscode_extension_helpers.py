@@ -46,6 +46,21 @@ _EDITOR_KEY_BY_DISPLAY = {
 }
 _ROW_EDITOR_SUFFIX = re.compile(r"\(([^)]+)\)\s*$")
 
+# Insiders is a VS Code channel, not its own row, so it is searched under ``Code``.
+_EXTENSION_DIR_KEYS_BY_EDITOR = {"Code": ("Code", "Code - Insiders")}
+
+
+def find_extension_in_editor_channels(
+    user_home: Path, ide_key: str, ext_id: str
+) -> Optional[Tuple[str, Optional[str]]]:
+    """``(dir_key, version)`` for the first channel of ``ide_key`` listing ``ext_id``,
+    stable before Insiders. None when no channel lists it. Never raises."""
+    for dir_key in _EXTENSION_DIR_KEYS_BY_EDITOR.get(ide_key, (ide_key,)):
+        entry = find_extension_in_editor(user_home, dir_key, ext_id)
+        if entry is not None:
+            return dir_key, entry[1]
+    return None
+
 
 def vscode_family_editor_dirs(tool_name: str) -> list:
     """User-data dir names for a VS Code-family Copilot row.

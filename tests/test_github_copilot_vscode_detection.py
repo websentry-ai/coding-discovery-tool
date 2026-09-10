@@ -405,6 +405,60 @@ class TestMacOSScopedToUserHome(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 det._scan_for_ides()
 
+    def test_unreadable_user_data_dir_raises_instead_of_reporting_absent(self):
+        det = MacOSCopilotDetector()
+        det.user_home = self.alice
+
+        # Patches the syscall, not Path.exists: 3.14 returns False there, so a
+        # Path.exists mock would pass while the shipped code still reported absent.
+        with patch("os.stat", side_effect=PermissionError(13, "Permission denied")):
+            with self.assertRaises(PermissionError):
+                det._detect_vscode_builtin_copilot(self.alice)
+
+
+class TestVscodeInsidersCoverage(unittest.TestCase):
+    """Insiders is a VS Code channel, not its own row, so its marketplace Copilot
+    must be found and reported under the existing ``(VS Code)`` label."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_registry(self, ext_root: str):
+        p = self.home / ext_root / "extensions.json"
+        p.parent.mkdir(parents=True)
+        p.write_text(
+            json.dumps([{"identifier": {"id": "github.copilot-chat"}, "version": "0.64.1"}]),
+            encoding="utf-8",
+        )
+
+    def test_insiders_only_copilot_is_detected_as_vs_code(self):
+        (self.home / "Library" / "Application Support" / "Code - Insiders" / "User").mkdir(parents=True)
+        self._make_registry(".vscode-insiders/extensions")
+
+        det = MacOSCopilotDetector()
+        det.user_home = self.home
+        results = det._detect_vscode_for_user(self.home)
+
+        self.assertEqual(["GitHub Copilot Chat (VS Code)"], [r["name"] for r in results])
+        self.assertEqual((".vscode-insiders", "extensions"),
+                         Path(results[0]["install_path"]).parts[-2:])
+
+    def test_stable_wins_when_both_channels_have_copilot(self):
+        self._make_registry(".vscode/extensions")
+        self._make_registry(".vscode-insiders/extensions")
+
+        det = MacOSCopilotDetector()
+        det.user_home = self.home
+        results = det._detect_vscode_for_user(self.home)
+
+        self.assertEqual(1, len(results))
+        self.assertEqual((".vscode", "extensions"), Path(results[0]["install_path"]).parts[-2:])
+
 
 if __name__ == "__main__":
     unittest.main()

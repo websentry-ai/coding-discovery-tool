@@ -994,6 +994,16 @@ class TestMarketplaceRedaction(unittest.TestCase):
         self.assertEqual(raw["chat.plugins.marketplaces"],
                          ["github/copilot-plugins", "github/awesome-copilot#marketplace"])
 
+    def test_a_credential_under_an_unexpected_field_is_still_stripped(self):
+        """The entry schema is open, so a remote can arrive under a name we did
+        not anticipate; the redaction must not depend on that name."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "remote": "https://x-access-token:ghp_SECRET@github.com/o/r.git"}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["remote"], "https://github.com/o/r.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
     def test_marketplace_identity_fields_are_not_rewritten(self):
         """@scope/name and a wildcard pattern are identity, not credentials."""
         raw = self._raw({"chat.plugins.strictMarketplaces": [

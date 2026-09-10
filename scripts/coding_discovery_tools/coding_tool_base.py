@@ -1367,7 +1367,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     _MARKETPLACE_KEYS = ("chat.plugins.marketplaces",
                          "chat.plugins.extraMarketplaces",
                          "chat.plugins.strictMarketplaces")
-    _MARKETPLACE_URL_FIELDS = ("url",)
+    # Identity, not destinations: rewriting these as URLs corrupts the record
+    # (an npm scope starts with @, a wildcard pattern may contain ?).
+    _MARKETPLACE_LITERAL_FIELDS = ("source", "package", "ref", "hostPattern", "pathPattern")
 
     @staticmethod
     def _cut_credentials(value: str) -> str:
@@ -1463,11 +1465,11 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         rewriting them as URLs corrupts the record."""
         if key == "headers" and isinstance(value, dict):
             return sorted(value)
-        if key in cls._MARKETPLACE_URL_FIELDS:
-            return cls._credentialed_only(value)
         if isinstance(value, (list, dict)):
             return cls._marketplace_without_secrets(value)
-        return value
+        if key in cls._MARKETPLACE_LITERAL_FIELDS:
+            return value
+        return cls._credentialed_only(value)
 
     @classmethod
     def _endpoint_without_secrets(cls, value):
@@ -1487,7 +1489,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     @classmethod
     def _without_secrets(cls, key: str, value):
         if key in cls._PROFILE_KEYS and isinstance(value, dict):
-            # env values are commonly API keys; the names still show what is set
+            # env values are commonly API keys; the names still show what is set.
+            # path and args stay verbatim: they are how the shell is invoked, which
+            # is the posture being reported, and a secret there is not the shape
+            # this setting is normally written in.
             return {k: (sorted(v) if k == "env" and isinstance(v, dict) else v)
                     for k, v in value.items()}
         if key in cls._URL_KEYS:

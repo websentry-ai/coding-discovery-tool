@@ -1460,16 +1460,25 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return cls._credentialed_only(value)
 
     @classmethod
+    def _userinfo_only(cls, value):
+        """Identity fields keep their shape — a ``?`` belongs to a path, an ``@``
+        starts an npm scope — but userinfo in an authority is still a credential."""
+        if isinstance(value, str) and cls._authority(value).find("@") > 0:
+            return cls._strip_url_secrets(value)
+        return value
+
+    @classmethod
     def _marketplace_field(cls, key, value):
         """Inside an entry only ``url`` carries a URL and only ``headers`` carries
         auth; ``package``, ``ref`` and the wildcard patterns are identity, and
         rewriting them as URLs corrupts the record."""
-        if key == "headers" and isinstance(value, dict):
-            return sorted(value)
+        if key == "headers":
+            # auth material whatever shape it arrives in; names are enough signal
+            return sorted(value) if isinstance(value, dict) else "<redacted>"
         if isinstance(value, (list, dict)):
             return cls._marketplace_without_secrets(value)
         if key in cls._MARKETPLACE_LITERAL_FIELDS:
-            return value
+            return cls._userinfo_only(value)
         return cls._credentialed_only(value)
 
     @classmethod

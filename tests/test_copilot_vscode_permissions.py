@@ -994,6 +994,21 @@ class TestMarketplaceRedaction(unittest.TestCase):
         self.assertEqual(raw["chat.plugins.marketplaces"],
                          ["github/copilot-plugins", "github/awesome-copilot#marketplace"])
 
+    def test_userinfo_is_stripped_from_an_identity_field_too(self):
+        """Identity fields keep their shape, but that must not become a way to
+        carry a credential past redaction — at any depth."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "auth": {"path": "https://x-access-token:ghp_SECRET@host/o/r.git"}}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["auth"]["path"], "https://host/o/r.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_headers_are_reduced_whatever_shape_they_take(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git", "headers": ["Authorization: Bearer SEK"]}]})
+        self.assertNotIn("SEK", json.dumps(raw))
+
     def test_a_credential_under_an_unexpected_field_is_still_stripped(self):
         """The entry schema is open, so a remote can arrive under a name we did
         not anticipate; the redaction must not depend on that name."""

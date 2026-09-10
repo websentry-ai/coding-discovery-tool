@@ -1142,9 +1142,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
 
     # A truthy global auto-approve removes every confirmation, as do the elevated
     # levels of the permissions picker (``chat.permissions.default``). The
-    # pre-rename ``chat.tools.autoApprove`` is deliberately NOT here: VS Code
-    # never migrated its value and no longer reads it, so a leftover ``true``
-    # grants nothing. It stays in the key set so the stale value is still visible.
+    # pre-rename ``chat.tools.autoApprove`` is not here — VS Code no longer reads
+    # it — but stays in the key set so the stale value is still reported.
     _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove",)
     _BYPASS_PERMISSION_LEVELS = ("autoApprove", "autopilot")
     # The session defaults object, and the name it carried before the rename. Only
@@ -1155,10 +1154,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     # Sandbox key for this platform, most specific first. Windows overrides it:
     # VS Code reads a Windows-only key there and ignores the generic one.
     _SANDBOX_KEYS = ("chat.agent.sandbox.enabled",)
-    # Posture of an untouched install. Copilot asks for everything out of the box:
-    # terminal auto-approval needs a one-time warning acceptance that starts false,
-    # and the edit auto-approve defaults are forwarded to the agent host rather than
-    # applied to in-editor chat.
+    # Posture of an untouched install: Copilot asks for everything until the user
+    # accepts the terminal auto-approval warning, which starts false.
     _DEFAULT_POSTURE_MODE = "default"
 
     @abstractmethod
@@ -1285,9 +1282,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             for path in enumerated:
                 raw = self._read_contained(path, Path(user_home))
                 if raw is None:
-                    # Refused by our own policy — containment, the size cap, a
-                    # non-regular file. VS Code applies it regardless, so this is
-                    # config we did not get to see, not config that is absent.
+                    # Refused by our own policy — containment, the size cap. The
+                    # editor applies it regardless, so it is unseen, not absent.
                     unreadable = True
                     uninspectable = True
                     continue
@@ -1297,9 +1293,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                     logger.debug(f"Parser failed on {path}: {e}")
                     data = None
                 if data is None:
-                    # Failing to parse never proves the editor would fail too: it
-                    # recovers what it can from a broken settings file, and a BOM
-                    # alone used to defeat this parser while VS Code read on.
+                    # Failing to parse never proves the editor would fail too —
+                    # it recovers what it can from a broken settings file.
                     unreadable = True
                     uninspectable = True
                     continue
@@ -1318,9 +1313,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             return self._default_posture(defaults_path)
         winner = max(per_channel, key=self._permissiveness)
         if uninspectable and winner.get("permission_mode") != "bypassPermissions":
-            # VS Code loads a profile by known path whether or not we could list
-            # it, so what we could not inspect may hold a bypass. Only an already
-            # maximal posture cannot be made worse by what we missed.
+            # VS Code loads a profile by known path whether or not we could list it,
+            # so only an already maximal posture is safe from what we missed.
             return None
         return winner
 
@@ -1334,9 +1328,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         deliberately to look clean."""
         seen = set(enumerated)
         candidates = [config_dir / "settings.json"]
-        # scandir, not glob: glob swallows a listing error and yields nothing, so
-        # an execute-only profiles/ would read as "no profiles" while VS Code
-        # still loads a bypass from it by known path.
+        # scandir, not glob: glob swallows a listing error, so an execute-only
+        # profiles/ would read as "no profiles" while VS Code still loads from it.
         try:
             with os.scandir(config_dir / "profiles") as entries:
                 candidates += [Path(e.path) / "settings.json" for e in entries]

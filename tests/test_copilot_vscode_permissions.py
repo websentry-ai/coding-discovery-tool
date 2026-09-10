@@ -766,5 +766,82 @@ class TestChannelsAreNotMerged(unittest.TestCase):
                           "stable's deny must not appear on the Insiders record")
 
 
+class TestDefaultConfigurationApprovals(unittest.TestCase):
+    """chat.defaultConfiguration.approvals is the other way a user turns off every
+    confirmation. Registry: approvals is manual | assisted | allowAll (default
+    manual); mode is interactive | plan | autopilot and does not gate approvals."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _rec(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")
+
+    def test_allow_all_alone_produces_a_bypass_record(self):
+        # the reported symptom: this settings.json yielded no record at all
+        rec = self._rec({"chat.defaultConfiguration": {"mode": "autopilot",
+                                                       "approvals": "allowAll"}})
+        self.assertIsNotNone(rec, "a settings file with only this key must still report")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_pre_rename_key_is_read_too(self):
+        rec = self._rec({"chat.agentSessions.defaultConfiguration": {"approvals": "allowAll"}})
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_manual_approvals_stay_default(self):
+        rec = self._rec({"chat.defaultConfiguration": {"approvals": "manual"},
+                         "chat.agent.enabled": True})
+        self.assertEqual(rec["permission_mode"], "default")
+
+    def test_assisted_approvals_stay_default(self):
+        # assisted still prompts; calling it a bypass would overstate the posture
+        rec = self._rec({"chat.defaultConfiguration": {"approvals": "assisted"}})
+        self.assertEqual(rec["permission_mode"], "default")
+        self.assertIn("chat.defaultConfiguration", rec["raw_settings"])
+
+    def test_autopilot_mode_without_allow_all_is_not_a_bypass(self):
+        # mode picks the chat mode; approvals is what removes confirmations
+        rec = self._rec({"chat.defaultConfiguration": {"mode": "autopilot",
+                                                       "approvals": "manual"}})
+        self.assertEqual(rec["permission_mode"], "default")
+
+    def test_unexpected_shapes_do_not_raise(self):
+        for value in ("allowAll", ["allowAll"], 42, None, {}):
+            rec = self._rec({"chat.defaultConfiguration": value, "chat.agent.enabled": True})
+            self.assertEqual(rec["permission_mode"], "default")
+
+
+class TestByteOrderMark(unittest.TestCase):
+    """A settings.json written with a BOM is still live config: VS Code reads it
+    and preserves the BOM across its own edits, so refusing to parse it hides the
+    user's posture indefinitely."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="bom-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_settings_with_a_bom_is_still_reported(self):
+        # exactly what PowerShell's Set-Content -Encoding UTF8 produces
+        body = json.dumps({"chat.tools.global.autoApprove": True})
+        (self.ud / "settings.json").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        rec = self._extract()
+        self.assertIsNotNone(rec, "a BOM must not make the settings file invisible")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_settings_without_a_bom_is_unchanged(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+
 if __name__ == "__main__":
     unittest.main()

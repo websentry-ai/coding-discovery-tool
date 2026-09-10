@@ -11,7 +11,13 @@ param(
     # Deprecated and ignored: the scan authenticates with -ApiKey. Declared so a
     # stale MDM policy or cron that still passes it is not rejected outright.
     [Parameter(Mandatory=$false)]
-    [string]$DiscoveryKey
+    [string]$DiscoveryKey,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$McpScan,
+
+    [Parameter(Mandatory=$false)]
+    [string]$McpServerName
 )
 
 if (-not [string]::IsNullOrWhiteSpace($DiscoveryKey)) {
@@ -148,6 +154,11 @@ function Main {
         exit 1
     }
 
+    if ($McpScan -and [string]::IsNullOrWhiteSpace($McpServerName)) {
+        Write-ErrorMessage "Missing required argument: -McpServerName is required with -McpScan"
+        exit 1
+    }
+
     $CurrentID = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     if ($CurrentID -eq "NT AUTHORITY\SYSTEM") {
         Write-Info "Running as SYSTEM. Attempting to target console user..."
@@ -189,22 +200,34 @@ function Main {
 
     if (-not (Get-Repository)) { Write-ErrorMessage "Failed to download repository."; exit 1 }
 
+    $previousApiKey = $env:UNBOUND_API_KEY
     Push-Location $TEMP_DIR
     try {
-        # NOTE: --api-key appears in the Python process command line (Win32_Process.CommandLine /
-        # Event Log 4688). This is a pre-existing limitation of the Python entry point,
-        # the wrapper already avoids exposing the key at the PS level.
-        $pythonArgs = @("-m", "scripts.coding_discovery_tools.ai_tools_discovery", "--api-key", $ApiKey, "--domain", $Domain)
-        if ($AppName) { $pythonArgs += @("--app_name", $AppName) }
+        # The scan reads UNBOUND_API_KEY / UNBOUND_MCP_SERVER_JSON from the environment,
+        # so the key and the server config stay out of Win32_Process.CommandLine.
+        if ($McpScan) {
+            $env:UNBOUND_API_KEY = $ApiKey
+            $pythonArgs = @("-m", "scripts.coding_discovery_tools.scan_single_mcp_server", "--name", $McpServerName, "--domain", $Domain)
+        } else {
+            # NOTE: --api-key appears in the Python process command line (Win32_Process.CommandLine /
+            # Event Log 4688). This is a pre-existing limitation of the Python entry point,
+            # the wrapper already avoids exposing the key at the PS level.
+            $pythonArgs = @("-m", "scripts.coding_discovery_tools.ai_tools_discovery", "--api-key", $ApiKey, "--domain", $Domain)
+            if ($AppName) { $pythonArgs += @("--app_name", $AppName) }
+        }
         
         $env:PYTHONWARNINGS = "ignore" # Suppress syntax warnings
 
         if ($pythonCmd -eq "py -3") { & py -3 @pythonArgs } else { & $pythonCmd @pythonArgs }
+        $pythonExitCode = $LASTEXITCODE
     }
     finally {
+        $env:UNBOUND_API_KEY = $previousApiKey
         Pop-Location
         Remove-TempDirectory
     }
+
+    if ($pythonExitCode -ne 0) { exit $pythonExitCode }
 }
 
 Main

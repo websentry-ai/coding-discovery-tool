@@ -16,6 +16,7 @@ from ...jetbrains_naming_helpers import (
     parse_ide_name_and_version,
     parse_plugin_metadata,
     should_skip_folder,
+    version_sort_key,
 )
 from ...linux_extraction_helpers import get_linux_user_homes
 
@@ -147,8 +148,7 @@ class LinuxJetBrainsDetector(BaseToolDetector):
         latest = {}
         for ide in ide_list:
             name = ide["display_name"]
-            parts = [int(x) for x in ide["version"].split(".") if x.isdigit()]
-            ver = tuple(parts) if parts else (0,)
+            ver = version_sort_key(ide["version"])
             if name not in latest or ver > latest[name][1]:
                 latest[name] = (ide, ver)
         return [entry[0] for entry in latest.values()]

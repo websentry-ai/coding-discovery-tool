@@ -19,6 +19,7 @@ from unittest import mock
 from scripts.coding_discovery_tools.jetbrains_naming_helpers import (
     VERSION_SUFFIX,
     should_skip_folder,
+    version_sort_key,
 )
 from scripts.coding_discovery_tools.linux.github_copilot.copilot_rules_extractor import (
     LinuxGitHubCopilotRulesExtractor,
@@ -339,6 +340,45 @@ class TestPerUserVersionFiltering(unittest.TestCase):
             {ide["config_path"] for ide in alice + bob},
             {"/Users/alice/PyCharm2024.1", "/Users/bob/PyCharm2025.2"},
         )
+
+    def test_prerelease_does_not_lose_to_the_stable_it_supersedes(self) -> None:
+        """A non-numeric segment used to be dropped, so 2025.2-EAP scored (2025,)
+        and lost to 2025.1 — reporting the old version and skipping the EAP's plugins."""
+        ides = [
+            {"display_name": "Rider", "version": "2025.1"},
+            {"display_name": "Rider", "version": "2025.2-EAP"},
+        ]
+        for detector_cls in DETECTORS:
+            with self.subTest(detector=detector_cls.__name__):
+                kept = detector_cls._filter_old_versions(list(ides))
+                self.assertEqual(["2025.2-EAP"], [ide["version"] for ide in kept])
+
+
+    def test_same_number_stable_beats_eap_whatever_the_scan_order(self) -> None:
+        """Config dirs arrive in os.listdir order, so a tie would resolve by
+        filesystem layout and could drop the stable install's plugins."""
+        stable = {"display_name": "Rider", "version": "2025.2"}
+        eap = {"display_name": "Rider", "version": "2025.2-EAP"}
+        for order in ([stable, eap], [eap, stable]):
+            for detector_cls in DETECTORS:
+                with self.subTest(detector=detector_cls.__name__,
+                                  order=[i["version"] for i in order]):
+                    kept = detector_cls._filter_old_versions(list(order))
+                    self.assertEqual(["2025.2"], [ide["version"] for ide in kept])
+
+
+class TestVersionSortKey(unittest.TestCase):
+
+    def test_orders_versions_newest_highest(self) -> None:
+        self.assertLess(version_sort_key("2024.3"), version_sort_key("2025.1"))
+        self.assertLess(version_sort_key("2025.1"), version_sort_key("2025.2-EAP"))
+        self.assertLess(version_sort_key("2025.2-EAP"), version_sort_key("2025.2"))
+        self.assertLess(version_sort_key("2025.2"), version_sort_key("2025.2.3"))
+
+    def test_unparseable_sorts_lowest(self) -> None:
+        for version in ("Unknown", "", "EAP"):
+            with self.subTest(version=version):
+                self.assertLess(version_sort_key(version), version_sort_key("1.0"))
 
 
 class TestRootScanDoesNotRescanHome(_TempHomeTestCase):

@@ -44,7 +44,6 @@ class TestPermissionMapping(unittest.TestCase):
 
     def test_global_autoapprove_is_bypass(self):
         self.assertEqual(self._rec({"chat.tools.global.autoApprove": True})["permission_mode"], "bypassPermissions")
-        self.assertEqual(self._rec({"chat.tools.autoApprove": True})["permission_mode"], "bypassPermissions")
 
     def test_default_mode_when_nothing_auto_approved(self):
         rec = self._rec({"chat.agent.enabled": True})
@@ -88,7 +87,8 @@ class TestPermissionMapping(unittest.TestCase):
     def test_sandbox_on_off(self):
         self.assertTrue(self._rec({"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
         self.assertFalse(self._rec({"chat.agent.sandbox.enabled": "off"})["sandbox_enabled"])
-        self.assertIsNone(self._rec({"chat.agent.enabled": True})["sandbox_enabled"])
+        # the registered default is "off", so an absent key means disabled, not unknown
+        self.assertFalse(self._rec({"chat.agent.enabled": True})["sandbox_enabled"])
 
     def test_raw_settings_excludes_noise(self):
         rec = self._rec({"chat.tools.global.autoApprove": True, "editor.fontSize": 13})
@@ -336,8 +336,14 @@ class TestModeEdgeCases(unittest.TestCase):
         self.assertEqual(self._mode({"chat.tools.global.autoApprove": "true"}), "default")
         self.assertEqual(self._mode({"chat.tools.global.autoApprove": 1}), "default")
 
-    def test_legacy_key_alone_still_bypasses(self):
-        self.assertEqual(self._mode({"chat.tools.autoApprove": True}), "bypassPermissions")
+    def test_pre_rename_global_key_is_not_a_bypass(self):
+        # VS Code never migrated chat.tools.autoApprove and no longer reads it,
+        # so a leftover true grants nothing — reporting bypass would be a false positive
+        self.assertEqual(self._mode({"chat.tools.autoApprove": True}), "default")
+
+    def test_pre_rename_global_key_is_still_captured(self):
+        rec = self.ex._build_record({"chat.tools.autoApprove": True}, Path("/x/settings.json"), "user")
+        self.assertIn("chat.tools.autoApprove", rec["raw_settings"])
 
 
 class TestParseResilience(unittest.TestCase):
@@ -447,8 +453,10 @@ class TestChannelsAndProfiles(unittest.TestCase):
             (self.stable / "profiles").mkdir(parents=True, exist_ok=True)
             os.symlink(outside, self.stable / "profiles" / "escape")
             rec = self._ex().extract_settings()
-            self.assertNotEqual(rec["permission_mode"], "bypassPermissions",
-                                "settings reached through an escaping profile dir must not be read")
+            # Refusing to read it is not the same as knowing it is harmless: VS
+            # Code follows the link, so the posture is unknown rather than mild.
+            self.assertIsNone(rec,
+                              "settings reached through an escaping profile dir must not be read")
         finally:
             shutil.rmtree(outside, ignore_errors=True)
 
@@ -621,6 +629,9 @@ class TestNonRegularFiles(unittest.TestCase):
             worker.start()
             worker.join(timeout=15)
             self.assertFalse(worker.is_alive(), "a planted FIFO hung the scan")
+            # A file that is there but unreadable leaves the posture unknown. A
+            # clean "default" row here would let anyone hide a real bypass behind
+            # a pipe, so absence of a record is the correct answer.
             self.assertIsNone(result.get("r"))
         finally:
             shutil.rmtree(home, ignore_errors=True)
@@ -764,6 +775,271 @@ class TestChannelsAreNotMerged(unittest.TestCase):
         self.assertEqual(rec.get("allow_rules"), ["Bash(curl *)"])
         self.assertIsNone(rec.get("deny_rules"),
                           "stable's deny must not appear on the Insiders record")
+
+
+class TestDefaultConfigurationApprovals(unittest.TestCase):
+    """chat.defaultConfiguration.approvals is the other way a user turns off every
+    confirmation. Registry: approvals is manual | assisted | allowAll (default
+    manual); mode is interactive | plan | autopilot and does not gate approvals."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _rec(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")
+
+    def test_allow_all_alone_produces_a_bypass_record(self):
+        # the reported symptom: this settings.json yielded no record at all
+        rec = self._rec({"chat.defaultConfiguration": {"mode": "autopilot",
+                                                       "approvals": "allowAll"}})
+        self.assertIsNotNone(rec, "a settings file with only this key must still report")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_pre_rename_key_is_read_too(self):
+        rec = self._rec({"chat.agentSessions.defaultConfiguration": {"approvals": "allowAll"}})
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_manual_approvals_stay_default(self):
+        rec = self._rec({"chat.defaultConfiguration": {"approvals": "manual"},
+                         "chat.agent.enabled": True})
+        self.assertEqual(rec["permission_mode"], "default")
+
+    def test_assisted_approvals_stay_default(self):
+        # assisted still prompts; calling it a bypass would overstate the posture
+        rec = self._rec({"chat.defaultConfiguration": {"approvals": "assisted"}})
+        self.assertEqual(rec["permission_mode"], "default")
+        self.assertIn("chat.defaultConfiguration", rec["raw_settings"])
+
+    def test_autopilot_mode_without_allow_all_is_not_a_bypass(self):
+        # mode picks the chat mode; approvals is what removes confirmations
+        rec = self._rec({"chat.defaultConfiguration": {"mode": "autopilot",
+                                                       "approvals": "manual"}})
+        self.assertEqual(rec["permission_mode"], "default")
+
+    def test_unexpected_shapes_do_not_raise(self):
+        for value in ("allowAll", ["allowAll"], 42, None, {}):
+            rec = self._rec({"chat.defaultConfiguration": value, "chat.agent.enabled": True})
+            self.assertEqual(rec["permission_mode"], "default")
+
+
+class TestByteOrderMark(unittest.TestCase):
+    """A settings.json written with a BOM is still live config: VS Code reads it
+    and preserves the BOM across its own edits, so refusing to parse it hides the
+    user's posture indefinitely."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="bom-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_settings_with_a_bom_is_still_reported(self):
+        # exactly what PowerShell's Set-Content -Encoding UTF8 produces
+        body = json.dumps({"chat.tools.global.autoApprove": True})
+        (self.ud / "settings.json").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        rec = self._extract()
+        self.assertIsNotNone(rec, "a BOM must not make the settings file invisible")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_settings_without_a_bom_is_unchanged(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+
+class TestSandboxKeyPerPlatform(unittest.TestCase):
+    """VS Code reads a Windows-only sandbox key on Windows and ignores the generic
+    one, so the extractor has to read whichever key that platform honours."""
+
+    def _rec(self, os_name, data):
+        ex = GitHubCopilotSettingsExtractorFactory.create(os_name)
+        return ex._build_record(data, Path("/x/settings.json"), "user")
+
+    def test_windows_reads_the_windows_key(self):
+        self.assertTrue(self._rec("Windows", {"chat.agent.sandbox.enabledWindows": "on"})["sandbox_enabled"])
+
+    def test_windows_reads_the_pre_rename_spelling(self):
+        self.assertTrue(self._rec("Windows", {"chat.agent.sandbox.enabled.windows": "on"})["sandbox_enabled"])
+
+    def test_windows_ignores_the_generic_key(self):
+        # VS Code does not honour it on Windows, so neither do we — the default is off
+        self.assertFalse(self._rec("Windows", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+
+    def test_posix_reads_the_generic_key(self):
+        self.assertTrue(self._rec("Darwin", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+        self.assertTrue(self._rec("Linux", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+
+    def test_posix_ignores_the_windows_key(self):
+        self.assertFalse(self._rec("Darwin", {"chat.agent.sandbox.enabledWindows": "on"})["sandbox_enabled"])
+
+
+class TestNewlyCapturedKeys(unittest.TestCase):
+    """Two settings that govern real exposure and were not being read."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_terminal_file_write_block_is_captured(self):
+        self.assertIn("chat.tools.terminal.blockDetectedFileWrites",
+                      self._raw({"chat.tools.terminal.blockDetectedFileWrites": "off"}))
+
+    def test_sandbox_allow_network_is_captured(self):
+        self.assertIn("chat.agent.sandbox.allowNetwork",
+                      self._raw({"chat.agent.sandbox.allowNetwork": True}))
+
+
+class TestDefaultPosture(unittest.TestCase):
+    """A Copilot user who has set none of these keys is on VS Code's shipped
+    defaults, which auto-apply edits — reporting nothing made them look identical
+    to a device that was never scanned."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="posture-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_no_settings_file_at_all_reports_the_defaults(self):
+        self.ud.mkdir(parents=True)
+        rec = self._extract()
+        self.assertIsNotNone(rec, "a Copilot install with no settings must still report")
+        # Copilot asks for everything until the user opts in, so the default
+        # posture is "default" — claiming acceptEdits would overstate it
+        self.assertEqual(rec["permission_mode"], "default")
+        self.assertFalse(rec["sandbox_enabled"])
+        self.assertEqual(rec["raw_settings"], {})
+        self.assertNotIn("allow_rules", rec, "the built-in rules are not the user's choices")
+
+    def test_settings_file_without_relevant_keys_reports_the_defaults(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"editor.fontSize": 13, "workbench.colorTheme": "Dark+"}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    def test_configured_user_is_unaffected(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+    def test_no_vscode_at_all_reports_nothing(self):
+        # absence must still mean absence — this is what keeps "never scanned" legible
+        self.assertIsNone(self._extract())
+
+    def test_unreadable_settings_is_unknown_not_defaults(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text("{ this is not json", encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file we could not read leaves the posture unknown")
+
+    def test_defaults_path_points_at_the_settings_file(self):
+        self.ud.mkdir(parents=True)
+        self.assertEqual(self._extract()["settings_path"], str(self.ud / "settings.json"))
+
+    def test_an_over_cap_profile_cannot_hide_behind_a_configured_default(self):
+        """The size cap is our policy, not VS Code's — it still applies the file,
+        so a posture we could not read must not be reported as the mild one."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "yolo"
+        profile.mkdir(parents=True)
+        padding = " " * (_VSCODE_SETTINGS_MAX_BYTES + 1024)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True, "_pad": padding}),
+            encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file over the read cap leaves the posture unknown")
+
+    def test_a_profile_our_parser_chokes_on_is_unknown_not_mild(self):
+        """Our parser failing is not proof the editor cannot read the file — the
+        BOM this change fixes was exactly that case."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "deep"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text("[" * 20000 + "]" * 20000, encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file our parser could not handle leaves the posture unknown")
+
+    def test_a_profile_we_cannot_parse_is_unknown_not_mild(self):
+        """VS Code recovers what it can from a broken settings file, so failing to
+        parse one never proves it holds nothing."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "broken"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text("{ not json", encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file we could not parse leaves the posture unknown")
+
+    def test_a_stray_file_under_profiles_does_not_suppress_the_row(self):
+        """touch profiles/x.txt must not drop the user off the page."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "profiles").mkdir()
+        (self.ud / "profiles" / "not-a-dir.txt").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    def test_a_plain_file_where_profiles_would_be_is_not_a_failure(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "profiles").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    @unittest.skipUnless(os.name == "posix", "chmod 0o111 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses directory permissions, so 0o111 is still listable")
+    def test_an_unlistable_profile_cannot_hide_behind_a_configured_default(self):
+        """A record built from the default file must not present as a clean
+        posture while a profile we could not inspect stays live."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.chmod(self.ud / "profiles", 0o111)
+        try:
+            self.assertIsNone(self._extract(),
+                              "an uninspectable profile leaves the posture unknown")
+        finally:
+            os.chmod(self.ud / "profiles", 0o755)
+
+    @unittest.skipUnless(os.name == "posix", "chmod 0o111 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses directory permissions, so 0o111 is still listable")
+    def test_unlistable_profiles_dir_is_unknown_not_defaults(self):
+        """An execute-only profiles/ still serves a bypass to VS Code by known
+        path, so it must not be reported as a clean default posture."""
+        self.ud.mkdir(parents=True)
+        profile = self.ud / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.chmod(self.ud / "profiles", 0o111)
+        try:
+            self.assertIsNone(self._extract(),
+                              "a profiles dir we cannot list leaves the posture unknown")
+        finally:
+            os.chmod(self.ud / "profiles", 0o755)
 
 
 class TestGuardRemovalKeys(unittest.TestCase):
@@ -1112,7 +1388,6 @@ class TestProfileSettingsMerge(unittest.TestCase):
         rec = self._extract()
         self.assertEqual(rec["permission_mode"], "bypassPermissions")
         self.assertEqual(rec["raw_settings"]["chat.agent.sandbox.enabled"], "on")
-
 
 if __name__ == "__main__":
     unittest.main()

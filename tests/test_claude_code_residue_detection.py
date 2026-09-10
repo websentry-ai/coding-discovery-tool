@@ -15,6 +15,7 @@ and a present-but-non-executable file -> NOT detected.
 
 import json
 import os
+import platform
 import shutil
 import tempfile
 import unittest
@@ -805,6 +806,97 @@ class TestToolConfigDirsDiagnostic(unittest.TestCase):
         """Must be tags, not just context, or they can't be grouped on in Sentry."""
         self.assertIn("config_dirs_present", utils_mod._SENTRY_TAG_KEYS)
         self.assertIn("config_dirs", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestWslDistrosPresent(unittest.TestCase):
+    """A tool installed inside a WSL distro is on a filesystem no detector walks,
+    so a zero-tool scan there has an explanation nothing else can show."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.packages = self.home / "AppData" / "Local" / "Packages"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_package(self, name, leaf=None, is_dir=False):
+        state = self.packages / name / "LocalState"
+        state.mkdir(parents=True)
+        if leaf and is_dir:
+            (state / leaf).mkdir()
+        elif leaf:
+            (state / leaf).write_text("")
+
+    def test_no_packages_dir(self):
+        self.assertEqual([], utils_mod.wsl_distros_present(self.home))
+
+    def test_wsl2_distro_found_by_its_disk_image(self):
+        self._make_package("CanonicalGroupLimited.Ubuntu22.04LTS_79rhkp1fndgsc", "ext4.vhdx")
+        self.assertEqual(["CanonicalGroupLimited.Ubuntu22.04LTS"],
+                         utils_mod.wsl_distros_present(self.home))
+
+    def test_wsl1_distro_found_by_its_rootfs(self):
+        self._make_package("TheDebianProject.DebianGNULinux_76v4gfsz19hv4", "rootfs", is_dir=True)
+        self.assertEqual(["TheDebianProject.DebianGNULinux"],
+                         utils_mod.wsl_distros_present(self.home))
+
+    def test_ordinary_store_app_is_not_a_distro(self):
+        self._make_package("Microsoft.WindowsCalculator_8wekyb3d8bbwe")
+        self.assertEqual([], utils_mod.wsl_distros_present(self.home))
+
+    def test_unreadable_package_never_raises(self):
+        self._make_package("CanonicalGroupLimited.Ubuntu_79rhkp1fndgsc", "ext4.vhdx")
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "denied")):
+            self.assertEqual([], utils_mod.wsl_distros_present(self.home))
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("wsl_distros", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestVscodeEditorsPresent(unittest.TestCase):
+    """A zero-tool scan can't otherwise tell "no editor here" from "editor in use
+    and we missed its Copilot extension"."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.base = {
+            "Darwin": ("Library", "Application Support"),
+            "Windows": ("AppData", "Roaming"),
+            "Linux": (".config",),
+        }[platform.system()]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_editor(self, name):
+        self.home.joinpath(*self.base, name, "User").mkdir(parents=True)
+
+    def test_no_editors(self):
+        self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+
+    def test_reports_each_editor_including_forks_and_insiders(self):
+        for name in ("Code", "Code - Insiders", "Cursor"):
+            self._make_editor(name)
+        self.assertEqual(["Code", "Code - Insiders", "Cursor"],
+                         utils_mod.vscode_editors_present(self.home))
+
+    def test_editor_dir_without_user_subdir_is_not_counted(self):
+        self.home.joinpath(*self.base, "Code").mkdir(parents=True)
+        self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+
+    def test_unreadable_dir_is_reported_not_passed_off_as_absence(self):
+        """Empty would claim the machine has no editor, which is the one thing
+        this probe exists to rule out."""
+        self._make_editor("Code")
+        with patch("os.stat", side_effect=PermissionError(13, "denied")):
+            self.assertEqual(["unreadable"], utils_mod.vscode_editors_present(self.home))
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("vscode_editors", utils_mod._SENTRY_TAG_KEYS)
 
 
 class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):

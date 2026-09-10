@@ -1124,11 +1124,16 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     SECURITY_RELEVANT_KEYS = {
         "chat.tools.global.autoApprove", "chat.tools.autoApprove",  # global YOLO (current + legacy)
         "chat.permissions.default",
+        "chat.defaultConfiguration", "chat.agentSessions.defaultConfiguration",  # + pre-rename
         "chat.tools.eligibleForAutoApproval",
         "chat.tools.terminal.enableAutoApprove", "chat.tools.terminal.autoApprove",
+        "chat.tools.terminal.blockDetectedFileWrites",
         "chat.tools.edits.autoApprove",
         "chat.tools.urls.autoApprove",
-        "chat.agent.enabled", "chat.agent.sandbox.enabled",
+        "chat.agent.enabled",
+        "chat.agent.sandbox.enabled", "chat.agent.sandbox.enabledWindows",
+        "chat.agent.sandbox.enabled.windows",  # pre-rename Windows spelling
+        "chat.agent.sandbox.allowNetwork",
         "chat.agent.networkFilter", "chat.agent.allowedNetworkDomains",
         "chat.agent.deniedNetworkDomains",
         "chat.mcp.access", "chat.mcp.allowedServers", "chat.mcp.deniedServers",
@@ -1206,9 +1211,22 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     }
 
     # A truthy global auto-approve removes every confirmation, as do the elevated
-    # levels of the permissions picker (``chat.permissions.default``).
-    _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove", "chat.tools.autoApprove")
+    # levels of the permissions picker (``chat.permissions.default``). The
+    # pre-rename ``chat.tools.autoApprove`` is not here — VS Code no longer reads
+    # it — but stays in the key set so the stale value is still reported.
+    _GLOBAL_AUTOAPPROVE_KEYS = ("chat.tools.global.autoApprove",)
     _BYPASS_PERMISSION_LEVELS = ("autoApprove", "autopilot")
+    # The session defaults object, and the name it carried before the rename. Only
+    # ``approvals`` decides confirmations; ``mode`` picks the chat mode, and
+    # autopilot mode still leaves approvals at whatever they are set to.
+    _DEFAULT_CONFIG_KEYS = ("chat.defaultConfiguration",
+                            "chat.agentSessions.defaultConfiguration")
+    # Sandbox key for this platform, most specific first. Windows overrides it:
+    # VS Code reads a Windows-only key there and ignores the generic one.
+    _SANDBOX_KEYS = ("chat.agent.sandbox.enabled",)
+    # Posture of an untouched install: Copilot asks for everything until the user
+    # accepts the terminal auto-approval warning, which starts false.
+    _DEFAULT_POSTURE_MODE = "default"
 
     @abstractmethod
     def _scan_users(self, callback) -> None:
@@ -1312,11 +1330,43 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         Insiders never merge, so the reported posture is always one that a single
         installation actually defines. The riskiest channel wins."""
         per_channel = []
+        defaults_path: Optional[Path] = None
+        unreadable = False
+        # A file we never got to look at is not the same as one we read and
+        # rejected: only the former can be hiding a posture VS Code still applies.
+        uninspectable = False
         for config_dir in self._user_config_dirs(Path(user_home)):
+            config_dir = Path(config_dir)
+            try:
+                if defaults_path is None and config_dir.is_dir():
+                    defaults_path = config_dir / "settings.json"
+            except OSError as e:
+                # Losing this probe silently would make a defaults record go
+                # missing with no trace of why.
+                logger.debug(f"Could not stat Copilot config dir {config_dir}: {e}")
             records = []
-            for path in self._iter_channel_settings_files(config_dir):
-                data = self._parse_jsonc(path, user_home)
+            enumerated = list(self._iter_channel_settings_files(config_dir))
+            if self._skipped_a_present_file(config_dir, enumerated):
+                unreadable = True
+                uninspectable = True
+            for path in enumerated:
+                raw = self._read_contained(path, Path(user_home))
+                if raw is None:
+                    # Refused by our own policy — containment, the size cap. The
+                    # editor applies it regardless, so it is unseen, not absent.
+                    unreadable = True
+                    uninspectable = True
+                    continue
+                try:
+                    data = self._parse_jsonc_text(raw)
+                except Exception as e:
+                    logger.debug(f"Parser failed on {path}: {e}")
+                    data = None
                 if data is None:
+                    # Failing to parse never proves the editor would fail too —
+                    # it recovers what it can from a broken settings file.
+                    unreadable = True
+                    uninspectable = True
                     continue
                 record = self._build_record(data, path, "user")
                 if record:
@@ -1328,8 +1378,63 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 records.sort(key=self._permissiveness, reverse=True)
                 per_channel.append(self._merge_records(records[0], records[1:]))
         if not per_channel:
+            if unreadable or defaults_path is None:
+                return None
+            return self._default_posture(defaults_path)
+        winner = max(per_channel, key=self._permissiveness)
+        if uninspectable and winner.get("permission_mode") != "bypassPermissions":
+            # VS Code loads a profile by known path whether or not we could list it,
+            # so only an already maximal posture is safe from what we missed.
             return None
-        return max(per_channel, key=self._permissiveness)
+        return winner
+
+    @staticmethod
+    def _skipped_a_present_file(config_dir: Path, enumerated) -> bool:
+        """True if a settings file is there but was not enumerated.
+
+        Enumeration keeps regular files only, so a FIFO or a device left at one
+        of these paths is dropped before anything is read. That is an unknown
+        posture, not an unconfigured one, and it is the case someone would plant
+        deliberately to look clean."""
+        seen = set(enumerated)
+        candidates = [config_dir / "settings.json"]
+        # scandir, not glob: glob swallows a listing error, so an execute-only
+        # profiles/ would read as "no profiles" while VS Code still loads from it.
+        try:
+            with os.scandir(config_dir / "profiles") as entries:
+                candidates += [Path(e.path) / "settings.json" for e in entries]
+        except (FileNotFoundError, NotADirectoryError):
+            pass          # no profiles here, or a stray file where they would be
+        except OSError:
+            return True
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            try:
+                os.lstat(str(candidate))
+            except (FileNotFoundError, NotADirectoryError):
+                continue   # absent, or its parent is a plain file
+            except OSError:
+                return True   # cannot tell — an unreadable directory reads like this
+            return True
+        return False
+
+    def _default_posture(self, path: Path) -> Dict:
+        """The posture VS Code applies when the user has set none of these keys.
+
+        Returning nothing for these users made them indistinguishable from
+        never-scanned, which was most of the fleet. The built-in terminal rules are
+        deliberately NOT synthesised into allow_rules — they are the tool's, not the
+        user's, and would read as chosen risk.
+        """
+        return {
+            "settings_source": "user",
+            "scope": "user",
+            "settings_path": str(path),
+            "raw_settings": {},   # empty: nothing here was authored by the user
+            "permission_mode": self._DEFAULT_POSTURE_MODE,
+            "sandbox_enabled": False,   # chat.agent.sandbox.enabled defaults to "off"
+        }
 
     @classmethod
     def _parse_jsonc(cls, path: Path, user_home=None) -> Optional[Dict]:
@@ -1347,8 +1452,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                 if not path.is_file():
                     return None
                 raw = path.read_text(encoding="utf-8", errors="replace")
-            data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
-            return data if isinstance(data, dict) else None
+            return cls._parse_jsonc_text(raw)
         except (PermissionError, OSError) as e:
             logger.debug(f"Permission/OS error reading {path}: {e}")
             return None
@@ -1469,9 +1573,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
 
     @classmethod
     def _marketplace_field(cls, key, value):
-        """Inside an entry only ``url`` carries a URL and only ``headers`` carries
-        auth; ``package``, ``ref`` and the wildcard patterns are identity, and
-        rewriting them as URLs corrupts the record."""
+        """Every value is checked for a credential except the identity fields,
+        which keep their own punctuation but still lose userinfo."""
         if key == "headers":
             # auth material whatever shape it arrives in; names are enough signal
             return sorted(value) if isinstance(value, dict) else "<redacted>"
@@ -1500,9 +1603,7 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     def _without_secrets(cls, key: str, value):
         if key in cls._PROFILE_KEYS and isinstance(value, dict):
             # env values are commonly API keys; the names still show what is set.
-            # path and args stay verbatim: they are how the shell is invoked, which
-            # is the posture being reported, and a secret there is not the shape
-            # this setting is normally written in.
+            # path and args stay verbatim — they are the posture being reported.
             return {k: (sorted(v) if k == "env" and isinstance(v, dict) else v)
                     for k, v in value.items()}
         if key in cls._URL_KEYS:
@@ -1512,6 +1613,14 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         if key in cls._MARKETPLACE_KEYS:
             return cls._remotes_without_secrets(value)
         return value
+
+
+    @staticmethod
+    def _parse_jsonc_text(raw: str) -> Optional[Dict]:
+        """Parse already-read JSONC text. Separate from the read so a caller can
+        tell a file it was refused from one it read and could not parse."""
+        data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
+        return data if isinstance(data, dict) else None
 
     def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:
         raw_settings = {k: self._without_secrets(k, data[k])
@@ -1540,6 +1649,10 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             return "bypassPermissions"
         if data.get("chat.permissions.default") in self._BYPASS_PERMISSION_LEVELS:
             return "bypassPermissions"
+        for key in self._DEFAULT_CONFIG_KEYS:
+            config = data.get(key)
+            if isinstance(config, dict) and config.get("approvals") == "allowAll":
+                return "bypassPermissions"
         edits = data.get("chat.tools.edits.autoApprove")
         if isinstance(edits, dict) and any(v is True for v in edits.values()):
             return "acceptEdits"
@@ -1548,14 +1661,18 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             return "acceptEdits"   # edits are accepted on a timer, with no prompt
         return "default"
 
-    @staticmethod
-    def _sandbox_enabled(data: Dict):
-        val = data.get("chat.agent.sandbox.enabled")
-        if isinstance(val, str):
-            return val.lower() == "on"
-        if isinstance(val, bool):
-            return val
-        return None
+    def _sandbox_enabled(self, data: Dict):
+        """Terminal sandboxing, read from the key this platform actually honours.
+
+        The registered default is "off", so an absent key means sandboxing is
+        disabled — not unknown."""
+        for key in self._SANDBOX_KEYS:
+            val = data.get(key)
+            if isinstance(val, str):
+                return val.lower() == "on"
+            if isinstance(val, bool):
+                return val
+        return False
 
     @staticmethod
     def _clean_terminal_pattern(pattern: str) -> str:

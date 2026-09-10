@@ -979,15 +979,17 @@ class TestDefaultPosture(unittest.TestCase):
         self.assertIsNone(self._extract(),
                           "a file our parser could not handle leaves the posture unknown")
 
-    def test_a_malformed_profile_still_reports_what_was_read(self):
-        """Malformed JSON is not hidden config: VS Code cannot apply it either."""
+    def test_a_profile_we_cannot_parse_is_unknown_not_mild(self):
+        """VS Code recovers what it can from a broken settings file, so failing to
+        parse one never proves it holds nothing."""
         self.ud.mkdir(parents=True)
         (self.ud / "settings.json").write_text(
             json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
         profile = self.ud / "profiles" / "broken"
         profile.mkdir(parents=True)
         (profile / "settings.json").write_text("{ not json", encoding="utf-8")
-        self.assertEqual(self._extract()["permission_mode"], "default")
+        self.assertIsNone(self._extract(),
+                          "a file we could not parse leaves the posture unknown")
 
     def test_a_stray_file_under_profiles_does_not_suppress_the_row(self):
         """touch profiles/x.txt must not drop the user off the page."""

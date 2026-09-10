@@ -1293,17 +1293,15 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                     continue
                 try:
                     data = self._parse_jsonc_text(raw)
-                except json.JSONDecodeError:
-                    # Malformed: unknown to us, but VS Code cannot apply it either.
-                    unreadable = True
-                    continue
                 except Exception as e:
                     logger.debug(f"Parser failed on {path}: {e}")
+                    data = None
+                if data is None:
+                    # Failing to parse never proves the editor would fail too: it
+                    # recovers what it can from a broken settings file, and a BOM
+                    # alone used to defeat this parser while VS Code read on.
                     unreadable = True
                     uninspectable = True
-                    continue
-                if data is None:
-                    unreadable = True
                     continue
                 record = self._build_record(data, path, "user")
                 if record:
@@ -1403,10 +1401,6 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     def _parse_jsonc_text(raw: str) -> Optional[Dict]:
         """Parse already-read JSONC text. Separate from the read so a caller can
         tell a file it was refused from one it read and could not parse."""
-        # Only a syntax error is caught here. Anything else — a recursion limit,
-        # a mangling by the strip passes — means our parser failed on a file the
-        # editor may well read, which the caller must treat as unseen rather than
-        # as junk. The BOM this PR fixes was exactly that case.
         data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(raw)))
         return data if isinstance(data, dict) else None
 

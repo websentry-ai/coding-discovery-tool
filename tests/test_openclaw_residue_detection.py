@@ -367,6 +367,9 @@ class TestResolveNpmGlobalToolBin(unittest.TestCase):
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
+        # The npm prefix is resolved once per run and cached, so an earlier suite's
+        # value would answer for this one and the mock below would never be consulted.
+        utils_mod.reset_sentry_run_state()
         import scripts.coding_discovery_tools.utils as utils
         self.utils = utils
         self.tmp = tempfile.TemporaryDirectory()

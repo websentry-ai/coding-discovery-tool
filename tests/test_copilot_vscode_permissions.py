@@ -1193,6 +1193,15 @@ class TestCredentialBearingValues(unittest.TestCase):
                          "env names stay as signal; values must not travel")
         self.assertNotIn("AKIAsecretvalue", json.dumps(raw))
 
+    def test_terminal_env_is_redacted_whatever_shape_it_takes(self):
+        """settings.json is user-authored and never schema-checked, so env can
+        arrive as a list — the same gap that was closed for auth headers."""
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": {
+            "path": "/bin/bash", "env": ["AWS_SECRET_ACCESS_KEY=AKIALEAK"]}})
+        self.assertNotIn("AKIALEAK", json.dumps(raw))
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": [{"env": {"K": "SEK"}}]})
+        self.assertNotIn("SEK", json.dumps(raw))
+
     def test_endpoint_userinfo_and_query_are_stripped(self):
         raw = self._raw({
             "github.copilot.chat.otel.otlpEndpoint": "https://u:p@collector.internal:4318/v1?api-key=SEK",

@@ -1601,10 +1601,12 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
 
     @classmethod
     def _without_secrets(cls, key: str, value):
-        if key in cls._PROFILE_KEYS and isinstance(value, dict):
+        if key in cls._PROFILE_KEYS:
             # env values are commonly API keys; the names still show what is set.
             # path and args stay verbatim — they are the posture being reported.
-            return {k: (sorted(v) if k == "env" and isinstance(v, dict) else v)
+            if not isinstance(value, dict):
+                return "<redacted>" if value else value
+            return {k: (sorted(v) if isinstance(v, dict) else "<redacted>") if k == "env" else v
                     for k, v in value.items()}
         if key in cls._URL_KEYS:
             return cls._endpoint_without_secrets(value)

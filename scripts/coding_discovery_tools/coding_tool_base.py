@@ -1369,7 +1369,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
                          "chat.plugins.strictMarketplaces")
     # Identity, not destinations: rewriting these as URLs corrupts the record
     # (an npm scope starts with @, a wildcard pattern may contain ?).
-    _MARKETPLACE_LITERAL_FIELDS = ("source", "package", "ref", "hostPattern", "pathPattern")
+    _MARKETPLACE_LITERAL_FIELDS = ("source", "package", "ref", "path",
+                                   "hostPattern", "pathPattern")
 
     @staticmethod
     def _cut_credentials(value: str) -> str:

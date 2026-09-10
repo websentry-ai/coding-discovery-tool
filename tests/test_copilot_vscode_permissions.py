@@ -1007,10 +1007,13 @@ class TestMarketplaceRedaction(unittest.TestCase):
     def test_marketplace_identity_fields_are_not_rewritten(self):
         """@scope/name and a wildcard pattern are identity, not credentials."""
         raw = self._raw({"chat.plugins.strictMarketplaces": [
-            {"source": "npm", "package": "@scope/name", "hostPattern": "*.exam?le.com"}]})
+            {"source": "npm", "package": "@scope/name", "hostPattern": "*.exam?le.com",
+             "path": "/opt/plugins/sub?dir"}]})
         entry = raw["chat.plugins.strictMarketplaces"][0]
         self.assertEqual(entry["package"], "@scope/name")
         self.assertEqual(entry["hostPattern"], "*.exam?le.com")
+        self.assertEqual(entry["path"], "/opt/plugins/sub?dir",
+                         "a local marketplace path is identity, not a URL")
 
     def test_a_token_in_the_endpoint_path_does_not_ship(self):
         """A webhook-style endpoint carries its secret in the path."""

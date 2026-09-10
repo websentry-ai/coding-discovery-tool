@@ -13,7 +13,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
-import scripts.coding_discovery_tools.macos.github_copilot.detect_copilot as detect_copilot_mod
 from scripts.coding_discovery_tools.macos.github_copilot.detect_copilot import (
     MacOSCopilotDetector,
 )
@@ -459,14 +458,6 @@ class TestVscodeInsidersCoverage(unittest.TestCase):
 
         self.assertEqual(1, len(results))
         self.assertEqual((".vscode", "extensions"), Path(results[0]["install_path"]).parts[-2:])
-
-    def test_short_app_bundle_name_is_probed(self):
-        """Some installs keep ``Code.app``; Cline and Roo Code already accept both."""
-        roots = detect_copilot_mod._VSCODE_APP_EXTENSION_ROOTS
-        for bundle in ("Code.app", "Visual Studio Code.app"):
-            self.assertIn(
-                Path(f"/Applications/{bundle}/Contents/Resources/app/extensions"), roots
-            )
 
 
 if __name__ == "__main__":

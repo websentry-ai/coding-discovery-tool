@@ -9,9 +9,8 @@ from ...constants import is_symlink_or_junction
 from ...jetbrains_naming_helpers import plugin_entries
 from ...vscode_extension_helpers import (
     VSCODE_EDITOR_DISPLAY_NAMES,
-    editor_extension_dir_keys,
     extensions_dir_for_editor,
-    find_extension_in_editor,
+    find_extension_in_editor_channels,
 )
 from ...windows_extraction_helpers import is_running_as_admin
 from ..jetbrains.jetbrains import WindowsJetBrainsDetector
@@ -167,23 +166,21 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
 
         for ide_key, ide_name in SUPPORTED_IDES.items():
             for ext_id, label in _MARKETPLACE_EXTENSIONS:
-                for dir_key in editor_extension_dir_keys(ide_key):
-                    entry = find_extension_in_editor(user_home, dir_key, ext_id)
-                    if entry is None:
-                        continue
-                    _location, version = entry
-                    name = f"{label} ({ide_name})"
-                    ext_dir = extensions_dir_for_editor(user_home, dir_key)
-                    results.append({
-                        "name": name,
-                        "version": version or "unknown",
-                        "publisher": "GitHub",
-                        "install_path": str(ext_dir),
-                    })
-                    if ide_key == "Code":
-                        code_found = True
-                    logger.info(f"Detected: {name} v{version or 'unknown'} at {ext_dir}")
-                    break
+                found = find_extension_in_editor_channels(user_home, ide_key, ext_id)
+                if found is None:
+                    continue
+                dir_key, version = found
+                name = f"{label} ({ide_name})"
+                ext_dir = extensions_dir_for_editor(user_home, dir_key)
+                results.append({
+                    "name": name,
+                    "version": version or "unknown",
+                    "publisher": "GitHub",
+                    "install_path": str(ext_dir),
+                })
+                if ide_key == "Code":
+                    code_found = True
+                logger.info(f"Detected: {name} v{version or 'unknown'} at {ext_dir}")
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
         # marketplace Copilot extension is present, so built-in users — and their

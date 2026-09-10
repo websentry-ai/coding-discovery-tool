@@ -11,9 +11,8 @@ from ...linux.jetbrains.jetbrains import LinuxJetBrainsDetector
 from ...linux_extraction_helpers import get_linux_user_homes
 from ...vscode_extension_helpers import (
     VSCODE_EDITOR_DISPLAY_NAMES,
-    editor_extension_dir_keys,
     extensions_dir_for_editor,
-    find_extension_in_editor,
+    find_extension_in_editor_channels,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,20 +112,18 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
 
         for ide_key, ide_name in SUPPORTED_IDES.items():
             for ext_id, label in _MARKETPLACE_EXTENSIONS:
-                for dir_key in editor_extension_dir_keys(ide_key):
-                    entry = find_extension_in_editor(user_home, dir_key, ext_id)
-                    if entry is None:
-                        continue
-                    _location, version = entry
-                    results.append({
-                        "name": f"{label} ({ide_name})",
-                        "version": version or "unknown",
-                        "publisher": "GitHub",
-                        "install_path": str(extensions_dir_for_editor(user_home, dir_key)),
-                    })
-                    if ide_key == "Code":
-                        code_found = True
-                    break
+                found = find_extension_in_editor_channels(user_home, ide_key, ext_id)
+                if found is None:
+                    continue
+                dir_key, version = found
+                results.append({
+                    "name": f"{label} ({ide_name})",
+                    "version": version or "unknown",
+                    "publisher": "GitHub",
+                    "install_path": str(extensions_dir_for_editor(user_home, dir_key)),
+                })
+                if ide_key == "Code":
+                    code_found = True
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
         # marketplace Copilot extension is present, so built-in users — and their

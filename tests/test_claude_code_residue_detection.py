@@ -15,6 +15,7 @@ and a present-but-non-executable file -> NOT detected.
 
 import json
 import os
+import platform
 import shutil
 import tempfile
 import unittest
@@ -852,6 +853,48 @@ class TestWslDistrosPresent(unittest.TestCase):
 
     def test_is_a_queryable_sentry_tag(self):
         self.assertIn("wsl_distros", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestVscodeEditorsPresent(unittest.TestCase):
+    """A zero-tool scan can't otherwise tell "no editor here" from "editor in use
+    and we missed its Copilot extension"."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.base = {
+            "Darwin": ("Library", "Application Support"),
+            "Windows": ("AppData", "Roaming"),
+            "Linux": (".config",),
+        }[platform.system()]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_editor(self, name):
+        self.home.joinpath(*self.base, name, "User").mkdir(parents=True)
+
+    def test_no_editors(self):
+        self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+
+    def test_reports_each_editor_including_forks_and_insiders(self):
+        for name in ("Code", "Code - Insiders", "Cursor"):
+            self._make_editor(name)
+        self.assertEqual(["Code", "Code - Insiders", "Cursor"],
+                         utils_mod.vscode_editors_present(self.home))
+
+    def test_editor_dir_without_user_subdir_is_not_counted(self):
+        self.home.joinpath(*self.base, "Code").mkdir(parents=True)
+        self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+
+    def test_unreadable_home_never_raises(self):
+        self._make_editor("Code")
+        with patch.object(Path, "is_dir", side_effect=PermissionError(13, "denied")):
+            self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("vscode_editors", utils_mod._SENTRY_TAG_KEYS)
 
 
 class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):

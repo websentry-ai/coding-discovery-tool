@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
+import scripts.coding_discovery_tools.macos.github_copilot.detect_copilot as detect_copilot_mod
 from scripts.coding_discovery_tools.macos.github_copilot.detect_copilot import (
     MacOSCopilotDetector,
 )
@@ -404,6 +405,65 @@ class TestMacOSScopedToUserHome(unittest.TestCase):
         ):
             with self.assertRaises(PermissionError):
                 det._scan_for_ides()
+
+    def test_unreadable_user_data_dir_raises_instead_of_reporting_absent(self):
+        det = MacOSCopilotDetector()
+        det.user_home = self.alice
+
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            with self.assertRaises(PermissionError):
+                det._detect_vscode_builtin_copilot(self.alice)
+
+
+class TestVscodeInsidersCoverage(unittest.TestCase):
+    """Insiders is a VS Code channel, not its own row, so its marketplace Copilot
+    must be found and reported under the existing ``(VS Code)`` label."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_registry(self, ext_root: str):
+        p = self.home / ext_root / "extensions.json"
+        p.parent.mkdir(parents=True)
+        p.write_text(
+            json.dumps([{"identifier": {"id": "github.copilot-chat"}, "version": "0.64.1"}]),
+            encoding="utf-8",
+        )
+
+    def test_insiders_only_copilot_is_detected_as_vs_code(self):
+        (self.home / "Library" / "Application Support" / "Code - Insiders" / "User").mkdir(parents=True)
+        self._make_registry(".vscode-insiders/extensions")
+
+        det = MacOSCopilotDetector()
+        det.user_home = self.home
+        results = det._detect_vscode_for_user(self.home)
+
+        self.assertEqual(["GitHub Copilot Chat (VS Code)"], [r["name"] for r in results])
+        self.assertTrue(results[0]["install_path"].endswith(".vscode-insiders/extensions"))
+
+    def test_stable_wins_when_both_channels_have_copilot(self):
+        self._make_registry(".vscode/extensions")
+        self._make_registry(".vscode-insiders/extensions")
+
+        det = MacOSCopilotDetector()
+        det.user_home = self.home
+        results = det._detect_vscode_for_user(self.home)
+
+        self.assertEqual(1, len(results))
+        self.assertTrue(results[0]["install_path"].endswith(".vscode/extensions"))
+
+    def test_short_app_bundle_name_is_probed(self):
+        """Some installs keep ``Code.app``; Cline and Roo Code already accept both."""
+        roots = [str(p) for p in detect_copilot_mod._VSCODE_APP_EXTENSION_ROOTS]
+        self.assertIn("/Applications/Code.app/Contents/Resources/app/extensions", roots)
+        self.assertIn(
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/extensions", roots
+        )
 
 
 if __name__ == "__main__":

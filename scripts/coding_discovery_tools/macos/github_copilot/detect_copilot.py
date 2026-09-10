@@ -10,6 +10,7 @@ from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from ...macos_extraction_helpers import MACHINE_APPS_DIR, is_running_as_root
 from ...vscode_extension_helpers import (
     VSCODE_EDITOR_DISPLAY_NAMES,
+    editor_extension_dir_keys,
     extensions_dir_for_editor,
     find_extension_in_editor,
 )
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 # Copilot folder name.
 _VSCODE_APP_EXTENSION_ROOTS = [
     Path("/Applications/Visual Studio Code.app/Contents/Resources/app/extensions"),
+    # Some installs keep the bundle's short name; Cline and Roo Code already accept both.
+    Path("/Applications/Code.app/Contents/Resources/app/extensions"),
     Path("/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/extensions"),
 ]
 _VSCODE_BUILTIN_COPILOT_DIRS = ("copilot", "copilot-chat")
@@ -151,18 +154,20 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
 
         for ide_key, ide_name in SUPPORTED_IDES.items():
             for ext_id, label in _MARKETPLACE_EXTENSIONS:
-                entry = find_extension_in_editor(user_home, ide_key, ext_id)
-                if entry is None:
-                    continue
-                _location, version = entry
-                results.append({
-                    "name": f"{label} ({ide_name})",
-                    "version": version or "unknown",
-                    "publisher": "GitHub",
-                    "install_path": str(extensions_dir_for_editor(user_home, ide_key))
-                })
-                if ide_key == "Code":
-                    code_found = True
+                for dir_key in editor_extension_dir_keys(ide_key):
+                    entry = find_extension_in_editor(user_home, dir_key, ext_id)
+                    if entry is None:
+                        continue
+                    _location, version = entry
+                    results.append({
+                        "name": f"{label} ({ide_name})",
+                        "version": version or "unknown",
+                        "publisher": "GitHub",
+                        "install_path": str(extensions_dir_for_editor(user_home, dir_key))
+                    })
+                    if ide_key == "Code":
+                        code_found = True
+                    break
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code app) when no
         # marketplace Copilot extension is installed. Without this, users on the
@@ -188,14 +193,8 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         servers — unlike the marketplace path, where ``github.copilot`` and
         ``github.copilot-chat`` are genuinely separate installs.
         """
-        uses_vscode = False
-        for rel in _VSCODE_USER_DATA_DIRS:
-            try:
-                if (user_home / rel).exists():
-                    uses_vscode = True
-                    break
-            except OSError:
-                continue
+        # Read errors propagate: an unreadable home must not look like an absent tool.
+        uses_vscode = any((user_home / rel).exists() for rel in _VSCODE_USER_DATA_DIRS)
         if not uses_vscode:
             logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
             return []

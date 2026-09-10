@@ -28,6 +28,7 @@ except ImportError:
     pwd = None  # Not available on Windows
 
 from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
+from .vscode_extension_helpers import VSCODE_EDITOR_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,33 @@ def tool_config_dirs_present(user_home: Path) -> List[str]:
         try:
             if (user_home / name).is_dir():
                 found.append(name.lstrip("."))
+        except (PermissionError, OSError):
+            continue
+    return found
+
+
+# Where each platform keeps a VS Code-family editor's per-user data dir.
+_VSCODE_USER_DATA_BASE = {
+    "Darwin": ("Library", "Application Support"),
+    "Windows": ("AppData", "Roaming"),
+    "Linux": (".config",),
+}
+
+
+def vscode_editors_present(user_home: Path) -> List[str]:
+    """VS Code-family editors with a user-data dir under ``user_home``. Never raises.
+
+    Diagnostic only. On a ZERO-tool scan it separates "no editor on this machine"
+    from "editor in use and we missed its Copilot extension".
+    """
+    base = _VSCODE_USER_DATA_BASE.get(platform.system())
+    if base is None:
+        return []
+    found = []
+    for editor in VSCODE_EDITOR_KEYS:
+        try:
+            if user_home.joinpath(*base, editor, "User").is_dir():
+                found.append(editor)
         except (PermissionError, OSError):
             continue
     return found
@@ -2259,7 +2287,7 @@ _SENTRY_TAG_KEYS = (
     "used_fallback_user", "homes_enumerated", "users_scanned",
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
-    "npm_prefix",
+    "npm_prefix", "vscode_editors",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

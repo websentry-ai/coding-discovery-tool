@@ -1042,5 +1042,361 @@ class TestDefaultPosture(unittest.TestCase):
             os.chmod(self.ud / "profiles", 0o755)
 
 
+class TestGuardRemovalKeys(unittest.TestCase):
+    """Settings that take a guard away rather than grant a permission. We read the
+    ones that say "auto-approve is on"; these are the ones that say "the safety
+    rails are gone", and several of them ship permissive."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("raw_settings", {})
+
+    def test_ignoring_the_built_in_deny_rules_is_captured(self):
+        # true discards VS Code's own deny rules, the net that blocks find -delete
+        self.assertIn("chat.tools.terminal.ignoreDefaultAutoApproveRules",
+                      self._raw({"chat.tools.terminal.ignoreDefaultAutoApproveRules": True}))
+
+    def test_workspace_npm_script_auto_approval_is_captured(self):
+        # ships true: a cloned repo's package.json can define a script that runs unprompted
+        self.assertIn("chat.tools.terminal.autoApproveWorkspaceNpmScripts",
+                      self._raw({"chat.tools.terminal.autoApproveWorkspaceNpmScripts": False}))
+
+    def test_sandbox_escape_hatches_are_captured(self):
+        raw = self._raw({
+            "chat.agent.sandbox.allowUnsandboxedCommands": True,
+            "chat.agent.sandbox.allowAutoApprove": True,
+            "chat.agent.sandbox.retryWithAllowNetworkRequests": True,
+        })
+        for key in ("chat.agent.sandbox.allowUnsandboxedCommands",
+                    "chat.agent.sandbox.allowAutoApprove",
+                    "chat.agent.sandbox.retryWithAllowNetworkRequests"):
+            self.assertIn(key, raw)
+
+    def test_third_party_code_surface_is_captured(self):
+        raw = self._raw({"chat.extensionTools.enabled": True, "chat.plugins.enabled": True,
+                         "chat.plugins.marketplaces": ["evil/marketplace"]})
+        self.assertIn("chat.plugins.marketplaces", raw)
+        self.assertIn("chat.extensionTools.enabled", raw)
+
+    def test_autonomy_bounds_are_captured(self):
+        raw = self._raw({"chat.agent.maxRequests": 500, "chat.autoReply": True})
+        self.assertEqual(raw["chat.agent.maxRequests"], 500)
+        self.assertTrue(raw["chat.autoReply"])
+
+    def test_risk_assessment_switch_is_captured(self):
+        # false removes VS Code's own risk check on tool calls
+        self.assertIn("chat.tools.riskAssessment.enabled",
+                      self._raw({"chat.tools.riskAssessment.enabled": False}))
+
+    def test_data_egress_settings_are_captured(self):
+        raw = self._raw({"chat.sessionSync.enabled": True, "chat.allowAnonymousAccess": True})
+        self.assertIn("chat.sessionSync.enabled", raw)
+        self.assertIn("chat.allowAnonymousAccess", raw)
+
+
+class TestTimedEditAcceptance(unittest.TestCase):
+    """chat.editing.autoAcceptDelay applies edits on a timer, with no prompt."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _mode(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["permission_mode"]
+
+    def test_a_delay_auto_accepts_edits(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 5}), "acceptEdits")
+
+    def test_zero_is_the_shipped_default_and_prompts(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 0,
+                                     "chat.agent.enabled": True}), "default")
+
+    def test_a_bool_is_not_a_delay(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": True,
+                                     "chat.agent.enabled": True}), "default")
+
+    def test_global_bypass_still_outranks_a_delay(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 5,
+                                     "chat.tools.global.autoApprove": True}), "bypassPermissions")
+
+
+class TestCopilotExtensionKeys(unittest.TestCase):
+    """The Copilot extension contributes 191 settings of its own, separately from
+    the ones VS Code registers. We were reading none of them."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("raw_settings", {})
+
+    def test_external_code_ingest_is_captured(self):
+        # ships true: workspace code is sent out for indexing
+        self.assertIn("github.copilot.chat.workspace.codeSearchExternalIngest.enabled",
+                      self._raw({"github.copilot.chat.workspace.codeSearchExternalIngest.enabled": True}))
+
+    def test_github_mcp_server_governance_is_captured(self):
+        raw = self._raw({"github.copilot.chat.githubMcpServer.enabled": True,
+                         "github.copilot.chat.githubMcpServer.lockdown": False,
+                         "github.copilot.chat.githubMcpServer.readonly": False})
+        for key in ("enabled", "lockdown", "readonly"):
+            self.assertIn(f"github.copilot.chat.githubMcpServer.{key}", raw)
+
+    def test_endpoint_overrides_are_captured(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "http://attacker.example/v1",
+                         "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride": "http://x"})
+        self.assertIn("github.copilot.chat.otel.otlpEndpoint", raw)
+        self.assertIn("github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride", raw)
+
+    def test_extension_install_capability_is_captured(self):
+        # the agent installing extensions is a code-execution surface
+        self.assertIn("github.copilot.chat.installExtensionSkill.enabled",
+                      self._raw({"github.copilot.chat.installExtensionSkill.enabled": True}))
+
+    def test_where_the_agent_runs_is_captured(self):
+        raw = self._raw({"github.copilot.chat.cloudAgent.enabled": True,
+                         "github.copilot.chat.backgroundAgent.enabled": True,
+                         "github.copilot.chat.cli.sandbox.enabled": "off"})
+        self.assertEqual(len(raw), 3)
+
+    def test_model_and_prompt_experiment_flags_are_not_captured(self):
+        # 191 settings are contributed; the experiment flags are noise and must
+        # not dilute the record
+        raw = self._raw({"github.copilot.chat.claudeOpus5Prompt.enabled": True,
+                         "github.copilot.chat.gemini3LowReasoningEffort.enabled": True,
+                         "github.copilot.chat.virtualTools.threshold": 128,
+                         "github.copilot.chat.agent.autoFix": True})
+        self.assertEqual(list(raw), ["github.copilot.chat.agent.autoFix"])
+
+
+class TestCredentialBearingValues(unittest.TestCase):
+    """Two captured settings are posture signal whose VALUE can carry a secret.
+    Keeping the setting while dropping the secret is the point."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_terminal_profile_env_values_are_not_uploaded(self):
+        raw = self._raw({"chat.tools.terminal.terminalProfile.osx": {
+            "path": "/bin/zsh", "args": ["-l"],
+            "env": {"AWS_SECRET_ACCESS_KEY": "AKIAsecretvalue", "PATH": "/usr/bin"}}})
+        prof = raw["chat.tools.terminal.terminalProfile.osx"]
+        self.assertEqual(prof["path"], "/bin/zsh")
+        self.assertEqual(prof["args"], ["-l"])
+        self.assertEqual(prof["env"], ["AWS_SECRET_ACCESS_KEY", "PATH"],
+                         "env names stay as signal; values must not travel")
+        self.assertNotIn("AKIAsecretvalue", json.dumps(raw))
+
+    def test_terminal_env_is_redacted_whatever_shape_it_takes(self):
+        """settings.json is user-authored and never schema-checked, so env can
+        arrive as a list — the same gap that was closed for auth headers."""
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": {
+            "path": "/bin/bash", "env": ["AWS_SECRET_ACCESS_KEY=AKIALEAK"]}})
+        self.assertNotIn("AKIALEAK", json.dumps(raw))
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": [{"env": {"K": "SEK"}}]})
+        self.assertNotIn("SEK", json.dumps(raw))
+
+    def test_endpoint_userinfo_and_query_are_stripped(self):
+        raw = self._raw({
+            "github.copilot.chat.otel.otlpEndpoint": "https://u:p@collector.internal:4318/v1?api-key=SEK",
+            "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride":
+                "https://ado.example.com/search?token=abc123"})
+        blob = json.dumps(raw)
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "https://collector.internal:4318/v1")
+        for secret in ("u:p@", "SEK", "abc123", "api-key", "token="):
+            self.assertNotIn(secret, blob)
+
+    def test_a_scheme_less_endpoint_is_redacted_too(self):
+        """The setting is a plain string, so users write it without a scheme —
+        and it carries a credential just as readily."""
+        raw = self._raw({
+            "github.copilot.chat.otel.otlpEndpoint": "collector.internal:4318/v1?api-key=SECRET",
+            "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride":
+                "user:pw@ado.internal/search?token=abc123"})
+        blob = json.dumps(raw)
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "collector.internal:4318/v1")
+        for secret in ("SECRET", "api-key", "user:pw@", "abc123", "token="):
+            self.assertNotIn(secret, blob)
+
+    def test_a_malformed_endpoint_does_not_leak_on_the_error_path(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "https://h:notaport/x?k=LEAK"})
+        self.assertNotIn("LEAK", json.dumps(raw))
+
+    def test_the_endpoint_host_is_still_reported(self):
+        # the destination is the finding; losing it would defeat capturing the key
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "http://attacker.example/v1?k=1"})
+        self.assertIn("attacker.example", raw["github.copilot.chat.otel.otlpEndpoint"])
+
+    def test_a_profile_without_env_is_untouched(self):
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": {"path": "/bin/bash"}})
+        self.assertEqual(raw["chat.tools.terminal.terminalProfile.linux"], {"path": "/bin/bash"})
+
+    def test_non_url_and_non_dict_values_survive(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "",
+                         "chat.tools.terminal.terminalProfile.osx": None})
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"], "")
+        self.assertIsNone(raw["chat.tools.terminal.terminalProfile.osx"])
+
+
+class TestMarketplaceRedaction(unittest.TestCase):
+    """A private plugin marketplace is a git remote, so it carries tokens the
+    same way the endpoints do."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_a_token_in_an_extra_marketplace_is_dropped(self):
+        raw = self._raw({"chat.plugins.extraMarketplaces": {
+            "private": "https://x-access-token:ghp_SECRET@github.com/org/repo.git"}})
+        self.assertEqual(raw["chat.plugins.extraMarketplaces"]["private"],
+                         "https://github.com/org/repo.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_strict_marketplace_headers_keep_only_their_names(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git", "url": "https://u:pw@host/o/r.git?token=T",
+             "headers": {"Authorization": "Bearer SEK"}}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["url"], "https://host/o/r.git")
+        self.assertEqual(entry["headers"], ["Authorization"])
+        self.assertNotIn("SEK", json.dumps(raw))
+
+    def test_an_ordinary_marketplace_ref_is_left_alone(self):
+        # the default value carries a #ref; rewriting it would lose that
+        raw = self._raw({"chat.plugins.marketplaces": [
+            "github/copilot-plugins", "github/awesome-copilot#marketplace"]})
+        self.assertEqual(raw["chat.plugins.marketplaces"],
+                         ["github/copilot-plugins", "github/awesome-copilot#marketplace"])
+
+    def test_userinfo_is_stripped_from_an_identity_field_too(self):
+        """Identity fields keep their shape, but that must not become a way to
+        carry a credential past redaction — at any depth."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "auth": {"path": "https://x-access-token:ghp_SECRET@host/o/r.git"}}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["auth"]["path"], "https://host/o/r.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_headers_are_reduced_whatever_shape_they_take(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git", "headers": ["Authorization: Bearer SEK"]}]})
+        self.assertNotIn("SEK", json.dumps(raw))
+
+    def test_a_credential_under_an_unexpected_field_is_still_stripped(self):
+        """The entry schema is open, so a remote can arrive under a name we did
+        not anticipate; the redaction must not depend on that name."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "remote": "https://x-access-token:ghp_SECRET@github.com/o/r.git"}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["remote"], "https://github.com/o/r.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_marketplace_identity_fields_are_not_rewritten(self):
+        """@scope/name and a wildcard pattern are identity, not credentials."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "npm", "package": "@scope/name", "hostPattern": "*.exam?le.com",
+             "path": "/opt/plugins/sub?dir"}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["package"], "@scope/name")
+        self.assertEqual(entry["hostPattern"], "*.exam?le.com")
+        self.assertEqual(entry["path"], "/opt/plugins/sub?dir",
+                         "a local marketplace path is identity, not a URL")
+
+    def test_a_token_in_the_endpoint_path_does_not_ship(self):
+        """A webhook-style endpoint carries its secret in the path."""
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://hooks.internal/services/T123/B456/SECRETTOKEN"})
+        value = raw["github.copilot.chat.otel.otlpEndpoint"]
+        self.assertEqual(value, "https://hooks.internal/services")
+        self.assertNotIn("SECRETTOKEN", json.dumps(raw))
+
+    def test_an_unencoded_question_mark_in_userinfo_does_not_leak(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://user:pa?ss@collector.internal/v1"})
+        value = raw["github.copilot.chat.otel.otlpEndpoint"]
+        self.assertEqual(value, "https://collector.internal/v1",
+                         "the host is the evidence and the credential must be gone")
+        self.assertNotIn("user:pa", json.dumps(raw))
+
+    def test_an_scp_style_remote_keeps_its_identity(self):
+        """git@host:owner/repo.git is a valid remote the URL parser rejects;
+        losing it would erase the marketplace we are trying to report."""
+        raw = self._raw({"chat.plugins.marketplaces": [
+            "git@github.com:owner/repo.git",
+            "x-access-token:ghp_SEK@github.com:owner/repo.git"]})
+        self.assertEqual(raw["chat.plugins.marketplaces"],
+                         ["github.com:owner/repo.git", "github.com:owner/repo.git"])
+        self.assertNotIn("ghp_SEK", json.dumps(raw))
+
+    def test_a_secret_nested_inside_an_entry_is_still_stripped(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "auth": {"headers": {"Authorization": "Bearer SEK"}},
+             "mirrors": ["https://tok@host/x.git"]}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["auth"]["headers"], ["Authorization"])
+        self.assertEqual(entry["mirrors"], ["https://host/x.git"])
+        self.assertNotIn("SEK", json.dumps(raw))
+        self.assertNotIn("tok@", json.dumps(raw))
+
+    def test_an_ipv6_endpoint_keeps_its_brackets(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://[2001:db8::1]:4318/v1?api-key=S"})
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "https://[2001:db8::1]:4318/v1")
+
+
+class TestProfileSettingsMerge(unittest.TestCase):
+    """The riskiest profile wins the posture, but a quieter profile's settings
+    are still evidence and must survive the merge."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="merge-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        (self.ud / "profiles" / "work").mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_non_winning_profile_keys_survive_the_merge(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        (self.ud / "profiles" / "work" / "settings.json").write_text(
+            json.dumps({"chat.tools.terminal.ignoreDefaultAutoApproveRules": True}),
+            encoding="utf-8")
+        rec = self._extract()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertTrue(rec["raw_settings"]["chat.tools.global.autoApprove"])
+        self.assertTrue(rec["raw_settings"]["chat.tools.terminal.ignoreDefaultAutoApproveRules"],
+                        "a quieter profile's settings are evidence too")
+
+    def test_the_winning_profile_wins_a_key_collision(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.sandbox.enabled": "off"}), encoding="utf-8")
+        (self.ud / "profiles" / "work" / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True,
+                        "chat.agent.sandbox.enabled": "on"}), encoding="utf-8")
+        rec = self._extract()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertEqual(rec["raw_settings"]["chat.agent.sandbox.enabled"], "on")
+
 if __name__ == "__main__":
     unittest.main()

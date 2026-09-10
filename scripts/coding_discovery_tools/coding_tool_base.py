@@ -1138,6 +1138,76 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         "chat.agent.deniedNetworkDomains",
         "chat.mcp.access", "chat.mcp.allowedServers", "chat.mcp.deniedServers",
         "github.copilot.chat.claudeAgent.enabled",
+        # Guards that can be taken away. Several ship permissive, so their absence
+        # from a settings file does not mean the protection is in place.
+        "chat.tools.terminal.ignoreDefaultAutoApproveRules",
+        "chat.tools.terminal.autoApproveWorkspaceNpmScripts",
+        "chat.tools.terminal.preventShellHistory",
+        "chat.tools.terminal.detachBackgroundProcesses",
+        "chat.tools.terminal.terminalProfile.linux",
+        "chat.tools.terminal.terminalProfile.osx",
+        "chat.tools.terminal.terminalProfile.windows",
+        "chat.agent.sandbox.allowAutoApprove",
+        "chat.agent.sandbox.allowUnsandboxedCommands",
+        "chat.agent.sandbox.retryWithAllowNetworkRequests",
+        "chat.agent.sandbox.advanced.runtime",
+        "chat.agent.sandbox.fileSystem.linux",
+        "chat.agent.sandbox.fileSystem.mac",
+        "chat.agent.sandbox.fileSystem.windows",
+        "chat.tools.riskAssessment.enabled",
+        "chat.assistedPermissions.enabled",
+        "chat.editing.autoAcceptDelay",
+        # What third-party code the agent may run.
+        "chat.extensionTools.enabled",
+        "chat.plugins.enabled", "chat.plugins.enabledPlugins",
+        "chat.plugins.marketplaces", "chat.plugins.extraMarketplaces",
+        "chat.plugins.strictMarketplaces", "chat.pluginLocations",
+        "chat.subagents.allowInvocationsFromSubagents",
+        # How far it may run unattended.
+        "chat.agent.maxRequests", "chat.autoReply", "chat.autopilot.advanced.enabled",
+        # Who may use it, and what leaves the machine.
+        "chat.allowAnonymousAccess", "chat.approvedAccountOrganizations",
+        "chat.sessionSync.enabled", "chat.sessionSync.excludeRepositories",
+        "chat.repoInfo.enabled",
+        "chat.implicitContext.enabled", "chat.implicitContext.includeActiveEditor",
+        "chat.defaultModel",
+        # The Copilot extension contributes its own settings, on top of the ones
+        # VS Code registers. These are the ones that move data or grant capability;
+        # its many model and prompt experiment flags are deliberately left out.
+        "github.copilot.enable",
+        "github.copilot.chat.workspace.codeSearchExternalIngest.enabled",
+        "github.copilot.chat.workspace.enableCodeSearch",
+        "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride",
+        "github.copilot.chat.localWorkspaceRecording.enabled",
+        "github.copilot.chat.editRecording.enabled",
+        "github.copilot.chat.agent.currentEditorContext.enabled",
+        "github.copilot.chat.agent.omitFileAttachmentContents",
+        "github.copilot.chat.imageUpload.enabled",
+        "github.copilot.chat.otel.enabled", "github.copilot.chat.otel.otlpEndpoint",
+        "github.copilot.chat.githubMcpServer.enabled",
+        "github.copilot.chat.githubMcpServer.lockdown",
+        "github.copilot.chat.githubMcpServer.readonly",
+        "github.copilot.chat.githubMcpServer.toolsets",
+        "github.copilot.chat.cli.mcp.enabled",
+        "github.copilot.chat.cli.sandbox.enabled",
+        "github.copilot.chat.cli.autoCommit.enabled",
+        "github.copilot.chat.anthropic.tools.websearch.enabled",
+        "github.copilot.chat.anthropic.tools.websearch.allowedDomains",
+        "github.copilot.chat.anthropic.tools.websearch.blockedDomains",
+        "github.copilot.chat.backgroundAgent.enabled",
+        "github.copilot.chat.cloudAgent.enabled",
+        "github.copilot.chat.agent.autoFix",
+        "github.copilot.chat.agent.backgroundTodoAgent.enabled",
+        "github.copilot.chat.installExtensionSkill.enabled",
+        "github.copilot.chat.skillTool.enabled",
+        "github.copilot.chat.executionSubagent.enabled",
+        "github.copilot.chat.executionSubagent.toolCallLimit",
+        "github.copilot.chat.searchSubagent.enabled",
+        "github.copilot.chat.searchSubagent.toolCallLimit",
+        "github.copilot.chat.organizationCustomAgents.enabled",
+        "github.copilot.chat.organizationInstructions.enabled",
+        "github.copilot.chat.reviewAgent.enabled",
+        "github.copilot.chat.reviewSelection.enabled",
     }
 
     # A truthy global auto-approve removes every confirmation, as do the elevated
@@ -1390,6 +1460,163 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             logger.debug(f"Could not parse {path}: {e}")
             return None
 
+    # Settings whose posture value is the setting itself, but whose value can
+    # carry a credential: a terminal profile's env map, and endpoint URLs with
+    # userinfo or a query string. Kept, with the secret-bearing part removed.
+    _PROFILE_KEYS = ("chat.tools.terminal.terminalProfile.linux",
+                     "chat.tools.terminal.terminalProfile.osx",
+                     "chat.tools.terminal.terminalProfile.windows")
+    _URL_KEYS = ("github.copilot.chat.otel.otlpEndpoint",
+                 "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride")
+    _MARKETPLACE_KEYS = ("chat.plugins.marketplaces",
+                         "chat.plugins.extraMarketplaces",
+                         "chat.plugins.strictMarketplaces")
+    # Identity, not destinations: rewriting these as URLs corrupts the record
+    # (an npm scope starts with @, a wildcard pattern may contain ?).
+    _MARKETPLACE_LITERAL_FIELDS = ("source", "package", "ref", "path",
+                                   "hostPattern", "pathPattern")
+
+    @staticmethod
+    def _cut_credentials(value: str) -> str:
+        """Drop the userinfo prefix and the query textually, for a value the URL
+        parser rejects — an scp-style git remote (``git@host:owner/repo.git``)
+        is one, and discarding it would lose the marketplace identity.
+
+        Userinfo goes first: an unencoded ``?`` inside a password would otherwise
+        cut the string before the ``@`` and keep half the credential."""
+        scheme, sep, rest = value.partition("://")
+        if not sep:
+            scheme, rest = "", value
+        authority, slash, path = rest.partition("/")
+        rest = authority.rsplit("@", 1)[-1] + slash + path
+        rest = rest.split("?", 1)[0]
+        return f"{scheme}://{rest}" if sep else rest
+
+    @staticmethod
+    def _authority(value: str) -> str:
+        """The part before the path, with any scheme removed."""
+        return value.split("://", 1)[-1].split("/", 1)[0]
+
+    @classmethod
+    def _looks_credentialed(cls, value) -> bool:
+        """Userinfo in the authority, or a query string. An npm scope such as
+        ``@scope/name`` has nothing before its ``@`` and is not a credential."""
+        if not isinstance(value, str):
+            return False
+        return "?" in value or cls._authority(value).find("@") > 0
+
+    @classmethod
+    def _strip_url_secrets(cls, value):
+        """Keep scheme, host, port and path; drop userinfo and the query.
+
+        A scheme is optional here — ``collector.internal:4318/v1?api-key=…`` is a
+        setting a user really writes, and it carries a credential just as readily
+        as a fully qualified URL, so the authority is parsed either way."""
+        if not isinstance(value, str) or not value.strip():
+            return value
+        from urllib.parse import urlsplit
+        scheme, rest = "", value
+        if "://" in value:
+            scheme, rest = value.split("://", 1)
+        try:
+            parts = urlsplit(rest if rest.startswith("//") else "//" + rest)
+            host = parts.hostname or ""
+            port = parts.port          # raises on a malformed port
+        except ValueError:
+            return cls._cut_credentials(value)
+        if ":" in host:
+            host = f"[{host}]"     # an IPv6 literal is ambiguous without its brackets
+        if port:
+            host = f"{host}:{port}"
+        cleaned = host + parts.path
+        return f"{scheme}://{cleaned}" if scheme else cleaned
+
+    @classmethod
+    def _credentialed_only(cls, value):
+        """Strip a value only when it actually carries userinfo or a query.
+
+        Marketplace entries are ordinarily plain refs like
+        ``github/awesome-copilot#marketplace``, and rewriting those would drop the
+        ref for no gain."""
+        if cls._looks_credentialed(value):
+            return cls._strip_url_secrets(value)
+        return value
+
+    @classmethod
+    def _remotes_without_secrets(cls, value):
+        """``marketplaces`` and ``extraMarketplaces`` hold remotes directly — a
+        list of them, or a name → remote map — and a private one carries a token
+        the same way the endpoints do."""
+        if isinstance(value, list):
+            return [cls._remotes_without_secrets(v) for v in value]
+        if isinstance(value, dict):
+            return {k: cls._remotes_without_secrets(v) for k, v in value.items()}
+        return cls._credentialed_only(value)
+
+    @classmethod
+    def _marketplace_without_secrets(cls, value):
+        """``strictMarketplaces`` holds entry objects instead, where the remote
+        lives under a named field and the rest is identity."""
+        if isinstance(value, list):
+            return [cls._marketplace_without_secrets(v) for v in value]
+        if isinstance(value, dict):
+            return {k: cls._marketplace_field(k, v) for k, v in value.items()}
+        return cls._credentialed_only(value)
+
+    @classmethod
+    def _userinfo_only(cls, value):
+        """Identity fields keep their shape — a ``?`` belongs to a path, an ``@``
+        starts an npm scope — but userinfo in an authority is still a credential."""
+        if isinstance(value, str) and cls._authority(value).find("@") > 0:
+            return cls._strip_url_secrets(value)
+        return value
+
+    @classmethod
+    def _marketplace_field(cls, key, value):
+        """Every value is checked for a credential except the identity fields,
+        which keep their own punctuation but still lose userinfo."""
+        if key == "headers":
+            # auth material whatever shape it arrives in; names are enough signal
+            return sorted(value) if isinstance(value, dict) else "<redacted>"
+        if isinstance(value, (list, dict)):
+            return cls._marketplace_without_secrets(value)
+        if key in cls._MARKETPLACE_LITERAL_FIELDS:
+            return cls._userinfo_only(value)
+        return cls._credentialed_only(value)
+
+    @classmethod
+    def _endpoint_without_secrets(cls, value):
+        """An endpoint's path can be the credential itself (webhook-style), so
+        only the first segment is kept — enough to name the destination."""
+        cleaned = cls._strip_url_secrets(value)
+        if not isinstance(cleaned, str):
+            return cleaned
+        scheme, sep, rest = cleaned.partition("://")
+        if not sep:
+            scheme, rest = "", cleaned
+        authority, slash, path = rest.partition("/")
+        if path:
+            rest = authority + slash + path.split("/", 1)[0]
+        return f"{scheme}://{rest}" if sep else rest
+
+    @classmethod
+    def _without_secrets(cls, key: str, value):
+        if key in cls._PROFILE_KEYS:
+            # env values are commonly API keys; the names still show what is set.
+            # path and args stay verbatim — they are the posture being reported.
+            if not isinstance(value, dict):
+                return "<redacted>" if value else value
+            return {k: (sorted(v) if isinstance(v, dict) else "<redacted>") if k == "env" else v
+                    for k, v in value.items()}
+        if key in cls._URL_KEYS:
+            return cls._endpoint_without_secrets(value)
+        if key == "chat.plugins.strictMarketplaces":
+            return cls._marketplace_without_secrets(value)
+        if key in cls._MARKETPLACE_KEYS:
+            return cls._remotes_without_secrets(value)
+        return value
+
+
     @staticmethod
     def _parse_jsonc_text(raw: str) -> Optional[Dict]:
         """Parse already-read JSONC text. Separate from the read so a caller can
@@ -1398,7 +1625,8 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return data if isinstance(data, dict) else None
 
     def _build_record(self, data: Dict, path: Path, scope: str) -> Optional[Dict]:
-        raw_settings = {k: data[k] for k in self.SECURITY_RELEVANT_KEYS if k in data}
+        raw_settings = {k: self._without_secrets(k, data[k])
+                        for k in self.SECURITY_RELEVANT_KEYS if k in data}
         if not raw_settings:
             return None  # nothing security-relevant here → no row
         allow_rules, deny_rules = self._terminal_rules(data)
@@ -1430,6 +1658,9 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         edits = data.get("chat.tools.edits.autoApprove")
         if isinstance(edits, dict) and any(v is True for v in edits.values()):
             return "acceptEdits"
+        delay = data.get("chat.editing.autoAcceptDelay")
+        if isinstance(delay, (int, float)) and not isinstance(delay, bool) and delay > 0:
+            return "acceptEdits"   # edits are accepted on a timer, with no prompt
         return "default"
 
     def _sandbox_enabled(self, data: Dict):
@@ -1491,20 +1722,28 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
         return out
 
     def _merge_records(self, base: Dict, others: List[Dict]) -> Dict:
-        """Union the allow/deny rules across a user's profiles and escalate the mode
-        to the most permissive seen, so one YOLO profile surfaces even when the
-        default profile is locked down."""
+        """Union the allow/deny rules and settings across a user's profiles and
+        escalate the mode to the most permissive seen, so one YOLO profile surfaces
+        even when the default profile is locked down.
+
+        Settings are unioned too: a guard switched off in a profile that did not
+        win is still switched off there, and keeping only the winner's would hide
+        it. The winning profile takes precedence where both set the same key."""
         if not others:
             return base
         merged = dict(base)
         order = {"default": 0, "acceptEdits": 1, "bypassPermissions": 2}
+        raw = {}
         for rec in others:
+            raw.update(rec.get("raw_settings") or {})
             for field in ("allow_rules", "deny_rules"):
                 extra = rec.get(field)
                 if extra:
                     merged[field] = self._dedupe(merged.get(field, []) + extra)
             if order.get(rec.get("permission_mode"), 0) > order.get(merged.get("permission_mode"), 0):
                 merged["permission_mode"] = rec["permission_mode"]
+        raw.update(base.get("raw_settings") or {})
+        merged["raw_settings"] = raw
         return merged
 
 

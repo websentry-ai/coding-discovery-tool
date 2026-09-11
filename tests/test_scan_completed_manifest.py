@@ -509,6 +509,21 @@ class TestOwnershipGate(unittest.TestCase):
                 "install_path": "/opt/homebrew/bin/copilot"}
         self.assertTrue(has_user_data("GitHub Copilot CLI", tool, self.BOB))
 
+    def test_shared_binary_does_not_disown_users_via_a_frozen_config_path(self):
+        """all_tools is deduped by name+install_path, so _config_path belongs to
+        whoever was enumerated first; reading it here would disown everyone else."""
+        tool = {"install_path": "/usr/local/bin/copilot",
+                "_config_path": "/Users/alice/.copilot"}
+        self.assertFalse(disowned_by_path(tool, self.BOB, self.HOMES))
+        self.assertFalse(disowned_by_path(tool, self.ALICE, self.HOMES))
+
+    def test_shared_binary_keeps_a_second_user_who_has_their_own_data(self):
+        """Bob shares Alice's /usr/local/bin/copilot but has his own ~/.copilot."""
+        tool = {"install_path": "/usr/local/bin/copilot",
+                "_config_path": "/Users/bob/.copilot",
+                "projects": [{"project_root": "/Users/bob/work"}]}
+        self.assertTrue(has_user_data("GitHub Copilot CLI", tool, self.BOB))
+
     def test_managed_only_permissions_are_not_user_data(self):
         """Managed policy survives filtering for everyone, so it is not user data."""
         tool = {"permissions": {"settings_source": "managed"}}

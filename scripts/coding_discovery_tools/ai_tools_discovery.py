@@ -265,7 +265,9 @@ def _home_for_user(user: str):
 
 def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
     """Whether this install sits inside a DIFFERENT enumerated user's home."""
-    path = _normalise_path(tool.get("_config_path") or tool.get("install_path", "") or "")
+    # install_path only: ``tool`` is globally deduped by name+install_path, so its
+    # ``_config_path`` is whichever user was enumerated first and would disown the rest.
+    path = _normalise_path(tool.get("install_path") or "")
     if not path:
         return False
     mine = _normalise_path(str(user_home))
@@ -294,7 +296,9 @@ def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
         if candidate.parent not in _MACHINE_GLOBAL_BIN_DIRS:
             return False
         return not machine_global_binary_owned_by_user(candidate, Path(user_home))
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError, RuntimeError) as e:
+        # Fail open, but say so: a failed check must not look like confirmed ownership.
+        logger.debug(f"Ownership check failed for {path} against {user_home}: {e}", exc_info=True)
         return False
 
 
@@ -3575,6 +3579,11 @@ def main():
             # resumed run — this is where re-processing (filesystem walk + CLI
             # subprocesses) is actually saved.
             if resume_done and all((tool_key, u) in resume_done for u in all_users):
+                # Checkpointed entries still have to pass the path gate: detection
+                # repopulated the manifest, and the manifest drives pruning.
+                for u in all_users:
+                    if _install_in_another_users_home(tool, user_homes[u], user_homes.values()):
+                        scanned_manifest.discard(_install_key(u, tool))
                 logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
                 resume_tools_skipped += 1
                 continue

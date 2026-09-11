@@ -90,7 +90,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -160,7 +160,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -285,6 +285,34 @@ def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
     return False
 
 
+# The bin dirs the detectors treat as machine-global; mirrors the candidate
+# lists in user_tool_detector and the copilot_cli detectors.
+_MACHINE_GLOBAL_BIN_DIRS = frozenset({
+    Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path("/usr/bin"),
+})
+
+
+def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
+    """Whether a MACHINE-GLOBAL binary belongs to someone other than ``user_home``.
+
+    Homebrew and manual /usr/local installs are owned by the installing user, so
+    without this one person's install is credited to every account on the box.
+    A root-owned system binary is genuinely shared and stays. Not terminal: a
+    False here only means "not disowned on ownership grounds", and the caller
+    still applies the per-tool user-data test.
+    """
+    path = tool.get("install_path") or ""
+    if not path:
+        return False
+    try:
+        candidate = Path(path)
+        if candidate.parent not in _MACHINE_GLOBAL_BIN_DIRS:
+            return False
+        return not machine_global_binary_owned_by_user(candidate, Path(user_home))
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
@@ -341,6 +369,24 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
         return True
 
     return owns_install
+
+
+def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool:
+    """Whether the filtered payload carries data this user actually owns.
+
+    Per-tool by design and not unifiable: the Augment rule excludes MANAGED-scope
+    permissions because org-wide policy survives filtering for every user, while
+    the Copilot CLI rule accepts any permissions block. Collapsing them would
+    regress one. The default takes the stricter reading.
+    """
+    if tool_name == "GitHub Copilot CLI":
+        return _copilot_cli_owned_by_user(tool_filtered, user_home)
+    if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
+        return _augment_owned_by_user(tool_filtered, user_home)
+    if tool_filtered.get("projects"):
+        return True
+    perms = tool_filtered.get("permissions")
+    return perms is not None and perms.get("settings_source") != "managed"
 
 
 def _decode_project_path(path):
@@ -3606,6 +3652,20 @@ def main():
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+
+                        # A machine-global binary owned by someone else is not this
+                        # user's install UNLESS they have their own data for it —
+                        # Copilot's install_path is the binary, so a real ~/.copilot
+                        # user would otherwise be dropped.
+                        if _machine_global_install_disowned(tool, user_home) \
+                                and not _has_user_owned_data(tool_name, tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping {tool_name} for {user_name}: "
+                                f"{tool.get('install_path')!r} is owned by another user "
+                                f"and this user has no data for it"
+                            )
+                            scanned_manifest.discard(_install_key(user_name, tool))
+                            continue
 
                         # Ownership gate (Copilot CLI only): suppress a phantom install
                         # row for a user who neither owns the detected ~/.copilot config

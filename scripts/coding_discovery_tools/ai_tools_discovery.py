@@ -252,6 +252,39 @@ def _install_key(user, tool):
     return (user, tool.get('name', 'Unknown'), tool.get('install_path'))
 
 
+def _home_for_user(user: str):
+    """The home directory the scan should read for ``user`` on this platform."""
+    if platform.system() == "Darwin":
+        return Path(f"/Users/{user}")
+    if platform.system() == "Windows":
+        return windows_home_for_user(user)
+    if platform.system() == "Linux":
+        return linux_home_for_user(user)
+    return Path.home()
+
+
+def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
+    """Whether this install sits inside a DIFFERENT enumerated user's home.
+
+    Deliberately conservative: only a path we can positively place in someone
+    else's home is disowned. An unknown, empty, machine-global or
+    non-filesystem path is never "another user's", because homes are not always
+    under /Users (AD, mobile, relocated, Data-volume firmlinks) and dropping on
+    "not under any home" would delete real installs.
+    """
+    path = _normalise_path(tool.get("_config_path") or tool.get("install_path", "") or "")
+    if not path:
+        return False
+    mine = _normalise_path(str(user_home))
+    if mine and (path == mine or path.startswith(mine + "/")):
+        return False
+    for other in other_homes:
+        theirs = _normalise_path(str(other))
+        if theirs and theirs != mine and (path == theirs or path.startswith(theirs + "/")):
+            return True
+    return False
+
+
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
@@ -3453,16 +3486,12 @@ def main():
         scanned_homes = []  # same, for the config-dir age discriminator
         wsl_seen = set()  # same, for the WSL-resident-install discriminator
         editors_seen = set()  # same, for the editor-present-but-extension-missed discriminator
+        # Resolved once: the report loop disowns an install by asking whether it
+        # sits in one of the OTHER homes, so it needs them all.
+        user_homes = {u: _home_for_user(u) for u in all_users}
 
         for user in all_users:
-            if platform.system() == "Darwin":
-                user_home = Path(f"/Users/{user}")
-            elif platform.system() == "Windows":
-                user_home = windows_home_for_user(user)
-            elif platform.system() == "Linux":
-                user_home = linux_home_for_user(user)
-            else:
-                user_home = Path.home()
+            user_home = user_homes[user]
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             scanned_homes.append(user_home)
             config_dirs_seen.update(tool_config_dirs_present(user_home))
@@ -3546,6 +3575,20 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
+                    user_home = user_homes[user_name]
+
+                    # Ahead of the resume skip: the manifest drives backend pruning,
+                    # so a row we would no longer emit must not survive as a resumed
+                    # entry. Another user's home is the one disowning test cheap
+                    # enough to run before filtering.
+                    if _install_in_another_users_home(tool, user_home, user_homes.values()):
+                        logger.info(
+                            f"  Skipping {tool_name} for {user_name}: "
+                            f"{tool.get('install_path')!r} is in another user's home"
+                        )
+                        scanned_manifest.discard(_install_key(user_name, tool))
+                        continue
+
                     # Already reported by the resumed run -> skip its re-upload.
                     # Log the per-user skip AND record it in the summary so a
                     # partially-resumed tool's summary reflects every user (resumed
@@ -3554,14 +3597,6 @@ def main():
                         logger.info(f"  · {tool_name} for user {user_name} already reported by the resumed run; skipping re-processing")
                         tool_users_summary.append({'user': user_name, 'resumed': True})
                         continue
-                    if platform.system() == "Darwin":
-                        user_home = Path(f"/Users/{user_name}")
-                    elif platform.system() == "Windows":
-                        user_home = windows_home_for_user(user_name)
-                    elif platform.system() == "Linux":
-                        user_home = linux_home_for_user(user_name)
-                    else:
-                        user_home = Path.home()
 
                     try:
                         # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
@@ -3584,7 +3619,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool_filtered))
+                            scanned_manifest.discard(_install_key(user_name, tool))
                             continue
 
                         # Ownership gate (Augment surfaces): same ~/.augment-keyed
@@ -3598,7 +3633,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool_filtered))
+                            scanned_manifest.discard(_install_key(user_name, tool))
                             continue
 
                         # Detect subscription plan for Claude Code

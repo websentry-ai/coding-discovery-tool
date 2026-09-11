@@ -3516,10 +3516,10 @@ def main():
         wsl_seen = set()  # same, for the WSL-resident-install discriminator
         editors_seen = set()  # same, for the editor-present-but-extension-missed discriminator
         # The report loop disowns an install by testing it against the other homes.
-        user_homes = {u: _home_for_user(u) for u in all_users}
+        all_user_homes = [_home_for_user(u) for u in all_users]
 
         for user in all_users:
-            user_home = user_homes[user]
+            user_home = _home_for_user(user)
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             scanned_homes.append(user_home)
             config_dirs_seen.update(tool_config_dirs_present(user_home))
@@ -3582,7 +3582,7 @@ def main():
                 # Checkpointed entries still have to pass the path gate: detection
                 # repopulated the manifest, and the manifest drives pruning.
                 for u in all_users:
-                    if _install_in_another_users_home(tool, user_homes[u], user_homes.values()):
+                    if _install_in_another_users_home(tool, _home_for_user(u), all_user_homes):
                         scanned_manifest.discard(_install_key(u, tool))
                 logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
                 resume_tools_skipped += 1
@@ -3608,11 +3608,11 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
-                    user_home = user_homes[user_name]
+                    user_home = _home_for_user(user_name)
 
                     # Before the resume skip: the manifest drives pruning, so a row
                     # we would not emit must not survive as a resumed entry.
-                    if _install_in_another_users_home(tool, user_home, user_homes.values()):
+                    if _install_in_another_users_home(tool, user_home, all_user_homes):
                         logger.info(
                             f"  Skipping {tool_name} for {user_name}: "
                             f"{tool.get('install_path')!r} is in another user's home"

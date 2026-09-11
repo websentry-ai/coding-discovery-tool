@@ -27,7 +27,7 @@ try:
 except ImportError:
     pwd = None  # Not available on Windows
 
-from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, is_symlink_or_junction, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
 from .vscode_extension_helpers import VSCODE_EDITOR_KEYS, reset_vscode_registry_state, vscode_registry_state
 
 logger = logging.getLogger(__name__)
@@ -229,25 +229,50 @@ _EVIDENCE_DIR_CAP = 300
 _VSCODE_CHAT_EDITORS = ("Code", "Code - Insiders")
 
 
-def _iter_dir_capped(directory: Path, cap: int = _EVIDENCE_DIR_CAP):
-    """Yield up to ``cap`` children of ``directory``. Never raises."""
+def _newest_dirs_first(directory: Path, cap: int = _EVIDENCE_DIR_CAP) -> List[Path]:
+    """Real subdirectories of ``directory``, newest first, capped. Never raises.
+
+    Sorted rather than left in ``scandir`` order: this backs a LAST-RESORT probe, so
+    the one workspace holding a recent transcript must not fall outside the cap on
+    the luck of filesystem ordering — missing it leaves a live install reported
+    absent, and absent is prunable. Links and junctions are skipped: under a
+    privileged all-users scan, a workspace redirected outside the home would
+    attribute another user's tool to this one.
+    """
+    if is_symlink_or_junction(directory):
+        return []
+    entries = []
     try:
-        for count, child in enumerate(directory.iterdir(), start=1):
-            yield child
-            if count >= cap:
-                logger.debug("Stopped at %d entries under %s; evidence beyond that "
-                             "is not read", cap, directory)
-                return
+        with os.scandir(directory) as scan:
+            for entry in scan:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if is_symlink_or_junction(entry.path):
+                        continue
+                    entries.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry.path)))
+                except OSError:
+                    continue
     except (PermissionError, OSError):
-        return
+        return []
+    entries.sort(key=lambda pair: pair[0], reverse=True)
+    if len(entries) > cap:
+        logger.debug("Reading the %d newest of %d entries under %s", cap, len(entries), directory)
+    return [path for _, path in entries[:cap]]
 
 
 def _has_recent_file(directory: Path, pattern: str, cutoff: float) -> bool:
-    """True when ``directory`` holds a file matching ``pattern`` modified since ``cutoff``."""
+    """True when ``directory`` holds a real file matching ``pattern`` modified since
+    ``cutoff``. Links are skipped, for the same redirect reason. Never raises."""
+    if is_symlink_or_junction(directory):
+        return False
     try:
         for path in directory.glob(pattern):
             try:
-                if path.is_file() and path.stat().st_mtime >= cutoff:
+                if is_symlink_or_junction(path):
+                    continue
+                st = os.stat(path)
+                if stat.S_ISREG(st.st_mode) and st.st_mtime >= cutoff:
                     return True
             except (PermissionError, OSError):
                 continue
@@ -272,9 +297,15 @@ def copilot_chat_evidence(user_home: Path,
     cutoff = time.time() - (max_age_days * 86400)
     for editor in _VSCODE_CHAT_EDITORS:
         user_dir = user_home.joinpath(*base, editor, "User")
-        for workspace in _iter_dir_capped(user_dir / "workspaceStorage"):
-            if _has_recent_file(workspace / "GitHub.copilot-chat" / "transcripts",
-                                "*.jsonl", cutoff):
+        # Every component from the home down is checked, not just the leaf: a link
+        # anywhere along the chain redirects the probe out of this user's tree.
+        if is_symlink_or_junction(user_dir):
+            continue
+        for workspace in _newest_dirs_first(user_dir / "workspaceStorage"):
+            chat_dir = workspace / "GitHub.copilot-chat"
+            if is_symlink_or_junction(chat_dir):
+                continue
+            if _has_recent_file(chat_dir / "transcripts", "*.jsonl", cutoff):
                 return user_dir
     return None
 
@@ -306,8 +337,10 @@ def copilot_cli_sessions_recent(copilot_dir: Path,
     ``session-state/<id>/events.jsonl`` is written by the CLI itself; the presence of
     ``~/.copilot`` alone is not evidence of anything but our own installer.
     """
+    if is_symlink_or_junction(copilot_dir):
+        return False
     cutoff = time.time() - (max_age_days * 86400)
-    for session in _iter_dir_capped(copilot_dir / "session-state"):
+    for session in _newest_dirs_first(copilot_dir / "session-state"):
         if _has_recent_file(session, "events.jsonl", cutoff):
             return True
     return False

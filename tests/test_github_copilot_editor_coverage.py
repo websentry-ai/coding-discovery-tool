@@ -220,6 +220,35 @@ class _EvidenceTierMixin:
         self._user_dir().mkdir(parents=True)
         self.assertEqual([], self._detect_builtin())
 
+    def test_redirected_workspace_is_not_evidence(self):
+        """A workspace pointing outside the home would hand another user's Copilot to
+        this one under a privileged all-users scan."""
+        theirs = Path(self.tmp) / "bob" / "ws" / "GitHub.copilot-chat" / "transcripts"
+        theirs.mkdir(parents=True)
+        (theirs / "s1.jsonl").write_text("{}", encoding="utf-8")
+        workspaces = self._user_dir() / "workspaceStorage"
+        workspaces.mkdir(parents=True)
+        try:
+            (workspaces / "ws1").symlink_to(theirs.parents[1], target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation is not permitted here")
+        self.assertEqual([], self._detect_builtin())
+
+    def test_recent_workspace_found_past_the_cap(self):
+        """Directory order is arbitrary, so the newest workspace has to be read first:
+        the one recent transcript must not fall outside the cap by luck and leave a
+        live install reported absent."""
+        workspaces = self._user_dir() / "workspaceStorage"
+        workspaces.mkdir(parents=True)
+        stale = time.time() - 400 * 86400
+        for index in range(utils_mod._EVIDENCE_DIR_CAP + 20):
+            decoy = workspaces / f"decoy{index:04d}"
+            decoy.mkdir()
+            os.utime(decoy, (stale, stale))
+        self._write_transcript()
+        self.assertEqual(["GitHub Copilot Chat (VS Code)"],
+                         [r["name"] for r in self._detect_builtin()])
+
 
 class TestMacosEvidenceTier(_EvidenceTierMixin, _Fixture):
     DETECTOR = MacOSCopilotDetector

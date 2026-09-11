@@ -585,6 +585,64 @@ class TestSentryRunGuards(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 30)
 
 
+class TestSentryRunContext(unittest.TestCase):
+    """Call sites that cannot reach main()'s context — the detect loop lives inside
+    the detector — still have to produce an attributable event."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
+    def tearDown(self):
+        utils_mod.reset_sentry_run_state()
+
+    def _capture_payload(self):
+        """curl reads the event from a temp file that is unlinked straight after,
+        so it has to be read while the call is still in flight."""
+        sent = {}
+
+        def side_effect(cmd, *a, **kwargs):
+            path = cmd[cmd.index("-d") + 1].lstrip("@")
+            sent.update(json.loads(Path(path).read_text()))
+            return Mock(returncode=0, stdout="200")
+
+        return sent, side_effect
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run")
+    def test_run_context_reaches_an_event_that_never_passed_it(self, mock_run):
+        sent, mock_run.side_effect = self._capture_payload()
+        run_ctx = {"domain": "https://backend.example", "app_name": ""}
+        utils_mod.set_sentry_run_context(run_ctx)
+        # main() fills these in after registering, as it does for every run.
+        run_ctx["device_id"] = "C02FP83QMD6M"
+        run_ctx["system_user"] = "ganeshk"
+
+        report_to_sentry(PermissionError(13, "denied"),
+                         {"phase": "detect", "tool_name": "JetBrains IDEs"})
+
+        self.assertEqual("C02FP83QMD6M", sent["tags"]["device_id"])
+        self.assertEqual("ganeshk", sent["tags"]["system_user"])
+        self.assertEqual("detect", sent["tags"]["phase"])
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run")
+    def test_per_call_key_wins_over_run_context(self, mock_run):
+        sent, mock_run.side_effect = self._capture_payload()
+        utils_mod.set_sentry_run_context({"domain": "https://backend.example",
+                                          "tool_name": "Claude Code"})
+        report_to_sentry(RuntimeError("x"), {"phase": "detect", "tool_name": "Cursor"})
+        self.assertEqual("Cursor", sent["tags"]["tool_name"])
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_loopback_domain_now_suppresses_a_detect_event(self, mock_run):
+        """Without the run context these events carried no domain, so local and CI
+        runs reported into production Sentry."""
+        utils_mod.set_sentry_run_context({"domain": "http://127.0.0.1:8000"})
+        report_to_sentry(RuntimeError("x"), {"phase": "detect", "tool_name": "Cursor"})
+        self.assertEqual(0, mock_run.call_count)
+
+
 class TestSettingsTransformPrecedence(unittest.TestCase):
     """Settings transformation merges scopes and maps fields correctly."""
 

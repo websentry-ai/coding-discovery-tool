@@ -18,10 +18,10 @@ from .coding_tool_base import BaseToolDetector
 from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
+    _is_scanning_users_own_home,
     _read_own_regular_file,
     extract_version_number,
     machine_global_binary_owned_by_user,
-    scanning_own_home,
     resolve_npm_global_tool_bin,
     run_command,
     windows_node_manager_shims,
@@ -798,10 +798,10 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
 
     # POSIX-shaped (``<prefix>/bin/<tool>``); the Windows candidates cover it above.
     if platform.system() != "Windows":
-        # Scanner-derived lookups are only this user's when it is the scanner's home.
-        own_home = scanning_own_home(user_home)
+        # Only the scanner's own home can trust scanner-derived lookups; the
+        # helper already refuses root, so it subsumes the previous is_root gate.
         npm_resolved = resolve_npm_global_tool_bin(
-            "claude", user_home, is_root or not own_home
+            "claude", user_home, not _is_scanning_users_own_home(user_home)
         )
         if npm_resolved:
             return npm_resolved
@@ -813,7 +813,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     # scanner's install. The explicit candidate list above is comprehensive and
     # already user_home-relative. Skipped on Windows, where ``which`` is not a
     # command and the .exe/.cmd candidates already cover it.
-    if scanning_own_home(user_home) and platform.system() != "Windows":
+    if _is_scanning_users_own_home(user_home) and platform.system() != "Windows":
         which_path = run_command(["which", "claude"], VERSION_TIMEOUT)
         if which_path:
             try:

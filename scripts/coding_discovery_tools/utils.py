@@ -282,19 +282,6 @@ def windows_node_manager_shims(user_home: Path, tool: str) -> List[Path]:
     return [root / f"{tool}{ext}" for root in roots for ext in (".cmd", ".exe")]
 
 
-def scanning_own_home(user_home: Path) -> bool:
-    """Whether ``user_home`` is the scanner's own home. Never raises.
-
-    ``npm prefix -g`` and ``which`` resolve the SCANNER's config, so they only
-    describe this user when the two are the same home. Root is not the test: a
-    non-root scan still walks every home in /Users.
-    """
-    try:
-        return Path(user_home) == Path.home()
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
 def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
     """Under a root/MDM multi-user scan, decide whether a MACHINE-GLOBAL binary
     (Homebrew / /usr/local / /usr/bin) should be attributed to ``user_home``.

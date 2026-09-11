@@ -18,6 +18,7 @@ import os
 import platform
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -342,7 +343,7 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         det = _make_detector()
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=False), \
-             patch("pathlib.Path.home", return_value=self.home), \
+             patch(f"{_MOD}._is_scanning_users_own_home", return_value=True), \
              patch(f"{_MOD}.run_command", return_value=str(which_target)):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
@@ -569,10 +570,14 @@ class TestPathBackstopScopedToOwnHome(unittest.TestCase):
         self.scanner_binary = binary
 
     def _find(self, user_home):
-        """Non-root, with the scanner's ``which`` pointing at its own binary."""
+        """Non-root, with the scanner's ``which`` pointing at its own binary.
+
+        ``_is_scanning_users_own_home`` is left unpatched so the real predicate
+        decides: under the test process it is only true for the scanner's home.
+        """
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=False), \
-             patch("pathlib.Path.home", return_value=self.scanner_home), \
+             patch(f"{_UTILS}.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(self.scanner_home))), \
              patch(f"{_MOD}.run_command", return_value=str(self.scanner_binary)), \
              patch.object(Path, "exists", _absent_unless_under(Path(self.tmp.name))):
             return find_claude_binary_for_user(user_home)

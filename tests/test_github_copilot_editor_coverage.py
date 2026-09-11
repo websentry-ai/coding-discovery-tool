@@ -234,6 +234,23 @@ class _EvidenceTierMixin:
             self.skipTest("symlink creation is not permitted here")
         self.assertEqual([], self._detect_builtin())
 
+    def test_redirected_ancestor_is_not_evidence(self):
+        """A guard on the leaf alone sees nothing: ``lstat`` resolves ancestors, so a
+        link at ``Code`` (or ``Library`` / ``AppData`` / ``.config``) hands another
+        profile's tree to the probe under this user's own lexical path."""
+        theirs = Path(self.tmp) / "bob" / "Code"
+        (theirs / "User" / "workspaceStorage" / "ws1"
+         / "GitHub.copilot-chat" / "transcripts").mkdir(parents=True)
+        (theirs / "User" / "workspaceStorage" / "ws1" / "GitHub.copilot-chat"
+         / "transcripts" / "s1.jsonl").write_text("{}", encoding="utf-8")
+        mine = self._user_dir().parent          # <home>/<data base>/Code
+        mine.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            mine.symlink_to(theirs, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation is not permitted here")
+        self.assertEqual([], self._detect_builtin())
+
     def test_recent_workspace_found_past_the_cap(self):
         """Directory order is arbitrary, so the newest workspace has to be read first:
         the one recent transcript must not fall outside the cap by luck and leave a

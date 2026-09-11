@@ -229,6 +229,24 @@ _EVIDENCE_DIR_CAP = 300
 _VSCODE_CHAT_EDITORS = ("Code", "Code - Insiders")
 
 
+def _descend_without_redirect(base: Path, *parts) -> Optional[Path]:
+    """``base`` joined with ``parts``, or None when ANY component is a link or junction.
+
+    Checked one component at a time on purpose: ``lstat`` resolves a path's ancestors
+    transparently, so a guard on the leaf alone sees nothing when the redirect sits at
+    ``Library``, ``Application Support``, ``.config``, ``AppData``, ``Roaming`` or
+    ``Code``. An unprivileged account can plant one of those and, during a root scan,
+    hand another profile's tree to this probe under its own lexical path.
+    """
+    current = base
+    for part in parts:
+        current = current / part
+        if is_symlink_or_junction(current):
+            logger.debug("Not descending into %s: redirected at %s", base, current)
+            return None
+    return current
+
+
 def _newest_dirs_first(directory: Path, cap: int = _EVIDENCE_DIR_CAP) -> List[Path]:
     """Real subdirectories of ``directory``, newest first, capped. Never raises.
 
@@ -296,16 +314,12 @@ def copilot_chat_evidence(user_home: Path,
         return None
     cutoff = time.time() - (max_age_days * 86400)
     for editor in _VSCODE_CHAT_EDITORS:
-        user_dir = user_home.joinpath(*base, editor, "User")
-        # Every component from the home down is checked, not just the leaf: a link
-        # anywhere along the chain redirects the probe out of this user's tree.
-        if is_symlink_or_junction(user_dir):
+        user_dir = _descend_without_redirect(user_home, *base, editor, "User")
+        if user_dir is None:
             continue
         for workspace in _newest_dirs_first(user_dir / "workspaceStorage"):
-            chat_dir = workspace / "GitHub.copilot-chat"
-            if is_symlink_or_junction(chat_dir):
-                continue
-            if _has_recent_file(chat_dir / "transcripts", "*.jsonl", cutoff):
+            transcripts = _descend_without_redirect(workspace, "GitHub.copilot-chat", "transcripts")
+            if transcripts is not None and _has_recent_file(transcripts, "*.jsonl", cutoff):
                 return user_dir
     return None
 
@@ -336,6 +350,11 @@ def copilot_cli_sessions_recent(copilot_dir: Path,
 
     ``session-state/<id>/events.jsonl`` is written by the CLI itself; the presence of
     ``~/.copilot`` alone is not evidence of anything but our own installer.
+
+    One leaf check is the whole chain here, unlike the VS Code probe: ``copilot_dir``
+    is ``<user_home>/.copilot``, a single component below the home. A ``COPILOT_HOME``
+    override can point elsewhere, but ``_resolve_copilot_dir`` honours it only for the
+    running user's own home, so it redirects nobody but its owner.
     """
     if is_symlink_or_junction(copilot_dir):
         return False

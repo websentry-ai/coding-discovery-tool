@@ -550,6 +550,7 @@ class TestClaudeCodeDetectorPosix(unittest.TestCase):
         self.assertEqual(result["version"], "9.9.9")
 
 
+@unittest.skipIf(os.name == "nt", "the PATH backstop is POSIX-only, and utils.pwd is None on Windows")
 class TestPathBackstopScopedToOwnHome(unittest.TestCase):
     """``which claude`` resolves the SCANNER's PATH. A non-root scan still walks
     every home in /Users, so trusting it for another user credits them with the

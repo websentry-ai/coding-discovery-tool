@@ -515,10 +515,10 @@ class TestSentryPriorityBypassesCap(unittest.TestCase):
 
     @staticmethod
     def _reset_budget():
-        utils_mod._sentry_event_count = 0
-        utils_mod._sentry_sent_signatures = set()
-        utils_mod._sentry_consecutive_fails = 0
-        utils_mod._sentry_dead_this_run = False
+        # The canonical reset, so per-run state added later can't strand this class.
+        # An earlier test that runs main() against its localhost server leaves a
+        # loopback run context behind, which suppresses every event reported after it.
+        utils_mod.reset_sentry_run_state()
 
     @patch.object(utils_mod, "subprocess")
     @patch.object(

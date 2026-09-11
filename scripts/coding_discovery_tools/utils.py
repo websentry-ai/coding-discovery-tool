@@ -2316,6 +2316,17 @@ _sentry_event_count = 0
 _sentry_consecutive_fails = 0
 _sentry_dead_this_run = False
 
+# Held by reference, so the fields main() adds later (device_id, run_id) reach
+# every event without each call site having to thread the context through.
+_sentry_run_context: Dict = {}
+
+
+def set_sentry_run_context(context: Dict) -> None:
+    """Register the run context merged into every ``report_to_sentry`` event."""
+    global _sentry_run_context
+    _sentry_run_context = context
+
+
 # Binaries found on disk but not attributed; a silent rejection is otherwise
 # indistinguishable from never having found the tool at all.
 _REJECTED_BINARIES_CAP = 10
@@ -2371,6 +2382,8 @@ def reset_sentry_run_state() -> None:
     _sentry_consecutive_fails = 0
     _sentry_dead_this_run = False
     _rejected_binaries.clear()
+    global _sentry_run_context
+    _sentry_run_context = {}
     global _npm_prefix_state, _npm_prefix_cached
     _npm_prefix_state = "not_probed"
     _npm_prefix_cached = _NPM_PREFIX_UNSET
@@ -2445,7 +2458,8 @@ def report_to_sentry(
             logger.debug("Sentry reporting skipped (no valid DSN configured)")
             return
 
-        ctx = context or {}
+        # Run context first: a per-call key (phase, tool_name) always wins.
+        ctx = {**_sentry_run_context, **(context or {})}
 
         if _is_ci_or_local_event(ctx):
             logger.debug("Sentry reporting skipped (CI/local run)")

@@ -4032,6 +4032,9 @@ def main():
             pass
         if _have_lock:
             discovery_cache.release_lock()
+        # Scoped to this run: a programmatic caller must not inherit the previous
+        # run's device_id, nor have its events suppressed by a stale loopback domain.
+        set_sentry_run_context({})
 
 
 if __name__ == "__main__":

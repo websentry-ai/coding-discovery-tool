@@ -642,6 +642,21 @@ class TestSentryRunContext(unittest.TestCase):
         report_to_sentry(RuntimeError("x"), {"phase": "detect", "tool_name": "Cursor"})
         self.assertEqual(0, mock_run.call_count)
 
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run")
+    def test_context_does_not_outlive_the_run_that_set_it(self, mock_run):
+        """main() clears it on teardown, so a programmatic caller can't inherit the
+        previous run's device or be silenced by its stale loopback domain."""
+        sent, mock_run.side_effect = self._capture_payload()
+        utils_mod.set_sentry_run_context({"domain": "http://127.0.0.1:8000",
+                                          "device_id": "PREVIOUS-RUN"})
+        utils_mod.set_sentry_run_context({})  # what main()'s finally now does
+
+        report_to_sentry(RuntimeError("x"), {"phase": "detect", "tool_name": "Cursor"})
+
+        self.assertEqual(1, mock_run.call_count)
+        self.assertNotIn("device_id", sent["tags"])
+
 
 class TestSettingsTransformPrecedence(unittest.TestCase):
     """Settings transformation merges scopes and maps fields correctly."""

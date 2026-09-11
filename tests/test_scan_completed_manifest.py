@@ -468,15 +468,12 @@ class TestManifestFromPresence(unittest.TestCase):
 
 
 class TestOwnershipGate(unittest.TestCase):
-    """One gate at the attribution choke point, so a new detector cannot leak the
-    way twelve patched-one-at-a-time detectors did. In prod a single Salesloft
-    admin account held 371 installs belonging to 147 other people."""
+    """One gate at the attribution choke point, so a new detector cannot leak."""
 
     ALICE = Path("/Users/alice")
     BOB = Path("/Users/bob")
     HOMES = [Path("/Users/alice"), Path("/Users/bob")]
 
-    # --- drops the leak --------------------------------------------------
     def test_binary_in_another_users_home_is_disowned(self):
         tool = {"install_path": "/Users/alice/.local/bin/claude"}
         self.assertTrue(disowned_by_path(tool, self.BOB, self.HOMES))
@@ -485,10 +482,8 @@ class TestOwnershipGate(unittest.TestCase):
         tool = {"install_path": "/Users/alice/.local/bin/claude"}
         self.assertFalse(disowned_by_path(tool, self.ALICE, self.HOMES))
 
-    # --- must NOT drop ---------------------------------------------------
     def test_home_outside_users_is_never_disowned(self):
-        """AD, mobile and relocated homes are not under /Users; dropping on
-        'not under any enumerated home' would delete real installs."""
+        """Homes are not always under /Users; dropping those would delete real installs."""
         tool = {"install_path": "/Volumes/net/jdoe/.local/bin/claude"}
         self.assertFalse(disowned_by_path(tool, self.BOB, self.HOMES))
 
@@ -501,7 +496,6 @@ class TestOwnershipGate(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(disowned_by_path({"install_path": path}, self.BOB, self.HOMES))
 
-    # --- shared binaries -------------------------------------------------
     def test_machine_global_binary_disowned_for_non_owner(self):
         tool = {"install_path": "/opt/homebrew/bin/claude"}
         with patch.object(flow_mod, "machine_global_binary_owned_by_user",
@@ -510,15 +504,13 @@ class TestOwnershipGate(unittest.TestCase):
             self.assertFalse(disowned_by_uid(tool, self.ALICE))
 
     def test_uid_rule_is_not_terminal_when_the_user_has_their_own_data(self):
-        """Copilot's install_path is the binary, so a real ~/.copilot user would
-        be dropped if the uid rule ended the decision."""
+        """Copilot's install_path is the shared binary, so a real ~/.copilot user."""
         tool = {"_config_path": "/Users/bob/.copilot",
                 "install_path": "/opt/homebrew/bin/copilot"}
         self.assertTrue(has_user_data("GitHub Copilot CLI", tool, self.BOB))
 
     def test_managed_only_permissions_are_not_user_data(self):
-        """Org-wide managed policy survives filtering for everyone, so counting it
-        would manufacture a row for a non-owner."""
+        """Managed policy survives filtering for everyone, so it is not user data."""
         tool = {"permissions": {"settings_source": "managed"}}
         self.assertFalse(has_user_data("Augment (VS Code)", tool, self.BOB))
         self.assertFalse(has_user_data("Cursor", tool, self.BOB))

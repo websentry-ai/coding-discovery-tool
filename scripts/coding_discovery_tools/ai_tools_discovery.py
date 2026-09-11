@@ -264,14 +264,7 @@ def _home_for_user(user: str):
 
 
 def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
-    """Whether this install sits inside a DIFFERENT enumerated user's home.
-
-    Deliberately conservative: only a path we can positively place in someone
-    else's home is disowned. An unknown, empty, machine-global or
-    non-filesystem path is never "another user's", because homes are not always
-    under /Users (AD, mobile, relocated, Data-volume firmlinks) and dropping on
-    "not under any home" would delete real installs.
-    """
+    """Whether this install sits inside a DIFFERENT enumerated user's home."""
     path = _normalise_path(tool.get("_config_path") or tool.get("install_path", "") or "")
     if not path:
         return False
@@ -285,22 +278,14 @@ def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
     return False
 
 
-# The bin dirs the detectors treat as machine-global; mirrors the candidate
-# lists in user_tool_detector and the copilot_cli detectors.
+# Mirrors the machine-global candidate lists in user_tool_detector.
 _MACHINE_GLOBAL_BIN_DIRS = frozenset({
     Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path("/usr/bin"),
 })
 
 
 def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
-    """Whether a MACHINE-GLOBAL binary belongs to someone other than ``user_home``.
-
-    Homebrew and manual /usr/local installs are owned by the installing user, so
-    without this one person's install is credited to every account on the box.
-    A root-owned system binary is genuinely shared and stays. Not terminal: a
-    False here only means "not disowned on ownership grounds", and the caller
-    still applies the per-tool user-data test.
-    """
+    """Whether a machine-global binary belongs to someone other than ``user_home``."""
     path = tool.get("install_path") or ""
     if not path:
         return False
@@ -372,13 +357,7 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
 
 
 def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool:
-    """Whether the filtered payload carries data this user actually owns.
-
-    Per-tool by design and not unifiable: the Augment rule excludes MANAGED-scope
-    permissions because org-wide policy survives filtering for every user, while
-    the Copilot CLI rule accepts any permissions block. Collapsing them would
-    regress one. The default takes the stricter reading.
-    """
+    """Data this user owns. Per-tool: Augment excludes managed-scope permissions, Copilot CLI does not."""
     if tool_name == "GitHub Copilot CLI":
         return _copilot_cli_owned_by_user(tool_filtered, user_home)
     if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
@@ -3532,8 +3511,7 @@ def main():
         scanned_homes = []  # same, for the config-dir age discriminator
         wsl_seen = set()  # same, for the WSL-resident-install discriminator
         editors_seen = set()  # same, for the editor-present-but-extension-missed discriminator
-        # Resolved once: the report loop disowns an install by asking whether it
-        # sits in one of the OTHER homes, so it needs them all.
+        # The report loop disowns an install by testing it against the other homes.
         user_homes = {u: _home_for_user(u) for u in all_users}
 
         for user in all_users:
@@ -3623,10 +3601,8 @@ def main():
                 for user_name in all_users:
                     user_home = user_homes[user_name]
 
-                    # Ahead of the resume skip: the manifest drives backend pruning,
-                    # so a row we would no longer emit must not survive as a resumed
-                    # entry. Another user's home is the one disowning test cheap
-                    # enough to run before filtering.
+                    # Before the resume skip: the manifest drives pruning, so a row
+                    # we would not emit must not survive as a resumed entry.
                     if _install_in_another_users_home(tool, user_home, user_homes.values()):
                         logger.info(
                             f"  Skipping {tool_name} for {user_name}: "
@@ -3653,10 +3629,8 @@ def main():
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
 
-                        # A machine-global binary owned by someone else is not this
-                        # user's install UNLESS they have their own data for it —
-                        # Copilot's install_path is the binary, so a real ~/.copilot
-                        # user would otherwise be dropped.
+                        # Owned by someone else, unless this user has their own data
+                        # for it: Copilot's install_path is the shared binary.
                         if _machine_global_install_disowned(tool, user_home) \
                                 and not _has_user_owned_data(tool_name, tool_filtered, user_home):
                             logger.info(

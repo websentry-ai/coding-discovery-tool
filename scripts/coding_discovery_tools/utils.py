@@ -28,7 +28,7 @@ except ImportError:
     pwd = None  # Not available on Windows
 
 from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
-from .vscode_extension_helpers import VSCODE_EDITOR_KEYS
+from .vscode_extension_helpers import VSCODE_EDITOR_KEYS, reset_vscode_registry_state, vscode_registry_state
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +217,100 @@ def vscode_editors_present(user_home: Path) -> List[str]:
             if "unreadable" not in found:
                 found.append("unreadable")
     return found
+
+
+# A tool's own session files prove it RAN on this machine. A config dir does not:
+# our installer creates ~/.claude, ~/.codex and ~/.copilot on every managed device,
+# which is why detection moved to the binary in the first place. Bounded, because
+# workspaceStorage holds one dir per workspace and the scan runs under a watchdog.
+COPILOT_EVIDENCE_MAX_AGE_DAYS = 30
+_EVIDENCE_DIR_CAP = 300
+# Copilot Chat writes transcripts under the stable and Insiders channels only.
+_VSCODE_CHAT_EDITORS = ("Code", "Code - Insiders")
+
+
+def _iter_dir_capped(directory: Path, cap: int = _EVIDENCE_DIR_CAP):
+    """Yield up to ``cap`` children of ``directory``. Never raises."""
+    try:
+        for count, child in enumerate(directory.iterdir(), start=1):
+            yield child
+            if count >= cap:
+                logger.debug("Stopped at %d entries under %s; evidence beyond that "
+                             "is not read", cap, directory)
+                return
+    except (PermissionError, OSError):
+        return
+
+
+def _has_recent_file(directory: Path, pattern: str, cutoff: float) -> bool:
+    """True when ``directory`` holds a file matching ``pattern`` modified since ``cutoff``."""
+    try:
+        for path in directory.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime >= cutoff:
+                    return True
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+    return False
+
+
+def copilot_chat_evidence(user_home: Path,
+                          max_age_days: int = COPILOT_EVIDENCE_MAX_AGE_DAYS) -> Optional[Path]:
+    """The VS Code ``User`` dir whose Copilot Chat transcripts were written recently.
+
+    ``workspaceStorage/<id>/GitHub.copilot-chat/transcripts/*.jsonl`` is written by the
+    Copilot Chat extension itself, so a fresh one proves the extension ran here even
+    when neither the marketplace registry nor the app bundle can be read. The mtime
+    bound is what keeps it from resurrecting an uninstalled extension, whose
+    workspaceStorage survives removal (microsoft/vscode#119022).
+    """
+    base = _VSCODE_USER_DATA_BASE.get(platform.system())
+    if base is None:
+        return None
+    cutoff = time.time() - (max_age_days * 86400)
+    for editor in _VSCODE_CHAT_EDITORS:
+        user_dir = user_home.joinpath(*base, editor, "User")
+        for workspace in _iter_dir_capped(user_dir / "workspaceStorage"):
+            if _has_recent_file(workspace / "GitHub.copilot-chat" / "transcripts",
+                                "*.jsonl", cutoff):
+                return user_dir
+    return None
+
+
+def copilot_chat_evidence_row(user_home: Path) -> List[Dict]:
+    """One Copilot Chat row backed by recent transcripts, or ``[]``. Never raises.
+
+    Last resort, after both the marketplace registry and the app bundle come back
+    empty. Reporting nothing there marks a live install absent, and an absent install
+    is prunable — so a user whose editor we cannot read drops out of inventory.
+    """
+    user_dir = copilot_chat_evidence(user_home)
+    if user_dir is None:
+        return []
+    return [{
+        "name": "GitHub Copilot Chat (VS Code)",
+        "version": "unknown",
+        "publisher": "GitHub",
+        # The editor's User dir, not the transcript's workspace dir: install_path is
+        # part of the manifest identity, so a per-workspace path would churn the row.
+        "install_path": str(user_dir),
+    }]
+
+
+def copilot_cli_sessions_recent(copilot_dir: Path,
+                                max_age_days: int = COPILOT_EVIDENCE_MAX_AGE_DAYS) -> bool:
+    """True when the Copilot CLI wrote a session under ``copilot_dir`` recently.
+
+    ``session-state/<id>/events.jsonl`` is written by the CLI itself; the presence of
+    ``~/.copilot`` alone is not evidence of anything but our own installer.
+    """
+    cutoff = time.time() - (max_age_days * 86400)
+    for session in _iter_dir_capped(copilot_dir / "session-state"):
+        if _has_recent_file(session, "events.jsonl", cutoff):
+            return True
+    return False
 
 
 def wsl_distros_present(user_home: Path) -> List[str]:
@@ -2293,7 +2387,7 @@ _SENTRY_TAG_KEYS = (
     "used_fallback_user", "homes_enumerated", "users_scanned",
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
-    "npm_prefix", "vscode_editors",
+    "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2332,6 +2426,17 @@ def set_sentry_run_context(context: Dict) -> None:
 _REJECTED_BINARIES_CAP = 10
 _rejected_binaries = []
 
+# VS Code-family app bundles whose extensions dir was found this run. Without it a
+# zero-tool scan on a machine that is plainly using VS Code cannot say whether no
+# install was found at any probed path or one was found and its bundled Copilot
+# folder was absent — the fix differs completely between the two.
+_VSCODE_BUNDLES_CAP = 8
+_vscode_bundles_found = set()
+# Dirs between an app bundle and its extensions dir: <bundle>/Contents/Resources/app
+# on macOS, <install>/resources/app elsewhere, and bare <install> for the Linux
+# distro layout.
+_VSCODE_BUNDLE_TAIL = frozenset({"extensions", "app", "resources", "contents"})
+
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
 _NPM_PREFIX_UNSET = object()
@@ -2364,6 +2469,26 @@ def rejected_binaries() -> list:
     return list(_rejected_binaries)
 
 
+def record_vscode_bundle_probe(ext_root) -> None:
+    """Note a VS Code-family app bundle whose extensions dir exists. Never raises."""
+    try:
+        ext_root = Path(ext_root)
+        if not ext_root.is_dir():
+            return
+        parts = list(ext_root.parts)
+        while parts and parts[-1].lower() in _VSCODE_BUNDLE_TAIL:
+            parts.pop()
+        if len(_vscode_bundles_found) < _VSCODE_BUNDLES_CAP:
+            _vscode_bundles_found.add(parts[-1] if parts else str(ext_root))
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def vscode_bundles_probed() -> list:
+    """VS Code-family app bundles found on disk this run."""
+    return sorted(_vscode_bundles_found)
+
+
 def npm_prefix_state() -> str:
     """Whether ``npm prefix -g`` answered this run: resolved, unresolved, or not_probed.
 
@@ -2382,6 +2507,8 @@ def reset_sentry_run_state() -> None:
     _sentry_consecutive_fails = 0
     _sentry_dead_this_run = False
     _rejected_binaries.clear()
+    _vscode_bundles_found.clear()
+    reset_vscode_registry_state()
     global _sentry_run_context
     _sentry_run_context = {}
     global _npm_prefix_state, _npm_prefix_cached

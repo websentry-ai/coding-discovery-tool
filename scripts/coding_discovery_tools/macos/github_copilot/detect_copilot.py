@@ -8,6 +8,7 @@ from ...coding_tool_base import BaseCopilotDetector as BaseCopilotDetectorBase
 from ...jetbrains_naming_helpers import plugin_entries
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from ...macos_extraction_helpers import MACHINE_APPS_DIR, is_running_as_root
+from ...utils import copilot_chat_evidence_row, record_vscode_bundle_probe
 from ...vscode_extension_helpers import (
     VSCODE_EDITOR_DISPLAY_NAMES,
     extensions_dir_for_editor,
@@ -204,6 +205,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
             return []
 
         for ext_root in _app_extension_roots(user_home):
+            record_vscode_bundle_probe(ext_root)
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
                 copilot_dir = ext_root / dir_name
                 try:
@@ -220,7 +222,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
                     "install_path": str(copilot_dir),
                 }]
         logger.debug("VS Code in use under %s but no built-in Copilot extension found", user_home)
-        return []
+        return copilot_chat_evidence_row(user_home)
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """

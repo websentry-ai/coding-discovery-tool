@@ -6,16 +6,25 @@ editor map, so a detected row always has a user-data dir to read.
 """
 
 import json
+import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
+from scripts.coding_discovery_tools.utils import (
+    record_vscode_bundle_probe,
+    vscode_bundles_probed,
+)
 from scripts.coding_discovery_tools.vscode_extension_helpers import (
     VSCODE_EDITOR_DISPLAY_NAMES,
+    find_extension_in_editor,
+    reset_vscode_registry_state,
     vscode_family_editor_dirs,
+    vscode_registry_state,
 )
 from scripts.coding_discovery_tools.linux.github_copilot.detect_copilot import (
     LinuxCopilotDetector,
@@ -147,6 +156,151 @@ class TestWindowsEditorCoverage(_EditorCoverageCase):
 
 class TestLinuxEditorCoverage(_EditorCoverageCase):
     DETECTOR = LinuxCopilotDetector
+
+
+_MAC_DETECT = "scripts.coding_discovery_tools.macos.github_copilot.detect_copilot"
+_LINUX_DETECT = "scripts.coding_discovery_tools.linux.github_copilot.detect_copilot"
+
+# Where each platform's VS Code keeps its per-user data, relative to the home.
+_USER_DATA_REL = {
+    "Darwin": Path("Library") / "Application Support",
+    "Windows": Path("AppData") / "Roaming",
+    "Linux": Path(".config"),
+}
+
+
+class _EvidenceTierMixin:
+    """Copilot Chat's own transcripts, the last resort once both the marketplace
+    registry and the app bundle come back empty. The editor's config dir is not
+    evidence of anything — our installer creates one on every managed device.
+
+    A mixin, not a ``_Fixture`` subclass: pytest collects every TestCase it finds,
+    and an abstract case with no DETECTOR would run and fail on its own."""
+
+    OS_NAME = None
+
+    def _no_bundles(self, det):
+        """Neutralise the app-bundle probe: a dev box with a real VS Code install
+        would otherwise answer from the bundle and never reach the evidence tier."""
+        raise NotImplementedError
+
+    def _user_dir(self):
+        return self.user_home / _USER_DATA_REL[self.OS_NAME] / "Code" / "User"
+
+    def _write_transcript(self, age_days=0):
+        transcripts = self._user_dir() / "workspaceStorage" / "ws1" / "GitHub.copilot-chat" / "transcripts"
+        transcripts.mkdir(parents=True, exist_ok=True)
+        path = transcripts / "s1.jsonl"
+        path.write_text("{}", encoding="utf-8")
+        if age_days:
+            stale = time.time() - age_days * 86400
+            os.utime(path, (stale, stale))
+        return path
+
+    def _detect_builtin(self):
+        det = type(self).DETECTOR()
+        with self._no_bundles(det), \
+                patch(f"{utils_mod.__name__}.platform.system", return_value=self.OS_NAME):
+            return det._detect_vscode_builtin_copilot(self.user_home)
+
+    def test_recent_transcript_reported(self):
+        self._write_transcript()
+        res = self._detect_builtin()
+        self.assertEqual(["GitHub Copilot Chat (VS Code)"], [r["name"] for r in res])
+        self.assertEqual("unknown", res[0]["version"])
+        # The editor's User dir, never the workspace dir: install_path is part of the
+        # manifest identity, so a per-workspace path would churn the row every scan.
+        self.assertEqual(self._user_dir(), Path(res[0]["install_path"]))
+
+    def test_stale_transcript_not_reported(self):
+        self._write_transcript(age_days=utils_mod.COPILOT_EVIDENCE_MAX_AGE_DAYS + 5)
+        self.assertEqual([], self._detect_builtin())
+
+    def test_user_data_dir_alone_is_not_evidence(self):
+        self._user_dir().mkdir(parents=True)
+        self.assertEqual([], self._detect_builtin())
+
+
+class TestMacosEvidenceTier(_EvidenceTierMixin, _Fixture):
+    DETECTOR = MacOSCopilotDetector
+    OS_NAME = "Darwin"
+
+    def _no_bundles(self, det):
+        return patch(f"{_MAC_DETECT}._app_extension_roots", return_value=[])
+
+
+class TestWindowsEvidenceTier(_EvidenceTierMixin, _Fixture):
+    DETECTOR = WindowsGitHubCopilotDetector
+    OS_NAME = "Windows"
+
+    def _no_bundles(self, det):
+        return patch.object(det, "_vscode_app_extension_roots", return_value=[])
+
+
+class TestLinuxEvidenceTier(_EvidenceTierMixin, _Fixture):
+    DETECTOR = LinuxCopilotDetector
+    OS_NAME = "Linux"
+
+    def _no_bundles(self, det):
+        return patch(f"{_LINUX_DETECT}._VSCODE_APP_EXTENSION_ROOTS", [])
+
+
+class TestNoToolsDiscriminators(unittest.TestCase):
+    """A zero-tool event has to say WHICH lookup came back empty. A registry that is
+    absent, one we were denied, and one that simply does not list Copilot are three
+    different bugs behind a single None."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp)
+        self._clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        self._clear()
+
+    def _clear(self):
+        reset_vscode_registry_state()
+        utils_mod._vscode_bundles_found.clear()
+
+    def _registry(self, payload):
+        registry = self.home / ".vscode" / "extensions" / "extensions.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(payload, encoding="utf-8")
+
+    def test_absent_registry(self):
+        find_extension_in_editor(self.home, "Code", "github.copilot")
+        self.assertEqual(["Code:missing"], vscode_registry_state())
+
+    def test_registry_without_copilot(self):
+        self._registry("[]")
+        find_extension_in_editor(self.home, "Code", "github.copilot")
+        self.assertEqual(["Code:present"], vscode_registry_state())
+
+    def test_registry_listing_copilot(self):
+        self._registry(json.dumps([{"identifier": {"id": "GitHub.Copilot"}, "version": "1.0"}]))
+        find_extension_in_editor(self.home, "Code", "github.copilot")
+        self.assertEqual(["Code:listed"], vscode_registry_state())
+
+    def test_denied_registry_is_not_reported_as_absent(self):
+        self._registry("[]")
+        with patch("os.stat", side_effect=PermissionError(13, "denied")):
+            find_extension_in_editor(self.home, "Code", "github.copilot")
+        self.assertEqual(["Code:unreadable"], vscode_registry_state())
+
+    def test_corrupt_registry_is_unreadable(self):
+        self._registry("{not json")
+        find_extension_in_editor(self.home, "Code", "github.copilot")
+        self.assertEqual(["Code:unreadable"], vscode_registry_state())
+
+    def test_bundle_probe_records_only_roots_on_disk(self):
+        present = self.home / "Visual Studio Code.app" / "Contents" / "Resources" / "app" / "extensions"
+        present.mkdir(parents=True)
+        record_vscode_bundle_probe(present)
+        record_vscode_bundle_probe(
+            self.home / "Code.app" / "Contents" / "Resources" / "app" / "extensions")
+        self.assertEqual(["Visual Studio Code.app"], vscode_bundles_probed())
 
 
 class TestMacosBuiltinFallback(_BuiltinFallbackCase):

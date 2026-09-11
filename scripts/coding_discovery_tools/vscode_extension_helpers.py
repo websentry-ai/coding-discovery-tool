@@ -11,7 +11,9 @@ All I/O is wrapped — this runs on customer machines and must never raise.
 
 import json
 import logging
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -48,6 +50,32 @@ _ROW_EDITOR_SUFFIX = re.compile(r"\(([^)]+)\)\s*$")
 
 # Insiders is a VS Code channel, not its own row, so it is searched under ``Code``.
 _EXTENSION_DIR_KEYS_BY_EDITOR = {"Code": ("Code", "Code - Insiders")}
+
+# Registry read outcomes seen this run, as ``<editor>:<outcome>``. A zero-tool scan
+# cannot otherwise act on a None from find_extension_in_editor: a registry that is
+# missing, one we could not read, and one that simply does not list Copilot are
+# three different bugs and one return value.
+_REGISTRY_OUTCOMES_CAP = 12
+_registry_outcomes = set()
+
+
+def _record_registry_outcome(ide_key: str, outcome: str) -> None:
+    """Note how one editor's ``extensions.json`` read ended. Never raises."""
+    try:
+        if len(_registry_outcomes) < _REGISTRY_OUTCOMES_CAP:
+            _registry_outcomes.add(f"{ide_key}:{outcome}")
+    except Exception:
+        pass
+
+
+def vscode_registry_state() -> list:
+    """This run's ``extensions.json`` outcomes: missing, unreadable, present, listed."""
+    return sorted(_registry_outcomes)
+
+
+def reset_vscode_registry_state() -> None:
+    """Clear the per-run registry outcomes."""
+    _registry_outcomes.clear()
 
 
 def find_extension_in_editor_channels(
@@ -119,15 +147,30 @@ def find_extension_in_editor(
     registry = extensions_dir / "extensions.json"
     target = ext_id.lower()
 
+    # os.stat, not is_file(): 3.14 returns False for an unreadable path, which would
+    # report a registry we were denied as one that is not there.
     try:
-        if not registry.is_file():
-            return None
+        mode = os.stat(registry).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        _record_registry_outcome(ide_key, "missing")
+        return None
+    except OSError as exc:
+        logger.debug(f"Could not stat extensions registry {registry}: {exc}")
+        _record_registry_outcome(ide_key, "unreadable")
+        return None
+    if not stat.S_ISREG(mode):
+        _record_registry_outcome(ide_key, "missing")
+        return None
+
+    try:
         entries = json.loads(registry.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError) as exc:
         logger.debug(f"Could not read extensions registry {registry}: {exc}")
+        _record_registry_outcome(ide_key, "unreadable")
         return None
 
     if not isinstance(entries, list):
+        _record_registry_outcome(ide_key, "unreadable")
         return None
 
     for entry in entries:
@@ -140,8 +183,10 @@ def find_extension_in_editor(
 
         version = entry.get("version")
         version = version if isinstance(version, str) else None
+        _record_registry_outcome(ide_key, "listed")
         return _resolve_entry_location(entry, extensions_dir), version
 
+    _record_registry_outcome(ide_key, "present")
     return None
 
 

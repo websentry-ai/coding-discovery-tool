@@ -18,6 +18,7 @@ from .coding_tool_base import BaseToolDetector
 from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
+    _is_scanning_users_own_home,
     _read_own_regular_file,
     extract_version_number,
     machine_global_binary_owned_by_user,
@@ -797,19 +798,22 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
 
     # POSIX-shaped (``<prefix>/bin/<tool>``); the Windows candidates cover it above.
     if platform.system() != "Windows":
-        npm_resolved = resolve_npm_global_tool_bin("claude", user_home, is_root)
+        # Only the scanner's own home can trust scanner-derived lookups; the
+        # helper already refuses root, so it subsumes the previous is_root gate.
+        npm_resolved = resolve_npm_global_tool_bin(
+            "claude", user_home, not _is_scanning_users_own_home(user_home)
+        )
         if npm_resolved:
             return npm_resolved
 
     # PATH backstop: catch custom install prefixes the explicit list misses.
-    # Only meaningful in the single-user / non-root case — the resolved PATH
-    # is the SCANNER's, not ``user_home``'s. Under a root/MDM multi-user scan
-    # it would resolve root's claude for a user who has none, mis-attributing
-    # the install. The explicit candidate list above is comprehensive and
-    # already user_home-relative, so we skip ``which`` when root, and on
-    # Windows (where ``which`` is not a command — the .exe/.cmd candidates
-    # above already cover it).
-    if not is_running_as_root() and platform.system() != "Windows":
+    # Gated on scanning the scanner's OWN home, not on being non-root: a
+    # non-root scan still walks every home in /Users, and ``which`` resolves the
+    # SCANNER's PATH, so for any other user it reports that user as owning the
+    # scanner's install. The explicit candidate list above is comprehensive and
+    # already user_home-relative. Skipped on Windows, where ``which`` is not a
+    # command and the .exe/.cmd candidates already cover it.
+    if _is_scanning_users_own_home(user_home) and platform.system() != "Windows":
         which_path = run_command(["which", "claude"], VERSION_TIMEOUT)
         if which_path:
             try:

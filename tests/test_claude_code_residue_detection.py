@@ -18,6 +18,7 @@ import os
 import platform
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -335,12 +336,14 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
 
     def test_which_backstop_detected(self):
         """No HOME/Homebrew binary, but ``which claude`` resolves to a real
-        executable -> detected. Proves the PATH backstop (non-root case)."""
+        executable -> detected. Proves the PATH backstop for the one case it is
+        valid in: the home being scanned is the scanner's own."""
         which_target = self.home / "custom" / "claude"
         self._make_exec(which_target)
         det = _make_detector()
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_MOD}._is_scanning_users_own_home", return_value=True), \
              patch(f"{_MOD}.run_command", return_value=str(which_target)):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
@@ -545,6 +548,46 @@ class TestClaudeCodeDetectorPosix(unittest.TestCase):
         result = self._detect()
         self.assertIsNotNone(result)
         self.assertEqual(result["version"], "9.9.9")
+
+
+@unittest.skipIf(os.name == "nt", "the PATH backstop is POSIX-only, and utils.pwd is None on Windows")
+class TestPathBackstopScopedToOwnHome(unittest.TestCase):
+    """``which claude`` resolves the SCANNER's PATH. A non-root scan still walks
+    every home in /Users, so trusting it for another user credits them with the
+    scanner's install — 49 of 49 misattributed rows in prod were this shape."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.scanner_home = root / "scanner"
+        self.other_home = root / "clariadmin"
+        self.other_home.mkdir(parents=True)
+        binary = self.scanner_home / ".local" / "bin" / "claude"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        os.chmod(binary, 0o755)
+        self.scanner_binary = binary
+
+    def _find(self, user_home):
+        """Non-root, with the scanner's ``which`` pointing at its own binary.
+
+        ``_is_scanning_users_own_home`` is left unpatched so the real predicate
+        decides: under the test process it is only true for the scanner's home.
+        """
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_UTILS}.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(self.scanner_home))), \
+             patch(f"{_MOD}.run_command", return_value=str(self.scanner_binary)), \
+             patch.object(Path, "exists", _absent_unless_under(Path(self.tmp.name))):
+            return find_claude_binary_for_user(user_home)
+
+    def test_another_users_home_does_not_inherit_the_scanner_binary(self):
+        self.assertIsNone(self._find(self.other_home))
+
+    def test_the_scanners_own_home_still_resolves_via_path(self):
+        self.assertEqual(str(self.scanner_binary), self._find(self.scanner_home))
 
 
 class TestWindowsClaudeVersionProbe(unittest.TestCase):

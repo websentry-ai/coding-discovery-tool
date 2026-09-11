@@ -12,6 +12,7 @@ from ...vscode_extension_helpers import (
     extensions_dir_for_editor,
     find_extension_in_editor_channels,
 )
+from ...utils import copilot_chat_evidence_row, record_vscode_bundle_probe
 from ...windows_extraction_helpers import is_running_as_admin
 from ..jetbrains.jetbrains import WindowsJetBrainsDetector
 
@@ -261,6 +262,7 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
             return []
 
         for ext_root in self._vscode_app_extension_roots(user_home):
+            record_vscode_bundle_probe(ext_root)
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
                 copilot_dir = ext_root / dir_name
                 if not _safe_descendant_directory(copilot_dir, ext_root):
@@ -290,7 +292,7 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                     "install_path": str(copilot_dir),
                 }]
         logger.debug(f"VS Code in use under {user_home} but no built-in Copilot extension found")
-        return []
+        return copilot_chat_evidence_row(user_home)
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """

@@ -16,6 +16,7 @@ the gate depends only on the binary the test creates under the hermetic home
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -92,6 +93,31 @@ class _CopilotBinaryGateMixin:
 
     def test_nothing_present_not_detected(self):
         self.assertIsNone(self.detector.detect())
+
+    def test_recent_session_state_detected_without_binary(self):
+        """No resolvable binary, but the CLI wrote ``session-state/<id>/events.jsonl``
+        itself — it ran here, under a node manager or prefix we do not probe. Absent
+        this the live install reports as missing, and missing is prunable."""
+        _make_hooks_only(self.home)
+        session = self.home / ".copilot" / "session-state" / "s1"
+        session.mkdir(parents=True)
+        (session / "events.jsonl").write_text("{}", encoding="utf-8")
+        with patch.object(self.detector, "_resolve_binary", return_value=None):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual("unknown", result["version"])
+        self.assertEqual(str(self.home / ".copilot"), result["install_path"])
+
+    def test_stale_session_state_not_detected(self):
+        """Session residue outlives an uninstall, so only a recent one is evidence."""
+        session = self.home / ".copilot" / "session-state" / "s1"
+        session.mkdir(parents=True)
+        events = session / "events.jsonl"
+        events.write_text("{}", encoding="utf-8")
+        stale = time.time() - (utils_mod.COPILOT_EVIDENCE_MAX_AGE_DAYS + 5) * 86400
+        os.utime(events, (stale, stale))
+        with patch.object(self.detector, "_resolve_binary", return_value=None):
+            self.assertIsNone(self.detector.detect())
 
 
 class TestMacOSCopilotCliBinaryGate(_CopilotBinaryGateMixin, unittest.TestCase):

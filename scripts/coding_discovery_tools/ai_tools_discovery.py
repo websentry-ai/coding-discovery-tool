@@ -90,7 +90,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -160,7 +160,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -252,6 +252,56 @@ def _install_key(user, tool):
     return (user, tool.get('name', 'Unknown'), tool.get('install_path'))
 
 
+def _home_for_user(user: str):
+    """The home directory the scan should read for ``user`` on this platform."""
+    if platform.system() == "Darwin":
+        return Path(f"/Users/{user}")
+    if platform.system() == "Windows":
+        return windows_home_for_user(user)
+    if platform.system() == "Linux":
+        return linux_home_for_user(user)
+    return Path.home()
+
+
+def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
+    """Whether this install sits inside a DIFFERENT enumerated user's home."""
+    # install_path only: ``tool`` is globally deduped by name+install_path, so its
+    # ``_config_path`` is whichever user was enumerated first and would disown the rest.
+    path = _normalise_path(tool.get("install_path") or "")
+    if not path:
+        return False
+    mine = _normalise_path(str(user_home))
+    if mine and (path == mine or path.startswith(mine + "/")):
+        return False
+    for other in other_homes:
+        theirs = _normalise_path(str(other))
+        if theirs and theirs != mine and (path == theirs or path.startswith(theirs + "/")):
+            return True
+    return False
+
+
+# Mirrors the machine-global candidate lists in user_tool_detector.
+_MACHINE_GLOBAL_BIN_DIRS = frozenset({
+    Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path("/usr/bin"),
+})
+
+
+def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
+    """Whether a machine-global binary belongs to someone other than ``user_home``."""
+    path = tool.get("install_path") or ""
+    if not path:
+        return False
+    try:
+        candidate = Path(path)
+        if candidate.parent not in _MACHINE_GLOBAL_BIN_DIRS:
+            return False
+        return not machine_global_binary_owned_by_user(candidate, Path(user_home))
+    except (OSError, ValueError, RuntimeError) as e:
+        # Fail open, but say so: a failed check must not look like confirmed ownership.
+        logger.debug(f"Ownership check failed for {path} against {user_home}: {e}", exc_info=True)
+        return False
+
+
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
@@ -308,6 +358,18 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
         return True
 
     return owns_install
+
+
+def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool:
+    """Data this user owns. Per-tool: Augment excludes managed-scope permissions, Copilot CLI does not."""
+    if tool_name == "GitHub Copilot CLI":
+        return _copilot_cli_owned_by_user(tool_filtered, user_home)
+    if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
+        return _augment_owned_by_user(tool_filtered, user_home)
+    if tool_filtered.get("projects"):
+        return True
+    perms = tool_filtered.get("permissions")
+    return perms is not None and perms.get("settings_source") != "managed"
 
 
 def _decode_project_path(path):
@@ -3128,6 +3190,8 @@ def main():
         "domain": args.domain,
         "app_name": args.app_name or "",
     }
+    # Reaches call sites that can't pass it, e.g. the detect loop inside the detector.
+    set_sentry_run_context(sentry_ctx)
 
     # Initialize variables before try block to avoid NameError in exception handler
     device_id = None
@@ -3451,16 +3515,11 @@ def main():
         scanned_homes = []  # same, for the config-dir age discriminator
         wsl_seen = set()  # same, for the WSL-resident-install discriminator
         editors_seen = set()  # same, for the editor-present-but-extension-missed discriminator
+        # The report loop disowns an install by testing it against the other homes.
+        all_user_homes = [_home_for_user(u) for u in all_users]
 
         for user in all_users:
-            if platform.system() == "Darwin":
-                user_home = Path(f"/Users/{user}")
-            elif platform.system() == "Windows":
-                user_home = windows_home_for_user(user)
-            elif platform.system() == "Linux":
-                user_home = linux_home_for_user(user)
-            else:
-                user_home = Path.home()
+            user_home = _home_for_user(user)
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             scanned_homes.append(user_home)
             config_dirs_seen.update(tool_config_dirs_present(user_home))
@@ -3520,6 +3579,11 @@ def main():
             # resumed run — this is where re-processing (filesystem walk + CLI
             # subprocesses) is actually saved.
             if resume_done and all((tool_key, u) in resume_done for u in all_users):
+                # Checkpointed entries still have to pass the path gate: detection
+                # repopulated the manifest, and the manifest drives pruning.
+                for u in all_users:
+                    if _install_in_another_users_home(tool, _home_for_user(u), all_user_homes):
+                        scanned_manifest.discard(_install_key(u, tool))
                 logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
                 resume_tools_skipped += 1
                 continue
@@ -3544,6 +3608,18 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
+                    user_home = _home_for_user(user_name)
+
+                    # Before the resume skip: the manifest drives pruning, so a row
+                    # we would not emit must not survive as a resumed entry.
+                    if _install_in_another_users_home(tool, user_home, all_user_homes):
+                        logger.info(
+                            f"  Skipping {tool_name} for {user_name}: "
+                            f"{tool.get('install_path')!r} is in another user's home"
+                        )
+                        scanned_manifest.discard(_install_key(user_name, tool))
+                        continue
+
                     # Already reported by the resumed run -> skip its re-upload.
                     # Log the per-user skip AND record it in the summary so a
                     # partially-resumed tool's summary reflects every user (resumed
@@ -3552,14 +3628,6 @@ def main():
                         logger.info(f"  · {tool_name} for user {user_name} already reported by the resumed run; skipping re-processing")
                         tool_users_summary.append({'user': user_name, 'resumed': True})
                         continue
-                    if platform.system() == "Darwin":
-                        user_home = Path(f"/Users/{user_name}")
-                    elif platform.system() == "Windows":
-                        user_home = windows_home_for_user(user_name)
-                    elif platform.system() == "Linux":
-                        user_home = linux_home_for_user(user_name)
-                    else:
-                        user_home = Path.home()
 
                     try:
                         # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
@@ -3569,6 +3637,18 @@ def main():
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+
+                        # Owned by someone else, unless this user has their own data
+                        # for it: Copilot's install_path is the shared binary.
+                        if _machine_global_install_disowned(tool, user_home) \
+                                and not _has_user_owned_data(tool_name, tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping {tool_name} for {user_name}: "
+                                f"{tool.get('install_path')!r} is owned by another user "
+                                f"and this user has no data for it"
+                            )
+                            scanned_manifest.discard(_install_key(user_name, tool))
+                            continue
 
                         # Ownership gate (Copilot CLI only): suppress a phantom install
                         # row for a user who neither owns the detected ~/.copilot config
@@ -3582,7 +3662,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool_filtered))
+                            scanned_manifest.discard(_install_key(user_name, tool))
                             continue
 
                         # Ownership gate (Augment surfaces): same ~/.augment-keyed
@@ -3596,7 +3676,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool_filtered))
+                            scanned_manifest.discard(_install_key(user_name, tool))
                             continue
 
                         # Detect subscription plan for Claude Code
@@ -3931,6 +4011,13 @@ def main():
                     "wsl_distros": ",".join(sorted(wsl_seen)),
                     # Non-empty means an editor is in use and we missed its extension.
                     "vscode_editors": ",".join(sorted(editors_seen)),
+                    # Empty with an editor in use means the app bundle is somewhere we
+                    # never probe; non-empty means we found it and the Copilot folder
+                    # was not inside.
+                    "vscode_bundles": ",".join(vscode_bundles_probed()),
+                    # missing | unreadable | present | listed, per editor: the three
+                    # ways the marketplace registry lookup returns nothing.
+                    "vscode_registry": ",".join(vscode_registry_state()),
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),
                     "in_container": in_container(),
@@ -4030,6 +4117,9 @@ def main():
             pass
         if _have_lock:
             discovery_cache.release_lock()
+        # Scoped to this run: a programmatic caller must not inherit the previous
+        # run's device_id, nor have its events suppressed by a stale loopback domain.
+        set_sentry_run_context({})
 
 
 if __name__ == "__main__":

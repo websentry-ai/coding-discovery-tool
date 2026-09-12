@@ -373,7 +373,7 @@ def dir_state(path) -> str:
     """
     try:
         return "present" if stat.S_ISDIR(os.stat(path).st_mode) else "absent"
-    except (FileNotFoundError, NotADirectoryError):
+    except (FileNotFoundError, NotADirectoryError, ValueError):
         return "absent"
     except OSError:
         return "unreadable"

@@ -2544,8 +2544,8 @@ def record_cowork_probe(part: str, state: str) -> None:
     try:
         if len(_cowork_probes) < _COWORK_PROBES_CAP:
             _cowork_probes.add(f"{part}:{state}")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Could not record Cowork probe %r:%r: %s", part, state, e, exc_info=True)
 
 
 def cowork_probes() -> list:

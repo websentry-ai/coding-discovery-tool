@@ -208,14 +208,32 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
         self.assertIn("sessions:present", utils_mod.cowork_probes())
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
-    def test_denied_sessions_raises_so_the_install_is_not_pruned(self):
+    def test_denied_sessions_in_our_own_home_raises_so_nothing_is_pruned(self):
         """Unknown presence, not absence: only a raise marks the scan incomplete."""
         self._sessions()
         claude_dir = self.home / "Library" / "Application Support" / "Claude"
         os.chmod(claude_dir, 0o000)
         try:
-            with self.assertRaises(PermissionError):
-                self._detect(Path("/Applications/Claude.app"))
+            with patch(f"{_MOD}._is_scanning_users_own_home", return_value=True):
+                with self.assertRaises(PermissionError):
+                    self._detect(Path("/Applications/Claude.app"))
+            self.assertIn("sessions:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(claude_dir, 0o700)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sessions_in_another_users_home_does_not_fail_the_scan(self):
+        """macOS homes are 0700, so an unprivileged scan cannot read a sibling home.
+        Raising there would mark every scan on every multi-user box incomplete and
+        nothing would ever be pruned."""
+        self._sessions()
+        claude_dir = self.home / "Library" / "Application Support" / "Claude"
+        os.chmod(claude_dir, 0o000)
+        try:
+            with patch(f"{_MOD}._is_scanning_users_own_home", return_value=False), \
+                    patch(f"{_MOD}._is_root", return_value=False):
+                self.assertIsNone(self._detect(Path("/Applications/Claude.app")))
+            # Still recorded, so the fleet can see it even though the scan stays clean.
             self.assertIn("sessions:unreadable", utils_mod.cowork_probes())
         finally:
             os.chmod(claude_dir, 0o700)

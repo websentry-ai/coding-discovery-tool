@@ -16,18 +16,25 @@ nothing to report on so we return None.
 """
 
 import logging
+import os
 import plistlib
+import stat
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
-from ...utils import dir_state, record_cowork_probe
+from ...constants import COMMAND_TIMEOUT
+from ...macos_extraction_helpers import MACHINE_APPS_DIR
+from ...utils import dir_state, record_cowork_probe, run_command
 
 logger = logging.getLogger(__name__)
 
 
 CLAUDE_DESKTOP_APP_PATH = Path("/Applications/Claude.app")
+
+
+CLAUDE_BUNDLE_ID = "com.anthropic.claudefordesktop"
 
 
 def _candidate_install_dirs(user_home: Path) -> List[Path]:
@@ -36,6 +43,67 @@ def _candidate_install_dirs(user_home: Path) -> List[Path]:
         CLAUDE_DESKTOP_APP_PATH,
         user_home / "Applications" / "Claude.app",
     ]
+
+
+def _scope_root(candidate: Path, user_home: Path) -> Optional[Path]:
+    """The root that owns ``candidate``: machine-wide, or the scanned user's home."""
+    if candidate.parent == MACHINE_APPS_DIR:
+        return MACHINE_APPS_DIR
+    return user_home if user_home in candidate.parents else None
+
+
+def _in_scope(candidate: Path, user_home: Path) -> bool:
+    """True when ``candidate`` is really inside a root we attribute to this user.
+
+    Lexical containment is not enough: a link anywhere below the root redirects out
+    of it, and ``dir_state`` follows links, so one user's bundle could be attributed
+    to another. Every component below the root is checked, hidden ones (``.Trash``)
+    rejected outright. A component we cannot lstat is kept, not dropped: unknown is
+    not absence.
+    """
+    root = _scope_root(candidate, user_home)
+    if root is None:
+        return False
+    current = root
+    for part in candidate.relative_to(root).parts:
+        if part.startswith("."):
+            return False
+        current = current / part
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError:
+            # Cannot tell. Keep it: dir_state classifies it unreadable, which raises
+            # rather than reporting the clean absence that permits a prune.
+            return True
+        if stat.S_ISLNK(mode):
+            return False
+    return True
+
+
+def _spotlight_candidates(user_home: Path) -> List[Path]:
+    """In-scope Claude.app bundles Spotlight knows about, best-effort and possibly empty.
+
+    Last resort only: the fixed paths miss an install anywhere else, and a Cowork
+    user whose bundle we cannot find reports as having no tool at all. Returns
+    candidates rather than an answer so the caller applies the same present /
+    unreadable handling it gives the fixed paths.
+    """
+    output = run_command(["mdfind", f"kMDItemCFBundleIdentifier == '{CLAUDE_BUNDLE_ID}'"],
+                         COMMAND_TIMEOUT)
+    if not output:
+        logger.debug("Spotlight gave no answer for %s: absent, unindexed, denied under root, "
+                     "or mdfind unavailable", CLAUDE_BUNDLE_ID)
+        return []
+    found = []
+    for line in output.splitlines():
+        candidate = Path(line.strip())
+        if candidate.suffix != ".app":
+            continue
+        if not _in_scope(candidate, user_home):
+            logger.debug("Ignoring out-of-scope Spotlight hit %s for %s", candidate, user_home)
+            continue
+        found.append(candidate)
+    return found
 
 
 def _get_cowork_sessions_dir(user_home: Path) -> Path:
@@ -61,12 +129,22 @@ class MacOSClaudeCoworkDetector(BaseToolDetector):
         return Path(user_home or getattr(self, "user_home", None) or Path.home())
 
     def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
+        home = self._scan_home(user_home)
         outcome = "absent"
-        for candidate in _candidate_install_dirs(self._scan_home(user_home)):
+        for candidate in _candidate_install_dirs(home):
             state = dir_state(candidate)
             if state == "present":
                 record_cowork_probe("bundle", "present")
                 return candidate
+            if state == "unreadable":
+                outcome = "unreadable"
+        # Spotlight is consulted only once the fixed paths have missed.
+        for candidate in _spotlight_candidates(home):
+            state = dir_state(candidate)
+            if state == "present":
+                record_cowork_probe("bundle", "spotlight")
+                return candidate
+            logger.debug("Spotlight hit %s is %s; trying the next result", candidate, state)
             if state == "unreadable":
                 outcome = "unreadable"
         record_cowork_probe("bundle", outcome)
@@ -82,12 +160,17 @@ class MacOSClaudeCoworkDetector(BaseToolDetector):
             logger.debug(f"Error checking Claude Cowork install: {e}")
             return None
 
-        if not (sessions_present and self._find_install_dir()):
+        if not sessions_present:
+            return None
+        # Reuse the resolved bundle: get_version() with no arg resolves it again,
+        # which would run the Spotlight lookup a second time.
+        app_install = self._find_install_dir()
+        if app_install is None:
             return None
 
         return {
             "name": self.tool_name,
-            "version": self.get_version(),
+            "version": self.get_version(app_install),
             "install_path": str(sessions_dir),
         }
 

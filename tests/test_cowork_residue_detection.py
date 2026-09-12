@@ -208,25 +208,43 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
         self.assertIn("sessions:present", utils_mod.cowork_probes())
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
-    def test_denied_sessions_is_not_reported_as_absent(self):
-        """An unreadable home must not look like an absent tool — absent is prunable."""
+    def test_denied_sessions_raises_so_the_install_is_not_pruned(self):
+        """Unknown presence, not absence: only a raise marks the scan incomplete."""
         self._sessions()
         claude_dir = self.home / "Library" / "Application Support" / "Claude"
         os.chmod(claude_dir, 0o000)
         try:
-            self.assertIsNone(self._detect(Path("/Applications/Claude.app")))
+            with self.assertRaises(PermissionError):
+                self._detect(Path("/Applications/Claude.app"))
             self.assertIn("sessions:unreadable", utils_mod.cowork_probes())
         finally:
             os.chmod(claude_dir, 0o700)
 
-    def test_find_install_dir_records_bundle_absent(self):
+    def _mac_detector(self):
         from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
             MacOSClaudeCoworkDetector,
         )
-        det = MacOSClaudeCoworkDetector()
+        return MacOSClaudeCoworkDetector()
+
+    def test_find_install_dir_records_bundle_absent(self):
+        det = self._mac_detector()
         with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[self.home / "nope.app"]):
             self.assertIsNone(det._find_install_dir(self.home))
         self.assertIn("bundle:absent", utils_mod.cowork_probes())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_bundle_raises_so_the_install_is_not_pruned(self):
+        det = self._mac_detector()
+        apps = self.home / "Applications"
+        (apps / "Claude.app").mkdir(parents=True)
+        os.chmod(apps, 0o000)
+        try:
+            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[apps / "Claude.app"]):
+                with self.assertRaises(PermissionError):
+                    det._find_install_dir(self.home)
+            self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(apps, 0o700)
 
 
 # ── OS detect() modules ──────────────────────────────────────────────────────

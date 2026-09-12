@@ -117,4 +117,6 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
             if state == "unreadable":
                 outcome = "unreadable"
         record_cowork_probe("bundle", outcome)
+        if outcome == "unreadable":
+            raise PermissionError("Claude Desktop install dir unreadable")
         return None

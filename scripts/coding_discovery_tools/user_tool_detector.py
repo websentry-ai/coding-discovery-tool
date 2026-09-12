@@ -427,6 +427,9 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
 
     sessions_state = dir_state(sessions_dir)
     record_cowork_probe("sessions", sessions_state)
+    # Unknown presence, not absence: raising marks the scan incomplete so the install is not pruned.
+    if sessions_state == "unreadable":
+        raise PermissionError(f"Cowork sessions dir unreadable: {sessions_dir}")
     if sessions_state != "present":
         return None
 
@@ -440,9 +443,9 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
             # Pass the scanned user's home so an admin/MDM multi-user scan probes
             # THIS user's per-user install dir, not the scanner's (Windows).
             app_install = find_install_dir(user_home)
-        except (PermissionError, OSError):
+        except OSError:
             record_cowork_probe("bundle", "unreadable")
-            return None
+            raise
         if app_install is None:
             return None
 

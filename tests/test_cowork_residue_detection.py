@@ -297,6 +297,25 @@ class TestCoworkSpotlightFallback(unittest.TestCase):
         self.assertEqual([], self._resolve(None))
         self.assertEqual([], self._resolve(""))
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unreadable_component_is_kept_not_dropped_as_out_of_scope(self):
+        """Through the REAL scope filter, not a mock: a component we cannot lstat is
+        unknown, and dropping it here would report the clean absence that prunes."""
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        apps = self.home / "Applications"
+        (apps / "Claude.app").mkdir(parents=True)
+        os.chmod(apps, 0o000)
+        try:
+            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[]), \
+                    patch(f"{_MAC_MOD}.run_command", return_value=str(apps / "Claude.app")):
+                with self.assertRaises(PermissionError):
+                    MacOSClaudeCoworkDetector()._find_install_dir(self.home)
+            self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(apps, 0o700)
+
     def test_unreadable_spotlight_hit_does_not_read_as_absent(self):
         """An unreadable in-scope hit leaves presence unknown, so the scan must not
         report a clean absence that permits a prune."""

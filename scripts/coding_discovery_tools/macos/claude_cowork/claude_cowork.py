@@ -16,13 +16,15 @@ nothing to report on so we return None.
 """
 
 import logging
+import os
 import plistlib
+import stat
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
-from ...constants import COMMAND_TIMEOUT, is_symlink_or_junction
+from ...constants import COMMAND_TIMEOUT
 from ...macos_extraction_helpers import MACHINE_APPS_DIR
 from ...utils import dir_state, record_cowork_probe, run_command
 
@@ -56,7 +58,8 @@ def _in_scope(candidate: Path, user_home: Path) -> bool:
     Lexical containment is not enough: a link anywhere below the root redirects out
     of it, and ``dir_state`` follows links, so one user's bundle could be attributed
     to another. Every component below the root is checked, hidden ones (``.Trash``)
-    rejected outright.
+    rejected outright. A component we cannot lstat is kept, not dropped: unknown is
+    not absence.
     """
     root = _scope_root(candidate, user_home)
     if root is None:
@@ -66,7 +69,13 @@ def _in_scope(candidate: Path, user_home: Path) -> bool:
         if part.startswith("."):
             return False
         current = current / part
-        if is_symlink_or_junction(current):
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError:
+            # Cannot tell. Keep it: dir_state classifies it unreadable, which raises
+            # rather than reporting the clean absence that permits a prune.
+            return True
+        if stat.S_ISLNK(mode):
             return False
     return True
 

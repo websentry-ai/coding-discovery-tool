@@ -175,6 +175,10 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
         utils_mod.reset_sentry_run_state()
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name)
+        # Neutralise Spotlight, like the real-bundle patch the OS tests already use.
+        spotlight = patch(f"{_MAC_MOD}.run_command", return_value=None)
+        spotlight.start()
+        self.addCleanup(spotlight.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -245,6 +249,68 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
             self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
         finally:
             os.chmod(apps, 0o700)
+
+
+class TestCoworkSpotlightFallback(unittest.TestCase):
+    """Two hard-coded paths miss an install anywhere else, and a Cowork user whose
+    bundle we cannot find reports as having no tool at all."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        utils_mod.reset_sentry_run_state()
+
+    def _resolve(self, mdfind_output):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            _spotlight_install_dir,
+        )
+        with patch(f"{_MAC_MOD}.run_command", return_value=mdfind_output):
+            return _spotlight_install_dir(self.home)
+
+    def test_accepts_machine_wide_and_the_scanned_users_own(self):
+        self.assertEqual(Path("/Applications/Claude.app"), self._resolve("/Applications/Claude.app"))
+        mine = self.home / "Applications" / "Claude.app"
+        self.assertEqual(mine, self._resolve(str(mine)))
+
+    def test_rejects_another_users_install(self):
+        """Attributing one user's app to another is the misattribution class #320/#321 closed."""
+        self.assertIsNone(self._resolve("/Users/someoneelse/Applications/Claude.app"))
+
+    def test_rejects_trash_and_mounted_volumes(self):
+        self.assertIsNone(self._resolve(str(self.home / ".Trash" / "Claude.app")))
+        self.assertIsNone(self._resolve("/Volumes/Backup/Applications/Claude.app"))
+
+    def test_unavailable_spotlight_does_not_fail_the_scan(self):
+        self.assertIsNone(self._resolve(None))
+        self.assertIsNone(self._resolve(""))
+
+    def test_fixed_path_wins_without_asking_spotlight(self):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        app = self.home / "Applications" / "Claude.app"
+        app.mkdir(parents=True)
+        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[app]), \
+                patch(f"{_MAC_MOD}.run_command") as mdfind:
+            self.assertEqual(app, MacOSClaudeCoworkDetector()._find_install_dir(self.home))
+        mdfind.assert_not_called()
+        self.assertIn("bundle:present", utils_mod.cowork_probes())
+
+    def test_spotlight_resolves_when_fixed_paths_miss(self):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        app = self.home / "Applications" / "Claude.app"
+        app.mkdir(parents=True)
+        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[self.home / "nope.app"]), \
+                patch(f"{_MAC_MOD}.run_command", return_value=str(app)):
+            self.assertEqual(app, MacOSClaudeCoworkDetector()._find_install_dir(self.home))
+        self.assertIn("bundle:spotlight", utils_mod.cowork_probes())
 
 
 # ── OS detect() modules ──────────────────────────────────────────────────────
@@ -383,6 +449,9 @@ class TestMacOSCoworkDetect(unittest.TestCase):
         patcher = patch(f"{_MAC_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app")
         patcher.start()
         self.addCleanup(patcher.stop)
+        spotlight = patch(f"{_MAC_MOD}.run_command", return_value=None)
+        spotlight.start()
+        self.addCleanup(spotlight.stop)
 
     def tearDown(self):
         self.tmp.cleanup()

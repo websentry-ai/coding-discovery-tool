@@ -22,12 +22,17 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
-from ...utils import dir_state, record_cowork_probe
+from ...constants import COMMAND_TIMEOUT
+from ...macos_extraction_helpers import MACHINE_APPS_DIR
+from ...utils import dir_state, record_cowork_probe, run_command
 
 logger = logging.getLogger(__name__)
 
 
 CLAUDE_DESKTOP_APP_PATH = Path("/Applications/Claude.app")
+
+
+CLAUDE_BUNDLE_ID = "com.anthropic.claudefordesktop"
 
 
 def _candidate_install_dirs(user_home: Path) -> List[Path]:
@@ -36,6 +41,31 @@ def _candidate_install_dirs(user_home: Path) -> List[Path]:
         CLAUDE_DESKTOP_APP_PATH,
         user_home / "Applications" / "Claude.app",
     ]
+
+
+def _spotlight_install_dir(user_home: Path) -> Optional[Path]:
+    """Claude.app wherever it is installed, asked of Spotlight. None when it cannot answer.
+
+    Last resort only: the fixed paths above miss an install anywhere else, and a
+    Cowork user whose bundle we cannot find reports as having no tool at all.
+    Spotlight is off, unindexed or empty-under-root on plenty of managed Macs, so
+    this returns None rather than failing the scan.
+    """
+    output = run_command(["mdfind", f"kMDItemCFBundleIdentifier == '{CLAUDE_BUNDLE_ID}'"],
+                         COMMAND_TIMEOUT)
+    for line in (output or "").splitlines():
+        candidate = Path(line.strip())
+        if candidate.suffix != ".app":
+            continue
+        # Same scope as the fixed list: machine-wide, or inside the scanned user's
+        # home. Anything else is another user's install, or a copy in Trash or on a
+        # mounted volume.
+        if candidate.parent != MACHINE_APPS_DIR and user_home not in candidate.parents:
+            continue
+        if any(part.startswith(".") for part in candidate.parts):
+            continue
+        return candidate
+    return None
 
 
 def _get_cowork_sessions_dir(user_home: Path) -> Path:
@@ -69,6 +99,10 @@ class MacOSClaudeCoworkDetector(BaseToolDetector):
                 return candidate
             if state == "unreadable":
                 outcome = "unreadable"
+        found = _spotlight_install_dir(self._scan_home(user_home))
+        if found is not None and dir_state(found) == "present":
+            record_cowork_probe("bundle", "spotlight")
+            return found
         record_cowork_probe("bundle", outcome)
         if outcome == "unreadable":
             raise PermissionError("Claude Desktop install dir unreadable")

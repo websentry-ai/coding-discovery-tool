@@ -365,6 +365,20 @@ def copilot_cli_sessions_recent(copilot_dir: Path,
     return False
 
 
+def dir_state(path) -> str:
+    """``present``, ``absent`` or ``unreadable`` for a directory. Never raises.
+
+    os.stat, not Path.exists(): 3.14 returns False for an unreadable path, so a
+    denied directory would otherwise report as an absent tool.
+    """
+    try:
+        return "present" if stat.S_ISDIR(os.stat(path).st_mode) else "absent"
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        return "unreadable"
+
+
 def wsl_distros_present(user_home: Path) -> List[str]:
     """Names of WSL distros installed for ``user_home``. Never raises.
 
@@ -2439,7 +2453,7 @@ _SENTRY_TAG_KEYS = (
     "used_fallback_user", "homes_enumerated", "users_scanned",
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
-    "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry",
+    "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2489,6 +2503,10 @@ _vscode_bundles_found = set()
 # distro layout.
 _VSCODE_BUNDLE_TAIL = frozenset({"extensions", "app", "resources", "contents"})
 
+# Both halves of the Cowork gate return a bare None, so absent, denied and never-installed read alike.
+_COWORK_PROBES_CAP = 6
+_cowork_probes = set()
+
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
 _NPM_PREFIX_UNSET = object()
@@ -2519,6 +2537,20 @@ def record_rejected_binary(candidate, reason: str) -> None:
 def rejected_binaries() -> list:
     """The run's rejected binaries as ``(path, reason)`` pairs."""
     return list(_rejected_binaries)
+
+
+def record_cowork_probe(part: str, state: str) -> None:
+    """Note how one half of the Cowork gate resolved. Never raises."""
+    try:
+        if len(_cowork_probes) < _COWORK_PROBES_CAP:
+            _cowork_probes.add(f"{part}:{state}")
+    except Exception:
+        pass
+
+
+def cowork_probes() -> list:
+    """This run's Cowork gate outcomes as ``<part>:<present|absent|unreadable>``."""
+    return sorted(_cowork_probes)
 
 
 def record_vscode_bundle_probe(ext_root) -> None:
@@ -2560,6 +2592,7 @@ def reset_sentry_run_state() -> None:
     _sentry_dead_this_run = False
     _rejected_binaries.clear()
     _vscode_bundles_found.clear()
+    _cowork_probes.clear()
     reset_vscode_registry_state()
     global _sentry_run_context
     _sentry_run_context = {}

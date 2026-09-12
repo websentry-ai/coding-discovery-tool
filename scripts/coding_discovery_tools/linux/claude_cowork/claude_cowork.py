@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
+from ...utils import dir_state, record_cowork_probe
 from ...linux_extraction_helpers import get_linux_user_homes
 
 logger = logging.getLogger(__name__)
@@ -100,10 +101,13 @@ class LinuxClaudeCoworkDetector(BaseToolDetector):
     def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
         # ``user_home`` is accepted for a uniform call signature with the central
         # path; Linux install dirs are machine-global so it is unused here.
+        outcome = "absent"
         for candidate in _candidate_install_dirs():
-            try:
-                if candidate.exists() and candidate.is_dir():
-                    return candidate
-            except OSError:
-                continue
+            state = dir_state(candidate)
+            if state == "present":
+                record_cowork_probe("bundle", "present")
+                return candidate
+            if state == "unreadable":
+                outcome = "unreadable"
+        record_cowork_probe("bundle", outcome)
         return None

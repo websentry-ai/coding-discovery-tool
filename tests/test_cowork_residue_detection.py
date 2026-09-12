@@ -166,6 +166,69 @@ class TestCentralCoworkMac(unittest.TestCase):
         self.assertEqual(result["install_path"], str(sdir))
 
 
+class TestCoworkProbeTelemetry(unittest.TestCase):
+    """Both halves of the gate returned a bare None, so absent, denied and
+    never-installed were one answer. The probe says which."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        utils_mod.reset_sentry_run_state()
+
+    def _sessions(self):
+        sdir = self.home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        sdir.mkdir(parents=True)
+        return sdir
+
+    def _detect(self, install_dir):
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"):
+            return _detect_claude_cowork(_make_detector(install_dir), self.home)
+
+    def test_dir_state_separates_denied_from_absent(self):
+        self.assertEqual("absent", utils_mod.dir_state(self.home / "nope"))
+        self.assertEqual("present", utils_mod.dir_state(self.home))
+
+    def test_sessions_absent(self):
+        self.assertIsNone(self._detect(None))
+        self.assertIn("sessions:absent", utils_mod.cowork_probes())
+
+    def test_sessions_present_bundle_absent(self):
+        self._sessions()
+        self.assertIsNone(self._detect(None))
+        self.assertIn("sessions:present", utils_mod.cowork_probes())
+
+    def test_both_present(self):
+        self._sessions()
+        self.assertIsNotNone(self._detect(Path("/Applications/Claude.app")))
+        self.assertIn("sessions:present", utils_mod.cowork_probes())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sessions_is_not_reported_as_absent(self):
+        """An unreadable home must not look like an absent tool — absent is prunable."""
+        self._sessions()
+        claude_dir = self.home / "Library" / "Application Support" / "Claude"
+        os.chmod(claude_dir, 0o000)
+        try:
+            self.assertIsNone(self._detect(Path("/Applications/Claude.app")))
+            self.assertIn("sessions:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(claude_dir, 0o700)
+
+    def test_find_install_dir_records_bundle_absent(self):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        det = MacOSClaudeCoworkDetector()
+        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[self.home / "nope.app"]):
+            self.assertIsNone(det._find_install_dir(self.home))
+        self.assertIn("bundle:absent", utils_mod.cowork_probes())
+
+
 # ── OS detect() modules ──────────────────────────────────────────────────────
 
 _WIN_MOD = "scripts.coding_discovery_tools.windows.claude_cowork.claude_cowork"

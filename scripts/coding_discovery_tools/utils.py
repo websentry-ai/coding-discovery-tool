@@ -379,6 +379,42 @@ def dir_state(path) -> str:
         return "unreadable"
 
 
+# Where each platform keeps the per-user application data every detector reads.
+_USER_DATA_DIR = {"Darwin": "Library", "Windows": "AppData", "Linux": ".config"}
+
+
+def _listable_state(path) -> str:
+    """``present``, ``absent`` or ``unreadable`` for a directory we must LIST.
+
+    Listing, not stat: a 0700 directory still stats fine from outside, so only an
+    attempted read distinguishes denied from empty.
+    """
+    try:
+        with os.scandir(path) as entries:
+            next(iter(entries), None)
+        return "present"
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        return "unreadable"
+
+
+def home_is_readable(user_home) -> bool:
+    """Whether the scan can see everything it must read for this user. Never raises.
+
+    Not the home alone: a macOS home is listable by its group while ``Library``
+    inside it is 0700, so a home-level check would call a user covered whose tool
+    data we cannot reach. Only a denial disqualifies — a home or data dir that is
+    not there holds nothing we could have missed.
+    """
+    user_home = Path(user_home)
+    paths = [user_home]
+    data_dir = _USER_DATA_DIR.get(platform.system())
+    if data_dir is not None:
+        paths.append(user_home / data_dir)
+    return all(_listable_state(path) != "unreadable" for path in paths)
+
+
 def wsl_distros_present(user_home: Path) -> List[str]:
     """Names of WSL distros installed for ``user_home``. Never raises.
 

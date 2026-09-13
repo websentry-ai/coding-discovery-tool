@@ -90,7 +90,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -160,7 +160,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -3424,6 +3424,7 @@ def main():
         scanned_manifest = set()
         # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
         incomplete_reasons = []
+        unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
@@ -3522,6 +3523,8 @@ def main():
             user_home = _home_for_user(user)
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
             scanned_homes.append(user_home)
+            if not home_is_readable(user_home):
+                unreadable_users.append(user)
             config_dirs_seen.update(tool_config_dirs_present(user_home))
             wsl_seen.update(wsl_distros_present(user_home))
             editors_seen.update(vscode_editors_present(user_home))
@@ -4062,7 +4065,7 @@ def main():
         else:
             manifest = [{"home_user": hu, "tool_name": tn}
                         for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
-            covered = all_users
+            covered = [u for u in all_users if u not in unreadable_users]
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,

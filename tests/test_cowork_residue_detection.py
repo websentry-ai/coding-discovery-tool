@@ -334,6 +334,7 @@ class TestCoworkSpotlightFallback(unittest.TestCase):
         finally:
             os.chmod(apps, 0o700)
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unreadable_spotlight_hit_does_not_read_as_absent(self):
         """An unreadable in-scope hit leaves presence unknown, so the scan must not
         report a clean absence that permits a prune."""

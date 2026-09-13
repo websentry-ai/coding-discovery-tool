@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
+from ...utils import dir_state, record_cowork_probe
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +61,17 @@ class MacOSClaudeCoworkDetector(BaseToolDetector):
         return Path(user_home or getattr(self, "user_home", None) or Path.home())
 
     def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
+        outcome = "absent"
         for candidate in _candidate_install_dirs(self._scan_home(user_home)):
-            try:
-                if candidate.exists() and candidate.is_dir():
-                    return candidate
-            except OSError:
-                continue
+            state = dir_state(candidate)
+            if state == "present":
+                record_cowork_probe("bundle", "present")
+                return candidate
+            if state == "unreadable":
+                outcome = "unreadable"
+        record_cowork_probe("bundle", outcome)
+        if outcome == "unreadable":
+            raise PermissionError("Claude Desktop install dir unreadable")
         return None
 
     def detect(self) -> Optional[Dict]:

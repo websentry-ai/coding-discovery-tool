@@ -890,3 +890,44 @@ class TestManifestKeyedByInstallPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCoverageExcludesUnreadableHomes(unittest.TestCase):
+    """An enumerated home we cannot read must not be reported as covered: the backend
+    prunes from that scope, so claiming it deletes installs we never looked for."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _home(self, name, with_data_dir=True):
+        home = self.root / name
+        (home / "Library").mkdir(parents=True) if with_data_dir else home.mkdir()
+        return home
+
+    def test_readable_home_is_covered(self):
+        self.assertTrue(utils_mod.home_is_readable(self._home("alice")))
+
+    def test_home_without_a_data_dir_is_covered(self):
+        """Nothing to be denied is not the same as denied."""
+        self.assertTrue(utils_mod.home_is_readable(self._home("carol", with_data_dir=False)))
+
+    def test_missing_home_is_covered(self):
+        """Absent is not denied: a home that is not there hides nothing from us."""
+        self.assertTrue(utils_mod.home_is_readable(self.root / "ghost"))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_home_listable_but_data_dir_denied_is_not_covered(self):
+        """The real shape on macOS: the home is group-readable while Library is 0700,
+        so a home-level check alone would wrongly call this user covered."""
+        home = self._home("bob")
+        os.chmod(home / "Library", 0o000)
+        try:
+            self.assertTrue(os.access(home, os.R_OK), "home itself stays listable")
+            self.assertFalse(utils_mod.home_is_readable(home))
+        finally:
+            os.chmod(home / "Library", 0o700)

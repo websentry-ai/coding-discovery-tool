@@ -166,6 +166,217 @@ class TestCentralCoworkMac(unittest.TestCase):
         self.assertEqual(result["install_path"], str(sdir))
 
 
+class TestCoworkProbeTelemetry(unittest.TestCase):
+    """Both halves of the gate returned a bare None, so absent, denied and
+    never-installed were one answer. The probe says which."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        # Neutralise Spotlight, like the real-bundle patch the OS tests already use.
+        spotlight = patch(f"{_MAC_MOD}.run_command", return_value=None)
+        spotlight.start()
+        self.addCleanup(spotlight.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        utils_mod.reset_sentry_run_state()
+
+    def _sessions(self):
+        sdir = self.home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        sdir.mkdir(parents=True)
+        return sdir
+
+    def _detect(self, install_dir):
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"):
+            return _detect_claude_cowork(_make_detector(install_dir), self.home)
+
+    def test_dir_state_separates_denied_from_absent(self):
+        self.assertEqual("absent", utils_mod.dir_state(self.home / "nope"))
+        self.assertEqual("present", utils_mod.dir_state(self.home))
+
+    def test_sessions_absent(self):
+        self.assertIsNone(self._detect(None))
+        self.assertIn("sessions:absent", utils_mod.cowork_probes())
+
+    def test_sessions_present_bundle_absent(self):
+        self._sessions()
+        self.assertIsNone(self._detect(None))
+        self.assertIn("sessions:present", utils_mod.cowork_probes())
+
+    def test_both_present(self):
+        self._sessions()
+        self.assertIsNotNone(self._detect(Path("/Applications/Claude.app")))
+        self.assertIn("sessions:present", utils_mod.cowork_probes())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sessions_in_our_own_home_raises_so_nothing_is_pruned(self):
+        """Unknown presence, not absence: only a raise marks the scan incomplete."""
+        self._sessions()
+        claude_dir = self.home / "Library" / "Application Support" / "Claude"
+        os.chmod(claude_dir, 0o000)
+        try:
+            with patch(f"{_MOD}._is_scanning_users_own_home", return_value=True):
+                with self.assertRaises(PermissionError):
+                    self._detect(Path("/Applications/Claude.app"))
+            self.assertIn("sessions:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(claude_dir, 0o700)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sessions_in_another_users_home_does_not_fail_the_scan(self):
+        """macOS homes are 0700, so an unprivileged scan cannot read a sibling home.
+        Raising there would mark every scan on every multi-user box incomplete and
+        nothing would ever be pruned."""
+        self._sessions()
+        claude_dir = self.home / "Library" / "Application Support" / "Claude"
+        os.chmod(claude_dir, 0o000)
+        try:
+            with patch(f"{_MOD}._is_scanning_users_own_home", return_value=False), \
+                    patch(f"{_MOD}._is_root", return_value=False):
+                self.assertIsNone(self._detect(Path("/Applications/Claude.app")))
+            # Still recorded, so the fleet can see it even though the scan stays clean.
+            self.assertIn("sessions:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(claude_dir, 0o700)
+
+    def _mac_detector(self):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        return MacOSClaudeCoworkDetector()
+
+    def test_find_install_dir_records_bundle_absent(self):
+        det = self._mac_detector()
+        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[self.home / "nope.app"]):
+            self.assertIsNone(det._find_install_dir(self.home))
+        self.assertIn("bundle:absent", utils_mod.cowork_probes())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_bundle_raises_so_the_install_is_not_pruned(self):
+        det = self._mac_detector()
+        apps = self.home / "Applications"
+        (apps / "Claude.app").mkdir(parents=True)
+        os.chmod(apps, 0o000)
+        try:
+            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[apps / "Claude.app"]):
+                with self.assertRaises(PermissionError):
+                    det._find_install_dir(self.home)
+            self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(apps, 0o700)
+
+
+class TestCoworkSpotlightFallback(unittest.TestCase):
+    """Two hard-coded paths miss an install anywhere else, and a Cowork user whose
+    bundle we cannot find reports as having no tool at all."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        utils_mod.reset_sentry_run_state()
+
+    def _resolve(self, mdfind_output):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            _spotlight_candidates,
+        )
+        with patch(f"{_MAC_MOD}.run_command", return_value=mdfind_output):
+            return _spotlight_candidates(self.home)
+
+    def test_accepts_machine_wide_and_the_scanned_users_own(self):
+        self.assertEqual([Path("/Applications/Claude.app")], self._resolve("/Applications/Claude.app"))
+        mine = self.home / "Applications" / "Claude.app"
+        mine.mkdir(parents=True)
+        self.assertEqual([mine], self._resolve(str(mine)))
+
+    def test_rejects_another_users_install(self):
+        """Attributing one user's app to another is the misattribution class #320/#321 closed."""
+        self.assertEqual([], self._resolve("/Users/someoneelse/Applications/Claude.app"))
+
+    def test_rejects_trash_and_mounted_volumes(self):
+        self.assertEqual([], self._resolve(str(self.home / ".Trash" / "Claude.app")))
+        self.assertEqual([], self._resolve("/Volumes/Backup/Applications/Claude.app"))
+
+    def test_rejects_a_symlinked_path_inside_the_home(self):
+        """Lexically in scope but redirected out of it — dir_state would follow the link."""
+        apps = self.home / "Applications"
+        apps.mkdir(parents=True)
+        (apps / "Claude.app").symlink_to("/Users/someoneelse/Applications/Claude.app")
+        self.assertEqual([], self._resolve(str(apps / "Claude.app")))
+
+    def test_unavailable_spotlight_does_not_fail_the_scan(self):
+        self.assertEqual([], self._resolve(None))
+        self.assertEqual([], self._resolve(""))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unreadable_component_is_kept_not_dropped_as_out_of_scope(self):
+        """Through the REAL scope filter, not a mock: a component we cannot lstat is
+        unknown, and dropping it here would report the clean absence that prunes."""
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        apps = self.home / "Applications"
+        (apps / "Claude.app").mkdir(parents=True)
+        os.chmod(apps, 0o000)
+        try:
+            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[]), \
+                    patch(f"{_MAC_MOD}.run_command", return_value=str(apps / "Claude.app")):
+                with self.assertRaises(PermissionError):
+                    MacOSClaudeCoworkDetector()._find_install_dir(self.home)
+            self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(apps, 0o700)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unreadable_spotlight_hit_does_not_read_as_absent(self):
+        """An unreadable in-scope hit leaves presence unknown, so the scan must not
+        report a clean absence that permits a prune."""
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        apps = self.home / "Applications"
+        (apps / "Claude.app").mkdir(parents=True)
+        os.chmod(apps, 0o000)
+        try:
+            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[]), \
+                    patch(f"{_MAC_MOD}._spotlight_candidates", return_value=[apps / "Claude.app"]):
+                with self.assertRaises(PermissionError):
+                    MacOSClaudeCoworkDetector()._find_install_dir(self.home)
+            self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
+        finally:
+            os.chmod(apps, 0o700)
+
+    def test_fixed_path_wins_without_asking_spotlight(self):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        app = self.home / "Applications" / "Claude.app"
+        app.mkdir(parents=True)
+        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[app]), \
+                patch(f"{_MAC_MOD}.run_command") as mdfind:
+            self.assertEqual(app, MacOSClaudeCoworkDetector()._find_install_dir(self.home))
+        mdfind.assert_not_called()
+        self.assertIn("bundle:present", utils_mod.cowork_probes())
+
+    def test_spotlight_resolves_when_fixed_paths_miss(self):
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        app = self.home / "Applications" / "Claude.app"
+        app.mkdir(parents=True)
+        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[self.home / "nope.app"]), \
+                patch(f"{_MAC_MOD}.run_command", return_value=str(app)):
+            self.assertEqual(app, MacOSClaudeCoworkDetector()._find_install_dir(self.home))
+        self.assertIn("bundle:spotlight", utils_mod.cowork_probes())
+
+
 # ── OS detect() modules ──────────────────────────────────────────────────────
 
 _WIN_MOD = "scripts.coding_discovery_tools.windows.claude_cowork.claude_cowork"
@@ -302,6 +513,9 @@ class TestMacOSCoworkDetect(unittest.TestCase):
         patcher = patch(f"{_MAC_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app")
         patcher.start()
         self.addCleanup(patcher.stop)
+        spotlight = patch(f"{_MAC_MOD}.run_command", return_value=None)
+        spotlight.start()
+        self.addCleanup(spotlight.stop)
 
     def tearDown(self):
         self.tmp.cleanup()

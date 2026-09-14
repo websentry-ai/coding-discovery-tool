@@ -20,6 +20,8 @@ from ...jetbrains_naming_helpers import (
 )
 from ...linux_extraction_helpers import get_linux_user_homes
 
+from ...utils import _listable_state, fail_if_anomalous
+
 logger = logging.getLogger(__name__)
 
 
@@ -88,14 +90,19 @@ class LinuxJetBrainsDetector(BaseToolDetector):
         """Scan every JetBrains-family config root for a specific user."""
         detected_ides = []
         for root in jetbrains_config_roots(user_home / ".config"):
-            detected_ides.extend(self._scan_vendor_config_dir(root))
+            detected_ides.extend(self._scan_vendor_config_dir(root, user_home))
         return detected_ides
 
-    def _scan_vendor_config_dir(self, jetbrains_config_dir: Path) -> List[Dict]:
+    def _scan_vendor_config_dir(self, jetbrains_config_dir: Path, user_home: Path) -> List[Dict]:
         """Scan one vendor's config directory for IDE installations."""
         detected_ides = []
 
-        if not jetbrains_config_dir.exists():
+        state = _listable_state(jetbrains_config_dir)
+        if state == "unreadable":
+            # Denied is not absent, so this raises when the home was ours to read.
+            fail_if_anomalous(user_home, f"JetBrains config dir unreadable: {jetbrains_config_dir}")
+            return detected_ides
+        if state != "present":
             logger.debug(f"JetBrains config directory not found: {jetbrains_config_dir}")
             return detected_ides
 

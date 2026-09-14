@@ -223,7 +223,7 @@ def vscode_editors_present(user_home: Path) -> List[str]:
 # our installer creates ~/.claude, ~/.codex and ~/.copilot on every managed device,
 # which is why detection moved to the binary in the first place. Bounded, because
 # workspaceStorage holds one dir per workspace and the scan runs under a watchdog.
-COPILOT_EVIDENCE_MAX_AGE_DAYS = 30
+SESSION_EVIDENCE_MAX_AGE_DAYS = 30
 _EVIDENCE_DIR_CAP = 300
 # Copilot Chat writes transcripts under the stable and Insiders channels only.
 _VSCODE_CHAT_EDITORS = ("Code", "Code - Insiders")
@@ -300,7 +300,7 @@ def _has_recent_file(directory: Path, pattern: str, cutoff: float) -> bool:
 
 
 def copilot_chat_evidence(user_home: Path,
-                          max_age_days: int = COPILOT_EVIDENCE_MAX_AGE_DAYS) -> Optional[Path]:
+                          max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> Optional[Path]:
     """The VS Code ``User`` dir whose Copilot Chat transcripts were written recently.
 
     ``workspaceStorage/<id>/GitHub.copilot-chat/transcripts/*.jsonl`` is written by the
@@ -345,7 +345,7 @@ def copilot_chat_evidence_row(user_home: Path) -> List[Dict]:
 
 
 def copilot_cli_sessions_recent(copilot_dir: Path,
-                                max_age_days: int = COPILOT_EVIDENCE_MAX_AGE_DAYS) -> bool:
+                                max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> bool:
     """True when the Copilot CLI wrote a session under ``copilot_dir`` recently.
 
     ``session-state/<id>/events.jsonl`` is written by the CLI itself; the presence of
@@ -361,6 +361,37 @@ def copilot_cli_sessions_recent(copilot_dir: Path,
     cutoff = time.time() - (max_age_days * 86400)
     for session in _newest_dirs_first(copilot_dir / "session-state"):
         if _has_recent_file(session, "events.jsonl", cutoff):
+            return True
+    return False
+
+
+def fail_if_anomalous(user_home, detail: str) -> None:
+    """Raise only when this scan had any business reading ``user_home``.
+
+    A denied read leaves presence unknown, and raising is what marks the scan
+    incomplete so nothing is pruned from it. But an unprivileged scan cannot read a
+    sibling home at all, macOS homes are 0700, so raising there would mark every scan
+    on every multi-user box incomplete and nothing would ever be pruned.
+    """
+    privileged = _windows_process_is_elevated() if platform.system() == "Windows" else _is_root()
+    if privileged or _is_scanning_users_own_home(Path(user_home)):
+        raise PermissionError(detail)
+    logger.debug("Read denied under %s; expected for another user's home", user_home)
+
+
+def claude_code_sessions_recent(claude_dir: Path,
+                                max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> bool:
+    """True when Claude Code wrote a session under ``claude_dir`` recently.
+
+    ``projects/<slug>/<id>.jsonl`` is written by Claude Code itself. ``~/.claude``
+    alone is not evidence: it holds settings and MCP config, survives an uninstall,
+    and our installer creates it on every managed device.
+    """
+    if is_symlink_or_junction(claude_dir):
+        return False
+    cutoff = time.time() - (max_age_days * 86400)
+    for project in _newest_dirs_first(claude_dir / "projects"):
+        if _has_recent_file(project, "*.jsonl", cutoff):
             return True
     return False
 

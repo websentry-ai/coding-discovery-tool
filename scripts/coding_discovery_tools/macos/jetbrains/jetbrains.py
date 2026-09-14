@@ -22,7 +22,7 @@ from ...jetbrains_naming_helpers import (
 )
 from ...macos_extraction_helpers import is_running_as_root
 
-from ...utils import dir_state, fail_if_anomalous
+from ...utils import _listable_state, fail_if_anomalous
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ class MacOSJetBrainsDetector(BaseToolDetector):
         """
         detected_ides = []
 
-        state = dir_state(jetbrains_config_dir)
+        state = _listable_state(jetbrains_config_dir)
         if state == "unreadable":
             # Denied is not absent, so this raises when the home was ours to read.
             fail_if_anomalous(user_home, f"JetBrains config dir unreadable: {jetbrains_config_dir}")

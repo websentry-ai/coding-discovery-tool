@@ -413,8 +413,6 @@ class TestVersionSuffixRegex(unittest.TestCase):
         self.assertLess(elapsed, 0.1)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestJetBrainsDeniedConfigDir(unittest.TestCase):
@@ -455,6 +453,22 @@ class TestJetBrainsDeniedConfigDir(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self._detect(own_home=True)
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_stat_able_but_unlistable_dir_is_not_reported_absent(self):
+        """0700 on the config dir itself: it stats fine, so a stat-based probe calls
+        it present and the listing error below reads as "no IDEs" — prunable."""
+        os.chmod(self.support / "JetBrains", 0o000)
+        try:
+            with self.assertRaises(PermissionError):
+                self._detect(own_home=True)
+            self.assertIsNone(self._detect(own_home=False))
+        finally:
+            os.chmod(self.support / "JetBrains", 0o700)
+
     def test_absent_config_dir_is_not_an_error(self):
         shutil.rmtree(self.support / "JetBrains")
         self.assertIsNone(self._detect(own_home=True))
+
+
+if __name__ == "__main__":
+    unittest.main()

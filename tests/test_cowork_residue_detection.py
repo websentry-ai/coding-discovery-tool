@@ -28,6 +28,7 @@ from scripts.coding_discovery_tools.claude_cowork_skills_helpers import COWORK_S
 from scripts.coding_discovery_tools.user_tool_detector import _detect_claude_cowork
 
 _MOD = "scripts.coding_discovery_tools.user_tool_detector"
+_UTILS_MOD = "scripts.coding_discovery_tools.utils"
 
 
 def _make_detector(install_dir=None):
@@ -218,7 +219,7 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
         claude_dir = self.home / "Library" / "Application Support" / "Claude"
         os.chmod(claude_dir, 0o000)
         try:
-            with patch(f"{_MOD}._is_scanning_users_own_home", return_value=True):
+            with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
                 with self.assertRaises(PermissionError):
                     self._detect(Path("/Applications/Claude.app"))
             self.assertIn("sessions:unreadable", utils_mod.cowork_probes())
@@ -234,8 +235,8 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
         claude_dir = self.home / "Library" / "Application Support" / "Claude"
         os.chmod(claude_dir, 0o000)
         try:
-            with patch(f"{_MOD}._is_scanning_users_own_home", return_value=False), \
-                    patch(f"{_MOD}._is_root", return_value=False):
+            with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=False), \
+                    patch(f"{_UTILS_MOD}._is_root", return_value=False):
                 self.assertIsNone(self._detect(Path("/Applications/Claude.app")))
             # Still recorded, so the fleet can see it even though the scan stays clean.
             self.assertIn("sessions:unreadable", utils_mod.cowork_probes())

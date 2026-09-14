@@ -365,6 +365,20 @@ def copilot_cli_sessions_recent(copilot_dir: Path,
     return False
 
 
+def fail_if_anomalous(user_home, detail: str) -> None:
+    """Raise only when this scan had any business reading ``user_home``.
+
+    A denied read leaves presence unknown, and raising is what marks the scan
+    incomplete so nothing is pruned from it. But an unprivileged scan cannot read a
+    sibling home at all, macOS homes are 0700, so raising there would mark every scan
+    on every multi-user box incomplete and nothing would ever be pruned.
+    """
+    privileged = _windows_process_is_elevated() if platform.system() == "Windows" else _is_root()
+    if privileged or _is_scanning_users_own_home(Path(user_home)):
+        raise PermissionError(detail)
+    logger.debug("Read denied under %s; expected for another user's home", user_home)
+
+
 def dir_state(path) -> str:
     """``present``, ``absent`` or ``unreadable`` for a directory. Never raises.
 

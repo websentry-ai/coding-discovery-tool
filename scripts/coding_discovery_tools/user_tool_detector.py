@@ -18,12 +18,11 @@ from .coding_tool_base import BaseToolDetector
 from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
-    _is_root,
     _is_scanning_users_own_home,
     _read_own_regular_file,
-    _windows_process_is_elevated,
     claude_code_sessions_recent,
     dir_state,
+    fail_if_anomalous,
     extract_version_number,
     machine_global_binary_owned_by_user,
     record_cowork_probe,
@@ -422,20 +421,6 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     return None
 
 
-def _fail_if_anomalous(user_home: Path, detail: str) -> None:
-    """Raise only when this scan had any business reading ``user_home``.
-
-    A denied read leaves presence unknown, and raising is what marks the scan
-    incomplete so the install is not pruned. But an unprivileged scan cannot read a
-    sibling home at all — macOS homes are 0700 — so raising there would mark every
-    scan on every multi-user box incomplete and nothing would ever be pruned.
-    """
-    privileged = _windows_process_is_elevated() if platform.system() == "Windows" else _is_root()
-    if privileged or _is_scanning_users_own_home(user_home):
-        raise PermissionError(detail)
-    logger.debug("Cowork probe denied under %s; expected for another user's home", user_home)
-
-
 def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
     """Detect Claude Cowork installation for a user.
 
@@ -460,7 +445,7 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     sessions_state = dir_state(sessions_dir)
     record_cowork_probe("sessions", sessions_state)
     if sessions_state == "unreadable":
-        _fail_if_anomalous(user_home, f"Cowork sessions dir unreadable: {sessions_dir}")
+        fail_if_anomalous(user_home, f"Cowork sessions dir unreadable: {sessions_dir}")
         return None
     if sessions_state != "present":
         return None
@@ -477,7 +462,7 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
             app_install = find_install_dir(user_home)
         except OSError as e:
             record_cowork_probe("bundle", "unreadable")
-            _fail_if_anomalous(user_home, str(e))
+            fail_if_anomalous(user_home, str(e))
             return None
         if app_install is None:
             return None

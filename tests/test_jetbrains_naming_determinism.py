@@ -9,6 +9,8 @@ Two defects this locks down:
 unittest, not pytest: CI runs `python -m unittest discover -s tests -t .`.
 """
 
+import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -409,6 +411,63 @@ class TestVersionSuffixRegex(unittest.TestCase):
         elapsed = time.monotonic() - start
 
         self.assertLess(elapsed, 0.1)
+
+
+
+
+class TestJetBrainsDeniedConfigDir(unittest.TestCase):
+    """A sibling home's Library is 0700, and ``Path.exists()`` raises on it rather
+    than returning False. That escaped the try below it, failed GitHub Copilot
+    detection for the user, and marked the whole device scan incomplete."""
+
+    _UTILS = "scripts.coding_discovery_tools.utils"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "clariadmin"
+        self.support = self.home / "Library" / "Application Support"
+        (self.support / "JetBrains").mkdir(parents=True)
+
+    def tearDown(self):
+        try:
+            os.chmod(self.support, 0o700)
+        except OSError:
+            pass
+        self.tmp.cleanup()
+
+    def _detect(self, own_home):
+        det = MacOSJetBrainsDetector()
+        det.user_home = self.home
+        with mock.patch(f"{self._UTILS}._is_root", return_value=False), \
+             mock.patch(f"{self._UTILS}._is_scanning_users_own_home", return_value=own_home):
+            return det.detect()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sibling_home_does_not_fail_the_scan(self):
+        os.chmod(self.support, 0o000)
+        self.assertIsNone(self._detect(own_home=False))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_own_home_raises_so_nothing_is_pruned(self):
+        os.chmod(self.support, 0o000)
+        with self.assertRaises(PermissionError):
+            self._detect(own_home=True)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_stat_able_but_unlistable_dir_is_not_reported_absent(self):
+        """0700 on the config dir itself: it stats fine, so a stat-based probe calls
+        it present and the listing error below reads as "no IDEs" — prunable."""
+        os.chmod(self.support / "JetBrains", 0o000)
+        try:
+            with self.assertRaises(PermissionError):
+                self._detect(own_home=True)
+            self.assertIsNone(self._detect(own_home=False))
+        finally:
+            os.chmod(self.support / "JetBrains", 0o700)
+
+    def test_absent_config_dir_is_not_an_error(self):
+        shutil.rmtree(self.support / "JetBrains")
+        self.assertIsNone(self._detect(own_home=True))
 
 
 if __name__ == "__main__":

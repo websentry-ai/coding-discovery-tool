@@ -114,7 +114,7 @@ class _CopilotBinaryGateMixin:
         session.mkdir(parents=True)
         events = session / "events.jsonl"
         events.write_text("{}", encoding="utf-8")
-        stale = time.time() - (utils_mod.COPILOT_EVIDENCE_MAX_AGE_DAYS + 5) * 86400
+        stale = time.time() - (utils_mod.SESSION_EVIDENCE_MAX_AGE_DAYS + 5) * 86400
         os.utime(events, (stale, stale))
         with patch.object(self.detector, "_resolve_binary", return_value=None):
             self.assertIsNone(self.detector.detect())

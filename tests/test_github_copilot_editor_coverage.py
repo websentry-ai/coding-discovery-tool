@@ -213,7 +213,7 @@ class _EvidenceTierMixin:
         self.assertEqual(self._user_dir(), Path(res[0]["install_path"]))
 
     def test_stale_transcript_not_reported(self):
-        self._write_transcript(age_days=utils_mod.COPILOT_EVIDENCE_MAX_AGE_DAYS + 5)
+        self._write_transcript(age_days=utils_mod.SESSION_EVIDENCE_MAX_AGE_DAYS + 5)
         self.assertEqual([], self._detect_builtin())
 
     def test_user_data_dir_alone_is_not_evidence(self):

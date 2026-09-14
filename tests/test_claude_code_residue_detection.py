@@ -18,6 +18,7 @@ import os
 import platform
 import shutil
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
@@ -1087,3 +1088,60 @@ class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):
         for good in ("2.1.260", "2", "2.1.260.1"):
             with self.subTest(version=good):
                 self.assertIsNotNone(_EXTENSION_VERSION.match(good))
+
+
+class TestClaudeCodeSessionEvidence(unittest.TestCase):
+    """No binary resolves, but Claude Code's own session files prove it ran. Our
+    backfill reads these same files, so a device can have them while discovery
+    reports the tool absent, and absent is prunable."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.claude_dir = self.home / ".claude"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _session(self, age_days=0):
+        project = self.claude_dir / "projects" / "-Users-someone-repo"
+        project.mkdir(parents=True, exist_ok=True)
+        path = project / "1f0681e6-60aa-47e1-b06e-47bd389cf42d.jsonl"
+        path.write_text("{}", encoding="utf-8")
+        if age_days:
+            stale = time.time() - age_days * 86400
+            os.utime(path, (stale, stale))
+        return path
+
+    def _detect(self):
+        det = _make_detector()
+        with patch(f"{_MOD}.find_claude_binary_for_user", return_value=None):
+            return _detect_claude_code(det, self.home)
+
+    def test_recent_session_detected_without_a_binary(self):
+        self._session()
+        result = self._detect()
+        self.assertIsNotNone(result)
+        self.assertEqual("unknown", result["version"])
+        # Stable across scans: install_path is part of the manifest identity, so a
+        # per-project path would churn the row.
+        self.assertEqual(str(self.claude_dir), result["install_path"])
+
+    def test_stale_session_not_detected(self):
+        self._session(age_days=utils_mod.SESSION_EVIDENCE_MAX_AGE_DAYS + 5)
+        self.assertIsNone(self._detect())
+
+    def test_config_dir_alone_is_not_evidence(self):
+        """The residue case the binary gate exists for: settings without sessions."""
+        self.claude_dir.mkdir()
+        (self.claude_dir / "settings.json").write_text("{}", encoding="utf-8")
+        (self.claude_dir / "projects").mkdir()
+        self.assertIsNone(self._detect())
+
+    def test_binary_still_wins_when_present(self):
+        self._session()
+        det = _make_detector()
+        with patch(f"{_MOD}.find_claude_binary_for_user", return_value="/usr/local/bin/claude"):
+            result = _detect_claude_code(det, self.home)
+        self.assertEqual("/usr/local/bin/claude", result["install_path"])

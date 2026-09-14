@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from typing import Dict, Optional, Tuple
@@ -319,15 +320,27 @@ def _parse_curl(result):
     return True, int(status_str), body, None
 
 
+# A presigned URL is a bearer credential and the signature lives in the query
+# string, so a malformed step-1 response would otherwise carry a usable upload
+# URL into telemetry. Host and path are kept; everything after '?' is dropped.
+_SIGNED_URL_RE = re.compile(r'(https?://[^\s"\'<>]+?)\?[^\s"\'<>]*')
+
+
+def _redact_signed_urls(text) -> str:
+    return _SIGNED_URL_RE.sub(r"\1?<redacted>", str(text or ""))
+
+
 def _report_step_failure(phase, status, body, err, ctx):
     """Log and report. The legacy fallback still handles recovery, but a silent
     fallback is indistinguishable from S3 never being attempted."""
+    safe_body = _redact_signed_urls(body)
+    safe_err = _redact_signed_urls(err)
     logger.warning(
-        f"S3 upload step '{phase}' failed: status={status}, err={err}, body={(body or '')[:200]}"
+        f"S3 upload step '{phase}' failed: status={status}, err={safe_err}, body={safe_body[:200]}"
     )
     detail = f"S3 {phase} failed: status={status}"
     if err:
-        detail += f", err={err}"
+        detail += f", err={safe_err}"
     try:
         raise RuntimeError(detail)
     except RuntimeError as exc:
@@ -337,7 +350,7 @@ def _report_step_failure(phase, status, body, err, ctx):
                 **ctx,
                 "phase": f"s3_{phase}",
                 "http_code": status,
-                "response_body": (body or "")[:1024],
+                "response_body": safe_body[:1024],
             },
             level="warning",
         )

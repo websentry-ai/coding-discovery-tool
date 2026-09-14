@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from typing import Dict, Optional, Tuple
 
-from .utils import normalize_url
+from .utils import normalize_url, report_to_sentry
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +162,9 @@ def try_s3_upload(
         _report_step_failure("upload_url_request", status, body, err, ctx)
         return False, True
     if status != 200:
-        # 503 means S3 not configured on the backend; quietly fall back.
-        # Anything else is logged.
-        if status != 503:
-            _report_step_failure("upload_url_request", status, body, None, ctx)
+        # 503 means S3 is not configured on this backend. Still reported: where S3
+        # is configured, a 503 is the one thing that explains a silent fallback.
+        _report_step_failure("upload_url_request", status, body, None, ctx)
         return False, True
 
     try:
@@ -173,14 +172,14 @@ def try_s3_upload(
         upload_url = url_response["upload_url"]
         object_key = url_response["object_key"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.warning(f"S3 step 1: malformed upload-url response: {e}; body={body[:200] if body else ''}")
+        _report_step_failure("upload_url_malformed", status, body, str(e), ctx)
         return False, True
 
     # ─── Step 2: PUT to S3 ──────────────────────────────────────────────
     try:
         s3_payload_json = json.dumps(payload)
     except (TypeError, ValueError) as e:
-        logger.warning(f"S3 step 2: failed to serialize payload: {e}")
+        _report_step_failure("payload_serialize", None, None, str(e), ctx)
         return False, True
 
     ok, status, body, err = _curl_put_to_s3(upload_url, s3_payload_json)
@@ -321,7 +320,24 @@ def _parse_curl(result):
 
 
 def _report_step_failure(phase, status, body, err, ctx):
-    """Log-only. Fallback to the legacy endpoint handles recovery; Sentry would just be noise."""
+    """Log and report. The legacy fallback still handles recovery, but a silent
+    fallback is indistinguishable from S3 never being attempted."""
     logger.warning(
         f"S3 upload step '{phase}' failed: status={status}, err={err}, body={(body or '')[:200]}"
     )
+    detail = f"S3 {phase} failed: status={status}"
+    if err:
+        detail += f", err={err}"
+    try:
+        raise RuntimeError(detail)
+    except RuntimeError as exc:
+        report_to_sentry(
+            exc,
+            {
+                **ctx,
+                "phase": f"s3_{phase}",
+                "http_code": status,
+                "response_body": (body or "")[:1024],
+            },
+            level="warning",
+        )

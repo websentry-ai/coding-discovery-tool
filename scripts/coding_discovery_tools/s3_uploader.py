@@ -163,8 +163,7 @@ def try_s3_upload(
         _report_step_failure("upload_url_request", status, body, err, ctx)
         return False, True
     if status != 200:
-        # 503 means S3 is not configured on this backend. Still reported: where S3
-        # is configured, a 503 is the one thing that explains a silent fallback.
+        # 503 (S3 not configured) included: where it is, a 503 explains the fallback.
         _report_step_failure("upload_url_request", status, body, None, ctx)
         return False, True
 
@@ -320,9 +319,7 @@ def _parse_curl(result):
     return True, int(status_str), body, None
 
 
-# A presigned URL is a bearer credential and the signature lives in the query
-# string, so a malformed step-1 response would otherwise carry a usable upload
-# URL into telemetry. Host and path are kept; everything after '?' is dropped.
+# A presigned URL is a bearer credential; its signature lives in the query string.
 _SIGNED_URL_RE = re.compile(r'(https?://[^\s"\'<>]+?)\?[^\s"\'<>]*')
 
 
@@ -331,8 +328,7 @@ def _redact_signed_urls(text) -> str:
 
 
 def _report_step_failure(phase, status, body, err, ctx):
-    """Log and report. The legacy fallback still handles recovery, but a silent
-    fallback is indistinguishable from S3 never being attempted."""
+    """Log and report; a silent fallback looks identical to S3 never being tried."""
     safe_body = _redact_signed_urls(body)
     safe_err = _redact_signed_urls(err)
     logger.warning(

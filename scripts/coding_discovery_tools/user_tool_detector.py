@@ -22,6 +22,7 @@ from .utils import (
     _is_scanning_users_own_home,
     _read_own_regular_file,
     _windows_process_is_elevated,
+    claude_code_sessions_recent,
     dir_state,
     extract_version_number,
     machine_global_binary_owned_by_user,
@@ -110,6 +111,10 @@ def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional
     directory survives uninstall (residue), so detecting on it produces false
     positives. ~/.claude remains available to the rules/MCP extractor, which only
     runs once the tool is detected here.
+
+    When no binary resolves, falls back to the session files under
+    ``~/.claude/projects``. Those are written by Claude Code when it runs, unlike the
+    config dir, so they carry none of the residue problem above.
     """
     claude_bin = find_claude_binary_for_user(user_home)
     if claude_bin:
@@ -117,6 +122,17 @@ def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional
             "name": detector.tool_name,
             "version": detector.get_version(claude_bin),
             "install_path": claude_bin
+        }
+
+    # Last resort: the session files Claude Code writes prove it ran under an install
+    # path we do not probe. Reporting nothing marks a live install absent, and absent
+    # is prunable.
+    claude_dir = user_home / ".claude"
+    if claude_code_sessions_recent(claude_dir):
+        return {
+            "name": detector.tool_name,
+            "version": "unknown",
+            "install_path": str(claude_dir),
         }
 
     return None

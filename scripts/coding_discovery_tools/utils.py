@@ -85,11 +85,8 @@ def _running_as_root() -> bool:
 def safe_exec_argv(command: list) -> Optional[list]:
     """``command`` with argv[0] resolved, or None when it is unsafe to run.
 
-    Under a root scan an absolute argv[0] is a binary resolved out of someone's home,
-    so it is refused unless _is_safe_exec_path clears it, and the resolved target is
-    what gets executed so validation and execution cannot disagree about which file
-    they mean. Only under root: running your own binary as yourself escalates nothing,
-    and gating it there would just drop versions for ordinary Homebrew installs.
+    Root-only: running your own binary as yourself escalates nothing, and gating it
+    there would drop versions for ordinary Homebrew installs.
     """
     if not command or not _running_as_root() or not os.path.isabs(str(command[0])):
         return command
@@ -97,8 +94,7 @@ def safe_exec_argv(command: list) -> Optional[list]:
     if not _is_safe_exec_path(resolved):
         logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
         return None
-    # A symlink must still land on the tool it named. npm ships claude as claude.exe,
-    # so the stem is what has to match, not the full filename.
+    # Stem, not filename: npm ships claude as claude.exe.
     named = Path(str(command[0])).name
     if Path(resolved).name != named and Path(resolved).stem != Path(named).stem:
         logger.debug(f"Refusing to execute {command[0]}: resolves to {Path(resolved).name}")
@@ -160,8 +156,7 @@ def _login_shell_owner(user_home: Path):
 def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
     """Absolute path ``user_home``'s own login shell resolves for ``tool``, else None.
 
-    Root-only: a non-root scan already has the ``which`` backstop, which resolves the
-    scanner's PATH and is therefore skipped under root, leaving those scans no fallback.
+    Root-only: a non-root scan already has the ``which`` backstop.
     """
     if platform.system() == "Windows" or pwd is None:
         return None
@@ -202,8 +197,7 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         if tool not in LOGIN_SHELL_TOOLS:
             continue
         resolved = Path(path.strip())
-        # Name of the path as given, not the symlink target, so a profile cannot
-        # point a tool name at some other privileged binary.
+        # The name as given, so a profile cannot rename another binary as a tool.
         if resolved.name != tool:
             logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
             continue
@@ -1999,8 +1993,7 @@ def get_claude_subscription_type(
             uid = _get_uid_for_user(username)
             if uid is not None:
                 shell = _get_compatible_shell(username)
-                # asuser adopts the user's bootstrap namespace; it does not drop euid,
-                # so sudo does that before their shell sees the binary.
+                # asuser adopts the namespace but not the uid; sudo drops it.
                 cmd = [
                     "launchctl", "asuser", str(uid),
                     "sudo", "-n", "-u", username,

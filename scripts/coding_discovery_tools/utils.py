@@ -82,29 +82,38 @@ def _running_as_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
-    """
-    Run a shell command and return its output.
-    
-    Args:
-        command: Command and arguments as list
-        timeout: Command timeout in seconds
-        
+def safe_exec_argv(command: list) -> Optional[list]:
+    """``command`` with argv[0] resolved, or None when it is unsafe to run.
+
     Under a root scan an absolute argv[0] is a binary resolved out of someone's home,
     so it is refused unless _is_safe_exec_path clears it, and the resolved target is
     what gets executed so validation and execution cannot disagree about which file
     they mean. Only under root: running your own binary as yourself escalates nothing,
     and gating it there would just drop versions for ordinary Homebrew installs.
+    """
+    if not command or not _running_as_root() or not os.path.isabs(str(command[0])):
+        return command
+    resolved = os.path.realpath(str(command[0]))
+    if not _is_safe_exec_path(resolved):
+        logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
+        return None
+    return [resolved, *command[1:]]
+
+
+def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
+    """
+    Run a shell command and return its output.
+
+    Args:
+        command: Command and arguments as list
+        timeout: Command timeout in seconds
 
     Returns:
         Command output as string or None if failed
     """
-    if command and _running_as_root() and os.path.isabs(str(command[0])):
-        resolved = os.path.realpath(str(command[0]))
-        if not _is_safe_exec_path(resolved):
-            logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
-            return None
-        command = [resolved, *command[1:]]
+    command = safe_exec_argv(command)
+    if command is None:
+        return None
     try:
         result = subprocess.run(
             command,
@@ -184,7 +193,14 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         if not line.startswith(_MARKER) or "\t" not in line:
             continue
         tool, _, path = line[len(_MARKER):].partition("\t")
+        if tool not in LOGIN_SHELL_TOOLS:
+            continue
         resolved = Path(path.strip())
+        # Name of the path as given, not the symlink target, so a profile cannot
+        # point a tool name at some other privileged binary.
+        if resolved.name != tool:
+            logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
+            continue
         try:
             if resolved.is_absolute() and resolved.is_file() and os.access(str(resolved), os.X_OK):
                 found[tool] = str(resolved)
@@ -1701,7 +1717,13 @@ def _run_auth_status(
     - (True, None, "claude.ai", "/login managed key")   — org-managed login
     - (True, None, None, None)                   — user is not logged in
     - (False, None, None, None)                  — command failed
+
+    The direct branch runs a resolved binary without dropping privileges, unlike the
+    launchctl and su branches, so it takes the same gate as run_command.
     """
+    cmd = safe_exec_argv(cmd)
+    if cmd is None:
+        return False, None, None, None
     try:
         result = subprocess.run(
             cmd,

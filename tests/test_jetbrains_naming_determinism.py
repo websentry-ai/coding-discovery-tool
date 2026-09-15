@@ -470,5 +470,58 @@ class TestJetBrainsDeniedConfigDir(unittest.TestCase):
         self.assertIsNone(self._detect(own_home=True))
 
 
+class TestWindowsJetBrainsDeniedConfigDir(unittest.TestCase):
+    """Windows caught the denial but returned the same empty list as a genuine
+    absence, so a locked-out scan read as "no JetBrains" with nothing to flag it."""
+
+    _UTILS = "scripts.coding_discovery_tools.utils"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "clariadmin"
+        self.roaming = self.home / "AppData" / "Roaming"
+        (self.roaming / "JetBrains").mkdir(parents=True)
+
+    def tearDown(self):
+        try:
+            os.chmod(self.roaming, 0o700)
+        except OSError:
+            pass
+        self.tmp.cleanup()
+
+    def _detect(self, own_home):
+        det = WindowsJetBrainsDetector()
+        det.user_home = self.home
+        with mock.patch(f"{self._UTILS}._is_root", return_value=False), \
+             mock.patch(f"{self._UTILS}._windows_process_is_elevated", return_value=False), \
+             mock.patch(f"{self._UTILS}._is_scanning_users_own_home", return_value=own_home):
+            return det.detect()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sibling_home_does_not_fail_the_scan(self):
+        os.chmod(self.roaming, 0o000)
+        self.assertIsNone(self._detect(own_home=False))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_own_home_raises_so_nothing_is_pruned(self):
+        os.chmod(self.roaming, 0o000)
+        with self.assertRaises(PermissionError):
+            self._detect(own_home=True)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_stat_able_but_unlistable_dir_is_not_reported_absent(self):
+        os.chmod(self.roaming / "JetBrains", 0o000)
+        try:
+            with self.assertRaises(PermissionError):
+                self._detect(own_home=True)
+            self.assertIsNone(self._detect(own_home=False))
+        finally:
+            os.chmod(self.roaming / "JetBrains", 0o700)
+
+    def test_absent_config_dir_is_not_an_error(self):
+        shutil.rmtree(self.roaming / "JetBrains")
+        self.assertIsNone(self._detect(own_home=True))
+
+
 if __name__ == "__main__":
     unittest.main()

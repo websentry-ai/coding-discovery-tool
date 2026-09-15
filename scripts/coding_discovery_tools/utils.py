@@ -158,9 +158,7 @@ def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
 
     Root-only: a non-root scan already has the ``which`` backstop.
     """
-    if platform.system() == "Windows" or pwd is None:
-        return None
-    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+    if platform.system() == "Windows" or pwd is None or not _running_as_root():
         return None
 
     key = str(user_home)
@@ -194,8 +192,6 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         if not line.startswith(_MARKER) or "\t" not in line:
             continue
         tool, _, path = line[len(_MARKER):].partition("\t")
-        if tool not in LOGIN_SHELL_TOOLS:
-            continue
         resolved = Path(path.strip())
         # The name as given, so a profile cannot rename another binary as a tool.
         if resolved.name != tool:

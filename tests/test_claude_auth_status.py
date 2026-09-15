@@ -431,7 +431,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
     def test_uses_launchctl_asuser_when_root_on_macos(
         self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_shell
     ):
-        """On macOS as root, command uses 'launchctl asuser <uid>' with user shell."""
+        """On macOS as root: launchctl asuser adopts the namespace, sudo drops the uid."""
         mock_run.return_value = self._mock_result(
             stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"})
         )
@@ -440,9 +440,10 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertEqual(args[0], "launchctl")
         self.assertEqual(args[1], "asuser")
         self.assertEqual(args[2], "501")
-        self.assertEqual(args[3], "/bin/zsh")
-        self.assertEqual(args[4], "-lc")
-        self.assertIn("auth status --json", args[5])
+        self.assertEqual(args[3:7], ["sudo", "-n", "-u", self.username])
+        self.assertEqual(args[7], "/bin/zsh")
+        self.assertEqual(args[8], "-lc")
+        self.assertIn("auth status --json", args[9])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)

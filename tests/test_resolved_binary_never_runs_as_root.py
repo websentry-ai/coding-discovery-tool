@@ -47,10 +47,35 @@ class TestResolvedBinaryNeverRunsAsRoot(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual((ok, plan), (False, None))
 
+    def test_symlink_to_another_binary_is_refused(self):
+        link = self.home / "bin" / "claude-link"
+        link.symlink_to("/usr/bin/uname")
+        renamed = self.home / "bin" / "claude2"
+        os.symlink("/usr/bin/uname", renamed)
+        with patch.object(U.os, "geteuid", return_value=0):
+            self.assertIsNone(U.safe_exec_argv([str(renamed), "--version"]))
+
+    def test_npm_shim_naming_still_passes(self):
+        """npm ships claude as claude.exe, so the stem must match, not the filename."""
+        real = self.home / "lib" / "claude.exe"
+        real.parent.mkdir(parents=True)
+        real.write_text("#!/bin/sh\n"); real.chmod(0o755)
+        shim = self.home / "bin" / "claude-shim"
+        shim.symlink_to(real)
+        with patch.object(U.os, "geteuid", return_value=501):
+            self.assertIsNotNone(U.safe_exec_argv([str(shim), "--version"]))
+
+    def test_launchctl_branch_drops_privileges(self):
+        """asuser adopts the namespace but not the uid, so sudo must follow it."""
+        import inspect
+        src = inspect.getsource(U.get_claude_subscription_type)
+        idx = src.index('"launchctl", "asuser"')
+        self.assertIn("sudo", src[idx:idx + 200])
+
     def test_privilege_dropping_branches_are_untouched(self):
         """launchctl/su already run as the target user, so they must not be gated."""
         for cmd in (
-            ["launchctl", "asuser", "501", "/bin/zsh", "-lc", f"{self.binary} auth status"],
+            ["launchctl", "asuser", "501", "sudo", "-n", "-u", "alice", "/bin/zsh", "-lc", f"{self.binary} auth status"],
             ["su", "-", "alice", "-c", f"{self.binary} auth status"],
         ):
             with self.subTest(cmd=cmd[0]):

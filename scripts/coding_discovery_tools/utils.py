@@ -97,6 +97,12 @@ def safe_exec_argv(command: list) -> Optional[list]:
     if not _is_safe_exec_path(resolved):
         logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
         return None
+    # A symlink must still land on the tool it named. npm ships claude as claude.exe,
+    # so the stem is what has to match, not the full filename.
+    named = Path(str(command[0])).name
+    if Path(resolved).name != named and Path(resolved).stem != Path(named).stem:
+        logger.debug(f"Refusing to execute {command[0]}: resolves to {Path(resolved).name}")
+        return None
     return [resolved, *command[1:]]
 
 
@@ -1993,8 +1999,11 @@ def get_claude_subscription_type(
             uid = _get_uid_for_user(username)
             if uid is not None:
                 shell = _get_compatible_shell(username)
+                # asuser adopts the user's bootstrap namespace; it does not drop euid,
+                # so sudo does that before their shell sees the binary.
                 cmd = [
                     "launchctl", "asuser", str(uid),
+                    "sudo", "-n", "-u", username,
                     shell, "-lc",
                     auth_cmd,
                 ]

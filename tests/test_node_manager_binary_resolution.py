@@ -75,10 +75,12 @@ class TestNodeManagerBinaryResolution(unittest.TestCase):
         (self.home / ".claude" / "settings.json").write_text("{}")
         self.assertIsNone(resolve_npm_global_tool_bin("claude", self.home, True))
 
+    @unittest.skipIf(os.name == "nt", "no execute bit to clear, so X_OK stays true")
     def test_non_executable_binary_resolves_to_none(self):
         self._plant(".volta/bin/claude", mode=0o644)
         self.assertIsNone(resolve_npm_global_tool_bin("claude", self.home, True))
 
+    @unittest.skipIf(os.name == "nt", "chmod(0o000) does not deny on Windows")
     def test_version_dir_walk_survives_an_unreadable_sibling(self):
         self._plant(".local/share/mise/installs/node/22.3.0/bin/claude")
         denied = self.home / ".local" / "share" / "fnm" / "node-versions"

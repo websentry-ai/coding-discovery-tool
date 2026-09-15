@@ -69,6 +69,12 @@ class TestUserLoginShellResolution(unittest.TestCase):
         result, _ = self._run(noisy)
         self.assertEqual(result, str(self.binary))
 
+    def test_copilot_is_resolved_by_the_same_call(self):
+        other = self.binary.with_name("copilot")
+        other.write_text("#!/bin/sh\n"); other.chmod(0o755)
+        result, _ = self._run(self._line("copilot", other), tool="copilot")
+        self.assertEqual(result, str(other))
+
     def test_one_invocation_serves_every_tool(self):
         other = self.binary.with_name("cursor-agent")
         other.write_text("#!/bin/sh\n")

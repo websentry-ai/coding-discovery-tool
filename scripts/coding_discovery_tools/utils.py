@@ -129,7 +129,7 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 
 
 LOGIN_SHELL_TIMEOUT = 10
-LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent")
+LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent", "copilot")
 _MARKER = "__unbound__"
 
 _login_shell_cache: Dict[str, Dict[str, str]] = {}

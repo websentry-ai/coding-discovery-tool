@@ -24,6 +24,7 @@ from ...utils import (
     copilot_cli_sessions_recent,
     machine_global_binary_owned_by_user,
     resolve_npm_global_tool_bin,
+    user_login_shell_tool_path,
     run_command,
 )
 
@@ -462,6 +463,10 @@ class MacOSCopilotCliDetector(BaseToolDetector):
                     return str(candidate)
             except (PermissionError, OSError):
                 continue
+
+        login_shell_path = user_login_shell_tool_path("copilot", user_home)
+        if login_shell_path:
+            return login_shell_path
 
         return None
 

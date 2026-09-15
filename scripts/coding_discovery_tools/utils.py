@@ -127,11 +127,7 @@ _login_shell_cache: Dict[str, Dict[str, str]] = {}
 
 
 def _login_shell_owner(user_home: Path):
-    """passwd entry for ``user_home``, only when that account's own home IS this path.
-
-    Owner uid alone is not enough: a root-owned ``/home/alice`` would resolve to root
-    and report root's binaries as Alice's.
-    """
+    """passwd entry for ``user_home``, only when that account's own home IS this path."""
     try:
         entry = pwd.getpwuid(user_home.stat().st_uid)
     except (KeyError, PermissionError, OSError) as e:
@@ -149,16 +145,8 @@ def _login_shell_owner(user_home: Path):
 def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
     """Absolute path ``user_home``'s own login shell resolves for ``tool``, else None.
 
-    The explicit candidate lists cannot cover every install prefix, and the ``which``
-    backstop resolves the SCANNER's PATH so it is skipped under a root scan — leaving
-    those scans with no fallback at all. Asking the scanned user's shell is correct by
-    construction and needs no per-manager path.
-
-    Root-only and POSIX-only: a non-root scan already has the ``which`` backstop, and
-    this needs to drop privileges to source the user's profile, so their shell config
-    never runs as root. stdin is closed and the call is bounded, because a profile that
-    blocks would otherwise stall a scan walking every home. Every tool is resolved in
-    one invocation and cached, so a slow profile is paid once per user, not per tool.
+    Root-only: a non-root scan already has the ``which`` backstop, which resolves the
+    scanner's PATH and is therefore skipped under root, leaving those scans no fallback.
     """
     if platform.system() == "Windows" or pwd is None:
         return None
@@ -176,7 +164,7 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
     if entry is None:
         return {}
 
-    # Each answer is marker-prefixed so a profile banner cannot be mistaken for a path.
+    # Marker-prefixed so profile banner output cannot be mistaken for a path.
     script = "; ".join(
         f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
         for tool in LOGIN_SHELL_TOOLS

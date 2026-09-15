@@ -120,6 +120,30 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 
 
 LOGIN_SHELL_TIMEOUT = 10
+LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent")
+_MARKER = "__unbound__"
+
+_login_shell_cache: Dict[str, Dict[str, str]] = {}
+
+
+def _login_shell_owner(user_home: Path):
+    """passwd entry for ``user_home``, only when that account's own home IS this path.
+
+    Owner uid alone is not enough: a root-owned ``/home/alice`` would resolve to root
+    and report root's binaries as Alice's.
+    """
+    try:
+        entry = pwd.getpwuid(user_home.stat().st_uid)
+    except (KeyError, PermissionError, OSError) as e:
+        logger.debug(f"No passwd entry for {user_home}: {e}")
+        return None
+    try:
+        if os.path.realpath(entry.pw_dir) != os.path.realpath(str(user_home)):
+            logger.debug(f"{user_home} is owned by {entry.pw_name}, whose home is elsewhere")
+            return None
+    except OSError:
+        return None
+    return entry
 
 
 def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
@@ -133,37 +157,56 @@ def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
     Root-only and POSIX-only: a non-root scan already has the ``which`` backstop, and
     this needs to drop privileges to source the user's profile, so their shell config
     never runs as root. stdin is closed and the call is bounded, because a profile that
-    blocks would otherwise stall a scan walking every home.
+    blocks would otherwise stall a scan walking every home. Every tool is resolved in
+    one invocation and cached, so a slow profile is paid once per user, not per tool.
     """
     if platform.system() == "Windows" or pwd is None:
         return None
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         return None
-    try:
-        entry = pwd.getpwuid(user_home.stat().st_uid)
-    except (KeyError, PermissionError, OSError) as e:
-        logger.debug(f"No passwd entry for {user_home}: {e}")
-        return None
 
+    key = str(user_home)
+    if key not in _login_shell_cache:
+        _login_shell_cache[key] = _resolve_login_shell_tools(user_home)
+    return _login_shell_cache[key].get(tool)
+
+
+def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
+    entry = _login_shell_owner(user_home)
+    if entry is None:
+        return {}
+
+    # Each answer is marker-prefixed so a profile banner cannot be mistaken for a path.
+    script = "; ".join(
+        f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
+        for tool in LOGIN_SHELL_TOOLS
+    )
     try:
         result = subprocess.run(
-            ["sudo", "-n", "-u", entry.pw_name, "-i", "command", "-v", tool],
+            ["sudo", "-n", "-u", entry.pw_name, "-i", "sh", "-c", script],
             capture_output=True, text=True,
             stdin=subprocess.DEVNULL, timeout=LOGIN_SHELL_TIMEOUT,
         )
     except Exception as e:
-        logger.debug(f"Login-shell lookup for {tool} as {entry.pw_name} failed: {e}")
-        return None
-    if result.returncode != 0:
-        return None
+        logger.debug(f"Login-shell lookup as {entry.pw_name} failed: {e}")
+        return {}
 
-    resolved = Path(result.stdout.strip())
-    try:
-        if resolved.is_absolute() and resolved.is_file() and os.access(str(resolved), os.X_OK):
-            return str(resolved)
-    except (PermissionError, OSError):
-        pass
-    return None
+    found: Dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith(_MARKER) or "\t" not in line:
+            continue
+        tool, _, path = line[len(_MARKER):].partition("\t")
+        resolved = Path(path.strip())
+        try:
+            if resolved.is_absolute() and resolved.is_file() and os.access(str(resolved), os.X_OK):
+                found[tool] = str(resolved)
+            else:
+                logger.debug(f"Login shell gave an unusable path for {tool}: {path!r}")
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not stat {path!r} for {tool}: {e}")
+    if not found:
+        logger.debug(f"Login shell resolved no tools for {entry.pw_name} (rc={result.returncode})")
+    return found
 
 
 def resolve_npm_global_tool_bin(
@@ -2739,6 +2782,7 @@ def reset_sentry_run_state() -> None:
     _rejected_binaries.clear()
     _vscode_bundles_found.clear()
     _cowork_probes.clear()
+    _login_shell_cache.clear()
     reset_vscode_registry_state()
     global _sentry_run_context
     _sentry_run_context = {}

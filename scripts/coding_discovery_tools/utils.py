@@ -2114,21 +2114,27 @@ def _binary_in_cwd(path: str) -> bool:
 def _is_safe_exec_path(path: str) -> bool:
     """True if a resolved binary at ``path`` is safe to execute during a scan — not
     one another local account could have planted. POSIX: the binary and the
-    directory it was found in must be owned by the running user or root and not
+    every directory above it must be owned by the running user or root and not
     group/world-writable, so a shared-writable PATH entry (e.g. a group-writable
-    ``/usr/local/bin``) can't supply it. Windows has no comparable cheap check, so
-    only the CWD guard applies there. Fails closed on any error."""
+    ``/usr/local/bin``) can't supply it. Ancestors are walked because a writable one
+    lets the binary be swapped underneath an otherwise safe leaf. Windows has no
+    comparable cheap check, so only the CWD guard applies there. Fails closed on any
+    error."""
     if os.name == "nt":
         return True
     try:
         euid = os.geteuid()
-        for target in (path, os.path.dirname(path) or os.sep):
+        target = os.path.realpath(path)
+        while True:
             info = os.stat(target)
             if info.st_uid not in (euid, 0):
                 return False
             if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
                 return False
-        return True
+            parent = os.path.dirname(target)
+            if parent == target:
+                return True
+            target = parent
     except OSError:
         return False
 

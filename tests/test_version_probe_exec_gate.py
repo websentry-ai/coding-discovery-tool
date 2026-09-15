@@ -37,6 +37,7 @@ class TestVersionProbeExecGate(unittest.TestCase):
             self.assertIsNone(run_command([str(self.binary), "--version"]))
         run.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "the shim is a POSIX shell script")
     def test_safe_absolute_binary_still_runs(self):
         with patch(f"{_MOD}._is_safe_exec_path", return_value=True):
             self.assertEqual(run_command([str(self.binary), "--version"]), "1.2.3")
@@ -54,11 +55,23 @@ class TestVersionProbeExecGate(unittest.TestCase):
     def test_empty_command_does_not_raise(self):
         self.assertIsNone(run_command([]))
 
+    @unittest.skipIf(os.name == "nt", "_is_safe_exec_path is a no-op on Windows")
     def test_gate_uses_the_real_ownership_rule(self):
         """No mocking: a world-writable dir is refused, a normal one is not."""
         self.assertEqual(run_command([str(self.binary), "--version"]), "1.2.3")
         os.chmod(self.dir, 0o777)
         self.assertIsNone(run_command([str(self.binary), "--version"]))
+
+    @unittest.skipIf(os.name == "nt", "_is_safe_exec_path is a no-op on Windows")
+    def test_a_writable_ancestor_is_refused(self):
+        nested = self.dir / "a" / "b"
+        nested.mkdir(parents=True)
+        binary = nested / "claude"
+        binary.write_text("#!/bin/sh\necho 1.2.3\n")
+        binary.chmod(0o755)
+        self.assertEqual(run_command([str(binary), "--version"]), "1.2.3")
+        os.chmod(self.dir / "a", 0o777)
+        self.assertIsNone(run_command([str(binary), "--version"]))
 
 
 if __name__ == "__main__":

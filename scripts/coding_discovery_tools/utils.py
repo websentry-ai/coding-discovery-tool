@@ -142,17 +142,25 @@ def resolve_npm_global_tool_bin(
     # 3. user_home-relative fallbacks — always safe (scoped to this user).
     candidates.append(user_home / ".npm-global" / "bin" / tool)
     candidates.append(user_home / ".local" / "share" / "pnpm" / tool)  # pnpm global
-    try:
-        nvm_node = user_home / ".nvm" / "versions" / "node"
-        if nvm_node.exists():
-            for version_dir in sorted(nvm_node.iterdir()):
+    candidates.append(user_home / "Library" / "pnpm" / tool)  # pnpm global, macOS
+    candidates.append(user_home / ".volta" / "bin" / tool)
+    candidates.append(user_home / ".asdf" / "shims" / tool)
+    for versions_dir, rel in (
+        (user_home / ".nvm" / "versions" / "node", ("bin",)),
+        (user_home / ".local" / "share" / "fnm" / "node-versions", ("installation", "bin")),
+        (user_home / ".local" / "share" / "mise" / "installs" / "node", ("bin",)),
+    ):
+        try:
+            if not versions_dir.exists():
+                continue
+            for version_dir in sorted(versions_dir.iterdir()):
                 try:
                     if version_dir.is_dir():
-                        candidates.append(version_dir / "bin" / tool)
+                        candidates.append(version_dir.joinpath(*rel, tool))
                 except (PermissionError, OSError):
                     continue
-    except (PermissionError, OSError) as e:
-        logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not enumerate {versions_dir} for {tool}: {e}")
 
     for candidate in candidates:
         try:

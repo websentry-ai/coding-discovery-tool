@@ -24,6 +24,9 @@ _MOD = "scripts.coding_discovery_tools.utils"
 
 class TestVersionProbeExecGate(unittest.TestCase):
     def setUp(self):
+        root = patch(f"{_MOD}._running_as_root", return_value=True)
+        root.start()
+        self.addCleanup(root.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
@@ -93,6 +96,12 @@ class TestVersionProbeExecGate(unittest.TestCase):
         link = self.dir / "looks-fine"
         link.symlink_to(target)
         self.assertIsNone(run_command([str(link), "--version"]))
+
+    def test_non_root_scan_is_not_gated_at_all(self):
+        with patch(f"{_MOD}._running_as_root", return_value=False), \
+                patch(f"{_MOD}._is_safe_exec_path") as gate:
+            self.assertEqual(run_command([str(self.binary), "--version"]), "1.2.3")
+        gate.assert_not_called()
 
 
 if __name__ == "__main__":

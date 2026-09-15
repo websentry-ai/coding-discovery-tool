@@ -119,6 +119,53 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     return None
 
 
+LOGIN_SHELL_TIMEOUT = 10
+
+
+def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
+    """Absolute path ``user_home``'s own login shell resolves for ``tool``, else None.
+
+    The explicit candidate lists cannot cover every install prefix, and the ``which``
+    backstop resolves the SCANNER's PATH so it is skipped under a root scan — leaving
+    those scans with no fallback at all. Asking the scanned user's shell is correct by
+    construction and needs no per-manager path.
+
+    Root-only and POSIX-only: a non-root scan already has the ``which`` backstop, and
+    this needs to drop privileges to source the user's profile, so their shell config
+    never runs as root. stdin is closed and the call is bounded, because a profile that
+    blocks would otherwise stall a scan walking every home.
+    """
+    if platform.system() == "Windows" or pwd is None:
+        return None
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return None
+    try:
+        entry = pwd.getpwuid(user_home.stat().st_uid)
+    except (KeyError, PermissionError, OSError) as e:
+        logger.debug(f"No passwd entry for {user_home}: {e}")
+        return None
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "-u", entry.pw_name, "-i", "command", "-v", tool],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=LOGIN_SHELL_TIMEOUT,
+        )
+    except Exception as e:
+        logger.debug(f"Login-shell lookup for {tool} as {entry.pw_name} failed: {e}")
+        return None
+    if result.returncode != 0:
+        return None
+
+    resolved = Path(result.stdout.strip())
+    try:
+        if resolved.is_absolute() and resolved.is_file() and os.access(str(resolved), os.X_OK):
+            return str(resolved)
+    except (PermissionError, OSError):
+        pass
+    return None
+
+
 def resolve_npm_global_tool_bin(
     tool: str, user_home: Path, is_root: bool
 ) -> Optional[str]:

@@ -78,7 +78,8 @@ class TestVersionProbeExecGate(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "symlink semantics differ on Windows")
     def test_executes_the_path_it_validated(self):
-        link = self.dir / "claude-link"
+        link = self.dir / "sub" / "claude"
+        link.parent.mkdir()
         link.symlink_to(self.binary)
         with patch(f"{_MOD}.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, stdout="1.2.3", stderr="")

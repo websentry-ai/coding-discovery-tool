@@ -84,9 +84,16 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
         command: Command and arguments as list
         timeout: Command timeout in seconds
         
+    An absolute argv[0] is a binary we resolved on disk, and under a root scan those
+    live in user-writable prefixes, so it is refused unless _is_safe_exec_path clears
+    it. Bare names are unaffected: they resolve through the scanner's own PATH.
+
     Returns:
         Command output as string or None if failed
     """
+    if command and os.path.isabs(str(command[0])) and not _is_safe_exec_path(str(command[0])):
+        logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
+        return None
     try:
         result = subprocess.run(
             command,

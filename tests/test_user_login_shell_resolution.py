@@ -69,12 +69,6 @@ class TestUserLoginShellResolution(unittest.TestCase):
         result, _ = self._run(noisy)
         self.assertEqual(result, str(self.binary))
 
-    def test_copilot_is_resolved_by_the_same_call(self):
-        other = self.binary.with_name("copilot")
-        other.write_text("#!/bin/sh\n"); other.chmod(0o755)
-        result, _ = self._run(self._line("copilot", other), tool="copilot")
-        self.assertEqual(result, str(other))
-
     def test_one_invocation_serves_every_tool(self):
         other = self.binary.with_name("cursor-agent")
         other.write_text("#!/bin/sh\n")
@@ -113,14 +107,25 @@ class TestUserLoginShellResolution(unittest.TestCase):
         result, _ = self._run(self._line("claude", self.home / "gone"))
         self.assertIsNone(result)
 
-    @unittest.skipIf(os.name == "nt", "no execute bit to clear, so X_OK stays true")
-    def test_non_executable_result_resolves_to_none(self):
-        self.binary.chmod(0o644)
-        result, _ = self._run(self._line("claude", self.binary))
-        self.assertIsNone(result)
-
     def test_alias_output_resolves_to_none(self):
         result, _ = self._run(self._line("claude", "claude: aliased to claude --verbose"))
+        self.assertIsNone(result)
+
+    def test_unusable_answers_resolve_to_none(self):
+        cases = {
+            "missing": self.home / "gone",
+            "alias": "claude: aliased to claude --verbose",
+            "relative": "bin/claude",
+        }
+        for label, path in cases.items():
+            with self.subTest(case=label):
+                result, _ = self._run(self._line("claude", path))
+                self.assertIsNone(result)
+
+    @unittest.skipIf(os.name == "nt", "no execute bit to clear")
+    def test_non_executable_answer_resolves_to_none(self):
+        self.binary.chmod(0o644)
+        result, _ = self._run(self._line("claude", self.binary))
         self.assertIsNone(result)
 
     def test_missing_passwd_entry_resolves_to_none(self):

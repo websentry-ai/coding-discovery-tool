@@ -73,6 +73,27 @@ class TestVersionProbeExecGate(unittest.TestCase):
         os.chmod(self.dir / "a", 0o777)
         self.assertIsNone(run_command([str(binary), "--version"]))
 
+    @unittest.skipIf(os.name == "nt", "symlink semantics differ on Windows")
+    def test_executes_the_path_it_validated(self):
+        link = self.dir / "claude-link"
+        link.symlink_to(self.binary)
+        with patch(f"{_MOD}.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="1.2.3", stderr="")
+            run_command([str(link), "--version"])
+        self.assertEqual(run.call_args[0][0][0], os.path.realpath(self.binary))
+
+    @unittest.skipIf(os.name == "nt", "_is_safe_exec_path is a no-op on Windows")
+    def test_symlink_into_an_unsafe_target_is_refused(self):
+        unsafe_dir = self.dir / "unsafe"
+        unsafe_dir.mkdir()
+        target = unsafe_dir / "claude"
+        target.write_text("#!/bin/sh\n")
+        target.chmod(0o755)
+        os.chmod(unsafe_dir, 0o777)
+        link = self.dir / "looks-fine"
+        link.symlink_to(target)
+        self.assertIsNone(run_command([str(link), "--version"]))
+
 
 if __name__ == "__main__":
     unittest.main()

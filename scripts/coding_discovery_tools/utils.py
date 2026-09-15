@@ -86,14 +86,19 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
         
     An absolute argv[0] is a binary we resolved on disk, and under a root scan those
     live in user-writable prefixes, so it is refused unless _is_safe_exec_path clears
-    it. Bare names are unaffected: they resolve through the scanner's own PATH.
+    it. The resolved target is what gets executed, so validation and execution cannot
+    disagree about which file that is. Bare names are unaffected: they resolve through
+    the scanner's own PATH.
 
     Returns:
         Command output as string or None if failed
     """
-    if command and os.path.isabs(str(command[0])) and not _is_safe_exec_path(str(command[0])):
-        logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
-        return None
+    if command and os.path.isabs(str(command[0])):
+        resolved = os.path.realpath(str(command[0]))
+        if not _is_safe_exec_path(resolved):
+            logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
+            return None
+        command = [resolved, *command[1:]]
     try:
         result = subprocess.run(
             command,

@@ -20,6 +20,7 @@ from ...jetbrains_naming_helpers import (
     should_skip_folder,
     version_sort_key,
 )
+from ...utils import _listable_state, fail_if_anomalous
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,13 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         if appdata and appdata != r"%APPDATA%":
             return jetbrains_config_roots(Path(appdata))
         return jetbrains_config_roots(Path.home() / "AppData" / "Roaming")
+
+    @property
+    def scan_user_home(self) -> Path:
+        """The home the config roots above were derived from."""
+        if hasattr(self, 'user_home') and self.user_home:
+            return Path(self.user_home)
+        return Path.home()
 
     IDE_NAME_MAPPING = JETBRAINS_IDE_NAME_MAPPING
 
@@ -133,14 +141,12 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         """
         detected_ides = []
 
-        # Another user's config dir is access-denied to a non-elevated scan and .exists() re-raises it; the try below covered only the listing.
-        try:
-            config_present = config_dir.exists()
-        except PermissionError as e:
-            logger.debug(f"Could not probe JetBrains config directory {config_dir}: {e}")
+        state = _listable_state(config_dir)
+        if state == "unreadable":
+            # Denied is not absent, so this raises when the home was ours to read.
+            fail_if_anomalous(self.scan_user_home, f"JetBrains config dir unreadable: {config_dir}")
             return detected_ides
-
-        if not config_present:
+        if state != "present":
             logger.debug(f"JetBrains config directory not found: {config_dir}")
             return detected_ides
 

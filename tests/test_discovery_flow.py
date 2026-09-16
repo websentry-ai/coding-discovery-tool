@@ -2285,10 +2285,21 @@ class TestWindowsPathProfileResolution(unittest.TestCase):
             self.assertFalse(self.weh._is_local_drive(hostile), hostile)
         self.assertTrue(self.weh._is_local_drive(r"C:\Program Files\nodejs"))
 
-    def test_a_profile_ProfileList_forgot_is_still_not_emitted(self):
-        """A deleted profile matches no root, so the Users segment is the backstop."""
-        self.assertTrue(self.weh._names_an_account(r"C:\Users\ghost\bin", []))
-        self.assertFalse(self.weh._names_an_account(r"C:\Program Files\nodejs", []))
+    def test_a_mapped_drive_is_asked_its_type_not_assumed_local(self):
+        """Z:\\ looks local but can be a share, so the drive type decides."""
+        fake = Mock()
+        fake.windll.kernel32.GetDriveTypeW.return_value = self.weh._DRIVE_REMOTE
+        with patch.dict("sys.modules", {"ctypes": fake}):
+            self.assertFalse(self.weh._is_local_drive(r"Z:\bin"))
+        fake.windll.kernel32.GetDriveTypeW.return_value = 3   # DRIVE_FIXED
+        with patch.dict("sys.modules", {"ctypes": fake}):
+            self.assertTrue(self.weh._is_local_drive(r"C:\bin"))
+
+    def test_only_windows_owned_roots_are_sent_verbatim(self):
+        """A path elsewhere can name a customer or project, so it is counted not sent."""
+        with patch.dict(os.environ, {"ProgramData": r"C:\ProgramData"}):
+            self.assertTrue(self.weh._is_machine_root(r"C:\ProgramData\chocolatey\bin"))
+            self.assertFalse(self.weh._is_machine_root(r"D:\Projects\Acquisition-Target\bin"))
 
 
 if __name__ == "__main__":

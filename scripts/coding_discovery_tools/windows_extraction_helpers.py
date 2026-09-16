@@ -76,6 +76,10 @@ def registry_profile_paths() -> Tuple[List[Path], bool]:
 
 _PROFILE_VARS = ("USERPROFILE", "HOMEPATH", "APPDATA", "LOCALAPPDATA")
 _LOCAL_DRIVE = re.compile(r"^[A-Za-z]:\\")
+_DRIVE_REMOTE = 4
+# Where a package manager installs. Anywhere else is someone's own directory, whose
+# name can carry a customer or project, so it is counted rather than sent.
+_MACHINE_ROOT_VARS = ("ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SystemRoot")
 
 
 def _under(path: str, root: str) -> bool:
@@ -86,20 +90,27 @@ def _under(path: str, root: str) -> bool:
 
 
 def _is_local_drive(path: str) -> bool:
-    """Whether ``path`` is a plain local drive path, so probing it touches no network."""
-    return bool(_LOCAL_DRIVE.match(path)) and not path.startswith("\\\\")
+    """Whether probing ``path`` stays off the network.
 
-
-def _names_an_account(entry: str, roots: List[str]) -> bool:
-    """Whether ``entry`` sits under any profile, including one ``ProfileList`` forgot.
-
-    A deleted profile leaves no root to match, so the ``Users`` segment is the
-    backstop: emitting such a path verbatim would put the account name in the tag.
+    A drive letter is not enough: ``Z:\\`` can be a mapped share, so the drive type
+    is asked before anything touches the filesystem.
     """
-    if any(_under(entry, root) for root in roots):
+    if not _LOCAL_DRIVE.match(path) or path.startswith("\\\\"):
+        return False
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.GetDriveTypeW(path[:3]) != _DRIVE_REMOTE
+    except (AttributeError, OSError):
         return True
-    parts = ntpath.normcase(entry).split("\\")
-    return "users" in parts[:2] and len(parts) > 2
+
+
+def _is_machine_root(entry: str) -> bool:
+    """Whether ``entry`` sits under a Windows-owned root, whose names are not the customer's."""
+    for var in _MACHINE_ROOT_VARS:
+        root = os.environ.get(var)
+        if root and _under(entry, root):
+            return True
+    return False
 
 
 def _expand_for_profile(entry: str, profile: Optional[str]) -> str:
@@ -155,6 +166,7 @@ def registry_user_path_dirs() -> List[str]:
     roots = list(profiles.values())
     dirs: List[str] = []
     seen = set()
+    withheld = 0
     try:
         with winreg.OpenKey(winreg.HKEY_USERS, "") as users:
             for index in range(winreg.QueryInfoKey(users)[0]):
@@ -196,12 +208,15 @@ def registry_user_path_dirs() -> List[str]:
                         continue
                     if profile and _under(entry, profile):
                         dirs.append("~" + entry[len(profile):])
-                    elif _names_an_account(entry, roots):
-                        logger.debug(f"Dropping unattributable profile PATH entry: {entry}")
-                    else:
+                    elif _is_machine_root(entry) and not any(_under(entry, r) for r in roots):
                         dirs.append(entry)
+                    else:
+                        withheld += 1
+                        logger.debug(f"Withholding PATH entry outside a known root: {entry}")
     except OSError as exc:
         logger.debug(f"Could not read HKEY_USERS Environment: {exc}", exc_info=True)
+    if withheld:
+        dirs.append(f"<{withheld} withheld>")
     return dirs
 
 

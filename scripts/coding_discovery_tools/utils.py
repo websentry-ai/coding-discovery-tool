@@ -2062,6 +2062,8 @@ def get_claude_subscription_type(
                     f"(daemon container detected)"
                 )
         ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="direct", env=env)
+        # Distinguishes "we declined to run it" from "it ran and said nothing".
+        gate_refused = safe_exec_argv(cmd) is None
         if diagnostics is not None:
             diagnostics.append({
                 "category": "direct_exec",
@@ -2074,6 +2076,7 @@ def get_claude_subscription_type(
                     "key_source": key_source,
                     "binary": claude_binary,
                     "shell_fallback": shell_fallback,
+                    "gate_refused": gate_refused,
                     "daemon_container": is_container if is_darwin else False,
                 },
             })

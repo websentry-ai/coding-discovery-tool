@@ -89,6 +89,19 @@ class TestResolvedBinaryNeverRunsAsRoot(unittest.TestCase):
             fake_pwd.getpwuid.return_value = entry
             self.assertIsNone(U.user_login_shell_tool_path("claude", self.home))
 
+    def test_a_refusal_is_reported_as_its_own_cause(self):
+        """Refusing must not read as a logged-out user, or the alert stays silent."""
+        diagnostics = []
+        with patch.object(U.platform, "system", return_value="Linux"), \
+                patch.object(U, "_is_root", return_value=True), \
+                patch.object(U.os, "geteuid", return_value=0):
+            U.get_claude_subscription_type(
+                "alice", str(self.binary), diagnostics=diagnostics, user_home=self.home
+            )
+        direct = [d for d in diagnostics if d["category"] == "direct_exec"]
+        self.assertTrue(direct, "no direct_exec diagnostic was recorded")
+        self.assertTrue(direct[0]["data"]["gate_refused"])
+
 
 if __name__ == "__main__":
     unittest.main()

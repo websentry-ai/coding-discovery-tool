@@ -513,6 +513,32 @@ def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
     return max(0, int((time.time() - newest) // 86400))
 
 
+_PATH_TAG_MAX_CHARS = 180
+
+
+def windows_user_path_dirs() -> str:
+    """Loaded users' existing PATH directories, profile-relative, for the no-tools tag.
+
+    Each profile root is rewritten to ``~`` so the tag carries the prefix that
+    matters (``~\\scoop\\shims``) without the account name.
+    """
+    if platform.system() != "Windows":
+        return ""
+    from .windows_extraction_helpers import registry_user_path_dirs
+    homes = sorted((str(h) for h in windows_user_homes().values()), key=len, reverse=True)
+    out, used = [], 0
+    for entry in registry_user_path_dirs():
+        for home in homes:
+            if entry.lower().startswith(home.lower()):
+                entry = "~" + entry[len(home):]
+                break
+        if used + len(entry) + 1 > _PATH_TAG_MAX_CHARS:
+            break
+        out.append(entry)
+        used += len(entry) + 1
+    return ",".join(out)
+
+
 _NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
 
 
@@ -2553,6 +2579,7 @@ _SENTRY_TAG_KEYS = (
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
+    "user_path_dirs",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

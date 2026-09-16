@@ -73,6 +73,53 @@ def registry_profile_paths() -> Tuple[List[Path], bool]:
     return paths, complete
 
 
+def registry_user_path_dirs() -> List[str]:
+    """Existing PATH directories recorded in every loaded user hive.
+
+    An npm-global CLI is invoked by name, so its directory is on the user's PATH
+    whatever prefix installed it. The candidate list can only name prefixes it
+    already knows, so a tool under an unlisted one reads as absent. Reading PATH
+    says where to look next. Only loaded hives answer: a logged-out profile's
+    ``NTUSER.DAT`` would have to be mounted, which a probe has no business doing.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    dirs: List[str] = []
+    seen = set()
+    try:
+        with winreg.OpenKey(winreg.HKEY_USERS, "") as users:
+            for index in range(winreg.QueryInfoKey(users)[0]):
+                try:
+                    sid = winreg.EnumKey(users, index)
+                    if sid.endswith("_Classes") or sid in _SERVICE_PROFILE_SIDS:
+                        continue
+                    with winreg.OpenKey(users, sid + r"\Environment") as env:
+                        raw, kind = winreg.QueryValueEx(env, "Path")
+                except OSError:
+                    continue
+                if not isinstance(raw, str):
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    raw = ntpath.expandvars(raw)
+                for entry in raw.split(";"):
+                    entry = entry.strip().rstrip("\\")
+                    key = entry.lower()
+                    if not entry or key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        if os.path.isdir(entry):
+                            dirs.append(entry)
+                    except OSError:
+                        continue
+    except OSError as exc:
+        logger.debug(f"Could not read HKEY_USERS Environment: {exc}", exc_info=True)
+    return dirs
+
+
 # Maps the globalStorage IDE-folder key (as used by Cline/Roo ``SUPPORTED_IDES``)
 # to the host editor's Windows ``Programs``/``Program Files`` install-dir names
 # and the executable names it puts on PATH. Used to gate Cline/Roo rows on the

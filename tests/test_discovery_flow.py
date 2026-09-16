@@ -2218,28 +2218,20 @@ class TestWindowsUserPathDiagnostics(unittest.TestCase):
     installed it. The candidate list can only name prefixes it knows, so this
     records where to look next when a Windows scan finds nothing."""
 
-    def setUp(self):
-        self.home = Path(tempfile.mkdtemp())
-        (self.home / "scoop" / "shims").mkdir(parents=True)
-
-    def _tag(self, entries, homes=None):
+    def _tag(self, entries):
         with patch.object(utils_mod.platform, "system", return_value="Windows"), \
-             patch.object(utils_mod, "windows_user_homes", return_value=homes or {"u": self.home}), \
              patch("scripts.coding_discovery_tools.windows_extraction_helpers."
                    "registry_user_path_dirs", return_value=entries):
             return utils_mod.windows_user_path_dirs()
 
-    def test_profile_root_is_replaced_so_the_account_name_is_not_sent(self):
-        tag = self._tag([str(self.home / "scoop" / "shims")])
-        self.assertTrue(tag.startswith("~"), tag)
-        self.assertNotIn(self.home.name, tag)
-
-    def test_machine_wide_entries_are_kept_whole(self):
-        self.assertEqual(r"C:\Program Files\nodejs", self._tag([r"C:\Program Files\nodejs"]))
+    def test_a_long_entry_does_not_hide_the_ones_after_it(self):
+        """Truncation skips the over-budget entry; a later short candidate still lands."""
+        tag = self._tag(["C:\\" + "x" * utils_mod._PATH_TAG_MAX_CHARS, r"~\scoop\shims"])
+        self.assertEqual(r"~\scoop\shims", tag)
 
     def test_value_is_capped_for_the_tag(self):
-        long_entries = [f"C:\\dir{i:03}" for i in range(200)]
-        self.assertLessEqual(len(self._tag(long_entries)), utils_mod._PATH_TAG_MAX_CHARS)
+        self.assertLessEqual(len(self._tag([f"C:\\dir{i:03}" for i in range(200)])),
+                             utils_mod._PATH_TAG_MAX_CHARS)
 
     def test_empty_off_windows(self):
         with patch.object(utils_mod.platform, "system", return_value="Darwin"):
@@ -2247,6 +2239,40 @@ class TestWindowsUserPathDiagnostics(unittest.TestCase):
 
     def test_is_a_queryable_sentry_tag(self):
         self.assertIn("user_path_dirs", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestWindowsPathProfileResolution(unittest.TestCase):
+    """Under SYSTEM, expanding %USERPROFILE% against the scanner resolves to
+    systemprofile, so every entry using it fails the directory check and drops the
+    prefix this diagnostic exists to find."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.windows_extraction_helpers as weh
+        self.weh = weh
+
+    def test_per_user_vars_resolve_against_the_hive_owner_not_the_scanner(self):
+        expanded = self.weh._expand_for_profile(r"%USERPROFILE%\scoop\shims", r"C:\Users\alice")
+        self.assertEqual(r"C:\Users\alice\scoop\shims", expanded)
+
+    def test_localappdata_derives_from_the_same_profile(self):
+        self.assertEqual(r"C:\Users\alice\AppData\Local\bin",
+                         self.weh._expand_for_profile(r"%LOCALAPPDATA%\bin", r"C:\Users\alice"))
+
+    def test_unattributable_profile_var_is_left_unexpanded_not_pointed_at_the_scanner(self):
+        self.assertEqual(r"%USERPROFILE%\scoop",
+                         self.weh._expand_for_profile(r"%USERPROFILE%\scoop", None))
+
+    def test_machine_vars_still_expand_from_the_process(self):
+        with patch.dict(os.environ, {"SOMEMACHINEVAR": r"C:\Tools"}):
+            self.assertEqual(r"C:\Tools\bin",
+                             self.weh._expand_for_profile(r"%SOMEMACHINEVAR%\bin", r"C:\Users\a"))
+
+    def test_sibling_profile_is_not_treated_as_inside_its_shorter_neighbour(self):
+        self.assertFalse(self.weh._under(r"C:\Users\bobby\bin", r"C:\Users\bob"))
+        self.assertTrue(self.weh._under(r"C:\Users\bob\bin", r"C:\Users\bob"))
+
+    def test_boundary_check_is_case_insensitive_like_windows(self):
+        self.assertTrue(self.weh._under(r"c:\users\BOB\bin", r"C:\Users\bob"))
 
 
 if __name__ == "__main__":

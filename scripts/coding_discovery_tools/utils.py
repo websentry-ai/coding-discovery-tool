@@ -519,21 +519,16 @@ _PATH_TAG_MAX_CHARS = 180
 def windows_user_path_dirs() -> str:
     """Loaded users' existing PATH directories, profile-relative, for the no-tools tag.
 
-    Each profile root is rewritten to ``~`` so the tag carries the prefix that
-    matters (``~\\scoop\\shims``) without the account name.
+    Over-budget entries are skipped rather than ending the scan, so a long one
+    cannot hide a short candidate behind it.
     """
     if platform.system() != "Windows":
         return ""
     from .windows_extraction_helpers import registry_user_path_dirs
-    homes = sorted((str(h) for h in windows_user_homes().values()), key=len, reverse=True)
     out, used = [], 0
     for entry in registry_user_path_dirs():
-        for home in homes:
-            if entry.lower().startswith(home.lower()):
-                entry = "~" + entry[len(home):]
-                break
         if used + len(entry) + 1 > _PATH_TAG_MAX_CHARS:
-            break
+            continue
         out.append(entry)
         used += len(entry) + 1
     return ",".join(out)

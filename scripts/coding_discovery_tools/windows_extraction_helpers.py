@@ -8,6 +8,7 @@ on Windows and macOS to avoid code duplication.
 import logging
 import ntpath
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -73,48 +74,121 @@ def registry_profile_paths() -> Tuple[List[Path], bool]:
     return paths, complete
 
 
+def _under(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or sits inside it, on a separator boundary.
+
+    A prefix test alone would put ``C:\\Users\\bobby`` inside ``C:\\Users\\bob``.
+    """
+    path, root = ntpath.normcase(path).rstrip("\\"), ntpath.normcase(root).rstrip("\\")
+    return path == root or path.startswith(root + "\\")
+
+
+_PROFILE_VARS = ("USERPROFILE", "HOMEPATH", "APPDATA", "LOCALAPPDATA")
+
+
+def _expand_for_profile(entry: str, profile: Optional[str]) -> str:
+    """Expand ``entry``'s variables, resolving the per-user ones against ``profile``.
+
+    Machine variables (``%SystemRoot%``, ``%ProgramFiles%``) are the same for every
+    account, so the process environment answers those correctly.
+    """
+    if profile:
+        for var, value in (("USERPROFILE", profile), ("HOMEPATH", profile),
+                           ("APPDATA", ntpath.join(profile, "AppData", "Roaming")),
+                           ("LOCALAPPDATA", ntpath.join(profile, "AppData", "Local"))):
+            entry = re.sub(rf"%{var}%", lambda _, v=value: v, entry, flags=re.IGNORECASE)
+    elif any(f"%{var}%".lower() in entry.lower() for var in _PROFILE_VARS):
+        return entry
+    return ntpath.expandvars(entry)
+
+
+def _profile_image_paths(winreg) -> Dict[str, str]:
+    """``{SID: profile dir}`` from ``ProfileList``, for every profile on the machine."""
+    profiles: Dict[str, str] = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                sid = None
+                try:
+                    sid = winreg.EnumKey(key, index)
+                    with winreg.OpenKey(key, sid) as sub_key:
+                        raw, kind = winreg.QueryValueEx(sub_key, "ProfileImagePath")
+                except OSError as exc:
+                    logger.debug(f"Could not read profile {sid or index}: {exc}", exc_info=True)
+                    continue
+                if not isinstance(raw, str) or not raw:
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    raw = ntpath.expandvars(raw)
+                profiles[sid[:-4] if sid.endswith(".bak") else sid] = raw.rstrip("\\")
+    except OSError as exc:
+        logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}", exc_info=True)
+    return profiles
+
+
 def registry_user_path_dirs() -> List[str]:
-    """Existing PATH directories recorded in every loaded user hive.
+    """Existing PATH directories from every loaded user hive, profile-relative.
 
     An npm-global CLI is invoked by name, so its directory is on the user's PATH
     whatever prefix installed it. The candidate list can only name prefixes it
     already knows, so a tool under an unlisted one reads as absent. Reading PATH
     says where to look next. Only loaded hives answer: a logged-out profile's
     ``NTUSER.DAT`` would have to be mounted, which a probe has no business doing.
+
+    Per-user variables are expanded against the hive's OWN profile, not the
+    scanner's: under SYSTEM ``ntpath.expandvars`` would resolve ``%USERPROFILE%``
+    to ``systemprofile``, so every entry using it would fail the directory check
+    and drop the prefix this exists to find. Each profile root is then rewritten
+    to ``~``, and an entry under a profile we cannot attribute is dropped rather
+    than sent with an account name in it.
     """
     try:
         import winreg
     except ImportError:
         return []
 
+    profiles = _profile_image_paths(winreg)
+    roots = list(profiles.values())
     dirs: List[str] = []
     seen = set()
     try:
         with winreg.OpenKey(winreg.HKEY_USERS, "") as users:
             for index in range(winreg.QueryInfoKey(users)[0]):
+                sid = None
                 try:
                     sid = winreg.EnumKey(users, index)
                     if sid.endswith("_Classes") or sid in _SERVICE_PROFILE_SIDS:
                         continue
                     with winreg.OpenKey(users, sid + r"\Environment") as env:
                         raw, kind = winreg.QueryValueEx(env, "Path")
-                except OSError:
+                except OSError as exc:
+                    logger.debug(f"Could not read PATH for {sid or index}: {exc}", exc_info=True)
                     continue
                 if not isinstance(raw, str):
                     continue
-                if kind == winreg.REG_EXPAND_SZ:
-                    raw = ntpath.expandvars(raw)
+                profile = profiles.get(sid)
                 for entry in raw.split(";"):
                     entry = entry.strip().rstrip("\\")
-                    key = entry.lower()
-                    if not entry or key in seen:
+                    if not entry:
+                        continue
+                    if kind == winreg.REG_EXPAND_SZ:
+                        entry = _expand_for_profile(entry, profile)
+                    key = ntpath.normcase(entry)
+                    if key in seen:
                         continue
                     seen.add(key)
                     try:
-                        if os.path.isdir(entry):
-                            dirs.append(entry)
-                    except OSError:
+                        if not os.path.isdir(entry):
+                            continue
+                    except OSError as exc:
+                        logger.debug(f"Could not stat PATH entry {entry}: {exc}", exc_info=True)
                         continue
+                    if profile and _under(entry, profile):
+                        dirs.append("~" + entry[len(profile):])
+                    elif any(_under(entry, root) for root in roots):
+                        logger.debug(f"Dropping PATH entry under an unattributed profile: {entry}")
+                    else:
+                        dirs.append(entry)
     except OSError as exc:
         logger.debug(f"Could not read HKEY_USERS Environment: {exc}", exc_info=True)
     return dirs

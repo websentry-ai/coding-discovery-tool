@@ -626,6 +626,27 @@ def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
     return max(0, int((time.time() - newest) // 86400))
 
 
+_PATH_TAG_MAX_CHARS = 180
+
+
+def windows_user_path_dirs() -> str:
+    """Loaded users' PATH directories, profile-relative, for the no-tools tag.
+
+    An over-budget entry is skipped, not a stopping point: ending the loop would
+    let one long entry hide every short candidate behind it.
+    """
+    if platform.system() != "Windows":
+        return ""
+    from .windows_extraction_helpers import registry_user_path_dirs
+    out, used = [], 0
+    for entry in registry_user_path_dirs():
+        if used + len(entry) + 1 > _PATH_TAG_MAX_CHARS:
+            continue
+        out.append(entry)
+        used += len(entry) + 1
+    return ",".join(out)
+
+
 _NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
 
 
@@ -2686,6 +2707,7 @@ _SENTRY_TAG_KEYS = (
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
+    "user_path_dirs",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths

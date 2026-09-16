@@ -2213,5 +2213,94 @@ class TestRejectedBinaryDiagnostics(unittest.TestCase):
         self.assertIsNone(utils_mod.newest_tool_config_dir_age_days([Path(tmp.name)]))
 
 
+class TestWindowsUserPathDiagnostics(unittest.TestCase):
+    """A CLI is invoked by name, so its dir is on the user's PATH whatever prefix
+    installed it. The candidate list can only name prefixes it knows, so this
+    records where to look next when a Windows scan finds nothing."""
+
+    def _tag(self, entries):
+        with patch.object(utils_mod.platform, "system", return_value="Windows"), \
+             patch("scripts.coding_discovery_tools.windows_extraction_helpers."
+                   "registry_user_path_dirs", return_value=entries):
+            return utils_mod.windows_user_path_dirs()
+
+    def test_a_long_entry_does_not_hide_the_ones_after_it(self):
+        """Truncation skips the over-budget entry; a later short candidate still lands."""
+        tag = self._tag(["C:\\" + "x" * utils_mod._PATH_TAG_MAX_CHARS, r"~\scoop\shims"])
+        self.assertEqual(r"~\scoop\shims", tag)
+
+    def test_value_is_capped_for_the_tag(self):
+        self.assertLessEqual(len(self._tag([f"C:\\dir{i:03}" for i in range(200)])),
+                             utils_mod._PATH_TAG_MAX_CHARS)
+
+    def test_empty_off_windows(self):
+        with patch.object(utils_mod.platform, "system", return_value="Darwin"):
+            self.assertEqual("", utils_mod.windows_user_path_dirs())
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("user_path_dirs", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestWindowsPathProfileResolution(unittest.TestCase):
+    """Under SYSTEM, expanding %USERPROFILE% against the scanner resolves to
+    systemprofile, so every entry using it fails the directory check and drops the
+    prefix this diagnostic exists to find."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.windows_extraction_helpers as weh
+        self.weh = weh
+
+    def test_per_user_vars_resolve_against_the_hive_owner_not_the_scanner(self):
+        expanded = self.weh._expand_for_profile(r"%USERPROFILE%\scoop\shims", r"C:\Users\alice")
+        self.assertEqual(r"C:\Users\alice\scoop\shims", expanded)
+
+    def test_localappdata_derives_from_the_same_profile(self):
+        self.assertEqual(r"C:\Users\alice\AppData\Local\bin",
+                         self.weh._expand_for_profile(r"%LOCALAPPDATA%\bin", r"C:\Users\alice"))
+
+    def test_unattributable_profile_var_is_left_unexpanded_not_pointed_at_the_scanner(self):
+        self.assertEqual(r"%USERPROFILE%\scoop",
+                         self.weh._expand_for_profile(r"%USERPROFILE%\scoop", None))
+
+    def test_machine_vars_still_expand_from_the_process(self):
+        with patch.dict(os.environ, {"SOMEMACHINEVAR": r"C:\Tools"}):
+            self.assertEqual(r"C:\Tools\bin",
+                             self.weh._expand_for_profile(r"%SOMEMACHINEVAR%\bin", r"C:\Users\a"))
+
+    def test_sibling_profile_is_not_treated_as_inside_its_shorter_neighbour(self):
+        self.assertFalse(self.weh._under(r"C:\Users\bobby\bin", r"C:\Users\bob"))
+        self.assertTrue(self.weh._under(r"C:\Users\bob\bin", r"C:\Users\bob"))
+
+    def test_boundary_check_is_case_insensitive_like_windows(self):
+        self.assertTrue(self.weh._under(r"c:\users\BOB\bin", r"C:\Users\bob"))
+
+    def test_dot_segments_cannot_smuggle_another_account_past_redaction(self):
+        """Lexically under alice, actually bob: redacting it would emit bob's name."""
+        self.assertFalse(self.weh._under(r"C:\Users\alice\..\bob\bin", r"C:\Users\alice"))
+        self.assertTrue(self.weh._under(r"C:\Users\alice\foo\..\bin", r"C:\Users\alice"))
+
+    def test_unc_entries_are_rejected_before_any_filesystem_call(self):
+        """isdir on a share authenticates this scan's token, Local System under MDM."""
+        for hostile in (r"\\attacker\share", "//attacker/share", r"\\?\UNC\attacker\share"):
+            self.assertFalse(self.weh._is_local_drive(hostile), hostile)
+        self.assertTrue(self.weh._is_local_drive(r"C:\Program Files\nodejs"))
+
+    def test_a_mapped_drive_is_asked_its_type_not_assumed_local(self):
+        """Z:\\ looks local but can be a share, so the drive type decides."""
+        fake = Mock()
+        fake.windll.kernel32.GetDriveTypeW.return_value = self.weh._DRIVE_REMOTE
+        with patch.dict("sys.modules", {"ctypes": fake}):
+            self.assertFalse(self.weh._is_local_drive(r"Z:\bin"))
+        fake.windll.kernel32.GetDriveTypeW.return_value = 3   # DRIVE_FIXED
+        with patch.dict("sys.modules", {"ctypes": fake}):
+            self.assertTrue(self.weh._is_local_drive(r"C:\bin"))
+
+    def test_only_windows_owned_roots_are_sent_verbatim(self):
+        """A path elsewhere can name a customer or project, so it is counted not sent."""
+        with patch.dict(os.environ, {"ProgramData": r"C:\ProgramData"}):
+            self.assertTrue(self.weh._is_machine_root(r"C:\ProgramData\chocolatey\bin"))
+            self.assertFalse(self.weh._is_machine_root(r"D:\Projects\Acquisition-Target\bin"))
+
+
 if __name__ == "__main__":
     unittest.main()

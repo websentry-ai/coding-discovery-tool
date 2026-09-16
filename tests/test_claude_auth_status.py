@@ -173,6 +173,18 @@ class TestGetPlanFromKeychain(unittest.TestCase):
         self.assertEqual(cmd[:3], ["launchctl", "asuser", "501"])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=None)
+    def test_unscoped_container_read_is_skipped(
+        self, _mock_uid, _mock_container, _mock_sys, _mock_root, mock_run
+    ):
+        """Without the wrapper or a keychain path it reads the scanner's own keychain."""
+        self.assertIsNone(_get_plan_from_keychain("alice"))
+        mock_run.assert_not_called()
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
     @patch("scripts.coding_discovery_tools.utils._get_real_home", return_value="/Users/testuser")
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")

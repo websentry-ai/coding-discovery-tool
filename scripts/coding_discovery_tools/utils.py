@@ -1805,6 +1805,7 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
     is_root = _is_root()
     is_darwin = platform.system() == "Darwin"
 
+    keychain_path = None
     if is_root:
         real_home = _get_real_home(username)
         if real_home:
@@ -1817,6 +1818,11 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
         launchctl = _safe_helper("launchctl")
         if uid is not None and launchctl:
             cmd = [launchctl, "asuser", str(uid)] + cmd
+        elif keychain_path is None:
+            # Neither scoped to their keychain nor run as them: this would read
+            # the scanner's own, so a hit would belong to the wrong account.
+            logger.debug(f"No keychain context for {username}; skipping the probe")
+            return None
 
     try:
         result = subprocess.run(

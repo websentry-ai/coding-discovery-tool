@@ -517,10 +517,10 @@ _PATH_TAG_MAX_CHARS = 180
 
 
 def windows_user_path_dirs() -> str:
-    """Loaded users' existing PATH directories, profile-relative, for the no-tools tag.
+    """Loaded users' PATH directories, profile-relative, for the no-tools tag.
 
-    Over-budget entries are skipped rather than ending the scan, so a long one
-    cannot hide a short candidate behind it.
+    An over-budget entry is skipped, not a stopping point: ending the loop would
+    let one long entry hide every short candidate behind it.
     """
     if platform.system() != "Windows":
         return ""

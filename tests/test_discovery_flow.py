@@ -2279,6 +2279,17 @@ class TestWindowsPathProfileResolution(unittest.TestCase):
         self.assertFalse(self.weh._under(r"C:\Users\alice\..\bob\bin", r"C:\Users\alice"))
         self.assertTrue(self.weh._under(r"C:\Users\alice\foo\..\bin", r"C:\Users\alice"))
 
+    def test_unc_entries_are_rejected_before_any_filesystem_call(self):
+        """isdir on a share authenticates this scan's token, Local System under MDM."""
+        for hostile in (r"\\attacker\share", "//attacker/share", r"\\?\UNC\attacker\share"):
+            self.assertFalse(self.weh._is_local_drive(hostile), hostile)
+        self.assertTrue(self.weh._is_local_drive(r"C:\Program Files\nodejs"))
+
+    def test_a_profile_ProfileList_forgot_is_still_not_emitted(self):
+        """A deleted profile matches no root, so the Users segment is the backstop."""
+        self.assertTrue(self.weh._names_an_account(r"C:\Users\ghost\bin", []))
+        self.assertFalse(self.weh._names_an_account(r"C:\Program Files\nodejs", []))
+
 
 if __name__ == "__main__":
     unittest.main()

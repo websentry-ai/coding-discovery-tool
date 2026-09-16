@@ -74,26 +74,36 @@ def registry_profile_paths() -> Tuple[List[Path], bool]:
     return paths, complete
 
 
-def _under(path: str, root: str) -> bool:
-    """Whether ``path`` is ``root`` or sits inside it, on a separator boundary.
+_PROFILE_VARS = ("USERPROFILE", "HOMEPATH", "APPDATA", "LOCALAPPDATA")
+_LOCAL_DRIVE = re.compile(r"^[A-Za-z]:\\")
 
-    A prefix test alone would put ``C:\\Users\\bobby`` inside ``C:\\Users\\bob``, and
-    an uncollapsed ``C:\\Users\\alice\\..\\bob`` inside alice's.
-    """
+
+def _under(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or inside it, on a separator boundary."""
     path = ntpath.normcase(ntpath.normpath(path)).rstrip("\\")
     root = ntpath.normcase(ntpath.normpath(root)).rstrip("\\")
     return path == root or path.startswith(root + "\\")
 
 
-_PROFILE_VARS = ("USERPROFILE", "HOMEPATH", "APPDATA", "LOCALAPPDATA")
+def _is_local_drive(path: str) -> bool:
+    """Whether ``path`` is a plain local drive path, so probing it touches no network."""
+    return bool(_LOCAL_DRIVE.match(path)) and not path.startswith("\\\\")
+
+
+def _names_an_account(entry: str, roots: List[str]) -> bool:
+    """Whether ``entry`` sits under any profile, including one ``ProfileList`` forgot.
+
+    A deleted profile leaves no root to match, so the ``Users`` segment is the
+    backstop: emitting such a path verbatim would put the account name in the tag.
+    """
+    if any(_under(entry, root) for root in roots):
+        return True
+    parts = ntpath.normcase(entry).split("\\")
+    return "users" in parts[:2] and len(parts) > 2
 
 
 def _expand_for_profile(entry: str, profile: Optional[str]) -> str:
-    """Expand ``entry``'s variables, resolving the per-user ones against ``profile``.
-
-    Machine variables (``%SystemRoot%``, ``%ProgramFiles%``) are the same for every
-    account, so the process environment answers those correctly.
-    """
+    """Expand ``entry``, resolving per-user variables against ``profile`` not the scanner."""
     if profile:
         for var, value in (("USERPROFILE", profile), ("HOMEPATH", profile),
                            ("APPDATA", ntpath.join(profile, "AppData", "Roaming")),
@@ -105,7 +115,7 @@ def _expand_for_profile(entry: str, profile: Optional[str]) -> str:
 
 
 def _profile_image_paths(winreg) -> Dict[str, str]:
-    """``{SID: profile dir}`` from ``ProfileList``, for every profile on the machine."""
+    """``{SID: profile dir}`` from ``ProfileList``."""
     profiles: Dict[str, str] = {}
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as key:
@@ -131,18 +141,10 @@ def _profile_image_paths(winreg) -> Dict[str, str]:
 def registry_user_path_dirs() -> List[str]:
     """Existing PATH directories from every loaded user hive, profile-relative.
 
-    An npm-global CLI is invoked by name, so its directory is on the user's PATH
-    whatever prefix installed it. The candidate list can only name prefixes it
-    already knows, so a tool under an unlisted one reads as absent. Reading PATH
-    says where to look next. Only loaded hives answer: a logged-out profile's
-    ``NTUSER.DAT`` would have to be mounted, which a probe has no business doing.
-
-    Per-user variables are expanded against the hive's OWN profile, not the
-    scanner's: under SYSTEM ``ntpath.expandvars`` would resolve ``%USERPROFILE%``
-    to ``systemprofile``, so every entry using it would fail the directory check
-    and drop the prefix this exists to find. Each profile root is then rewritten
-    to ``~``, and an entry under a profile we cannot attribute is dropped rather
-    than sent with an account name in it.
+    A CLI is invoked by name, so its directory is on the user's PATH whatever prefix
+    installed it, and the candidate list can only name prefixes it already knows.
+    Only loaded hives answer: mounting a logged-out profile's NTUSER.DAT is a side
+    effect a probe has no business causing.
     """
     try:
         import winreg
@@ -175,13 +177,17 @@ def registry_user_path_dirs() -> List[str]:
                         continue
                     if kind == winreg.REG_EXPAND_SZ:
                         entry = _expand_for_profile(entry, profile)
-                    # Collapsed before anything reads it: an uncollapsed
-                    # ~\..\..\bob\bin would redact to a path naming another account.
+                    # Collapse first: ~\..\..\bob\bin would otherwise redact to a path naming bob.
                     entry = ntpath.normpath(entry).rstrip("\\")
                     key = ntpath.normcase(entry)
                     if key in seen:
                         continue
                     seen.add(key)
+                    # Before any filesystem call: isdir on \\host\share authenticates
+                    # this scan's token, which under MDM is Local System.
+                    if not _is_local_drive(entry):
+                        logger.debug(f"Skipping non-local PATH entry: {entry}")
+                        continue
                     try:
                         if not os.path.isdir(entry):
                             continue
@@ -190,8 +196,8 @@ def registry_user_path_dirs() -> List[str]:
                         continue
                     if profile and _under(entry, profile):
                         dirs.append("~" + entry[len(profile):])
-                    elif any(_under(entry, root) for root in roots):
-                        logger.debug(f"Dropping PATH entry under an unattributed profile: {entry}")
+                    elif _names_an_account(entry, roots):
+                        logger.debug(f"Dropping unattributable profile PATH entry: {entry}")
                     else:
                         dirs.append(entry)
     except OSError as exc:

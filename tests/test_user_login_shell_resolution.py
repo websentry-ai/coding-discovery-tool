@@ -21,8 +21,8 @@ from unittest.mock import patch
 
 from scripts.coding_discovery_tools.utils import (
     _MARKER,
-    _SUDO,
     _login_shell_cache,
+    _safe_helper_cache,
     user_login_shell_tool_path,
 )
 
@@ -37,6 +37,9 @@ class TestUserLoginShellResolution(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         _login_shell_cache.clear()
         self.addCleanup(_login_shell_cache.clear)
+        _safe_helper_cache.clear()
+        _safe_helper_cache["sudo"] = "/fake/sudo"
+        self.addCleanup(_safe_helper_cache.clear)
         self.binary = self.home / "custom-prefix" / "bin" / "claude"
         self.binary.parent.mkdir(parents=True)
         self.binary.write_text("#!/bin/sh\n")
@@ -62,8 +65,7 @@ class TestUserLoginShellResolution(unittest.TestCase):
     def test_drops_privileges_and_cannot_hang(self):
         _, run = self._run(self._line("claude", self.binary))
         args, kwargs = run.call_args
-        self.assertEqual(args[0][:6], [_SUDO, "-n", "-u", "alice", "-i", "sh"])
-        self.assertFalse(_SUDO == "sudo" and os.path.exists("/usr/bin/sudo"))
+        self.assertEqual(args[0][:6], ["/fake/sudo", "-n", "-u", "alice", "-i", "sh"])
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertGreater(kwargs["timeout"], 0)
 
@@ -130,6 +132,13 @@ class TestUserLoginShellResolution(unittest.TestCase):
         self.binary.chmod(0o644)
         result, _ = self._run(self._line("claude", self.binary))
         self.assertIsNone(result)
+
+    def test_no_safe_sudo_skips_the_lookup(self):
+        """Better to lose the fallback than to let root's PATH pick the helper."""
+        _safe_helper_cache["sudo"] = None
+        result, run = self._run(self._line("claude", self.binary))
+        self.assertIsNone(result)
+        run.assert_not_called()
 
     def test_another_accounts_binary_is_not_attributed(self):
         """A shared prefix on the PATH must not hand Bob's install to Alice."""

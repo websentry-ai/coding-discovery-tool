@@ -135,10 +135,20 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 LOGIN_SHELL_TIMEOUT = 10
 LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent", "copilot")
 _MARKER = "__unbound__"
-# argv[0] of a root exec: absolute where it exists, so root's PATH cannot supply it.
-_SUDO = "/usr/bin/sudo" if os.path.exists("/usr/bin/sudo") else "sudo"
 
 _login_shell_cache: Dict[str, Dict[str, str]] = {}
+_safe_helper_cache: Dict[str, Optional[str]] = {}
+
+
+def _safe_helper(name: str) -> Optional[str]:
+    """Absolute path for a helper we exec as root, or None if PATH offers no safe one.
+
+    These run before any privilege drop, so a bare name would let root's own PATH
+    decide what executes. Skipping beats falling back to the bare name.
+    """
+    if name not in _safe_helper_cache:
+        _safe_helper_cache[name] = _which_no_cwd(name)
+    return _safe_helper_cache[name]
 
 
 def _login_shell_owner(user_home: Path):
@@ -176,6 +186,11 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
     if entry is None:
         return {}
 
+    sudo = _safe_helper("sudo")
+    if sudo is None:
+        logger.debug("No safe sudo on PATH; skipping the login-shell lookup")
+        return {}
+
     # Marker-prefixed so profile banner output cannot be mistaken for a path.
     script = "; ".join(
         f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
@@ -183,7 +198,7 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
     )
     try:
         result = subprocess.run(
-            [_SUDO, "-n", "-u", entry.pw_name, "-i", "sh", "-c", script],
+            [sudo, "-n", "-u", entry.pw_name, "-i", "sh", "-c", script],
             capture_output=True, text=True,
             stdin=subprocess.DEVNULL, timeout=LOGIN_SHELL_TIMEOUT,
         )
@@ -1799,8 +1814,9 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
     is_container = is_darwin and _is_daemon_container()
     if is_darwin and (is_root or is_container):
         uid = _get_uid_for_user(username)
-        if uid is not None:
-            cmd = ["launchctl", "asuser", str(uid)] + cmd
+        launchctl = _safe_helper("launchctl")
+        if uid is not None and launchctl:
+            cmd = [launchctl, "asuser", str(uid)] + cmd
 
     try:
         result = subprocess.run(
@@ -1995,12 +2011,14 @@ def get_claude_subscription_type(
 
         if use_launchctl:
             uid = _get_uid_for_user(username)
-            if uid is not None:
+            launchctl = _safe_helper("launchctl")
+            sudo = _safe_helper("sudo")
+            if uid is not None and launchctl and sudo:
                 shell = _get_compatible_shell(username)
                 # asuser adopts the namespace but not the uid; sudo drops it.
                 cmd = [
-                    "launchctl", "asuser", str(uid),
-                    "sudo", "-n", "-u", username,
+                    launchctl, "asuser", str(uid),
+                    sudo, "-n", "-u", username,
                     shell, "-lc",
                     auth_cmd,
                 ]
@@ -2802,6 +2820,7 @@ def reset_sentry_run_state() -> None:
     _vscode_bundles_found.clear()
     _cowork_probes.clear()
     _login_shell_cache.clear()
+    _safe_helper_cache.clear()
     reset_vscode_registry_state()
     global _sentry_run_context
     _sentry_run_context = {}

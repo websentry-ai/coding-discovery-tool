@@ -33,6 +33,15 @@ _MOD = "scripts.coding_discovery_tools.utils"
 class TestGetPlanFromKeychain(unittest.TestCase):
     """Tests for _get_plan_from_keychain direct Keychain reader."""
 
+    def setUp(self):
+        # Identity, so these assert branch logic rather than the runner's PATH.
+        helpers = patch(
+            "scripts.coding_discovery_tools.utils._safe_helper",
+            side_effect=lambda name: name,
+        )
+        helpers.start()
+        self.addCleanup(helpers.stop)
+
     def _mock_result(self, stdout="", returncode=0):
         mock = MagicMock(spec=subprocess.CompletedProcess)
         mock.stdout = stdout
@@ -326,6 +335,14 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
     def setUp(self):
         self.claude_binary = "/usr/local/bin/claude"
         self.username = "testuser"
+        # Identity, so these keep asserting branch logic rather than PATH layout;
+        # the absolute form is pinned by test_root_execs_resolve_to_absolute_helpers.
+        helpers = patch(
+            "scripts.coding_discovery_tools.utils._safe_helper",
+            side_effect=lambda name: name,
+        )
+        helpers.start()
+        self.addCleanup(helpers.stop)
         patcher = patch(
             "scripts.coding_discovery_tools.utils._get_plan_from_keychain",
             return_value=None,

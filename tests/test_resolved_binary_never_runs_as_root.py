@@ -89,6 +89,33 @@ class TestResolvedBinaryNeverRunsAsRoot(unittest.TestCase):
             fake_pwd.getpwuid.return_value = entry
             self.assertIsNone(U.user_login_shell_tool_path("claude", self.home))
 
+    def _plan_probe_calls(self, helper):
+        calls = []
+        with patch.object(U.platform, "system", return_value="Darwin"), \
+                patch.object(U, "_is_root", return_value=True), \
+                patch.object(U.os, "geteuid", return_value=0), \
+                patch.object(U, "_get_uid_for_user", return_value=501), \
+                patch.object(U, "_get_compatible_shell", return_value="/bin/zsh"), \
+                patch.object(U, "_safe_helper", side_effect=helper), \
+                patch.object(U, "_is_safe_exec_path", return_value=True), \
+                patch.object(U.subprocess, "run") as run:
+            run.side_effect = lambda cmd, **kw: (
+                calls.append(cmd),
+                subprocess.CompletedProcess([], 1, stdout="", stderr=""),
+            )[1]
+            U.get_claude_subscription_type("alice", str(self.binary), user_home=self.home)
+        return calls
+
+    def test_root_execs_resolve_to_absolute_helpers(self):
+        """launchctl and sudo run before any privilege drop, so PATH must not pick them."""
+        calls = self._plan_probe_calls(lambda name: f"/sbin/{name}")
+        probe = next(c for c in calls if len(c) > 3 and str(c[3]).endswith("sudo"))
+        self.assertEqual([probe[0], probe[3]], ["/sbin/launchctl", "/sbin/sudo"])
+
+    def test_an_unsafe_helper_skips_the_branch_rather_than_going_bare(self):
+        calls = self._plan_probe_calls(lambda name: None)
+        self.assertFalse([c for c in calls if "launchctl" in str(c[0])])
+
     def test_a_refusal_is_reported_as_its_own_cause(self):
         """Refusing must not read as a logged-out user, or the alert stays silent."""
         diagnostics = []

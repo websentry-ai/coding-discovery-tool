@@ -2274,6 +2274,11 @@ class TestWindowsPathProfileResolution(unittest.TestCase):
     def test_boundary_check_is_case_insensitive_like_windows(self):
         self.assertTrue(self.weh._under(r"c:\users\BOB\bin", r"C:\Users\bob"))
 
+    def test_dot_segments_cannot_smuggle_another_account_past_redaction(self):
+        """Lexically under alice, actually bob: redacting it would emit bob's name."""
+        self.assertFalse(self.weh._under(r"C:\Users\alice\..\bob\bin", r"C:\Users\alice"))
+        self.assertTrue(self.weh._under(r"C:\Users\alice\foo\..\bin", r"C:\Users\alice"))
+
 
 if __name__ == "__main__":
     unittest.main()

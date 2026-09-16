@@ -77,9 +77,11 @@ def registry_profile_paths() -> Tuple[List[Path], bool]:
 def _under(path: str, root: str) -> bool:
     """Whether ``path`` is ``root`` or sits inside it, on a separator boundary.
 
-    A prefix test alone would put ``C:\\Users\\bobby`` inside ``C:\\Users\\bob``.
+    A prefix test alone would put ``C:\\Users\\bobby`` inside ``C:\\Users\\bob``, and
+    an uncollapsed ``C:\\Users\\alice\\..\\bob`` inside alice's.
     """
-    path, root = ntpath.normcase(path).rstrip("\\"), ntpath.normcase(root).rstrip("\\")
+    path = ntpath.normcase(ntpath.normpath(path)).rstrip("\\")
+    root = ntpath.normcase(ntpath.normpath(root)).rstrip("\\")
     return path == root or path.startswith(root + "\\")
 
 
@@ -120,7 +122,7 @@ def _profile_image_paths(winreg) -> Dict[str, str]:
                     continue
                 if kind == winreg.REG_EXPAND_SZ:
                     raw = ntpath.expandvars(raw)
-                profiles[sid[:-4] if sid.endswith(".bak") else sid] = raw.rstrip("\\")
+                profiles[sid[:-4] if sid.endswith(".bak") else sid] = ntpath.normpath(raw).rstrip("\\")
     except OSError as exc:
         logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}", exc_info=True)
     return profiles
@@ -173,6 +175,9 @@ def registry_user_path_dirs() -> List[str]:
                         continue
                     if kind == winreg.REG_EXPAND_SZ:
                         entry = _expand_for_profile(entry, profile)
+                    # Collapsed before anything reads it: an uncollapsed
+                    # ~\..\..\bob\bin would redact to a path naming another account.
+                    entry = ntpath.normpath(entry).rstrip("\\")
                     key = ntpath.normcase(entry)
                     if key in seen:
                         continue

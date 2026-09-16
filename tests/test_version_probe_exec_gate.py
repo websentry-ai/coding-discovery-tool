@@ -34,6 +34,7 @@ class TestVersionProbeExecGate(unittest.TestCase):
         self.binary.write_text("#!/bin/sh\necho 1.2.3\n")
         self.binary.chmod(0o755)
 
+    @unittest.skipIf(os.name == "nt", "the gate is POSIX-only")
     def test_unsafe_absolute_binary_is_not_executed(self):
         with patch(f"{_MOD}._is_safe_exec_path", return_value=False), \
                 patch(f"{_MOD}.subprocess.run") as run:
@@ -78,7 +79,8 @@ class TestVersionProbeExecGate(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "symlink semantics differ on Windows")
     def test_executes_the_path_it_validated(self):
-        link = self.dir / "claude-link"
+        link = self.dir / "sub" / "claude"
+        link.parent.mkdir()
         link.symlink_to(self.binary)
         with patch(f"{_MOD}.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, stdout="1.2.3", stderr="")
@@ -99,7 +101,9 @@ class TestVersionProbeExecGate(unittest.TestCase):
 
     def test_non_root_scan_is_not_gated_at_all(self):
         with patch(f"{_MOD}._running_as_root", return_value=False), \
-                patch(f"{_MOD}._is_safe_exec_path") as gate:
+                patch(f"{_MOD}._is_safe_exec_path") as gate, \
+                patch(f"{_MOD}.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="1.2.3", stderr="")
             self.assertEqual(run_command([str(self.binary), "--version"]), "1.2.3")
         gate.assert_not_called()
 

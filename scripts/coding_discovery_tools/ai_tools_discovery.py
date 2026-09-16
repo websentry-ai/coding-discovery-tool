@@ -3697,14 +3697,19 @@ def main():
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
-                                    # Only alert when the CLI actually succeeded (ok=True) at
-                                    # some stage but returned no plan.  If every stage failed
-                                    # (ok=False), the user never authenticated — not actionable.
+                                    # Alert when the CLI succeeded (ok=True) somewhere but
+                                    # returned no plan, or when the exec gate refused the
+                                    # binary.  Every stage failing on its own means the user
+                                    # never authenticated — not actionable.
                                     cli_succeeded = any(
                                         d.get("data", {}).get("ok") is True
                                         for d in plan_diagnostics
                                     )
-                                    if tool_filtered.get("projects") and cli_succeeded:
+                                    gate_refused = any(
+                                        d.get("data", {}).get("gate_refused")
+                                        for d in plan_diagnostics
+                                    )
+                                    if tool_filtered.get("projects") and (cli_succeeded or gate_refused):
                                         report_to_sentry(
                                             RuntimeError("Claude Code plan detection failed"),
                                             context={

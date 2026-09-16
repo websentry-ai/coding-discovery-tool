@@ -28,6 +28,7 @@ from .utils import (
     record_cowork_probe,
     resolve_npm_global_tool_bin,
     run_command,
+    user_login_shell_tool_path,
     windows_node_manager_shims,
 )
 from .vscode_extension_helpers import (
@@ -669,6 +670,10 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
             except (PermissionError, OSError):
                 pass
 
+    login_shell_path = user_login_shell_tool_path("junie", user_home)
+    if login_shell_path:
+        return login_shell_path
+
     return None
 
 
@@ -847,6 +852,10 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             except (PermissionError, OSError):
                 pass
 
+    login_shell_path = user_login_shell_tool_path("claude", user_home)
+    if login_shell_path:
+        return login_shell_path
+
     return None
 
 
@@ -972,5 +981,9 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
                     return str(resolved)
             except (PermissionError, OSError):
                 pass
+
+    login_shell_path = user_login_shell_tool_path("cursor-agent", user_home)
+    if login_shell_path:
+        return login_shell_path
 
     return None

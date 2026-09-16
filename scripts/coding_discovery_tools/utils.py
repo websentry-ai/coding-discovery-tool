@@ -82,29 +82,42 @@ def _running_as_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+def safe_exec_argv(command: list) -> Optional[list]:
+    """``command`` with argv[0] resolved, or None when it is unsafe to run.
+
+    Root-only: running your own binary as yourself escalates nothing, and gating it
+    there would drop versions for ordinary Homebrew installs. Skipped on Windows,
+    where _is_safe_exec_path cannot refuse anything and resolving would be the only
+    effect.
+    """
+    if not command or os.name == "nt" or not _running_as_root() or not os.path.isabs(str(command[0])):
+        return command
+    resolved = os.path.realpath(str(command[0]))
+    if not _is_safe_exec_path(resolved):
+        logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
+        return None
+    # Stem, not filename: npm ships claude as claude.exe.
+    named = Path(str(command[0])).name
+    if Path(resolved).name != named and Path(resolved).stem != Path(named).stem:
+        logger.debug(f"Refusing to execute {command[0]}: resolves to {Path(resolved).name}")
+        return None
+    return [resolved, *command[1:]]
+
+
 def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     """
     Run a shell command and return its output.
-    
+
     Args:
         command: Command and arguments as list
         timeout: Command timeout in seconds
-        
-    Under a root scan an absolute argv[0] is a binary resolved out of someone's home,
-    so it is refused unless _is_safe_exec_path clears it, and the resolved target is
-    what gets executed so validation and execution cannot disagree about which file
-    they mean. Only under root: running your own binary as yourself escalates nothing,
-    and gating it there would just drop versions for ordinary Homebrew installs.
 
     Returns:
         Command output as string or None if failed
     """
-    if command and _running_as_root() and os.path.isabs(str(command[0])):
-        resolved = os.path.realpath(str(command[0]))
-        if not _is_safe_exec_path(resolved):
-            logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
-            return None
-        command = [resolved, *command[1:]]
+    command = safe_exec_argv(command)
+    if command is None:
+        return None
     try:
         result = subprocess.run(
             command,
@@ -117,6 +130,106 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     except Exception as e:
         logger.debug(f"Command {command} failed: {e}")
     return None
+
+
+LOGIN_SHELL_TIMEOUT = 10
+LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent", "copilot")
+_MARKER = "__unbound__"
+
+_login_shell_cache: Dict[str, Dict[str, str]] = {}
+_safe_helper_cache: Dict[str, Optional[str]] = {}
+
+
+def _safe_helper(name: str) -> Optional[str]:
+    """Absolute path for a helper we exec as root, or None if PATH offers no safe one.
+
+    These run before any privilege drop, so a bare name would let root's own PATH
+    decide what executes. Skipping beats falling back to the bare name.
+    """
+    if name not in _safe_helper_cache:
+        _safe_helper_cache[name] = _which_no_cwd(name)
+    return _safe_helper_cache[name]
+
+
+def _login_shell_owner(user_home: Path):
+    """passwd entry for ``user_home``, only when that account's own home IS this path."""
+    try:
+        entry = pwd.getpwuid(user_home.stat().st_uid)
+    except (KeyError, PermissionError, OSError) as e:
+        logger.debug(f"No passwd entry for {user_home}: {e}")
+        return None
+    try:
+        if os.path.realpath(entry.pw_dir) != os.path.realpath(str(user_home)):
+            logger.debug(f"{user_home} is owned by {entry.pw_name}, whose home is elsewhere")
+            return None
+    except OSError:
+        return None
+    return entry
+
+
+def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
+    """Absolute path ``user_home``'s own login shell resolves for ``tool``, else None.
+
+    Root-only: a non-root scan already has the ``which`` backstop.
+    """
+    if platform.system() == "Windows" or pwd is None or not _running_as_root():
+        return None
+
+    key = str(user_home)
+    if key not in _login_shell_cache:
+        _login_shell_cache[key] = _resolve_login_shell_tools(user_home)
+    return _login_shell_cache[key].get(tool)
+
+
+def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
+    entry = _login_shell_owner(user_home)
+    if entry is None:
+        return {}
+
+    sudo = _safe_helper("sudo")
+    if sudo is None:
+        logger.debug("No safe sudo on PATH; skipping the login-shell lookup")
+        return {}
+
+    # Marker-prefixed so profile banner output cannot be mistaken for a path.
+    script = "; ".join(
+        f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
+        for tool in LOGIN_SHELL_TOOLS
+    )
+    try:
+        result = subprocess.run(
+            [sudo, "-n", "-u", entry.pw_name, "-i", "sh", "-c", script],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=LOGIN_SHELL_TIMEOUT,
+        )
+    except Exception as e:
+        logger.debug(f"Login-shell lookup as {entry.pw_name} failed: {e}")
+        return {}
+
+    found: Dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith(_MARKER) or "\t" not in line:
+            continue
+        tool, _, path = line[len(_MARKER):].partition("\t")
+        resolved = Path(path.strip())
+        # The name as given, so a profile cannot rename another binary as a tool.
+        if resolved.name != tool:
+            logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
+            continue
+        try:
+            # Ownership on the target, not the link: the candidate loops reject
+            # another account's install and this must not add it back.
+            real = Path(os.path.realpath(str(resolved)))
+            if (resolved.is_absolute() and real.is_file() and os.access(str(real), os.X_OK)
+                    and machine_global_binary_owned_by_user(real, user_home)):
+                found[tool] = str(resolved)
+            else:
+                logger.debug(f"Login shell gave an unusable path for {tool}: {path!r}")
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not stat {path!r} for {tool}: {e}")
+    if not found:
+        logger.debug(f"Login shell resolved no tools for {entry.pw_name} (rc={result.returncode})")
+    return found
 
 
 def resolve_npm_global_tool_bin(
@@ -1623,7 +1736,13 @@ def _run_auth_status(
     - (True, None, "claude.ai", "/login managed key")   — org-managed login
     - (True, None, None, None)                   — user is not logged in
     - (False, None, None, None)                  — command failed
+
+    The direct branch runs a resolved binary without dropping privileges, unlike the
+    launchctl and su branches, so it takes the same gate as run_command.
     """
+    cmd = safe_exec_argv(cmd)
+    if cmd is None:
+        return False, None, None, None
     try:
         result = subprocess.run(
             cmd,
@@ -1686,6 +1805,7 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
     is_root = _is_root()
     is_darwin = platform.system() == "Darwin"
 
+    keychain_path = None
     if is_root:
         real_home = _get_real_home(username)
         if real_home:
@@ -1695,8 +1815,14 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
     is_container = is_darwin and _is_daemon_container()
     if is_darwin and (is_root or is_container):
         uid = _get_uid_for_user(username)
-        if uid is not None:
-            cmd = ["launchctl", "asuser", str(uid)] + cmd
+        launchctl = _safe_helper("launchctl")
+        if uid is not None and launchctl:
+            cmd = [launchctl, "asuser", str(uid)] + cmd
+        elif keychain_path is None:
+            # Neither scoped to their keychain nor run as them: this would read
+            # the scanner's own, so a hit would belong to the wrong account.
+            logger.debug(f"No keychain context for {username}; skipping the probe")
+            return None
 
     try:
         result = subprocess.run(
@@ -1891,10 +2017,14 @@ def get_claude_subscription_type(
 
         if use_launchctl:
             uid = _get_uid_for_user(username)
-            if uid is not None:
+            launchctl = _safe_helper("launchctl")
+            sudo = _safe_helper("sudo")
+            if uid is not None and launchctl and sudo:
                 shell = _get_compatible_shell(username)
+                # asuser adopts the namespace but not the uid; sudo drops it.
                 cmd = [
-                    "launchctl", "asuser", str(uid),
+                    launchctl, "asuser", str(uid),
+                    sudo, "-n", "-u", username,
                     shell, "-lc",
                     auth_cmd,
                 ]
@@ -1962,6 +2092,8 @@ def get_claude_subscription_type(
                     f"(daemon container detected)"
                 )
         ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="direct", env=env)
+        # Distinguishes "we declined to run it" from "it ran and said nothing".
+        gate_refused = safe_exec_argv(cmd) is None
         if diagnostics is not None:
             diagnostics.append({
                 "category": "direct_exec",
@@ -1974,6 +2106,7 @@ def get_claude_subscription_type(
                     "key_source": key_source,
                     "binary": claude_binary,
                     "shell_fallback": shell_fallback,
+                    "gate_refused": gate_refused,
                     "daemon_container": is_container if is_darwin else False,
                 },
             })
@@ -2692,6 +2825,8 @@ def reset_sentry_run_state() -> None:
     _rejected_binaries.clear()
     _vscode_bundles_found.clear()
     _cowork_probes.clear()
+    _login_shell_cache.clear()
+    _safe_helper_cache.clear()
     reset_vscode_registry_state()
     global _sentry_run_context
     _sentry_run_context = {}

@@ -90,7 +90,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, windows_user_path_dirs
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -160,7 +160,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, windows_user_path_dirs
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -3697,14 +3697,19 @@ def main():
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
-                                    # Only alert when the CLI actually succeeded (ok=True) at
-                                    # some stage but returned no plan.  If every stage failed
-                                    # (ok=False), the user never authenticated — not actionable.
+                                    # Alert when the CLI succeeded (ok=True) somewhere but
+                                    # returned no plan, or when the exec gate refused the
+                                    # binary.  Every stage failing on its own means the user
+                                    # never authenticated — not actionable.
                                     cli_succeeded = any(
                                         d.get("data", {}).get("ok") is True
                                         for d in plan_diagnostics
                                     )
-                                    if tool_filtered.get("projects") and cli_succeeded:
+                                    gate_refused = any(
+                                        d.get("data", {}).get("gate_refused")
+                                        for d in plan_diagnostics
+                                    )
+                                    if tool_filtered.get("projects") and (cli_succeeded or gate_refused):
                                         report_to_sentry(
                                             RuntimeError("Claude Code plan detection failed"),
                                             context={
@@ -4048,6 +4053,7 @@ def main():
                     no_tools_ctx["is_elevated"] = admin_state
                     no_tools_ctx["detect_scope"] = "all_users" if admin_state else "single_home"
                     no_tools_ctx["scan_home"] = os.path.basename(os.path.expanduser("~"))
+                    no_tools_ctx["user_path_dirs"] = windows_user_path_dirs()
                 report_to_sentry(
                     RuntimeError("Discovery found no tools"),
                     context=no_tools_ctx,

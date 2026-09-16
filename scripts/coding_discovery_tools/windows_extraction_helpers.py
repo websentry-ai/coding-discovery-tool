@@ -8,6 +8,7 @@ on Windows and macOS to avoid code duplication.
 import logging
 import ntpath
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +72,152 @@ def registry_profile_paths() -> Tuple[List[Path], bool]:
         logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}", exc_info=True)
         return [], False
     return paths, complete
+
+
+_PROFILE_VARS = ("USERPROFILE", "HOMEPATH", "APPDATA", "LOCALAPPDATA")
+_LOCAL_DRIVE = re.compile(r"^[A-Za-z]:\\")
+_DRIVE_REMOTE = 4
+# Where a package manager installs. Anywhere else is someone's own directory, whose
+# name can carry a customer or project, so it is counted rather than sent.
+_MACHINE_ROOT_VARS = ("ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SystemRoot")
+
+
+def _under(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or inside it, on a separator boundary."""
+    path = ntpath.normcase(ntpath.normpath(path)).rstrip("\\")
+    root = ntpath.normcase(ntpath.normpath(root)).rstrip("\\")
+    return path == root or path.startswith(root + "\\")
+
+
+def _is_local_drive(path: str) -> bool:
+    """Whether probing ``path`` stays off the network.
+
+    A drive letter is not enough: ``Z:\\`` can be a mapped share, so the drive type
+    is asked before anything touches the filesystem.
+    """
+    if not _LOCAL_DRIVE.match(path) or path.startswith("\\\\"):
+        return False
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.GetDriveTypeW(path[:3]) != _DRIVE_REMOTE
+    except (AttributeError, OSError):
+        return True
+
+
+def _is_machine_root(entry: str) -> bool:
+    """Whether ``entry`` sits under a Windows-owned root, whose names are not the customer's."""
+    for var in _MACHINE_ROOT_VARS:
+        root = os.environ.get(var)
+        if root and _under(entry, root):
+            return True
+    return False
+
+
+def _expand_for_profile(entry: str, profile: Optional[str]) -> str:
+    """Expand ``entry``, resolving per-user variables against ``profile`` not the scanner."""
+    if profile:
+        for var, value in (("USERPROFILE", profile), ("HOMEPATH", profile),
+                           ("APPDATA", ntpath.join(profile, "AppData", "Roaming")),
+                           ("LOCALAPPDATA", ntpath.join(profile, "AppData", "Local"))):
+            entry = re.sub(rf"%{var}%", lambda _, v=value: v, entry, flags=re.IGNORECASE)
+    elif any(f"%{var}%".lower() in entry.lower() for var in _PROFILE_VARS):
+        return entry
+    return ntpath.expandvars(entry)
+
+
+def _profile_image_paths(winreg) -> Dict[str, str]:
+    """``{SID: profile dir}`` from ``ProfileList``."""
+    profiles: Dict[str, str] = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                sid = None
+                try:
+                    sid = winreg.EnumKey(key, index)
+                    with winreg.OpenKey(key, sid) as sub_key:
+                        raw, kind = winreg.QueryValueEx(sub_key, "ProfileImagePath")
+                except OSError as exc:
+                    logger.debug(f"Could not read profile {sid or index}: {exc}", exc_info=True)
+                    continue
+                if not isinstance(raw, str) or not raw:
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    raw = ntpath.expandvars(raw)
+                profiles[sid[:-4] if sid.endswith(".bak") else sid] = ntpath.normpath(raw).rstrip("\\")
+    except OSError as exc:
+        logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}", exc_info=True)
+    return profiles
+
+
+def registry_user_path_dirs() -> List[str]:
+    """Existing PATH directories from every loaded user hive, profile-relative.
+
+    A CLI is invoked by name, so its directory is on the user's PATH whatever prefix
+    installed it, and the candidate list can only name prefixes it already knows.
+    Only loaded hives answer: mounting a logged-out profile's NTUSER.DAT is a side
+    effect a probe has no business causing.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    profiles = _profile_image_paths(winreg)
+    roots = list(profiles.values())
+    dirs: List[str] = []
+    seen = set()
+    withheld = 0
+    try:
+        with winreg.OpenKey(winreg.HKEY_USERS, "") as users:
+            for index in range(winreg.QueryInfoKey(users)[0]):
+                sid = None
+                try:
+                    sid = winreg.EnumKey(users, index)
+                    if sid.endswith("_Classes") or sid in _SERVICE_PROFILE_SIDS:
+                        continue
+                    with winreg.OpenKey(users, sid + r"\Environment") as env:
+                        raw, kind = winreg.QueryValueEx(env, "Path")
+                except OSError as exc:
+                    logger.debug(f"Could not read PATH for {sid or index}: {exc}", exc_info=True)
+                    continue
+                if not isinstance(raw, str):
+                    continue
+                profile = profiles.get(sid)
+                for entry in raw.split(";"):
+                    entry = entry.strip().rstrip("\\")
+                    if not entry:
+                        continue
+                    if kind == winreg.REG_EXPAND_SZ:
+                        entry = _expand_for_profile(entry, profile)
+                    # Collapse first: ~\..\..\bob\bin would otherwise redact to a path naming bob.
+                    entry = ntpath.normpath(entry).rstrip("\\")
+                    key = ntpath.normcase(entry)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    # Before any filesystem call: isdir on \\host\share authenticates
+                    # this scan's token, which under MDM is Local System.
+                    if not _is_local_drive(entry):
+                        logger.debug(f"Skipping non-local PATH entry: {entry}")
+                        continue
+                    try:
+                        if not os.path.isdir(entry):
+                            continue
+                    except OSError as exc:
+                        logger.debug(f"Could not stat PATH entry {entry}: {exc}", exc_info=True)
+                        continue
+                    if profile and _under(entry, profile):
+                        dirs.append("~" + entry[len(profile):])
+                    elif _is_machine_root(entry) and not any(_under(entry, r) for r in roots):
+                        dirs.append(entry)
+                    else:
+                        withheld += 1
+                        logger.debug(f"Withholding PATH entry outside a known root: {entry}")
+    except OSError as exc:
+        logger.debug(f"Could not read HKEY_USERS Environment: {exc}", exc_info=True)
+    if withheld:
+        dirs.append(f"<{withheld} withheld>")
+    return dirs
 
 
 # Maps the globalStorage IDE-folder key (as used by Cline/Roo ``SUPPORTED_IDES``)

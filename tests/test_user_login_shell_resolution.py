@@ -129,6 +129,21 @@ class TestUserLoginShellResolution(unittest.TestCase):
         result, _ = self._run(self._line("claude", self.binary))
         self.assertIsNone(result)
 
+    def test_another_accounts_binary_is_not_attributed(self):
+        """A shared prefix on the PATH must not hand Bob's install to Alice."""
+        with patch(f"{_MOD}.machine_global_binary_owned_by_user", return_value=False) as owned:
+            result, _ = self._run(self._line("claude", self.binary))
+        self.assertIsNone(result)
+        owned.assert_called()
+
+    def test_ownership_is_judged_on_the_symlink_target(self):
+        link = self.home / "link" / "claude"
+        link.parent.mkdir()
+        link.symlink_to(self.binary)
+        with patch(f"{_MOD}.machine_global_binary_owned_by_user", return_value=True) as owned:
+            self._run(self._line("claude", link))
+        self.assertEqual(Path(owned.call_args[0][0]), Path(os.path.realpath(self.binary)))
+
     def test_missing_passwd_entry_resolves_to_none(self):
         with patch(f"{_MOD}.os.geteuid", return_value=0), \
                 patch(f"{_MOD}.pwd") as fake_pwd, \

@@ -200,7 +200,11 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
             logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
             continue
         try:
-            if resolved.is_absolute() and resolved.is_file() and os.access(str(resolved), os.X_OK):
+            # Ownership on the target, not the link: the candidate loops reject
+            # another account's install and this must not add it back.
+            real = Path(os.path.realpath(str(resolved)))
+            if (resolved.is_absolute() and real.is_file() and os.access(str(real), os.X_OK)
+                    and machine_global_binary_owned_by_user(real, user_home)):
                 found[tool] = str(resolved)
             else:
                 logger.debug(f"Login shell gave an unusable path for {tool}: {path!r}")

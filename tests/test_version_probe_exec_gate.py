@@ -34,6 +34,7 @@ class TestVersionProbeExecGate(unittest.TestCase):
         self.binary.write_text("#!/bin/sh\necho 1.2.3\n")
         self.binary.chmod(0o755)
 
+    @unittest.skipIf(os.name == "nt", "the gate is POSIX-only")
     def test_unsafe_absolute_binary_is_not_executed(self):
         with patch(f"{_MOD}._is_safe_exec_path", return_value=False), \
                 patch(f"{_MOD}.subprocess.run") as run:

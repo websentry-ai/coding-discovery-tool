@@ -28,6 +28,7 @@ from scripts.coding_discovery_tools.utils import (
 _MOD = "scripts.coding_discovery_tools.utils"
 
 
+@unittest.skipIf(os.name == "nt", "resolution is POSIX-only; there is no os.geteuid to patch")
 class TestUserLoginShellResolution(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

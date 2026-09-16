@@ -100,7 +100,9 @@ class TestVersionProbeExecGate(unittest.TestCase):
 
     def test_non_root_scan_is_not_gated_at_all(self):
         with patch(f"{_MOD}._running_as_root", return_value=False), \
-                patch(f"{_MOD}._is_safe_exec_path") as gate:
+                patch(f"{_MOD}._is_safe_exec_path") as gate, \
+                patch(f"{_MOD}.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="1.2.3", stderr="")
             self.assertEqual(run_command([str(self.binary), "--version"]), "1.2.3")
         gate.assert_not_called()
 

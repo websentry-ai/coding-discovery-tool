@@ -86,9 +86,11 @@ def safe_exec_argv(command: list) -> Optional[list]:
     """``command`` with argv[0] resolved, or None when it is unsafe to run.
 
     Root-only: running your own binary as yourself escalates nothing, and gating it
-    there would drop versions for ordinary Homebrew installs.
+    there would drop versions for ordinary Homebrew installs. Skipped on Windows,
+    where _is_safe_exec_path cannot refuse anything and resolving would be the only
+    effect.
     """
-    if not command or not _running_as_root() or not os.path.isabs(str(command[0])):
+    if not command or os.name == "nt" or not _running_as_root() or not os.path.isabs(str(command[0])):
         return command
     resolved = os.path.realpath(str(command[0]))
     if not _is_safe_exec_path(resolved):

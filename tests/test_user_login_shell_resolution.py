@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from scripts.coding_discovery_tools.utils import (
     _MARKER,
+    _SUDO,
     _login_shell_cache,
     user_login_shell_tool_path,
 )
@@ -61,7 +62,8 @@ class TestUserLoginShellResolution(unittest.TestCase):
     def test_drops_privileges_and_cannot_hang(self):
         _, run = self._run(self._line("claude", self.binary))
         args, kwargs = run.call_args
-        self.assertEqual(args[0][:6], ["sudo", "-n", "-u", "alice", "-i", "sh"])
+        self.assertEqual(args[0][:6], [_SUDO, "-n", "-u", "alice", "-i", "sh"])
+        self.assertFalse(_SUDO == "sudo" and os.path.exists("/usr/bin/sudo"))
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertGreater(kwargs["timeout"], 0)
 

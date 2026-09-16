@@ -135,6 +135,8 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
 LOGIN_SHELL_TIMEOUT = 10
 LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent", "copilot")
 _MARKER = "__unbound__"
+# argv[0] of a root exec: absolute where it exists, so root's PATH cannot supply it.
+_SUDO = "/usr/bin/sudo" if os.path.exists("/usr/bin/sudo") else "sudo"
 
 _login_shell_cache: Dict[str, Dict[str, str]] = {}
 
@@ -181,7 +183,7 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
     )
     try:
         result = subprocess.run(
-            ["sudo", "-n", "-u", entry.pw_name, "-i", "sh", "-c", script],
+            [_SUDO, "-n", "-u", entry.pw_name, "-i", "sh", "-c", script],
             capture_output=True, text=True,
             stdin=subprocess.DEVNULL, timeout=LOGIN_SHELL_TIMEOUT,
         )

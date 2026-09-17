@@ -132,6 +132,27 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     return None
 
 
+def run_command_status(command: list, timeout: int = COMMAND_TIMEOUT) -> Tuple[Optional[str], bool]:
+    """``(output, ran)`` — like ``run_command``, but says whether it got to run.
+
+    ``run_command`` returns None both for a clean search that matched nothing and
+    for a timeout, so a caller cannot tell absence from ignorance. ``ran`` is True
+    only for a clean exit-zero run, so a caller may read an empty output as absence.
+    """
+    command = safe_exec_argv(command)
+    if command is None:
+        return None, False
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        logger.debug(f"Command {command} failed: {e}")
+        return None, False
+    if result.returncode != 0:
+        logger.debug(f"Command {command} exited {result.returncode}")
+        return None, False
+    return (result.stdout.strip() or None), True
+
+
 LOGIN_SHELL_TIMEOUT = 10
 LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent", "copilot")
 _MARKER = "__unbound__"
@@ -645,6 +666,92 @@ def windows_user_path_dirs() -> str:
         out.append(entry)
         used += len(entry) + 1
     return ",".join(out)
+
+
+_SURFACE_MAX_HOMES = 5
+_SURFACE_MAX_NAMES = 120
+_SURFACE_MAX_NAME_CHARS = 64
+_SURFACE_MAX_TOTAL_CHARS = 8000
+
+
+def _install_surface_roots(user_homes) -> List[Tuple[str, Path]]:
+    """(label, path) install surfaces for this platform. Labels carry no username.
+
+    Signal before noise: the shared char budget is spent in this order, and
+    AppData\\Local is hundreds of cache entries, so listing it per home ahead of
+    the rest would starve the later homes entirely.
+    """
+    system = platform.system()
+    roots: List[Tuple[str, Path]] = []
+    bulk: List[Tuple[str, Path]] = []
+    if system == "Windows":
+        # Env vars, not a literal C:\ — a D:\Program Files install is invisible otherwise.
+        for label, var in (("ProgramFiles", "ProgramW6432"),
+                           ("ProgramFiles", "ProgramFiles"),
+                           ("ProgramFiles(x86)", "ProgramFiles(x86)")):
+            value = os.environ.get(var)
+            if value:
+                roots.append((label, Path(value)))
+    elif system == "Darwin":
+        roots.append(("/Applications", Path("/Applications")))
+
+    for index, user_home in enumerate(list(user_homes)[:_SURFACE_MAX_HOMES]):
+        user_home = Path(user_home)
+        suffix = f"#{index}" if index else ""
+        if system == "Windows":
+            local = user_home / "AppData" / "Local"
+            # Programs joins its parent: every per-user editor install lands inside it.
+            roots.append((f"LocalAppData\\Programs{suffix}", local / "Programs"))
+            roots.append((f"Roaming{suffix}", user_home / "AppData" / "Roaming"))
+            bulk.append((f"LocalAppData{suffix}", local))
+        elif system == "Darwin":
+            roots.append((f"~/Applications{suffix}", user_home / "Applications"))
+    return roots + bulk
+
+
+def install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:
+    """Top-level names in the OS install surfaces, for the zero-tool event. Never raises.
+
+    A name here that we did not report is a path bug, not an empty machine. The
+    caller wraps the whole event, so a raise would drop the other discriminators too.
+    """
+    surfaces: Dict[str, Dict] = {}
+    total = 0
+    truncated = False
+    try:
+        used_chars = 0
+        seen_paths = set()
+        for label, path in _install_surface_roots(user_homes):
+            try:
+                resolved = os.path.realpath(path)
+            except OSError:
+                resolved = str(path)
+            if resolved in seen_paths or label in surfaces:
+                continue
+            seen_paths.add(resolved)
+            names: List[str] = []
+            count = 0
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        count += 1
+                        name = entry.name[:_SURFACE_MAX_NAME_CHARS]
+                        if (len(names) >= _SURFACE_MAX_NAMES
+                                or used_chars + len(name) + 1 > _SURFACE_MAX_TOTAL_CHARS):
+                            truncated = True
+                            continue
+                        names.append(name)
+                        used_chars += len(name) + 1
+                state = "present"
+            except (FileNotFoundError, NotADirectoryError):
+                state = "absent"
+            except OSError:
+                state = "unreadable"
+            surfaces[label] = {"state": state, "n": count, "names": sorted(names)}
+            total += count
+    except Exception as surface_err:
+        logger.debug(f"Install-surface listing failed: {surface_err}")
+    return surfaces, total, truncated
 
 
 _NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
@@ -2708,6 +2815,8 @@ _SENTRY_TAG_KEYS = (
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
     "user_path_dirs",
+    # Scalars only: entry names are unbounded cardinality, so the listing stays in extra.
+    "install_surfaces_total", "install_surfaces_truncated",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -2761,6 +2870,10 @@ _VSCODE_BUNDLE_TAIL = frozenset({"extensions", "app", "resources", "contents"})
 _COWORK_PROBES_CAP = 6
 _cowork_probes = set()
 
+# Same for the Xcode gate, plus the agent subfolders that say which extractors are worth building.
+_XCODE_PROBES_CAP = 8
+_xcode_probes = set()
+
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
 _NPM_PREFIX_UNSET = object()
@@ -2805,6 +2918,20 @@ def record_cowork_probe(part: str, state: str) -> None:
 def cowork_probes() -> list:
     """This run's Cowork gate outcomes as ``<part>:<present|absent|unreadable>``."""
     return sorted(_cowork_probes)
+
+
+def record_xcode_probe(part: str, state: str) -> None:
+    """Note how one part of the Xcode gate resolved. Never raises."""
+    try:
+        if len(_xcode_probes) < _XCODE_PROBES_CAP:
+            _xcode_probes.add(f"{part}:{state}")
+    except Exception as e:
+        logger.debug("Could not record Xcode probe %r:%r: %s", part, state, e, exc_info=True)
+
+
+def xcode_probes() -> list:
+    """This run's Xcode gate outcomes as ``<part>:<state>``."""
+    return sorted(_xcode_probes)
 
 
 def record_vscode_bundle_probe(ext_root) -> None:

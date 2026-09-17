@@ -33,6 +33,15 @@ KNOWN_AGENT_DIRS = frozenset({"ClaudeAgentConfig", "codex", "gemini"})
 
 _MAX_AGENT_PROBE_LEN = 64
 
+# O_NOFOLLOW/O_NONBLOCK are POSIX-only and O_BINARY is Windows-only. The detector is
+# macOS-only but its tests run on the Windows matrix, so resolve them defensively.
+_PLIST_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
 
 def coding_assistant_dir(user_home: Path) -> Path:
     """Where Xcode keeps this user's agent config, MCP servers and skills."""
@@ -104,7 +113,7 @@ def _read_bundle_version(app_bundle: Path) -> Optional[str]:
     try:
         if not stat.S_ISREG(os.lstat(info_plist).st_mode):
             return None
-        fd = os.open(info_plist, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(info_plist, _PLIST_OPEN_FLAGS)
     except OSError as e:
         logger.debug(f"Could not open {info_plist}: {e}")
         return None

@@ -129,6 +129,13 @@ class XcodeDetectionTests(unittest.TestCase):
         self.assertIsNone(self._detector().detect())
         self.assertIn("bundle:absent", utils_mod.xcode_probes())
 
+    def test_version_reads_on_every_platform(self):
+        """O_NOFOLLOW/O_NONBLOCK are POSIX-only; resolving them unguarded made the
+        read raise AttributeError and silently return no version off macOS."""
+        app = self.apps / "Xcode.app"
+        _make_bundle(app, "26.3")
+        self.assertEqual(xcode_mod._read_bundle_version(app), "26.3")
+
     def test_empty_search_is_absence_but_a_dead_binary_is_unknown(self):
         real = utils_mod.run_command_status
         self.assertEqual(real(["mdfind", "kMDItemCFBundleIdentifier == 'com.nope.nothing'"]),

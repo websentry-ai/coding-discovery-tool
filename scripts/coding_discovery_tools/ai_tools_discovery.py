@@ -4036,7 +4036,7 @@ def main():
                     # resolved | unresolved (npm not on PATH) | not_probed (root scan)
                     "npm_prefix": npm_prefix_state(),
                 }
-                # A name we can see here but did not report is a path bug, not an empty box.
+                # A name visible here that we did not report is a path bug, not an empty box.
                 surfaces, surfaces_total, surfaces_truncated = install_surface_listing(scanned_homes)
                 no_tools_ctx["install_surfaces"] = surfaces
                 no_tools_ctx["install_surfaces_total"] = surfaces_total

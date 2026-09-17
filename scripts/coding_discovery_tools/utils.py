@@ -672,8 +672,7 @@ def _install_surface_roots(user_homes) -> List[Tuple[str, Path]]:
         user_home = Path(user_home)
         if system == "Windows":
             local = user_home / "AppData" / "Local"
-            # Programs is listed as well as its parent: every per-user editor install
-            # lands one level inside it, so the parent alone reports only "Programs".
+            # Programs joins its parent: every per-user editor install lands inside it.
             per_home = (("LocalAppData", local),
                         ("LocalAppData\\Programs", local / "Programs"),
                         ("Roaming", user_home / "AppData" / "Roaming"))
@@ -687,59 +686,47 @@ def _install_surface_roots(user_homes) -> List[Tuple[str, Path]]:
 
 
 def install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:
-    """Top-level entry names of the OS install surfaces. Never raises.
+    """Top-level names in the OS install surfaces, for the zero-tool event. Never raises.
 
-    Diagnostic only, for the zero-tool event: every detector gates on a hard-coded
-    path, so a name sitting here that we did not report is a path bug rather than
-    an empty machine. Returns (surfaces, total_entries, truncated).
-
-    The whole body is guarded, not just the per-surface probes: the caller's own
-    handler wraps the entire event, so anything raised here would take the
-    pre-existing discriminators down with it instead of dropping this field alone.
+    A name here that we did not report is a path bug, not an empty machine. The
+    caller wraps the whole event, so a raise would drop the other discriminators too.
     """
-    try:
-        return _install_surface_listing(user_homes)
-    except Exception as surface_err:
-        logger.debug(f"Install-surface listing failed: {surface_err}")
-        return {}, 0, False
-
-
-def _install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:
     surfaces: Dict[str, Dict] = {}
     total = 0
     truncated = False
-    used_chars = 0
-    seen_paths = set()
-    for label, path in _install_surface_roots(user_homes):
-        try:
-            resolved = os.path.realpath(path)
-        except OSError:
-            resolved = str(path)
-        if resolved in seen_paths or label in surfaces:
-            continue
-        seen_paths.add(resolved)
-        names: List[str] = []
-        count = 0
-        try:
-            with os.scandir(path) as entries:
-                for entry in entries:
-                    count += 1
-                    if len(names) >= _SURFACE_MAX_NAMES:
-                        truncated = True
-                        continue
-                    name = entry.name[:_SURFACE_MAX_NAME_CHARS]
-                    if used_chars + len(name) + 1 > _SURFACE_MAX_TOTAL_CHARS:
-                        truncated = True
-                        continue
-                    names.append(name)
-                    used_chars += len(name) + 1
-            state = "present"
-        except (FileNotFoundError, NotADirectoryError):
-            state = "absent"
-        except OSError:
-            state = "unreadable"
-        surfaces[label] = {"state": state, "n": count, "names": sorted(names)}
-        total += count
+    try:
+        used_chars = 0
+        seen_paths = set()
+        for label, path in _install_surface_roots(user_homes):
+            try:
+                resolved = os.path.realpath(path)
+            except OSError:
+                resolved = str(path)
+            if resolved in seen_paths or label in surfaces:
+                continue
+            seen_paths.add(resolved)
+            names: List[str] = []
+            count = 0
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        count += 1
+                        name = entry.name[:_SURFACE_MAX_NAME_CHARS]
+                        if (len(names) >= _SURFACE_MAX_NAMES
+                                or used_chars + len(name) + 1 > _SURFACE_MAX_TOTAL_CHARS):
+                            truncated = True
+                            continue
+                        names.append(name)
+                        used_chars += len(name) + 1
+                state = "present"
+            except (FileNotFoundError, NotADirectoryError):
+                state = "absent"
+            except OSError:
+                state = "unreadable"
+            surfaces[label] = {"state": state, "n": count, "names": sorted(names)}
+            total += count
+    except Exception as surface_err:
+        logger.debug(f"Install-surface listing failed: {surface_err}")
     return surfaces, total, truncated
 
 
@@ -2804,7 +2791,7 @@ _SENTRY_TAG_KEYS = (
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
     "user_path_dirs",
-    # The listing itself stays in extra — entry names are far too high-cardinality to tag.
+    # Scalars only: entry names are unbounded cardinality, so the listing stays in extra.
     "install_surfaces_total", "install_surfaces_truncated",
 )
 

@@ -170,6 +170,26 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_xcode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the Xcode coding intelligence detector. macOS only — Xcode does
+        not exist on Windows or Linux.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos import MacOSXcodeDetector
+            return MacOSXcodeDetector()
+        return None
+
+    @staticmethod
     def create_windsurf_detector(os_name: Optional[str] = None) -> BaseToolDetector:
         """
         Create appropriate Windsurf detector for the OS.
@@ -581,6 +601,11 @@ class ToolDetectorFactory:
         if claude_cowork_detector is not None:
             detectors.append(claude_cowork_detector)
         
+        # Add Xcode coding intelligence detector for macOS
+        xcode_detector = ToolDetectorFactory.create_xcode_detector(os_name)
+        if xcode_detector is not None:
+            detectors.append(xcode_detector)
+
         # Add Cline detector for macOS and Windows
         cline_detector = ToolDetectorFactory.create_cline_detector(os_name)
         if cline_detector is not None:

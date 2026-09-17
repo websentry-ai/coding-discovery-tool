@@ -96,6 +96,10 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     elif tool_name == "claude cowork":
         return _detect_claude_cowork(detector, user_home)
 
+    # Xcode coding intelligence detection
+    elif tool_name == "xcode coding intelligence":
+        return _detect_xcode(detector, user_home)
+
     # Junie detection
     elif tool_name == "junie":
         return _detect_junie(detector, user_home)
@@ -474,6 +478,20 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         "version": detector.get_version(app_install),
         "install_path": str(sessions_dir)
     }
+
+
+def _detect_xcode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect Xcode coding intelligence for a user.
+
+    The detector already scopes every probe to ``detector.user_home``, which the
+    caller has set, so this only has to turn a denied read into the anomaly path
+    instead of the clean absence that would permit a prune.
+    """
+    try:
+        return detector.detect()
+    except OSError as e:
+        fail_if_anomalous(user_home, str(e))
+        return None
 
 
 def junie_version_from_binary(binary_path: str) -> Optional[str]:

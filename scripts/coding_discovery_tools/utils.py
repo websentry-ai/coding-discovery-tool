@@ -2849,6 +2849,10 @@ _VSCODE_BUNDLE_TAIL = frozenset({"extensions", "app", "resources", "contents"})
 _COWORK_PROBES_CAP = 6
 _cowork_probes = set()
 
+# Same for the Xcode gate, plus the agent subfolders that say which extractors are worth building.
+_XCODE_PROBES_CAP = 8
+_xcode_probes = set()
+
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
 _NPM_PREFIX_UNSET = object()
@@ -2893,6 +2897,20 @@ def record_cowork_probe(part: str, state: str) -> None:
 def cowork_probes() -> list:
     """This run's Cowork gate outcomes as ``<part>:<present|absent|unreadable>``."""
     return sorted(_cowork_probes)
+
+
+def record_xcode_probe(part: str, state: str) -> None:
+    """Note how one part of the Xcode gate resolved. Never raises."""
+    try:
+        if len(_xcode_probes) < _XCODE_PROBES_CAP:
+            _xcode_probes.add(f"{part}:{state}")
+    except Exception as e:
+        logger.debug("Could not record Xcode probe %r:%r: %s", part, state, e, exc_info=True)
+
+
+def xcode_probes() -> list:
+    """This run's Xcode gate outcomes as ``<part>:<state>``."""
+    return sorted(_xcode_probes)
 
 
 def record_vscode_bundle_probe(ext_root) -> None:

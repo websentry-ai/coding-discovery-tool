@@ -15,6 +15,7 @@ from .codex import MacOSCodexDetector
 from .replit import MacOSReplitDetector
 from .opencode import MacOSOpenCodeDetector
 from .junie import MacOSJunieDetector
+from .xcode import MacOSXcodeDetector
 
 __all__ = [
     'MacOSDeviceIdExtractor',
@@ -31,5 +32,6 @@ __all__ = [
     'MacOSReplitDetector',
     'MacOSOpenCodeDetector',
     'MacOSJunieDetector',
+    'MacOSXcodeDetector',
 ]
 

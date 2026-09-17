@@ -1005,7 +1005,8 @@ def windows_user_homes() -> Dict[str, Path]:
     see a profile relocated to another drive, and it treats any leftover folder
     as a user. ``ProfileList`` is Windows' own record, so the two are combined —
     a walked folder is kept only when a profile record vouches for the name, and
-    registry profiles the walk missed are added at their real path.
+    registry profiles the walk missed are added at their real path. The skip-list
+    applies to both, so a name the walk drops cannot return through the registry.
 
     A profile whose recorded path is a UNC share still vouches for its local
     ``C:\\Users`` cache, and an incomplete registry read vouches for nothing, so
@@ -1042,7 +1043,7 @@ def windows_user_homes() -> Dict[str, Path]:
     homes: Dict[str, Path] = {}
     vouched: Dict[str, str] = {}
     for path in registry:
-        if not path.name:
+        if not path.name or path.name in WINDOWS_SKIP_USER_DIRS:
             continue
         key = path.name.lower()
         vouched.setdefault(key, path.name)

@@ -487,6 +487,47 @@ class TestSentryNeverCrashes(unittest.TestCase):
         report_to_sentry(RuntimeError("x"), context=None, level="warning")
 
 
+class TestSentryTagRegistration(unittest.TestCase):
+    """A no-tools discriminator is only useful once it is indexed.
+
+    A key the allowlist misses still reaches Sentry, but as extra: readable one
+    event at a time and absent from every search and aggregate, which is how
+    xcode_probe shipped unqueryable.
+    """
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
+    def _tags_for(self, context):
+        captured = {}
+
+        def fake_curl(argv, **kwargs):
+            payload_path = next(a[1:] for a in argv if str(a).startswith("@"))
+            with open(payload_path, encoding="utf-8") as fh:
+                captured.update(json.load(fh))
+            return Mock(returncode=0, stdout="200", stderr="")
+
+        with patch.object(utils_mod, "_SENTRY_DSN", "https://key@o1.ingest.sentry.io/1"), \
+             patch.object(utils_mod.subprocess, "run", fake_curl):
+            report_to_sentry(RuntimeError("boom"), context=context)
+        return captured.get("tags", {})
+
+    def test_probe_is_indexed_and_the_surface_listing_is_not(self):
+        tags = self._tags_for({
+            "phase": "no_tools_found",
+            "xcode_probe": "coding_assistant:absent",
+            "cowork_probe": "sessions:absent",
+            "install_surfaces_total": 32,
+            "install_surfaces": {"/Applications": {"n": 30, "names": ["Slack.app"]}},
+        })
+
+        self.assertEqual("coding_assistant:absent", tags.get("xcode_probe"))
+        self.assertEqual("sessions:absent", tags.get("cowork_probe"))
+        self.assertEqual("32", tags.get("install_surfaces_total"))
+        # Unbounded cardinality: the listing must stay out of the indexed tags.
+        self.assertNotIn("install_surfaces", tags)
+
+
 class TestParseSentryDsn(unittest.TestCase):
     """_parse_sentry_dsn correctly parses valid DSNs and rejects invalid ones."""
 

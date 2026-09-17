@@ -2815,7 +2815,7 @@ _SENTRY_TAG_KEYS = (
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
-    "user_path_dirs",
+    "xcode_probe", "user_path_dirs",
     # Scalars only: entry names are unbounded cardinality, so the listing stays in extra.
     "install_surfaces_total", "install_surfaces_truncated",
 )

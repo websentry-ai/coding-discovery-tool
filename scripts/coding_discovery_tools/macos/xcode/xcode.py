@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 from ...coding_tool_base import BaseToolDetector
 from ...constants import COMMAND_TIMEOUT
 from ...macos_extraction_helpers import MACHINE_APPS_DIR, path_in_scope
-from ...utils import dir_state, record_xcode_probe, run_command
+from ...utils import dir_state, record_xcode_probe, run_command_status
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +60,16 @@ def agent_summary(assistant_dir: Path) -> str:
 def _active_developer_bundle() -> Tuple[Optional[Path], bool]:
     """``(bundle, probed)`` for the Xcode ``xcode-select`` points at.
 
-    ``probed`` is False when the command itself gave no answer, which is not the
-    same as a machine with no Xcode — see ``_find_install_dir``.
+    ``probed`` is False only when the command could not run. A clean answer that
+    names no bundle — Command Line Tools only, or no developer dir — is absence.
     """
-    output = run_command(["xcode-select", "-p"], COMMAND_TIMEOUT)
-    if not output:
+    output, ran = run_command_status(["xcode-select", "-p"], COMMAND_TIMEOUT)
+    if not ran:
         return None, False
-    for parent in Path(output.strip()).parents:
-        if parent.suffix == ".app":
-            return parent, True
+    if output:
+        for parent in Path(output).parents:
+            if parent.suffix == ".app":
+                return parent, True
     return None, True
 
 
@@ -76,16 +77,16 @@ def _spotlight_candidates(user_home: Path) -> Tuple[List[Path], bool]:
     """``(bundles, probed)`` for in-scope Xcode bundles Spotlight knows about.
 
     Catches version-suffixed installs (``Xcode-16.2.app``) the fixed paths miss.
+    A search that ran and matched nothing is absence, not ignorance.
     """
-    output = run_command(
+    output, ran = run_command_status(
         ["mdfind", f"kMDItemCFBundleIdentifier == '{XCODE_BUNDLE_ID}'"], COMMAND_TIMEOUT
     )
-    if not output:
-        logger.debug("Spotlight gave no answer for %s: absent, unindexed, denied under "
-                     "root, or mdfind unavailable", XCODE_BUNDLE_ID)
+    if not ran:
+        logger.debug("Spotlight could not run for %s", XCODE_BUNDLE_ID)
         return [], False
     found = []
-    for line in output.splitlines():
+    for line in (output or "").splitlines():
         candidate = Path(line.strip())
         if candidate.suffix == ".app" and path_in_scope(candidate, user_home):
             found.append(candidate)

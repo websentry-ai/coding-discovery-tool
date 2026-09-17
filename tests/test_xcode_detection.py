@@ -121,6 +121,20 @@ class XcodeDetectionTests(unittest.TestCase):
                 self._detector().detect()
         self.assertIn("bundle:unknown", utils_mod.xcode_probes())
 
+    def test_stale_tree_with_no_xcode_is_a_clean_absence(self):
+        """Xcode removed, CodingAssistant left behind: the probes ran and found
+        nothing, so this must not raise and strand the whole scan."""
+        (self.home / _ASSISTANT / "codex").mkdir(parents=True)
+
+        self.assertIsNone(self._detector().detect())
+        self.assertIn("bundle:absent", utils_mod.xcode_probes())
+
+    def test_empty_search_is_absence_but_a_dead_binary_is_unknown(self):
+        real = utils_mod.run_command_status
+        self.assertEqual(real(["mdfind", "kMDItemCFBundleIdentifier == 'com.nope.nothing'"]),
+                         (None, True))
+        self.assertEqual(real(["definitely-not-a-binary-xyz"]), (None, False))
+
     def test_redirected_coding_assistant_is_out_of_scope(self):
         _make_bundle(self.apps / "Xcode.app")
 

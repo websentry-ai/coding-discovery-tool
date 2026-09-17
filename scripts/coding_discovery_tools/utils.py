@@ -132,6 +132,25 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     return None
 
 
+def run_command_status(command: list, timeout: int = COMMAND_TIMEOUT) -> Tuple[Optional[str], bool]:
+    """``(output, ran)`` — like ``run_command``, but says whether it got to run.
+
+    ``run_command`` returns None both for a clean search that matched nothing and
+    for a timeout, so a caller cannot tell absence from ignorance. ``ran`` is False
+    only when the process could not be executed; a non-zero exit is still an answer.
+    """
+    command = safe_exec_argv(command)
+    if command is None:
+        return None, False
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        logger.debug(f"Command {command} failed: {e}")
+        return None, False
+    output = result.stdout.strip() if result.returncode == 0 else ""
+    return (output or None), True
+
+
 LOGIN_SHELL_TIMEOUT = 10
 LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent", "copilot")
 _MARKER = "__unbound__"

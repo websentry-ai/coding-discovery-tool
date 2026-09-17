@@ -1677,12 +1677,8 @@ def extract_mcp_from_dir_generic(
         logger.warning(f"Error reading {tool_name} MCP config {mcp_config_file}: {e}")
 
 
-# Distinct from the rules index id: the MCP prune adds is_home_dotdir_descendant,
-# which the Linux rules prune omits, so the two must not share a cached tree.
-# Every MCP caller uses the same prune (should_skip_path + should_skip_system_path
-# for the running OS), so they intentionally share this one id and its cached
-# walk. A caller with a DIFFERENT prune must pass a distinct skip_id, or it would
-# be served an index built under the wrong prune.
+# All MCP callers share this prune, so they share one cached walk. A different
+# prune needs its own id or it gets served an index built under the wrong one.
 _MCP_PROJECT_SKIP_ID = "mcp_project"
 
 

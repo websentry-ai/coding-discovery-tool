@@ -1,8 +1,5 @@
-"""Single-pass directory index shared across per-tool extractors.
-
-Walks each subtree once into a ``basename -> [dirs]`` map instead of once per
-tool. Dispatch order matches the old per-tool DFS walk.
-"""
+"""Single-pass directory index shared across per-tool extractors: each subtree
+is walked once into a ``basename -> [dirs]`` map instead of once per tool."""
 
 import logging
 import os
@@ -26,9 +23,8 @@ _INDEX_LOCK = threading.Lock()
 
 
 def _is_dispatchable(path: Path) -> bool:
-    """True if ``path`` still resolves to a real directory. ``stat`` follows the
-    link, so a symlinked tool folder (stow/monorepo) passes and a dangling one is
-    refused; containment is enforced separately by ``_within_scan_root``."""
+    """True if ``path`` still resolves to a real directory. ``stat`` follows, so a
+    stowed tool folder passes; containment is ``_within_scan_root``'s job."""
     try:
         return stat.S_ISDIR(os.stat(str(path)).st_mode)
     except OSError:
@@ -36,9 +32,8 @@ def _is_dispatchable(path: Path) -> bool:
 
 
 def _within_scan_root(target: Path, root_real: str) -> bool:
-    """True if ``target`` fully resolves inside the scan root. ``realpath`` follows
-    every link, so an indexed dir (or ancestor) swapped for a symlink to another
-    user's tree resolves outside ``root_real`` and is refused. Never raises."""
+    """True if ``target`` resolves inside the scan root. ``realpath`` follows every
+    link, so a dir swapped for one pointing elsewhere is refused. Never raises."""
     try:
         real = os.path.normcase(os.path.realpath(str(target)))
     except OSError:
@@ -54,10 +49,8 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> bool:
-    """Record every hidden dir under ``current_dir`` by basename, returning True
-    only if this dir and every subtree below it were fully readable — so the
-    caller can skip caching a partial index. Records a dir before its children
-    (``outermost_only`` relies on it); records but never descends links."""
+    """Index hidden dirs by basename, ancestor-first; never descends links. True
+    only if the whole subtree read, so partial indexes are not cached."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
@@ -95,9 +88,8 @@ def _collect(root_path: Path, current_dir: Path,
 def get_subtree_index(root_path: Path, current_dir: Path,
                       should_skip: Callable[[Path], bool],
                       skip_id: str) -> Dict[str, List[Path]]:
-    """Memoized ``basename -> [dirs]`` map for ``current_dir``. ``skip_id`` keeps
-    callers with different prunes from sharing a tree; a partially-read tree is
-    returned but not cached, so a later tool retries it."""
+    """Memoized ``basename -> [dirs]`` map. ``skip_id`` stops callers with
+    different prunes sharing a tree; a partial read is returned but not cached."""
     key = (skip_id, str(root_path), str(current_dir))
     with _INDEX_LOCK:
         cached = _INDEX_CACHE.get(key)
@@ -128,10 +120,8 @@ def _walk_direct(root_path: Path, current_dir: Path,
                  is_match: Callable[[str], bool],
                  on_match: Callable[[Path], None],
                  should_skip: Callable[[Path], bool]) -> None:
-    """Stateless per-tool walk: the index fallback, and the route for callers whose
-    marker is not a hidden dir. Matches are re-validated then dispatched, not
-    descended; links/junctions are never descended. No shared state, so a failure
-    here is contained to one tool."""
+    """Per-tool walk: the index fallback, and the route for non-hidden markers.
+    Matches are dispatched, never descended; no shared state, so faults stay local."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError):
@@ -168,18 +158,15 @@ def dispatch_matches(root_path: Path, current_dir: Path,
                      is_match: Callable[[str], bool],
                      on_match: Callable[[Path], None],
                      markers_all_hidden: bool = True) -> None:
-    """Dispatch matching dirs to ``on_match`` via the shared index, falling back to
-    an independent walk if the index faults — so an index fault costs one tool, not
-    the scan. A caller matching a NON-hidden marker must pass
-    ``markers_all_hidden=False`` (the index stores only hidden dirs)."""
+    """Dispatch matches to ``on_match`` via the shared index, falling back to an
+    independent walk on fault. Non-hidden markers need ``markers_all_hidden=False``."""
     if not markers_all_hidden:
         _walk_direct(root_path, current_dir, is_match, on_match, should_skip)
         return
     try:
         index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
-        # Each bucket is one basename in ancestor-before-descendant order, so for
-        # the single-basename matchers in use this stays DFS-ordered and prunes
-        # correctly. A cross-basename matcher would need to re-establish order.
+        # Buckets are ancestor-first, so single-basename matchers stay DFS-ordered.
+        # A cross-basename matcher would have to re-establish that order.
         matches = [d for name, dirs in index.items() if is_match(name) for d in dirs]
         targets = outermost_only(matches)
     except Exception as e:

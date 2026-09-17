@@ -50,9 +50,8 @@ from .macos_extraction_helpers import (  # noqa: F401
 # Linux-specific overrides
 # ---------------------------------------------------------------------------
 
-# Precomputed once so the per-path check is a single C-level ``str.startswith``
-# over a tuple instead of a Python generator that re-iterates every skip dir on
-# every path — this predicate runs on every entry of every walk.
+# Precomputed: this runs on every entry of every walk, so the check is one
+# C-level ``startswith`` over a tuple, not a Python loop over the set.
 _LINUX_SKIP_SYSTEM_PREFIXES = tuple(d + '/' for d in _LINUX_SKIP_SYSTEM_DIRS)
 _LINUX_SKIP_SYSTEM_SOURCE = _LINUX_SKIP_SYSTEM_DIRS
 
@@ -146,9 +145,8 @@ def is_user_level_tool_dir(tool_dir: Path) -> bool:
     return False
 
 
-# Linux project-walk prune. Unlike macOS it does NOT skip hidden home-level dirs
-# (Linux tool configs live under /home/<u>/.<tool>). The id keys the index cache
-# and must differ from the macOS policy.
+# Linux prune keeps hidden home-level dirs (tool configs live at ~/.<tool>).
+# Different policy from macOS, so it must not share that cache id.
 def _linux_project_skip(item: Path) -> bool:
     return should_skip_path(item) or should_skip_system_path(item)
 

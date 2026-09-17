@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction, scan_dir_entries
 from ...mcp_extraction_helpers import (
     append_vscode_cached_mcp_servers,
     enumerate_vscode_mcp_files,
@@ -169,7 +169,8 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # .vscode is in SKIP_DIRS; exempt the leaf so the check below is reachable.
                     if item.name != ".vscode" and (should_skip_path(item) or should_skip_system_path(item)):
@@ -182,7 +183,7 @@ class MacOSGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if is_symlink_or_junction(item):
                             continue
                         if item.name == ".vscode":

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional, List, Dict
 
 from ...coding_tool_base import BaseClaudeSettingsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     should_skip_path,
     read_file_content,
@@ -199,7 +199,8 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # Check if we should skip this path
                     if should_skip_path(item, system_dirs):
@@ -213,7 +214,7 @@ class WindowsClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
                     except ValueError:
                         continue
                     
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Found a .claude directory!
                         if item.name == ".claude":
                             # Skip if this is a global user .claude directory

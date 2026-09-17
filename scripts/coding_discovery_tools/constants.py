@@ -157,3 +157,15 @@ def is_skipped_windows_user_dir(name: str) -> bool:
     """
     return name.lower() in _WINDOWS_SKIP_USER_DIRS_LOWER
 
+
+def scan_dir_entries(directory):
+    """``os.scandir`` as a drop-in for ``Path.iterdir()`` in the scan walks.
+
+    Yields ``DirEntry``, whose ``is_dir()``/``is_file()``/``is_symlink()`` read
+    the dirent instead of re-stat-ing -- the same predicates on a ``Path`` cost a
+    syscall each, and Windows ``stat`` is ~63us. Raises exactly where
+    ``iterdir()`` did, so callers keep their existing error handling.
+    """
+    with os.scandir(directory) as it:
+        for entry in it:
+            yield entry

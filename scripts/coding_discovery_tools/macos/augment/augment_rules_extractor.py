@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...coding_tool_base import BaseAugmentRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -182,7 +182,8 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
         self._extract_dir_level_files(current_dir, projects_by_root)
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if self._should_skip(item):
                         continue
@@ -197,7 +198,7 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
                     # Skip non-dirs and symlinked dirs BEFORE the .augment
                     # handling / recursion (mirrors the mcp + settings walk
                     # ordering) so a symlinked .augment can't be followed.
-                    if not item.is_dir() or item.is_symlink():
+                    if not _entry.is_dir() or _entry.is_symlink():
                         continue
 
                     if item.name == AUGMENT_DIR_NAME:
@@ -281,15 +282,16 @@ class MacOSAugmentRulesExtractor(BaseAugmentRulesExtractor):
         if current_depth > MAX_SEARCH_DEPTH:
             return
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
-                    if item.is_dir():
-                        if item.is_symlink():
+                    if _entry.is_dir():
+                        if _entry.is_symlink():
                             continue
                         self._walk_rules_dir(
                             item, find_project_root_func, scope, projects_by_root, current_depth + 1
                         )
-                    elif item.is_file() and _is_augment_rule_file(item.name):
+                    elif _entry.is_file() and _is_augment_rule_file(item.name):
                         self._add_rule_file(item, find_project_root_func, scope, projects_by_root)
                 except (PermissionError, OSError):
                     continue

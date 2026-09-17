@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCodexRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -80,7 +80,8 @@ class LinuxCodexRulesExtractor(BaseCodexRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -92,13 +93,13 @@ class LinuxCodexRulesExtractor(BaseCodexRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_file():
+                    if _entry.is_file():
                         if item.name in (AGENTS_MD, AGENTS_OVERRIDE_MD):
                             if item.parent.name == ".codex":
                                 continue
                             self._extract_agents_file(item, projects_by_root)
-                    elif item.is_dir():
-                        if item.is_symlink():
+                    elif _entry.is_dir():
+                        if _entry.is_symlink():
                             continue
                         self._walk_for_agents_files(root_path, item, projects_by_root, current_depth + 1)
 

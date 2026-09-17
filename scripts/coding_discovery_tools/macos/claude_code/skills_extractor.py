@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from ...coding_tool_base import BaseClaudeSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...macos_extraction_helpers import (
     extract_single_rule_file,
     get_top_level_directories,
@@ -132,7 +132,8 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -144,7 +145,7 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == CLAUDE_DIR_NAME:
                             for config in CLAUDE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
@@ -160,7 +161,7 @@ class MacOSClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                                         )
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
 
                         self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1, plugin_lookup=plugin_lookup)

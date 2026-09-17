@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction
+from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction, scan_dir_entries
 from .mcp_script_hash import augment_script_fields
 from .vscode_extension_helpers import (
     extensions_dir_for_editor,
@@ -1707,7 +1707,8 @@ def walk_for_mcp_configs_generic(
         return
     
     try:
-        for item in current_dir.iterdir():
+        for _entry in scan_dir_entries(current_dir):
+            item = Path(_entry.path)
             try:
                 # Check if we should skip this path
                 if should_skip_func(item) or is_home_dotdir_descendant(item):
@@ -1722,7 +1723,7 @@ def walk_for_mcp_configs_generic(
                     # Path not relative to root (different drive on Windows)
                     continue
                 
-                if item.is_dir():
+                if _entry.is_dir():
                     # Found the tool directory!
                     if item.name.lower() == tool_dir_name.lower():
                         extract_mcp_from_dir_generic(
@@ -1731,7 +1732,7 @@ def walk_for_mcp_configs_generic(
                         # Don't recurse into tool directory
                         continue
                     
-                    if item.is_symlink():
+                    if _entry.is_symlink():
                         continue
 
                     # Recurse into subdirectories

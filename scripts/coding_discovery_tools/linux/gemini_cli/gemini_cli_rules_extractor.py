@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseGeminiCliRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -71,7 +71,8 @@ class LinuxGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -83,7 +84,7 @@ class LinuxGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_file() and item.name == "GEMINI.md":
+                    if _entry.is_file() and item.name == "GEMINI.md":
                         if item.parent.name == ".gemini":
                             continue
                         if should_process_file(item, item.parent):
@@ -97,8 +98,8 @@ class LinuxGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
                                         add_rule_to_project(rule_info, project_root, projects_by_root)
                             except Exception as e:
                                 logger.debug(f"Error extracting GEMINI.md from {item}: {e}")
-                    elif item.is_dir():
-                        if item.is_symlink():
+                    elif _entry.is_dir():
+                        if _entry.is_symlink():
                             continue
                         self._walk_for_gemini_md(root_path, item, projects_by_root, current_depth + 1)
 

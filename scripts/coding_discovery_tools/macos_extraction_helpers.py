@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
+from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS, scan_dir_entries
 from .mcp_extraction_helpers import is_home_dotdir_descendant
 
 logger = logging.getLogger(__name__)
@@ -633,7 +633,8 @@ def walk_for_tool_directories(
         return
 
     try:
-        for item in current_dir.iterdir():
+        for _entry in scan_dir_entries(current_dir):
+            item = Path(_entry.path)
             try:
                 # Check if we should skip this path
                 if (should_skip_path(item) or should_skip_system_path(item)
@@ -648,7 +649,7 @@ def walk_for_tool_directories(
                 except ValueError:
                     continue
 
-                if item.is_dir():
+                if _entry.is_dir():
                     # Found the tool directory!
                     if item.name == tool_dir_name:
                         # Extract rules from this tool directory
@@ -656,7 +657,7 @@ def walk_for_tool_directories(
                         # Don't recurse into tool directory
                         continue
 
-                    if item.is_symlink():
+                    if _entry.is_symlink():
                         continue
 
                     # Recurse into subdirectories

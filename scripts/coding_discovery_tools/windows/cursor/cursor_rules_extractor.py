@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...cursor_rules_helpers import is_cursor_rule_md_file, is_agents_md_file, extract_cursor_rules_from_dir
 from ...windows_extraction_helpers import (
     add_rule_to_project,
@@ -151,7 +151,8 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             system_dirs = get_windows_system_directories()
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # Check if we should skip this path
                     if should_skip_path(item, system_dirs):
@@ -166,7 +167,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                         # Path not relative to root (different drive on Windows)
                         continue
                     
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Found a .cursor directory!
                         if item.name == ".cursor":
                             # Extract rules from this .cursor directory
@@ -174,7 +175,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
                             # Don't recurse into .cursor directory
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
 
                         # Recurse into subdirectories
@@ -266,16 +267,17 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
             system_dirs = get_windows_system_directories()
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item, system_dirs):
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name.startswith("."):
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
 
                         if (item / ".cursor").is_dir():
@@ -283,7 +285,7 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
 
                         self._walk_for_agents_md(root_path, item, projects_by_root, current_depth + 1, system_dirs)
 
-                    elif item.is_file() and is_agents_md_file(item.name):
+                    elif _entry.is_file() and is_agents_md_file(item.name):
                         extract_and_add_rule(
                             item, find_project_root, add_rule_to_project,
                             projects_by_root, scope="project"

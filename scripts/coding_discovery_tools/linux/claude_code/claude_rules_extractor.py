@@ -17,7 +17,7 @@ from ...claude_rules_helpers import (
     extract_rules_from_rules_directory,
 )
 from ...coding_tool_base import BaseClaudeRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     extract_and_add_rule,
@@ -104,7 +104,8 @@ class LinuxClaudeRulesExtractor(BaseClaudeRulesExtractor):
         if current_depth > MAX_SEARCH_DEPTH:
             return
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -115,18 +116,18 @@ class LinuxClaudeRulesExtractor(BaseClaudeRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == CLAUDE_DIR_NAME:
                             if is_user_level_tool_dir(item):
                                 continue
                             self._extract_rules_from_claude_directory(item, projects_by_root)
                             continue
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
                         self._walk_for_claude_files(
                             root_path, item, projects_by_root, current_depth + 1
                         )
-                    elif item.is_file():
+                    elif _entry.is_file():
                         if item.name == ".clauderules" or is_claude_md_file(item.name):
                             if should_process_file(item, root_path):
                                 extract_and_add_rule(

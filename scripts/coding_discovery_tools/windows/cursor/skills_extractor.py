@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from ...coding_tool_base import BaseCursorSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
     get_windows_system_directories,
@@ -158,7 +158,8 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # Performance fix: check skip condition without recreating set each iteration
                     if should_skip_path(item, get_windows_system_directories()):
@@ -172,7 +173,7 @@ class WindowsCursorSkillsExtractor(BaseCursorSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Check if this is a .cursor or .agents directory
                         if item.name in CURSOR_PARENT_DIR_NAMES:
                             users_root = str(self._get_users_directory())

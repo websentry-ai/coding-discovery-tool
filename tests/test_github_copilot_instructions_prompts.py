@@ -21,6 +21,7 @@ ingestion, so every emitted rule's keys must be a subset of the allowlist.
 
 import shutil
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +56,7 @@ def _flatten_rules(project_list):
     return rules
 
 
+@unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot extractors")
 class TestProjectInstructionsAndPrompts(unittest.TestCase):
     """Project-scoped .github/instructions/** and .github/prompts/ extraction."""
 

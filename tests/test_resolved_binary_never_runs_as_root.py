@@ -12,6 +12,7 @@ nothing spawns.
 import os
 import subprocess
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +23,7 @@ _MOD = "scripts.coding_discovery_tools.utils"
 
 
 @unittest.skipIf(os.name == "nt", "_is_safe_exec_path is a no-op on Windows")
+@unittest.skipUnless(sys.platform == "darwin", "asserts macOS helper paths (launchctl)")
 class TestResolvedBinaryNeverRunsAsRoot(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

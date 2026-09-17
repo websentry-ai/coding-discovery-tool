@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -497,6 +498,7 @@ _MCP_MOD = (
 _MCP_HELPERS_MOD = "scripts.coding_discovery_tools.mcp_extraction_helpers"
 
 
+@unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot CLI extractor")
 class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
     """Workspace ``.mcp.json`` at a project root is surfaced for the CLI.
 

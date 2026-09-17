@@ -892,6 +892,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@unittest.skipUnless(sys.platform == "darwin", "asserts the macOS home/Library permission shape")
 class TestCoverageExcludesUnreadableHomes(unittest.TestCase):
     """An enumerated home we cannot read must not be reported as covered: the backend
     prunes from that scope, so claiming it deletes installs we never looked for."""

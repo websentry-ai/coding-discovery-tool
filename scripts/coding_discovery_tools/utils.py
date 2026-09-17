@@ -654,9 +654,15 @@ _SURFACE_MAX_TOTAL_CHARS = 8000
 
 
 def _install_surface_roots(user_homes) -> List[Tuple[str, Path]]:
-    """(label, path) install surfaces for this platform. Labels carry no username."""
+    """(label, path) install surfaces for this platform. Labels carry no username.
+
+    Signal before noise: the shared char budget is spent in this order, and
+    AppData\\Local is hundreds of cache entries, so listing it per home ahead of
+    the rest would starve the later homes entirely.
+    """
     system = platform.system()
     roots: List[Tuple[str, Path]] = []
+    bulk: List[Tuple[str, Path]] = []
     if system == "Windows":
         # Env vars, not a literal C:\ — a D:\Program Files install is invisible otherwise.
         for label, var in (("ProgramFiles", "ProgramW6432"),
@@ -670,19 +676,16 @@ def _install_surface_roots(user_homes) -> List[Tuple[str, Path]]:
 
     for index, user_home in enumerate(list(user_homes)[:_SURFACE_MAX_HOMES]):
         user_home = Path(user_home)
+        suffix = f"#{index}" if index else ""
         if system == "Windows":
             local = user_home / "AppData" / "Local"
             # Programs joins its parent: every per-user editor install lands inside it.
-            per_home = (("LocalAppData", local),
-                        ("LocalAppData\\Programs", local / "Programs"),
-                        ("Roaming", user_home / "AppData" / "Roaming"))
+            roots.append((f"LocalAppData\\Programs{suffix}", local / "Programs"))
+            roots.append((f"Roaming{suffix}", user_home / "AppData" / "Roaming"))
+            bulk.append((f"LocalAppData{suffix}", local))
         elif system == "Darwin":
-            per_home = (("~/Applications", user_home / "Applications"),)
-        else:
-            per_home = ()
-        for label, path in per_home:
-            roots.append((f"{label}#{index}" if index else label, path))
-    return roots
+            roots.append((f"~/Applications{suffix}", user_home / "Applications"))
+    return roots + bulk
 
 
 def install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:

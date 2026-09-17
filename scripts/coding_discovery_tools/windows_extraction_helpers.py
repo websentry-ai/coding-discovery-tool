@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 _PROFILE_LIST_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
 # LOCAL SYSTEM / LOCAL SERVICE / NETWORK SERVICE — S-1-5-18 is what an MDM runs as.
 _SERVICE_PROFILE_SIDS = frozenset({"S-1-5-18", "S-1-5-19", "S-1-5-20"})
+# Font Driver Host / UMFD, IIS application pools and DWM each get their own profile,
+# one per session, so they are SID families rather than the fixed SIDs above. Real
+# accounts are never matched: local and domain users are S-1-5-21-*, Entra S-1-12-1-*.
+_SERVICE_PROFILE_SID_PREFIXES = ("S-1-5-96-", "S-1-5-82-", "S-1-5-90-")
+
+
+def _is_service_profile_sid(sid: str) -> bool:
+    """True for a profile Windows keeps for itself rather than for a person."""
+    return sid in _SERVICE_PROFILE_SIDS or sid.startswith(_SERVICE_PROFILE_SID_PREFIXES)
 
 
 def registry_profile_paths() -> Tuple[List[Path], bool]:
@@ -53,7 +62,7 @@ def registry_profile_paths() -> Tuple[List[Path], bool]:
                 try:
                     sid = winreg.EnumKey(key, index)
                     base_sid = sid[:-4] if sid.endswith(".bak") else sid
-                    if base_sid in _SERVICE_PROFILE_SIDS:
+                    if _is_service_profile_sid(base_sid):
                         continue
                     with winreg.OpenKey(key, sid) as sub_key:
                         raw, kind = winreg.QueryValueEx(sub_key, "ProfileImagePath")

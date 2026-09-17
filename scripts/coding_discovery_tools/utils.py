@@ -27,7 +27,7 @@ try:
 except ImportError:
     pwd = None  # Not available on Windows
 
-from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, is_symlink_or_junction, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, is_symlink_or_junction, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, is_skipped_windows_user_dir, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT
 from .vscode_extension_helpers import VSCODE_EDITOR_KEYS, reset_vscode_registry_state, vscode_registry_state
 
 logger = logging.getLogger(__name__)
@@ -1005,7 +1005,8 @@ def windows_user_homes() -> Dict[str, Path]:
     see a profile relocated to another drive, and it treats any leftover folder
     as a user. ``ProfileList`` is Windows' own record, so the two are combined —
     a walked folder is kept only when a profile record vouches for the name, and
-    registry profiles the walk missed are added at their real path.
+    registry profiles the walk missed are added at their real path. The skip-list
+    applies to both, so a name the walk drops cannot return through the registry.
 
     A profile whose recorded path is a UNC share still vouches for its local
     ``C:\\Users`` cache, and an incomplete registry read vouches for nothing, so
@@ -1029,7 +1030,7 @@ def windows_user_homes() -> Dict[str, Path]:
             for user_dir in win_users_dir.iterdir():
                 if (user_dir.is_dir()
                         and not user_dir.name.startswith('.')
-                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
+                        and not is_skipped_windows_user_dir(user_dir.name)):
                     walked[user_dir.name] = user_dir
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from Windows Users directory: {e}")
@@ -1042,7 +1043,7 @@ def windows_user_homes() -> Dict[str, Path]:
     homes: Dict[str, Path] = {}
     vouched: Dict[str, str] = {}
     for path in registry:
-        if not path.name:
+        if not path.name or is_skipped_windows_user_dir(path.name):
             continue
         key = path.name.lower()
         vouched.setdefault(key, path.name)

@@ -220,6 +220,27 @@ class TestGetAllUsersWindows(unittest.TestCase):
             self.assertNotIn(excluded, result)
 
     @patch("scripts.coding_discovery_tools.windows_extraction_helpers.registry_profile_paths",
+           return_value=([PureWindowsPath(r"C:\Users\temp"),
+                          PureWindowsPath(r"C:\Users\public"),
+                          PureWindowsPath(r"C:\Users\alice")], True))
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_skip_list_is_case_insensitive_for_registry_profiles(self, _mock_sys, _mock_registry):
+        """ProfileImagePath records whatever casing created the profile, and
+        Windows paths are case-insensitive, so the skip-list has to be too."""
+        with patch("scripts.coding_discovery_tools.utils.Path") as MockPath:
+            mock_home = MagicMock()
+            mock_home.anchor = "C:\\"
+            mock_users_dir = MagicMock()
+            mock_users_dir.exists.return_value = True
+            mock_users_dir.iterdir.return_value = []
+            MockPath.home.return_value = mock_home
+            MockPath.return_value.__truediv__ = MagicMock(return_value=mock_users_dir)
+            result = get_all_users_windows()
+        self.assertIn("alice", result)
+        self.assertNotIn("temp", result)
+        self.assertNotIn("public", result)
+
+    @patch("scripts.coding_discovery_tools.windows_extraction_helpers.registry_profile_paths",
            return_value=([PureWindowsPath(r"C:\Users\TEMP"),
                           PureWindowsPath(r"C:\Users\alice")], True))
     @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")

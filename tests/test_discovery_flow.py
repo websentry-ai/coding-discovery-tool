@@ -585,10 +585,83 @@ class TestSentryRunGuards(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 30)
 
 
-class TestSettingsTransformPrecedence(unittest.TestCase):
-    """Settings transformation picks highest precedence and maps fields correctly."""
+class TestSentryRunContext(unittest.TestCase):
+    """Call sites that cannot reach main()'s context — the detect loop lives inside
+    the detector — still have to produce an attributable event."""
 
-    def test_managed_wins_over_user(self):
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+
+    def tearDown(self):
+        utils_mod.reset_sentry_run_state()
+
+    def _capture_payload(self):
+        """curl reads the event from a temp file that is unlinked straight after,
+        so it has to be read while the call is still in flight."""
+        sent = {}
+
+        def side_effect(cmd, *a, **kwargs):
+            path = cmd[cmd.index("-d") + 1].lstrip("@")
+            sent.update(json.loads(Path(path).read_text()))
+            return Mock(returncode=0, stdout="200")
+
+        return sent, side_effect
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run")
+    def test_run_context_reaches_an_event_that_never_passed_it(self, mock_run):
+        sent, mock_run.side_effect = self._capture_payload()
+        run_ctx = {"domain": "https://backend.example", "app_name": ""}
+        utils_mod.set_sentry_run_context(run_ctx)
+        # main() fills these in after registering, as it does for every run.
+        run_ctx["device_id"] = "C02FP83QMD6M"
+        run_ctx["system_user"] = "ganeshk"
+
+        report_to_sentry(PermissionError(13, "denied"),
+                         {"phase": "detect", "tool_name": "JetBrains IDEs"})
+
+        self.assertEqual("C02FP83QMD6M", sent["tags"]["device_id"])
+        self.assertEqual("ganeshk", sent["tags"]["system_user"])
+        self.assertEqual("detect", sent["tags"]["phase"])
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run")
+    def test_per_call_key_wins_over_run_context(self, mock_run):
+        sent, mock_run.side_effect = self._capture_payload()
+        utils_mod.set_sentry_run_context({"domain": "https://backend.example",
+                                          "tool_name": "Claude Code"})
+        report_to_sentry(RuntimeError("x"), {"phase": "detect", "tool_name": "Cursor"})
+        self.assertEqual("Cursor", sent["tags"]["tool_name"])
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run", return_value=Mock(returncode=0, stdout="200"))
+    def test_loopback_domain_now_suppresses_a_detect_event(self, mock_run):
+        """Without the run context these events carried no domain, so local and CI
+        runs reported into production Sentry."""
+        utils_mod.set_sentry_run_context({"domain": "http://127.0.0.1:8000"})
+        report_to_sentry(RuntimeError("x"), {"phase": "detect", "tool_name": "Cursor"})
+        self.assertEqual(0, mock_run.call_count)
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "https://key@host.example/1")
+    @patch("subprocess.run")
+    def test_context_does_not_outlive_the_run_that_set_it(self, mock_run):
+        """main() clears it on teardown, so a programmatic caller can't inherit the
+        previous run's device or be silenced by its stale loopback domain."""
+        sent, mock_run.side_effect = self._capture_payload()
+        utils_mod.set_sentry_run_context({"domain": "http://127.0.0.1:8000",
+                                          "device_id": "PREVIOUS-RUN"})
+        utils_mod.set_sentry_run_context({})  # what main()'s finally now does
+
+        report_to_sentry(RuntimeError("x"), {"phase": "detect", "tool_name": "Cursor"})
+
+        self.assertEqual(1, mock_run.call_count)
+        self.assertNotIn("device_id", sent["tags"])
+
+
+class TestSettingsTransformPrecedence(unittest.TestCase):
+    """Settings transformation merges scopes and maps fields correctly."""
+
+    def test_managed_scalars_win_and_rules_accumulate(self):
         settings = [
             {
                 "scope": "user",
@@ -613,7 +686,7 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["scope"], "managed")
         self.assertEqual(result["permission_mode"], "deny")
-        self.assertEqual(result["allow_rules"], ["Bash"])
+        self.assertEqual(result["allow_rules"], ["Read", "Bash"])
         self.assertEqual(result["deny_rules"], ["Write"])
         self.assertTrue(result["sandbox_enabled"])
 
@@ -644,6 +717,146 @@ class TestSettingsTransformPrecedence(unittest.TestCase):
 
     def test_empty_settings_returns_none(self):
         self.assertIsNone(transform_settings_to_backend_format([]))
+
+    @staticmethod
+    def _user(**permissions):
+        return {
+            "scope": "user",
+            "settings_path": "/home/u/.claude/settings.json",
+            "permissions": permissions,
+            "sandbox": {"enabled": False},
+        }
+
+    @staticmethod
+    def _project(root, allow, **permissions):
+        return {
+            "scope": "local",
+            "settings_path": f"/home/u{root}/.claude/settings.local.json",
+            "permissions": {"allow": allow, **permissions},
+            "sandbox": {},
+        }
+
+    def test_user_scope_mode_survives_a_project_that_only_grants_rules(self):
+        settings = [
+            self._user(defaultMode="auto", allow=["Read"], deny=["Bash(sudo:*)"]),
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["permission_mode"], "auto")
+        self.assertEqual(result["allow_rules"], ["Read", "Bash(npm:*)"])
+        self.assertEqual(result["deny_rules"], ["Bash(sudo:*)"])
+        self.assertFalse(result["sandbox_enabled"])
+        self.assertEqual(
+            result["contributing_paths"],
+            ["/home/u/.claude/settings.json", "/home/u/repo/.claude/settings.local.json"],
+        )
+
+    def test_riskiest_project_is_reported(self):
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Read", "Read"]),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_project_scope_auto_is_ignored_and_drops_the_user_value(self):
+        settings = [
+            self._user(defaultMode="acceptEdits"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
+
+    def test_unrestricted_grant_outranks_a_tamer_project_on_a_higher_mode(self):
+        settings = [
+            self._user(defaultMode="default"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+            self._project("/yolo", ["Bash"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["allow_rules"], ["Bash"])
+
+    def test_empty_policies_do_not_erase_an_inherited_one(self):
+        user = self._user(defaultMode="default")
+        user["mcp_policies"] = {"allowedMcpServers": ["github"], "deniedMcpServers": []}
+        project = self._project("/repo", ["Read"])
+        project["mcp_policies"] = {"allowedMcpServers": [], "deniedMcpServers": []}
+
+        result = transform_settings_to_backend_format([user, project])
+
+        self.assertEqual(result["mcp_policies"]["allowedMcpServers"], ["github"])
+
+    def test_suppressed_mode_still_ranks_at_the_inherited_posture(self):
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+        self.assertNotIn("permission_mode", result)
+
+    def test_a_second_suppression_does_not_erase_the_ranking_mode(self):
+        settings = [
+            self._user(defaultMode="bypassPermissions"),
+            {
+                "scope": "project",
+                "settings_path": "/home/u/repo/.claude/settings.json",
+                "permissions": {"defaultMode": "auto"},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Read"], defaultMode="auto"),
+            self._project("/tame", ["Read", "Write"], defaultMode="acceptEdits"),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertIn("/repo", result["settings_path"])
+
+    def test_one_users_settings_do_not_seed_another_users_project(self):
+        settings = [
+            self._user(defaultMode="default", allow=["Read(alice)"]),
+            {
+                "scope": "user",
+                "settings_path": "/home/bob/.claude/settings.json",
+                "permissions": {"defaultMode": "bypassPermissions", "allow": ["Bash"]},
+                "sandbox": {},
+            },
+            self._project("/repo", ["Bash(npm:*)"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertEqual(result["contributing_paths"], ["/home/bob/.claude/settings.json"])
+        self.assertNotIn("Read(alice)", result["allow_rules"])
+        self.assertNotIn("Bash(npm:*)", result["allow_rules"])
+
+    def test_disable_auto_mode_drops_auto(self):
+        settings = [
+            {
+                "scope": "managed",
+                "settings_path": "/Library/managed-settings.json",
+                "raw_settings": {"permissions": {"disableAutoMode": "disable"}},
+                "permissions": {},
+                "sandbox": {},
+            },
+            self._user(defaultMode="auto", allow=["Read"]),
+        ]
+
+        result = transform_settings_to_backend_format(settings)
+
+        self.assertNotIn("permission_mode", result)
 
 
 class TestFilterProjectsByUser(unittest.TestCase):
@@ -1741,6 +1954,34 @@ class TestSwallowedExtractionReportsToSentry(unittest.TestCase):
         self.assertEqual(context.get("phase"), "extract")
 
 
+class TestDetectErrorReporting(unittest.TestCase):
+    """A home the scan cannot read is routine on a multi-user box. It must still
+    count as a failure so the tool survives reconciliation, but it is not a defect
+    worth an alert."""
+
+    def _run(self, exc):
+        import scripts.coding_discovery_tools.ai_tools_discovery as mod
+        detector = Mock()
+        detector.tool_name = "JetBrains IDEs"
+        instance = mod.AIToolsDetector.__new__(mod.AIToolsDetector)
+        instance._tool_detectors = [detector]
+        failures = set()
+        with patch.object(mod, "detect_tool_for_user", side_effect=exc), \
+                patch.object(mod, "report_to_sentry") as sentry:
+            instance.detect_all_tools(user_home="/Users/other", failures=failures)
+        return sentry.called, failures
+
+    def test_permission_error_is_recorded_but_not_alerted(self):
+        reported, failures = self._run(PermissionError(13, "Permission denied"))
+        self.assertFalse(reported)
+        self.assertEqual({"JetBrains IDEs"}, failures)
+
+    def test_other_errors_still_alert(self):
+        reported, failures = self._run(RuntimeError("boom"))
+        self.assertTrue(reported)
+        self.assertEqual({"JetBrains IDEs"}, failures)
+
+
 class TestNoToolsSentryEvent(unittest.TestCase):
     """main() emits exactly one enriched 'no_tools_found' warning on a zero-tool
     scan (the only signal that distinguishes an enumeration miss from a genuinely
@@ -1755,6 +1996,11 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         if "context" in kwargs:
             return kwargs["context"]
         return args[1] if len(args) > 1 else {}
+
+    def setUp(self):
+        # Module state is per-process, which is per-scan in production but not
+        # across tests; without this the event inherits another test's rejections.
+        utils_mod.reset_sentry_run_state()
 
     def _run_main(self, detect_return, mock_sentry):
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
@@ -1802,6 +2048,10 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         self.assertEqual(kwargs.get("level"), "warning")
 
         ctx = self._context_of(call)
+        # Discriminators that separate residue from a binary we found and dropped.
+        self.assertIn("config_dirs_age_days", ctx)
+        # ...and from a prefix we never got to look under.
+        self.assertIn(ctx.get("npm_prefix"), {"resolved", "unresolved", "not_probed"})
         # get_all_users_linux -> [] means enumeration missed every account, so the
         # current-user fallback supplies the single scanned home.
         self.assertEqual(ctx.get("homes_enumerated"), 0)
@@ -1813,6 +2063,36 @@ class TestNoToolsSentryEvent(unittest.TestCase):
         # PII guard: no list-valued context (e.g. the raw user list) may leak.
         for key, value in ctx.items():
             self.assertNotIsInstance(value, list, f"context key {key!r} is a list")
+
+    def test_windows_elevation_is_queryable_like_is_root(self):
+        """POSIX reports is_root as a tag; the Windows equivalents were context-only,
+        so a no-tools scan could not be grouped by whether it saw every profile."""
+        import scripts.coding_discovery_tools.utils as u
+        for key in ("is_root", "is_elevated", "detect_scope"):
+            self.assertIn(key, u._SENTRY_TAG_KEYS)
+
+    def test_admin_state_is_never_invented(self):
+        import scripts.coding_discovery_tools.windows_extraction_helpers as weh
+        import scripts.coding_discovery_tools.utils as u
+
+        with patch.object(weh, "_running_as_local_system", return_value=False), \
+                patch.object(weh, "windows_admin_state", return_value=None):
+            self.assertIsNone(u._windows_process_is_elevated())
+
+        with patch("ctypes.windll", create=True) as windll:
+            windll.shell32.IsUserAnAdmin.side_effect = OSError("unavailable")
+            self.assertIsNone(weh.windows_admin_state())
+            self.assertIs(weh.is_running_as_admin(), False)
+
+    def test_elevated_probe_reports_system(self):
+        """SYSTEM holds no Administrators-group membership, so the telemetry
+        probe must recognise it by SID or an MDM scan reports is_elevated=False."""
+        import scripts.coding_discovery_tools.windows_extraction_helpers as weh
+        import scripts.coding_discovery_tools.utils as u
+
+        with patch.object(weh, "_running_as_local_system", return_value=True), \
+                patch.object(weh, "windows_admin_state", return_value=None):
+            self.assertIs(u._windows_process_is_elevated(), True)
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
     def test_does_not_fire_when_tools_found(self):
@@ -1827,6 +2107,199 @@ class TestNoToolsSentryEvent(unittest.TestCase):
             if self._context_of(c).get("phase") == "no_tools_found"
         ]
         self.assertEqual(no_tools_calls, [], "no_tools_found must not fire when a tool is detected")
+
+
+class TestNpmPrefixDiagnostics(unittest.TestCase):
+    """An npm-global CLI lives under `npm prefix -g`. A scan whose PATH lacks npm
+    never looks there, which until now reported the same as looking and finding
+    nothing."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.home = Path(tempfile.mkdtemp())
+
+    tearDown = setUp
+
+    def _state(self, npm_output, is_root=False):
+        with patch.object(utils_mod, "run_command", return_value=npm_output):
+            utils_mod.resolve_npm_global_tool_bin("copilot", self.home, is_root)
+        return utils_mod.npm_prefix_state()
+
+    def test_resolved_when_npm_answers(self):
+        self.assertEqual("resolved", self._state("/opt/homebrew"))
+
+    def test_unresolved_when_npm_is_not_on_path(self):
+        self.assertEqual("unresolved", self._state(None))
+
+    def test_unresolved_when_npm_answers_blank(self):
+        self.assertEqual("unresolved", self._state("   "))
+
+    def test_not_probed_on_a_root_scan(self):
+        """Root scans skip the probe by design; that is not the same as a failure."""
+        self.assertEqual("not_probed", self._state("/opt/homebrew", is_root=True))
+
+    def test_reset_between_runs(self):
+        self._state("/opt/homebrew")
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual("not_probed", utils_mod.npm_prefix_state())
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("npm_prefix", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestRejectedBinaryDiagnostics(unittest.TestCase):
+    """A binary found and then not attributed is the one cause a zero-tool event
+    could not previously distinguish, because the rejection was silent."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+
+    tearDown = setUp
+
+    def test_owner_mismatch_is_recorded(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        binary = home / "claude"
+        binary.write_text("")
+        real_stat = os.stat
+
+        def fake_stat(path, *a, **k):
+            if str(path) == str(binary):
+                return Mock(st_uid=502)
+            if str(path) == str(home):
+                return Mock(st_uid=501)
+            return real_stat(path, *a, **k)
+
+        with patch.object(utils_mod.os, "stat", side_effect=fake_stat):
+            self.assertFalse(utils_mod.machine_global_binary_owned_by_user(binary, home))
+        self.assertEqual(
+            [(str(binary), "owner_mismatch")], utils_mod.rejected_binaries()
+        )
+
+    def test_attributed_binary_is_not_recorded(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        binary = home / "claude"
+        binary.write_text("")
+        with patch.object(utils_mod.os, "stat", return_value=Mock(st_uid=501)):
+            self.assertTrue(utils_mod.machine_global_binary_owned_by_user(binary, home))
+        self.assertEqual([], utils_mod.rejected_binaries())
+
+    def test_config_dir_age_reports_the_freshest(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        (home / ".claude").mkdir()
+        self.assertEqual(0, utils_mod.newest_tool_config_dir_age_days([home]))
+
+    def test_rejected_tools_carries_basenames_not_paths(self):
+        """A full path can carry a username; the context PII guard forbids it.
+        The tool name is the diagnostic signal, so report only that."""
+        utils_mod.record_rejected_binary("/opt/homebrew/bin/claude", "owner_mismatch")
+        utils_mod.record_rejected_binary("/Users/someone/.local/bin/codex", "owner_mismatch")
+        field = ",".join(
+            sorted({os.path.basename(p) for p, _ in utils_mod.rejected_binaries()})
+        )
+        self.assertEqual("claude,codex", field)
+        self.assertNotIn("someone", field)
+
+    def test_config_dir_age_is_none_without_any_config_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.assertIsNone(utils_mod.newest_tool_config_dir_age_days([Path(tmp.name)]))
+
+
+class TestWindowsUserPathDiagnostics(unittest.TestCase):
+    """A CLI is invoked by name, so its dir is on the user's PATH whatever prefix
+    installed it. The candidate list can only name prefixes it knows, so this
+    records where to look next when a Windows scan finds nothing."""
+
+    def _tag(self, entries):
+        with patch.object(utils_mod.platform, "system", return_value="Windows"), \
+             patch("scripts.coding_discovery_tools.windows_extraction_helpers."
+                   "registry_user_path_dirs", return_value=entries):
+            return utils_mod.windows_user_path_dirs()
+
+    def test_a_long_entry_does_not_hide_the_ones_after_it(self):
+        """Truncation skips the over-budget entry; a later short candidate still lands."""
+        tag = self._tag(["C:\\" + "x" * utils_mod._PATH_TAG_MAX_CHARS, r"~\scoop\shims"])
+        self.assertEqual(r"~\scoop\shims", tag)
+
+    def test_value_is_capped_for_the_tag(self):
+        self.assertLessEqual(len(self._tag([f"C:\\dir{i:03}" for i in range(200)])),
+                             utils_mod._PATH_TAG_MAX_CHARS)
+
+    def test_empty_off_windows(self):
+        with patch.object(utils_mod.platform, "system", return_value="Darwin"):
+            self.assertEqual("", utils_mod.windows_user_path_dirs())
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("user_path_dirs", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestWindowsPathProfileResolution(unittest.TestCase):
+    """Under SYSTEM, expanding %USERPROFILE% against the scanner resolves to
+    systemprofile, so every entry using it fails the directory check and drops the
+    prefix this diagnostic exists to find."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.windows_extraction_helpers as weh
+        self.weh = weh
+
+    def test_per_user_vars_resolve_against_the_hive_owner_not_the_scanner(self):
+        expanded = self.weh._expand_for_profile(r"%USERPROFILE%\scoop\shims", r"C:\Users\alice")
+        self.assertEqual(r"C:\Users\alice\scoop\shims", expanded)
+
+    def test_localappdata_derives_from_the_same_profile(self):
+        self.assertEqual(r"C:\Users\alice\AppData\Local\bin",
+                         self.weh._expand_for_profile(r"%LOCALAPPDATA%\bin", r"C:\Users\alice"))
+
+    def test_unattributable_profile_var_is_left_unexpanded_not_pointed_at_the_scanner(self):
+        self.assertEqual(r"%USERPROFILE%\scoop",
+                         self.weh._expand_for_profile(r"%USERPROFILE%\scoop", None))
+
+    def test_machine_vars_still_expand_from_the_process(self):
+        with patch.dict(os.environ, {"SOMEMACHINEVAR": r"C:\Tools"}):
+            self.assertEqual(r"C:\Tools\bin",
+                             self.weh._expand_for_profile(r"%SOMEMACHINEVAR%\bin", r"C:\Users\a"))
+
+    def test_sibling_profile_is_not_treated_as_inside_its_shorter_neighbour(self):
+        self.assertFalse(self.weh._under(r"C:\Users\bobby\bin", r"C:\Users\bob"))
+        self.assertTrue(self.weh._under(r"C:\Users\bob\bin", r"C:\Users\bob"))
+
+    def test_boundary_check_is_case_insensitive_like_windows(self):
+        self.assertTrue(self.weh._under(r"c:\users\BOB\bin", r"C:\Users\bob"))
+
+    def test_dot_segments_cannot_smuggle_another_account_past_redaction(self):
+        """Lexically under alice, actually bob: redacting it would emit bob's name."""
+        self.assertFalse(self.weh._under(r"C:\Users\alice\..\bob\bin", r"C:\Users\alice"))
+        self.assertTrue(self.weh._under(r"C:\Users\alice\foo\..\bin", r"C:\Users\alice"))
+
+    def test_unc_entries_are_rejected_before_any_filesystem_call(self):
+        """isdir on a share authenticates this scan's token, Local System under MDM."""
+        for hostile in (r"\\attacker\share", "//attacker/share", r"\\?\UNC\attacker\share"):
+            self.assertFalse(self.weh._is_local_drive(hostile), hostile)
+        self.assertTrue(self.weh._is_local_drive(r"C:\Program Files\nodejs"))
+
+    def test_a_mapped_drive_is_asked_its_type_not_assumed_local(self):
+        """Z:\\ looks local but can be a share, so the drive type decides."""
+        fake = Mock()
+        fake.windll.kernel32.GetDriveTypeW.return_value = self.weh._DRIVE_REMOTE
+        with patch.dict("sys.modules", {"ctypes": fake}):
+            self.assertFalse(self.weh._is_local_drive(r"Z:\bin"))
+        fake.windll.kernel32.GetDriveTypeW.return_value = 3   # DRIVE_FIXED
+        with patch.dict("sys.modules", {"ctypes": fake}):
+            self.assertTrue(self.weh._is_local_drive(r"C:\bin"))
+
+    def test_only_windows_owned_roots_are_sent_verbatim(self):
+        """A path elsewhere can name a customer or project, so it is counted not sent."""
+        with patch.dict(os.environ, {"ProgramData": r"C:\ProgramData"}):
+            self.assertTrue(self.weh._is_machine_root(r"C:\ProgramData\chocolatey\bin"))
+            self.assertFalse(self.weh._is_machine_root(r"D:\Projects\Acquisition-Target\bin"))
 
 
 if __name__ == "__main__":

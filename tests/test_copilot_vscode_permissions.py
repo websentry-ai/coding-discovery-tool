@@ -1,0 +1,1402 @@
+"""Tests for the VS Code GitHub Copilot settings/permission extractor.
+
+Covers the permission mapping (settings.json keys → backend-ready record) and the
+real per-OS extractor over planted settings.json fixtures.
+"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+from coding_discovery_tools.coding_tool_base import (  # noqa: E402
+    _VSCODE_SETTINGS_MAX_BYTES,
+    BaseGitHubCopilotSettingsExtractor,
+)
+from coding_discovery_tools.coding_tool_factory import GitHubCopilotSettingsExtractorFactory  # noqa: E402
+
+
+class _MapExtractor(BaseGitHubCopilotSettingsExtractor):
+    """Concrete stub for exercising the mapping without touching the real FS."""
+
+    def _scan_users(self, callback):
+        pass
+
+    def _user_config_dirs(self, user_home):
+        return []
+
+
+class TestPermissionMapping(unittest.TestCase):
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _rec(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")
+
+    def test_no_security_keys_yields_no_record(self):
+        self.assertIsNone(self._rec({"editor.fontSize": 13, "workbench.colorTheme": "Dark"}))
+
+    def test_global_autoapprove_is_bypass(self):
+        self.assertEqual(self._rec({"chat.tools.global.autoApprove": True})["permission_mode"], "bypassPermissions")
+
+    def test_default_mode_when_nothing_auto_approved(self):
+        rec = self._rec({"chat.agent.enabled": True})
+        self.assertEqual(rec["permission_mode"], "default")
+        # a False global auto-approve must NOT read as bypass
+        self.assertEqual(self._rec({"chat.tools.global.autoApprove": False})["permission_mode"], "default")
+
+    def test_terminal_allow_deny_and_regex_stripped(self):
+        rec = self._rec({"chat.tools.terminal.autoApprove": {
+            "/^git\\s+status/": True, "rm": False, "curl": False,
+        }})
+        self.assertIn("Bash(^git\\s+status *)", rec["allow_rules"])
+        self.assertIn("Bash(rm *)", rec["deny_rules"])
+        self.assertIn("Bash(curl *)", rec["deny_rules"])
+
+    def test_only_registry_verified_keys_are_captured(self):
+        # Guard against re-introducing blog-era phantom keys: keys that VS Code
+        # does not register must never appear in raw_settings or affect the mode.
+        rec = self._rec({
+            "chat.tools.global.autoApprove": True,                              # real
+            "github.copilot.chat.agent.autoApproveFileChanges": True,           # phantom
+            "github.copilot.chat.agent.terminalCommands.blocklist": ["sudo"],   # phantom
+        })
+        self.assertIn("chat.tools.global.autoApprove", rec["raw_settings"])
+        self.assertNotIn("github.copilot.chat.agent.autoApproveFileChanges", rec["raw_settings"])
+        self.assertNotIn("github.copilot.chat.agent.terminalCommands.blocklist", rec["raw_settings"])
+
+    def test_mcp_governance_kept_as_context_not_a_permission_field(self):
+        # chat.mcp.* is VS Code-wide MCP governance, not a Copilot tool permission:
+        # captured in raw_settings for context, never promoted to its own field.
+        rec = self._rec({
+            "chat.mcp.access": "registry",
+            "chat.mcp.allowedServers": [{"serverName": "github-mcp"}],
+            "chat.mcp.deniedServers": [{"serverName": "shady"}],
+        })
+        self.assertEqual(rec["raw_settings"]["chat.mcp.access"], "registry")
+        self.assertIn("chat.mcp.allowedServers", rec["raw_settings"])
+        self.assertNotIn("mcp_tool_allowlist", rec)
+        self.assertNotIn("mcp_policies", rec)
+
+    def test_sandbox_on_off(self):
+        self.assertTrue(self._rec({"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+        self.assertFalse(self._rec({"chat.agent.sandbox.enabled": "off"})["sandbox_enabled"])
+        # the registered default is "off", so an absent key means disabled, not unknown
+        self.assertFalse(self._rec({"chat.agent.enabled": True})["sandbox_enabled"])
+
+    def test_raw_settings_excludes_noise(self):
+        rec = self._rec({"chat.tools.global.autoApprove": True, "editor.fontSize": 13})
+        self.assertIn("chat.tools.global.autoApprove", rec["raw_settings"])
+        self.assertNotIn("editor.fontSize", rec["raw_settings"])
+
+    def test_merge_escalates_mode_and_unions_rules(self):
+        user = self._rec({"chat.tools.terminal.autoApprove": {"ls": True}})
+        ws = self._rec({"chat.tools.global.autoApprove": True,
+                        "chat.tools.terminal.autoApprove": {"pwd": True, "ls": True}})
+        merged = self.ex._merge_records(user, [ws])
+        # a more-permissive profile surfaces; allow rules union without duplicating "ls"
+        self.assertEqual(merged["permission_mode"], "bypassPermissions")
+        self.assertEqual(sorted(merged["allow_rules"]), ["Bash(ls *)", "Bash(pwd *)"])
+
+    def test_jsonc_comments_and_trailing_commas_parse(self):
+        tmp = Path(tempfile.mkdtemp()) / "settings.json"
+        tmp.write_text('{\n  // comment\n  "chat.tools.global.autoApprove": true,\n}\n', encoding="utf-8")
+        try:
+            parsed = self.ex._parse_jsonc(tmp)
+            self.assertEqual(parsed.get("chat.tools.global.autoApprove"), True)
+        finally:
+            shutil.rmtree(tmp.parent, ignore_errors=True)
+
+
+class TestMacOSExtractorOverFixture(unittest.TestCase):
+    """Drive the real macOS extractor over planted user + profile settings.json."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="copilot-perm-e2e-", dir=str(Path.home())))
+        user_dir = self.home / "Library" / "Application Support" / "Code" / "User"
+        user_dir.mkdir(parents=True)
+        (user_dir / "settings.json").write_text(json.dumps({
+            "chat.tools.global.autoApprove": True,
+            "chat.tools.terminal.autoApprove": {"git status": True, "rm": False},
+        }), encoding="utf-8")
+        # a named profile that blocks an extra terminal command
+        prof = user_dir / "profiles" / "workp"
+        prof.mkdir(parents=True)
+        (prof / "settings.json").write_text(json.dumps({
+            "chat.tools.terminal.autoApprove": {"curl": False},
+        }), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_extracts_user_and_merges_profiles(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)  # constrain to the fixture
+        rec = ex.extract_settings()
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertIn("Bash(git status *)", rec["allow_rules"])
+        self.assertIn("Bash(rm *)", rec["deny_rules"])
+        # the named profile's own deny rule is merged in too
+        self.assertIn("Bash(curl *)", rec["deny_rules"])
+
+    def test_named_profile_yolo_is_detected_and_escalates(self):
+        # A locked-down default profile but a YOLO *named* profile must surface:
+        # the profile is its own permission surface (profiles/<id>/settings.json).
+        base = self.home / "Library" / "Application Support" / "Code" / "User"
+        # default profile: benign
+        (base / "settings.json").write_text(json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        # named profile: YOLO
+        prof = base / "profiles" / "ab12cd"
+        prof.mkdir(parents=True)
+        (prof / "settings.json").write_text(json.dumps({
+            "chat.tools.global.autoApprove": True,
+            "chat.tools.terminal.autoApprove": {"rm": False},
+        }), encoding="utf-8")
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        rec = ex.extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions", "a YOLO named profile must surface")
+        self.assertIn("Bash(rm *)", rec.get("deny_rules", []))
+
+    def test_multi_user_scan_surfaces_the_riskiest_user(self):
+        # Elevated scan over two users: a benign user first, a YOLO user second.
+        # The returned record must be the YOLO user's (its own settings_path), so
+        # the risky posture is never hidden behind the benign first user.
+        homes = []
+        for name, settings in (("benign", {"chat.agent.enabled": True}),
+                               ("yolo", {"chat.tools.global.autoApprove": True})):
+            h = Path(tempfile.mkdtemp(prefix=f"copilot-{name}-", dir=str(Path.home())))
+            ud = h / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            (ud / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+            homes.append(h)
+        try:
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: [cb(h) for h in homes]
+            rec = ex.extract_settings()
+            self.assertEqual(rec["permission_mode"], "bypassPermissions")
+            self.assertIn("yolo", rec["settings_path"], "riskiest user's own settings_path must be preserved")
+        finally:
+            for h in homes:
+                shutil.rmtree(h, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_settings_symlink_escaping_home_is_refused(self):
+        # A user's settings.json symlinked to an out-of-home file must NOT be read
+        # (a privileged scan could otherwise report root-owned content as the user's).
+        outside = Path(tempfile.mkdtemp(prefix="copilot-outside-"))
+        try:
+            (outside / "evil.json").write_text(json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+            ud = self.home / "Library" / "Application Support" / "Code" / "User"
+            # replace the benign default settings.json with an escaping symlink
+            (ud / "settings.json").unlink()
+            os.symlink(outside / "evil.json", ud / "settings.json")
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(self.home)
+            rec = ex.extract_settings()
+            # only the in-home profile remains — the escaping YOLO is dropped
+            self.assertNotEqual(rec and rec.get("permission_mode"), "bypassPermissions",
+                                "content from an out-of-home symlink must not be reported")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_in_home_settings_symlink_is_allowed(self):
+        # A stow/chezmoi-style symlink that resolves INSIDE the home is still read.
+        real = self.home / "dotfiles" / "vscode-settings.json"
+        real.parent.mkdir(parents=True)
+        real.write_text(json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        (ud / "settings.json").unlink()
+        os.symlink(real, ud / "settings.json")
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        self.assertEqual(ex.extract_settings()["permission_mode"], "bypassPermissions")
+
+    def test_no_copilot_settings_returns_none(self):
+        empty_home = Path(tempfile.mkdtemp(prefix="copilot-perm-empty-", dir=str(Path.home())))
+        try:
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(empty_home)
+            self.assertIsNone(ex.extract_settings())
+        finally:
+            shutil.rmtree(empty_home, ignore_errors=True)
+
+
+class TestBackendShapeParity(unittest.TestCase):
+    """The record must stay within the Cursor record's vocabulary — that is the
+    shape gateway-data's AIToolPermissions ingest and the fe already accept, so
+    routing Copilot permissions needs no backend/frontend change."""
+
+    # From BaseCursorSettingsExtractor._parse_composer_state (the backend contract).
+    CURSOR_RECORD_KEYS = {
+        "settings_source", "scope", "settings_path", "raw_settings", "permission_mode",
+        "sandbox_enabled", "allow_rules", "deny_rules", "mcp_tool_allowlist",
+        "mcp_servers", "mcp_policies",
+    }
+    REQUIRED = {"permission_mode", "settings_source", "settings_path"}
+
+    def test_record_shape_within_cursor_vocabulary(self):
+        rec = _MapExtractor()._build_record({
+            "chat.tools.global.autoApprove": True,
+            "chat.tools.terminal.autoApprove": {"rm": False},
+            "chat.mcp.allowedServers": ["x"], "chat.mcp.deniedServers": ["y"],
+            "chat.agent.sandbox.enabled": "on",
+        }, Path("/s.json"), "user")
+        extra = set(rec) - self.CURSOR_RECORD_KEYS
+        self.assertEqual(extra, set(), f"keys outside the backend-accepted shape: {extra}")
+        self.assertTrue(self.REQUIRED.issubset(set(rec)), "missing a required backend field")
+
+
+class TestCanonicalRowAttachment(unittest.TestCase):
+    """Permissions attach to exactly the canonical VS Code row and no other — a
+    multi-row install must not double-report, and non-Copilot tools are untouched
+    (the record is freshly built, never shared)."""
+
+    def _detector(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        det._github_copilot_rules_extractor = None      # branch guards None → skipped
+        det._github_copilot_mcp_extractor = None
+        det._get_copilot_cli_skills = lambda: {"user_skills": [], "project_skills": []}
+        det._github_copilot_settings_extractor.extract_settings_by_user = lambda: [{
+            "permission_mode": "bypassPermissions", "settings_source": "user",
+            "scope": "user", "settings_path": "/x", "raw_settings": {},
+        }]
+        det._canonical_vscode_copilot = "github copilot chat (vs code)"
+        return det
+
+    def test_only_canonical_row_gets_permissions(self):
+        det = self._detector()
+        chat = det.process_single_tool(
+            {"name": "GitHub Copilot Chat (VS Code)", "version": "1", "install_path": "/a", "projects": []})
+        plain = det.process_single_tool(
+            {"name": "GitHub Copilot (VS Code)", "version": "1", "install_path": "/b", "projects": []})
+        self.assertIn("permissions", chat)
+        self.assertEqual(chat["permissions"]["permission_mode"], "bypassPermissions")
+        self.assertNotIn("permissions", plain, "a non-canonical Copilot row must not double-attach")
+
+
+class TestTerminalRuleEdgeCases(unittest.TestCase):
+    """Reachable shapes of chat.tools.terminal.autoApprove."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _rules(self, auto):
+        rec = self.ex._build_record({"chat.tools.terminal.autoApprove": auto},
+                                    Path("/x/settings.json"), "user")
+        return (rec or {}).get("allow_rules", []), (rec or {}).get("deny_rules", [])
+
+    def test_object_form_approve_true_is_an_allow_rule(self):
+        # VS Code also accepts {"approve": true, "matchCommandLine": true}
+        allow, _ = self._rules({"npm run": {"approve": True, "matchCommandLine": True}})
+        self.assertIn("Bash(npm run *)", allow)
+
+    def test_object_form_approve_false_is_a_deny_rule(self):
+        # the dangerous miss: an object-form denial must not vanish
+        _, deny = self._rules({"rm -rf": {"approve": False}})
+        self.assertIn("Bash(rm -rf *)", deny)
+
+    def test_unknown_verdict_shape_is_ignored_not_guessed(self):
+        allow, deny = self._rules({"weird": "yes", "other": 123, "none": None})
+        self.assertEqual(allow, [])
+        self.assertEqual(deny, [])
+
+    def test_empty_pattern_key_is_skipped(self):
+        allow, _ = self._rules({"": True, "ls": True})
+        self.assertEqual(allow, ["Bash(ls *)"])
+
+    def test_unicode_and_quoted_patterns_survive(self):
+        allow, _ = self._rules({'echo "héllo"': True})
+        self.assertIn('Bash(echo "héllo" *)', allow)
+
+    def test_duplicate_rules_deduped(self):
+        rec = self.ex._build_record({"chat.tools.terminal.autoApprove": {"/ls/": True, "ls": True}},
+                                    Path("/x/s.json"), "user")
+        self.assertEqual(rec["allow_rules"], ["Bash(ls *)"])
+
+
+class TestModeEdgeCases(unittest.TestCase):
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _mode(self, data):
+        return self.ex._build_record(data, Path("/x/s.json"), "user")["permission_mode"]
+
+    def test_truthy_non_boolean_is_not_bypass(self):
+        # only a literal true flips the mode; "true"/1 must not be read as bypass
+        self.assertEqual(self._mode({"chat.tools.global.autoApprove": "true"}), "default")
+        self.assertEqual(self._mode({"chat.tools.global.autoApprove": 1}), "default")
+
+    def test_pre_rename_global_key_is_not_a_bypass(self):
+        # VS Code never migrated chat.tools.autoApprove and no longer reads it,
+        # so a leftover true grants nothing — reporting bypass would be a false positive
+        self.assertEqual(self._mode({"chat.tools.autoApprove": True}), "default")
+
+    def test_pre_rename_global_key_is_still_captured(self):
+        rec = self.ex._build_record({"chat.tools.autoApprove": True}, Path("/x/settings.json"), "user")
+        self.assertIn("chat.tools.autoApprove", rec["raw_settings"])
+
+
+class TestParseResilience(unittest.TestCase):
+    """A broken or hostile settings.json degrades quietly; it never crashes a scan."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+        self.tmp = Path(tempfile.mkdtemp(prefix="parse-"))
+
+    def tearDown(self):
+        for p in self.tmp.rglob("*"):
+            try: p.chmod(0o644)
+            except OSError: pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, text):
+        p = self.tmp / "settings.json"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_malformed_json_returns_none(self):
+        self.assertIsNone(self.ex._parse_jsonc(self._write('{"a": ')))
+
+    def test_non_dict_json_returns_none(self):
+        self.assertIsNone(self.ex._parse_jsonc(self._write('["not", "a", "dict"]')))
+        self.assertIsNone(self.ex._parse_jsonc(self._write('42')))
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(self.ex._parse_jsonc(self.tmp / "nope.json"))
+
+    def test_empty_object_yields_no_record(self):
+        self.assertIsNone(self.ex._build_record({}, Path("/x/s.json"), "user"))
+
+    @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses file permissions, so chmod 000 is not unreadable")
+    def test_unreadable_file_returns_none(self):
+        p = self._write('{"chat.tools.global.autoApprove": true}')
+        os.chmod(p, 0o000)
+        try:
+            self.assertIsNone(self.ex._parse_jsonc(p))
+        finally:
+            os.chmod(p, 0o644)
+
+
+class TestChannelsAndProfiles(unittest.TestCase):
+    """Stable vs Insiders, many profiles, and hostile entries under profiles/."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="chan-", dir=str(Path.home())))
+        self.stable = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.insiders = self.home / "Library" / "Application Support" / "Code - Insiders" / "User"
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _ex(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex
+
+    @staticmethod
+    def _w(p, obj):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(obj), encoding="utf-8")
+
+    def test_insiders_only_install_is_extracted(self):
+        # no stable dir at all — the Insiders channel must still be read
+        self._w(self.insiders / "settings.json", {"chat.tools.global.autoApprove": True})
+        rec = self._ex().extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertIn("Code - Insiders", rec["settings_path"])
+
+    def test_riskiest_channel_wins_and_is_attributed(self):
+        # benign stable + YOLO Insiders: the risk must surface, attributed to Insiders
+        self._w(self.stable / "settings.json", {"chat.agent.enabled": True})
+        self._w(self.insiders / "settings.json", {"chat.tools.global.autoApprove": True})
+        rec = self._ex().extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertIn("Code - Insiders", rec["settings_path"],
+                      "settings_path must point at the channel that carries the risk")
+
+    def test_many_profiles_all_merge_deterministically(self):
+        self._w(self.stable / "settings.json", {"chat.agent.enabled": True})
+        for i in range(20):
+            self._w(self.stable / "profiles" / f"p{i:02d}" / "settings.json",
+                    {"chat.tools.terminal.autoApprove": {f"cmd{i:02d}": True}})
+        first = self._ex().extract_settings()
+        second = self._ex().extract_settings()
+        self.assertEqual(len(first["allow_rules"]), 20, "every profile's rule must merge")
+        self.assertEqual(first["allow_rules"], second["allow_rules"], "order must be deterministic")
+
+    def test_stray_file_under_profiles_is_ignored(self):
+        self._w(self.stable / "settings.json", {"chat.tools.global.autoApprove": True})
+        (self.stable / "profiles").mkdir(parents=True, exist_ok=True)
+        (self.stable / "profiles" / "not-a-dir.txt").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._ex().extract_settings()["permission_mode"], "bypassPermissions")
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_symlinked_profile_dir_escaping_home_is_refused(self):
+        # the profile DIR (not just the leaf) is a link out of the home
+        outside = Path(tempfile.mkdtemp(prefix="chan-outside-"))
+        try:
+            (outside / "settings.json").write_text(
+                json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+            self._w(self.stable / "settings.json", {"chat.agent.enabled": True})
+            (self.stable / "profiles").mkdir(parents=True, exist_ok=True)
+            os.symlink(outside, self.stable / "profiles" / "escape")
+            rec = self._ex().extract_settings()
+            # Refusing to read it is not the same as knowing it is harmless: VS
+            # Code follows the link, so the posture is unknown rather than mild.
+            self.assertIsNone(rec,
+                              "settings reached through an escaping profile dir must not be read")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+class TestContainmentRace(unittest.TestCase):
+    """A settings file swapped for an out-of-home link between enumeration and the
+    read must never be reported. Validating a path and opening it separately leaves
+    that window; the read validates the descriptor it actually holds."""
+
+    @unittest.skipUnless(os.name == "posix", "symlink swap is POSIX-specific")
+    def test_file_swapped_after_enumeration_is_not_read(self):
+        home = Path(tempfile.mkdtemp(prefix="race-home-", dir=str(Path.home())))
+        outside = Path(tempfile.mkdtemp(prefix="race-outside-"))
+        try:
+            (outside / "secret.json").write_text(
+                json.dumps({"chat.tools.global.autoApprove": True,
+                            "chat.mcp.access": "OUT-OF-HOME"}), encoding="utf-8")
+            ud = home / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            (ud / "settings.json").write_text(
+                json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(home)
+            original = ex._iter_channel_settings_files
+
+            def swap_then_yield(config_dir):
+                for p in list(original(config_dir)):
+                    if Path(p).name == "settings.json" and Path(p).parent == ud:
+                        os.unlink(p)                                  # attacker wins the window
+                        os.symlink(outside / "secret.json", p)
+                    yield p
+
+            ex._iter_channel_settings_files = swap_then_yield
+            rec = ex.extract_settings()
+            self.assertNotIn("OUT-OF-HOME", json.dumps(rec or {}),
+                             "content behind an out-of-home link must never be reported")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+class TestOwnershipContainment(unittest.TestCase):
+    """A user's settings file must belong to that user. A hard link keeps its
+    target's owner while its path stays inside the home, so path containment is
+    blind to it — ownership is what refuses a link to a foreign file."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="own-home-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+        self.ud.joinpath("settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _ex(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex
+
+    def test_same_owner_file_is_read(self):
+        # the ordinary case must keep working
+        self.assertEqual(self._ex().extract_settings()["permission_mode"], "bypassPermissions")
+
+    @unittest.skipUnless(os.name == "posix", "uid ownership is POSIX-specific")
+    def test_file_owned_by_another_user_is_refused(self):
+        # simulate the home belonging to a different uid than the settings file,
+        # which is exactly the state a hard link to a foreign file produces
+        real_stat = os.stat
+        home_real = os.path.realpath(str(self.home))
+
+        class _FakeStat:
+            def __init__(self, base): self._b = base
+            def __getattr__(self, name): return getattr(self._b, name)
+            @property
+            def st_uid(self): return self._b.st_uid + 1  # a different owner
+
+        def patched(p, *a, **k):
+            st = real_stat(p, *a, **k)
+            return _FakeStat(st) if os.path.realpath(str(p)) == home_real else st
+
+        os.stat = patched
+        try:
+            self.assertIsNone(self._ex().extract_settings(),
+                              "a settings file not owned by the home's user must be refused")
+        finally:
+            os.stat = real_stat
+
+
+class TestTerminalMasterSwitch(unittest.TestCase):
+    """chat.tools.terminal.enableAutoApprove gates the whole terminal feature."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+        self.auto = {"npm run build": True, "rm": False}
+
+    def _rules(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("allow_rules", []), (rec or {}).get("deny_rules", [])
+
+    def test_switch_off_drops_allow_rules_but_keeps_denies(self):
+        allow, deny = self._rules({"chat.tools.terminal.autoApprove": self.auto,
+                                   "chat.tools.terminal.enableAutoApprove": False})
+        self.assertEqual(allow, [], "nothing is auto-approved while the switch is off")
+        self.assertEqual(deny, ["Bash(rm *)"])
+
+    def test_switch_absent_keeps_allow_rules(self):
+        # the setting defaults to true in VS Code, so absence means enabled
+        allow, _ = self._rules({"chat.tools.terminal.autoApprove": self.auto})
+        self.assertEqual(allow, ["Bash(npm run build *)"])
+
+    def test_switch_on_keeps_allow_rules(self):
+        allow, _ = self._rules({"chat.tools.terminal.autoApprove": self.auto,
+                                "chat.tools.terminal.enableAutoApprove": True})
+        self.assertEqual(allow, ["Bash(npm run build *)"])
+
+
+class TestPermissionLevelAndEdits(unittest.TestCase):
+    """chat.permissions.default (the permissions picker) and edit auto-approval."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _mode(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["permission_mode"]
+
+    def test_auto_approve_level_is_bypass(self):
+        self.assertEqual(self._mode({"chat.permissions.default": "autoApprove"}),
+                         "bypassPermissions")
+
+    def test_autopilot_level_is_bypass(self):
+        self.assertEqual(self._mode({"chat.permissions.default": "autopilot"}),
+                         "bypassPermissions")
+
+    def test_default_level_stays_default(self):
+        self.assertEqual(self._mode({"chat.permissions.default": "default"}), "default")
+
+    def test_edit_auto_approve_is_accept_edits(self):
+        self.assertEqual(self._mode({"chat.tools.edits.autoApprove": {"**/*": True}}),
+                         "acceptEdits")
+
+    def test_edit_deny_only_stays_default(self):
+        self.assertEqual(self._mode({"chat.tools.edits.autoApprove": {"**/.env": False}}),
+                         "default")
+
+    def test_global_bypass_outranks_accept_edits(self):
+        self.assertEqual(self._mode({"chat.tools.edits.autoApprove": {"**/*": True},
+                                     "chat.tools.global.autoApprove": True}),
+                         "bypassPermissions")
+
+
+class TestNonRegularFiles(unittest.TestCase):
+    """A FIFO planted at settings.json must not stall a privileged scan."""
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs are POSIX-only")
+    def test_fifo_is_skipped_without_blocking(self):
+        home = Path(tempfile.mkdtemp(prefix="fifo-home-", dir=str(Path.home())))
+        try:
+            ud = home / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            os.mkfifo(str(ud / "settings.json"))
+
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(home)
+            result = {}
+            worker = threading.Thread(target=lambda: result.setdefault("r", ex.extract_settings()))
+            worker.daemon = True
+            worker.start()
+            worker.join(timeout=15)
+            self.assertFalse(worker.is_alive(), "a planted FIFO hung the scan")
+            # A file that is there but unreadable leaves the posture unknown. A
+            # clean "default" row here would let anyone hide a real bypass behind
+            # a pipe, so absence of a record is the correct answer.
+            self.assertIsNone(result.get("r"))
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+class TestHardLinkContainment(unittest.TestCase):
+    """A hard link keeps its target's contents while its path sits in the home."""
+
+    def test_hard_link_to_outside_file_is_refused(self):
+        home = Path(tempfile.mkdtemp(prefix="link-home-", dir=str(Path.home())))
+        outside = Path(tempfile.mkdtemp(prefix="link-outside-"))
+        try:
+            victim = outside / "victim.json"
+            victim.write_text(json.dumps({"chat.tools.global.autoApprove": True,
+                                          "chat.mcp.access": "OUT-OF-HOME"}), encoding="utf-8")
+            ud = home / "Library" / "Application Support" / "Code" / "User"
+            ud.mkdir(parents=True)
+            try:
+                os.link(str(victim), str(ud / "settings.json"))
+            except (OSError, NotImplementedError, AttributeError) as e:
+                self.skipTest(f"hard links unavailable here: {e}")
+
+            ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+            ex._scan_users = lambda cb: cb(home)
+            self.assertNotIn("OUT-OF-HOME", json.dumps(ex.extract_settings() or {}),
+                             "content behind a hard link must never be reported")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+class TestSettingsSizeCap(unittest.TestCase):
+    """A planted multi-GB settings.json must not be slurped into memory during a
+    privileged scan — without starving a genuinely large real one."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="cap-home-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+        self.settings = self.ud / "settings.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _ex(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex
+
+    def test_oversized_file_is_refused(self):
+        self.settings.write_text(json.dumps({"chat.tools.global.autoApprove": True}),
+                                 encoding="utf-8")
+        # sparse: st_size is what the cap reads, so no gigabyte is actually written
+        os.truncate(str(self.settings), _VSCODE_SETTINGS_MAX_BYTES + 1)
+        self.assertIsNone(self._ex().extract_settings())
+
+    def test_large_real_settings_is_still_read(self):
+        # ~2 MB of legitimate content: well past anything real, still under the cap
+        padding = {f"chat.tools.terminal.autoApprove-note-{i}": "x" * 200 for i in range(10000)}
+        padding["chat.tools.global.autoApprove"] = True
+        self.settings.write_text(json.dumps(padding), encoding="utf-8")
+        self.assertGreater(self.settings.stat().st_size, 2 * 1024 * 1024)
+        self.assertLess(self.settings.stat().st_size, _VSCODE_SETTINGS_MAX_BYTES)
+        self.assertEqual(self._ex().extract_settings()["permission_mode"], "bypassPermissions")
+
+
+class TestPerUserAttribution(unittest.TestCase):
+    """An elevated scan must not hand one user's posture to everyone else, nor
+    strip permissions from every user but the riskiest one."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="peruser-", dir=str(Path.home())))
+        self.locked = self._home("locked", {"chat.agent.enabled": True,
+                                            "chat.tools.terminal.autoApprove": {"rm": False}})
+        self.yolo = self._home("yolo", {"chat.tools.global.autoApprove": True})
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _home(self, name, settings):
+        home = self.root / name
+        ud = home / "Library" / "Application Support" / "Code" / "User"
+        ud.mkdir(parents=True)
+        (ud / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+        return home
+
+    def _by_user(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: [cb(self.locked), cb(self.yolo)]
+        return ex.extract_settings_by_user()
+
+    def test_every_user_keeps_a_record(self):
+        records = self._by_user()
+        self.assertEqual(len(records), 2, "an elevated scan must keep every user's record")
+        self.assertEqual(records[0]["permission_mode"], "bypassPermissions", "riskiest first")
+
+    def test_each_user_report_carries_its_own_posture(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        tool = {"name": "GitHub Copilot Chat (VS Code)", "projects": [],
+                "_permissions_by_user": self._by_user()}
+        tool["permissions"] = tool["_permissions_by_user"][0]
+
+        locked = det.filter_tool_projects_by_user(tool, self.locked)
+        yolo = det.filter_tool_projects_by_user(tool, self.yolo)
+        stranger = det.filter_tool_projects_by_user(tool, self.root / "nobody")
+
+        self.assertEqual(locked["permissions"]["permission_mode"], "default")
+        self.assertIn(str(self.locked), locked["permissions"]["settings_path"])
+        self.assertEqual(yolo["permissions"]["permission_mode"], "bypassPermissions")
+        self.assertNotIn("permissions", stranger, "a user with no settings gets no record")
+        for out in (locked, yolo, stranger):
+            self.assertNotIn("_permissions_by_user", out, "the internal key must not survive")
+
+
+class TestChannelsAreNotMerged(unittest.TestCase):
+    """Stable and Insiders are separate installations, so their policies must not
+    combine into a posture that neither one defines."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="chan-", dir=str(Path.home())))
+        self.support = self.home / "Library" / "Application Support"
+        for channel, settings in (
+            ("Code", {"chat.tools.terminal.autoApprove": {"rm": False}}),
+            ("Code - Insiders", {"chat.tools.global.autoApprove": True,
+                                 "chat.tools.terminal.autoApprove": {"curl": True}}),
+        ):
+            d = self.support / channel / "User"
+            d.mkdir(parents=True)
+            (d / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_riskiest_channel_is_reported_whole(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        rec = ex.extract_settings()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertIn("Code - Insiders", rec["settings_path"])
+        self.assertEqual(rec.get("allow_rules"), ["Bash(curl *)"])
+        self.assertIsNone(rec.get("deny_rules"),
+                          "stable's deny must not appear on the Insiders record")
+
+
+class TestDefaultConfigurationApprovals(unittest.TestCase):
+    """chat.defaultConfiguration.approvals is the other way a user turns off every
+    confirmation. Registry: approvals is manual | assisted | allowAll (default
+    manual); mode is interactive | plan | autopilot and does not gate approvals."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _rec(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")
+
+    def test_allow_all_alone_produces_a_bypass_record(self):
+        # the reported symptom: this settings.json yielded no record at all
+        rec = self._rec({"chat.defaultConfiguration": {"mode": "autopilot",
+                                                       "approvals": "allowAll"}})
+        self.assertIsNotNone(rec, "a settings file with only this key must still report")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_pre_rename_key_is_read_too(self):
+        rec = self._rec({"chat.agentSessions.defaultConfiguration": {"approvals": "allowAll"}})
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_manual_approvals_stay_default(self):
+        rec = self._rec({"chat.defaultConfiguration": {"approvals": "manual"},
+                         "chat.agent.enabled": True})
+        self.assertEqual(rec["permission_mode"], "default")
+
+    def test_assisted_approvals_stay_default(self):
+        # assisted still prompts; calling it a bypass would overstate the posture
+        rec = self._rec({"chat.defaultConfiguration": {"approvals": "assisted"}})
+        self.assertEqual(rec["permission_mode"], "default")
+        self.assertIn("chat.defaultConfiguration", rec["raw_settings"])
+
+    def test_autopilot_mode_without_allow_all_is_not_a_bypass(self):
+        # mode picks the chat mode; approvals is what removes confirmations
+        rec = self._rec({"chat.defaultConfiguration": {"mode": "autopilot",
+                                                       "approvals": "manual"}})
+        self.assertEqual(rec["permission_mode"], "default")
+
+    def test_unexpected_shapes_do_not_raise(self):
+        for value in ("allowAll", ["allowAll"], 42, None, {}):
+            rec = self._rec({"chat.defaultConfiguration": value, "chat.agent.enabled": True})
+            self.assertEqual(rec["permission_mode"], "default")
+
+
+class TestByteOrderMark(unittest.TestCase):
+    """A settings.json written with a BOM is still live config: VS Code reads it
+    and preserves the BOM across its own edits, so refusing to parse it hides the
+    user's posture indefinitely."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="bom-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        self.ud.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_settings_with_a_bom_is_still_reported(self):
+        # exactly what PowerShell's Set-Content -Encoding UTF8 produces
+        body = json.dumps({"chat.tools.global.autoApprove": True})
+        (self.ud / "settings.json").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        rec = self._extract()
+        self.assertIsNotNone(rec, "a BOM must not make the settings file invisible")
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+
+    def test_settings_without_a_bom_is_unchanged(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+
+class TestSandboxKeyPerPlatform(unittest.TestCase):
+    """VS Code reads a Windows-only sandbox key on Windows and ignores the generic
+    one, so the extractor has to read whichever key that platform honours."""
+
+    def _rec(self, os_name, data):
+        ex = GitHubCopilotSettingsExtractorFactory.create(os_name)
+        return ex._build_record(data, Path("/x/settings.json"), "user")
+
+    def test_windows_reads_the_windows_key(self):
+        self.assertTrue(self._rec("Windows", {"chat.agent.sandbox.enabledWindows": "on"})["sandbox_enabled"])
+
+    def test_windows_reads_the_pre_rename_spelling(self):
+        self.assertTrue(self._rec("Windows", {"chat.agent.sandbox.enabled.windows": "on"})["sandbox_enabled"])
+
+    def test_windows_ignores_the_generic_key(self):
+        # VS Code does not honour it on Windows, so neither do we — the default is off
+        self.assertFalse(self._rec("Windows", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+
+    def test_posix_reads_the_generic_key(self):
+        self.assertTrue(self._rec("Darwin", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+        self.assertTrue(self._rec("Linux", {"chat.agent.sandbox.enabled": "on"})["sandbox_enabled"])
+
+    def test_posix_ignores_the_windows_key(self):
+        self.assertFalse(self._rec("Darwin", {"chat.agent.sandbox.enabledWindows": "on"})["sandbox_enabled"])
+
+
+class TestNewlyCapturedKeys(unittest.TestCase):
+    """Two settings that govern real exposure and were not being read."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_terminal_file_write_block_is_captured(self):
+        self.assertIn("chat.tools.terminal.blockDetectedFileWrites",
+                      self._raw({"chat.tools.terminal.blockDetectedFileWrites": "off"}))
+
+    def test_sandbox_allow_network_is_captured(self):
+        self.assertIn("chat.agent.sandbox.allowNetwork",
+                      self._raw({"chat.agent.sandbox.allowNetwork": True}))
+
+
+class TestDefaultPosture(unittest.TestCase):
+    """A Copilot user who has set none of these keys is on VS Code's shipped
+    defaults, which auto-apply edits — reporting nothing made them look identical
+    to a device that was never scanned."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="posture-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_no_settings_file_at_all_reports_the_defaults(self):
+        self.ud.mkdir(parents=True)
+        rec = self._extract()
+        self.assertIsNotNone(rec, "a Copilot install with no settings must still report")
+        # Copilot asks for everything until the user opts in, so the default
+        # posture is "default" — claiming acceptEdits would overstate it
+        self.assertEqual(rec["permission_mode"], "default")
+        self.assertFalse(rec["sandbox_enabled"])
+        self.assertEqual(rec["raw_settings"], {})
+        self.assertNotIn("allow_rules", rec, "the built-in rules are not the user's choices")
+
+    def test_settings_file_without_relevant_keys_reports_the_defaults(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"editor.fontSize": 13, "workbench.colorTheme": "Dark+"}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    def test_configured_user_is_unaffected(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "bypassPermissions")
+
+    def test_no_vscode_at_all_reports_nothing(self):
+        # absence must still mean absence — this is what keeps "never scanned" legible
+        self.assertIsNone(self._extract())
+
+    def test_unreadable_settings_is_unknown_not_defaults(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text("{ this is not json", encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file we could not read leaves the posture unknown")
+
+    def test_defaults_path_points_at_the_settings_file(self):
+        self.ud.mkdir(parents=True)
+        self.assertEqual(self._extract()["settings_path"], str(self.ud / "settings.json"))
+
+    def test_an_over_cap_profile_cannot_hide_behind_a_configured_default(self):
+        """The size cap is our policy, not VS Code's — it still applies the file,
+        so a posture we could not read must not be reported as the mild one."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "yolo"
+        profile.mkdir(parents=True)
+        padding = " " * (_VSCODE_SETTINGS_MAX_BYTES + 1024)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True, "_pad": padding}),
+            encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file over the read cap leaves the posture unknown")
+
+    def test_a_profile_our_parser_chokes_on_is_unknown_not_mild(self):
+        """Our parser failing is not proof the editor cannot read the file — the
+        BOM this change fixes was exactly that case."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "deep"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text("[" * 20000 + "]" * 20000, encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file our parser could not handle leaves the posture unknown")
+
+    def test_a_profile_we_cannot_parse_is_unknown_not_mild(self):
+        """VS Code recovers what it can from a broken settings file, so failing to
+        parse one never proves it holds nothing."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "broken"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text("{ not json", encoding="utf-8")
+        self.assertIsNone(self._extract(),
+                          "a file we could not parse leaves the posture unknown")
+
+    def test_a_stray_file_under_profiles_does_not_suppress_the_row(self):
+        """touch profiles/x.txt must not drop the user off the page."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "profiles").mkdir()
+        (self.ud / "profiles" / "not-a-dir.txt").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    def test_a_plain_file_where_profiles_would_be_is_not_a_failure(self):
+        self.ud.mkdir(parents=True)
+        (self.ud / "profiles").write_text("junk", encoding="utf-8")
+        self.assertEqual(self._extract()["permission_mode"], "default")
+
+    @unittest.skipUnless(os.name == "posix", "chmod 0o111 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses directory permissions, so 0o111 is still listable")
+    def test_an_unlistable_profile_cannot_hide_behind_a_configured_default(self):
+        """A record built from the default file must not present as a clean
+        posture while a profile we could not inspect stays live."""
+        self.ud.mkdir(parents=True)
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.enabled": True}), encoding="utf-8")
+        profile = self.ud / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.chmod(self.ud / "profiles", 0o111)
+        try:
+            self.assertIsNone(self._extract(),
+                              "an uninspectable profile leaves the posture unknown")
+        finally:
+            os.chmod(self.ud / "profiles", 0o755)
+
+    @unittest.skipUnless(os.name == "posix", "chmod 0o111 is POSIX-specific")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root bypasses directory permissions, so 0o111 is still listable")
+    def test_unlistable_profiles_dir_is_unknown_not_defaults(self):
+        """An execute-only profiles/ still serves a bypass to VS Code by known
+        path, so it must not be reported as a clean default posture."""
+        self.ud.mkdir(parents=True)
+        profile = self.ud / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        os.chmod(self.ud / "profiles", 0o111)
+        try:
+            self.assertIsNone(self._extract(),
+                              "a profiles dir we cannot list leaves the posture unknown")
+        finally:
+            os.chmod(self.ud / "profiles", 0o755)
+
+
+class TestGuardRemovalKeys(unittest.TestCase):
+    """Settings that take a guard away rather than grant a permission. We read the
+    ones that say "auto-approve is on"; these are the ones that say "the safety
+    rails are gone", and several of them ship permissive."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("raw_settings", {})
+
+    def test_ignoring_the_built_in_deny_rules_is_captured(self):
+        # true discards VS Code's own deny rules, the net that blocks find -delete
+        self.assertIn("chat.tools.terminal.ignoreDefaultAutoApproveRules",
+                      self._raw({"chat.tools.terminal.ignoreDefaultAutoApproveRules": True}))
+
+    def test_workspace_npm_script_auto_approval_is_captured(self):
+        # ships true: a cloned repo's package.json can define a script that runs unprompted
+        self.assertIn("chat.tools.terminal.autoApproveWorkspaceNpmScripts",
+                      self._raw({"chat.tools.terminal.autoApproveWorkspaceNpmScripts": False}))
+
+    def test_sandbox_escape_hatches_are_captured(self):
+        raw = self._raw({
+            "chat.agent.sandbox.allowUnsandboxedCommands": True,
+            "chat.agent.sandbox.allowAutoApprove": True,
+            "chat.agent.sandbox.retryWithAllowNetworkRequests": True,
+        })
+        for key in ("chat.agent.sandbox.allowUnsandboxedCommands",
+                    "chat.agent.sandbox.allowAutoApprove",
+                    "chat.agent.sandbox.retryWithAllowNetworkRequests"):
+            self.assertIn(key, raw)
+
+    def test_third_party_code_surface_is_captured(self):
+        raw = self._raw({"chat.extensionTools.enabled": True, "chat.plugins.enabled": True,
+                         "chat.plugins.marketplaces": ["evil/marketplace"]})
+        self.assertIn("chat.plugins.marketplaces", raw)
+        self.assertIn("chat.extensionTools.enabled", raw)
+
+    def test_autonomy_bounds_are_captured(self):
+        raw = self._raw({"chat.agent.maxRequests": 500, "chat.autoReply": True})
+        self.assertEqual(raw["chat.agent.maxRequests"], 500)
+        self.assertTrue(raw["chat.autoReply"])
+
+    def test_risk_assessment_switch_is_captured(self):
+        # false removes VS Code's own risk check on tool calls
+        self.assertIn("chat.tools.riskAssessment.enabled",
+                      self._raw({"chat.tools.riskAssessment.enabled": False}))
+
+    def test_data_egress_settings_are_captured(self):
+        raw = self._raw({"chat.sessionSync.enabled": True, "chat.allowAnonymousAccess": True})
+        self.assertIn("chat.sessionSync.enabled", raw)
+        self.assertIn("chat.allowAnonymousAccess", raw)
+
+
+class TestTimedEditAcceptance(unittest.TestCase):
+    """chat.editing.autoAcceptDelay applies edits on a timer, with no prompt."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _mode(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["permission_mode"]
+
+    def test_a_delay_auto_accepts_edits(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 5}), "acceptEdits")
+
+    def test_zero_is_the_shipped_default_and_prompts(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 0,
+                                     "chat.agent.enabled": True}), "default")
+
+    def test_a_bool_is_not_a_delay(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": True,
+                                     "chat.agent.enabled": True}), "default")
+
+    def test_global_bypass_still_outranks_a_delay(self):
+        self.assertEqual(self._mode({"chat.editing.autoAcceptDelay": 5,
+                                     "chat.tools.global.autoApprove": True}), "bypassPermissions")
+
+
+class TestCopilotExtensionKeys(unittest.TestCase):
+    """The Copilot extension contributes 191 settings of its own, separately from
+    the ones VS Code registers. We were reading none of them."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        rec = self.ex._build_record(data, Path("/x/settings.json"), "user")
+        return (rec or {}).get("raw_settings", {})
+
+    def test_external_code_ingest_is_captured(self):
+        # ships true: workspace code is sent out for indexing
+        self.assertIn("github.copilot.chat.workspace.codeSearchExternalIngest.enabled",
+                      self._raw({"github.copilot.chat.workspace.codeSearchExternalIngest.enabled": True}))
+
+    def test_github_mcp_server_governance_is_captured(self):
+        raw = self._raw({"github.copilot.chat.githubMcpServer.enabled": True,
+                         "github.copilot.chat.githubMcpServer.lockdown": False,
+                         "github.copilot.chat.githubMcpServer.readonly": False})
+        for key in ("enabled", "lockdown", "readonly"):
+            self.assertIn(f"github.copilot.chat.githubMcpServer.{key}", raw)
+
+    def test_endpoint_overrides_are_captured(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "http://attacker.example/v1",
+                         "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride": "http://x"})
+        self.assertIn("github.copilot.chat.otel.otlpEndpoint", raw)
+        self.assertIn("github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride", raw)
+
+    def test_extension_install_capability_is_captured(self):
+        # the agent installing extensions is a code-execution surface
+        self.assertIn("github.copilot.chat.installExtensionSkill.enabled",
+                      self._raw({"github.copilot.chat.installExtensionSkill.enabled": True}))
+
+    def test_where_the_agent_runs_is_captured(self):
+        raw = self._raw({"github.copilot.chat.cloudAgent.enabled": True,
+                         "github.copilot.chat.backgroundAgent.enabled": True,
+                         "github.copilot.chat.cli.sandbox.enabled": "off"})
+        self.assertEqual(len(raw), 3)
+
+    def test_model_and_prompt_experiment_flags_are_not_captured(self):
+        # 191 settings are contributed; the experiment flags are noise and must
+        # not dilute the record
+        raw = self._raw({"github.copilot.chat.claudeOpus5Prompt.enabled": True,
+                         "github.copilot.chat.gemini3LowReasoningEffort.enabled": True,
+                         "github.copilot.chat.virtualTools.threshold": 128,
+                         "github.copilot.chat.agent.autoFix": True})
+        self.assertEqual(list(raw), ["github.copilot.chat.agent.autoFix"])
+
+
+class TestCredentialBearingValues(unittest.TestCase):
+    """Two captured settings are posture signal whose VALUE can carry a secret.
+    Keeping the setting while dropping the secret is the point."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_terminal_profile_env_values_are_not_uploaded(self):
+        raw = self._raw({"chat.tools.terminal.terminalProfile.osx": {
+            "path": "/bin/zsh", "args": ["-l"],
+            "env": {"AWS_SECRET_ACCESS_KEY": "AKIAsecretvalue", "PATH": "/usr/bin"}}})
+        prof = raw["chat.tools.terminal.terminalProfile.osx"]
+        self.assertEqual(prof["path"], "/bin/zsh")
+        self.assertEqual(prof["args"], ["-l"])
+        self.assertEqual(prof["env"], ["AWS_SECRET_ACCESS_KEY", "PATH"],
+                         "env names stay as signal; values must not travel")
+        self.assertNotIn("AKIAsecretvalue", json.dumps(raw))
+
+    def test_terminal_env_is_redacted_whatever_shape_it_takes(self):
+        """settings.json is user-authored and never schema-checked, so env can
+        arrive as a list — the same gap that was closed for auth headers."""
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": {
+            "path": "/bin/bash", "env": ["AWS_SECRET_ACCESS_KEY=AKIALEAK"]}})
+        self.assertNotIn("AKIALEAK", json.dumps(raw))
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": [{"env": {"K": "SEK"}}]})
+        self.assertNotIn("SEK", json.dumps(raw))
+
+    def test_endpoint_userinfo_and_query_are_stripped(self):
+        raw = self._raw({
+            "github.copilot.chat.otel.otlpEndpoint": "https://u:p@collector.internal:4318/v1?api-key=SEK",
+            "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride":
+                "https://ado.example.com/search?token=abc123"})
+        blob = json.dumps(raw)
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "https://collector.internal:4318/v1")
+        for secret in ("u:p@", "SEK", "abc123", "api-key", "token="):
+            self.assertNotIn(secret, blob)
+
+    def test_a_scheme_less_endpoint_is_redacted_too(self):
+        """The setting is a plain string, so users write it without a scheme —
+        and it carries a credential just as readily."""
+        raw = self._raw({
+            "github.copilot.chat.otel.otlpEndpoint": "collector.internal:4318/v1?api-key=SECRET",
+            "github.copilot.chat.workspace.prototypeAdoCodeSearchEndpointOverride":
+                "user:pw@ado.internal/search?token=abc123"})
+        blob = json.dumps(raw)
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "collector.internal:4318/v1")
+        for secret in ("SECRET", "api-key", "user:pw@", "abc123", "token="):
+            self.assertNotIn(secret, blob)
+
+    def test_a_malformed_endpoint_does_not_leak_on_the_error_path(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "https://h:notaport/x?k=LEAK"})
+        self.assertNotIn("LEAK", json.dumps(raw))
+
+    def test_the_endpoint_host_is_still_reported(self):
+        # the destination is the finding; losing it would defeat capturing the key
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "http://attacker.example/v1?k=1"})
+        self.assertIn("attacker.example", raw["github.copilot.chat.otel.otlpEndpoint"])
+
+    def test_a_profile_without_env_is_untouched(self):
+        raw = self._raw({"chat.tools.terminal.terminalProfile.linux": {"path": "/bin/bash"}})
+        self.assertEqual(raw["chat.tools.terminal.terminalProfile.linux"], {"path": "/bin/bash"})
+
+    def test_non_url_and_non_dict_values_survive(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint": "",
+                         "chat.tools.terminal.terminalProfile.osx": None})
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"], "")
+        self.assertIsNone(raw["chat.tools.terminal.terminalProfile.osx"])
+
+
+class TestMarketplaceRedaction(unittest.TestCase):
+    """A private plugin marketplace is a git remote, so it carries tokens the
+    same way the endpoints do."""
+
+    def setUp(self):
+        self.ex = _MapExtractor()
+
+    def _raw(self, data):
+        return self.ex._build_record(data, Path("/x/settings.json"), "user")["raw_settings"]
+
+    def test_a_token_in_an_extra_marketplace_is_dropped(self):
+        raw = self._raw({"chat.plugins.extraMarketplaces": {
+            "private": "https://x-access-token:ghp_SECRET@github.com/org/repo.git"}})
+        self.assertEqual(raw["chat.plugins.extraMarketplaces"]["private"],
+                         "https://github.com/org/repo.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_strict_marketplace_headers_keep_only_their_names(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git", "url": "https://u:pw@host/o/r.git?token=T",
+             "headers": {"Authorization": "Bearer SEK"}}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["url"], "https://host/o/r.git")
+        self.assertEqual(entry["headers"], ["Authorization"])
+        self.assertNotIn("SEK", json.dumps(raw))
+
+    def test_an_ordinary_marketplace_ref_is_left_alone(self):
+        # the default value carries a #ref; rewriting it would lose that
+        raw = self._raw({"chat.plugins.marketplaces": [
+            "github/copilot-plugins", "github/awesome-copilot#marketplace"]})
+        self.assertEqual(raw["chat.plugins.marketplaces"],
+                         ["github/copilot-plugins", "github/awesome-copilot#marketplace"])
+
+    def test_userinfo_is_stripped_from_an_identity_field_too(self):
+        """Identity fields keep their shape, but that must not become a way to
+        carry a credential past redaction — at any depth."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "auth": {"path": "https://x-access-token:ghp_SECRET@host/o/r.git"}}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["auth"]["path"], "https://host/o/r.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_headers_are_reduced_whatever_shape_they_take(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git", "headers": ["Authorization: Bearer SEK"]}]})
+        self.assertNotIn("SEK", json.dumps(raw))
+
+    def test_a_credential_under_an_unexpected_field_is_still_stripped(self):
+        """The entry schema is open, so a remote can arrive under a name we did
+        not anticipate; the redaction must not depend on that name."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "remote": "https://x-access-token:ghp_SECRET@github.com/o/r.git"}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["remote"], "https://github.com/o/r.git")
+        self.assertNotIn("ghp_SECRET", json.dumps(raw))
+
+    def test_marketplace_identity_fields_are_not_rewritten(self):
+        """@scope/name and a wildcard pattern are identity, not credentials."""
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "npm", "package": "@scope/name", "hostPattern": "*.exam?le.com",
+             "path": "/opt/plugins/sub?dir"}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["package"], "@scope/name")
+        self.assertEqual(entry["hostPattern"], "*.exam?le.com")
+        self.assertEqual(entry["path"], "/opt/plugins/sub?dir",
+                         "a local marketplace path is identity, not a URL")
+
+    def test_a_token_in_the_endpoint_path_does_not_ship(self):
+        """A webhook-style endpoint carries its secret in the path."""
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://hooks.internal/services/T123/B456/SECRETTOKEN"})
+        value = raw["github.copilot.chat.otel.otlpEndpoint"]
+        self.assertEqual(value, "https://hooks.internal/services")
+        self.assertNotIn("SECRETTOKEN", json.dumps(raw))
+
+    def test_an_unencoded_question_mark_in_userinfo_does_not_leak(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://user:pa?ss@collector.internal/v1"})
+        value = raw["github.copilot.chat.otel.otlpEndpoint"]
+        self.assertEqual(value, "https://collector.internal/v1",
+                         "the host is the evidence and the credential must be gone")
+        self.assertNotIn("user:pa", json.dumps(raw))
+
+    def test_an_scp_style_remote_keeps_its_identity(self):
+        """git@host:owner/repo.git is a valid remote the URL parser rejects;
+        losing it would erase the marketplace we are trying to report."""
+        raw = self._raw({"chat.plugins.marketplaces": [
+            "git@github.com:owner/repo.git",
+            "x-access-token:ghp_SEK@github.com:owner/repo.git"]})
+        self.assertEqual(raw["chat.plugins.marketplaces"],
+                         ["github.com:owner/repo.git", "github.com:owner/repo.git"])
+        self.assertNotIn("ghp_SEK", json.dumps(raw))
+
+    def test_a_secret_nested_inside_an_entry_is_still_stripped(self):
+        raw = self._raw({"chat.plugins.strictMarketplaces": [
+            {"source": "git",
+             "auth": {"headers": {"Authorization": "Bearer SEK"}},
+             "mirrors": ["https://tok@host/x.git"]}]})
+        entry = raw["chat.plugins.strictMarketplaces"][0]
+        self.assertEqual(entry["auth"]["headers"], ["Authorization"])
+        self.assertEqual(entry["mirrors"], ["https://host/x.git"])
+        self.assertNotIn("SEK", json.dumps(raw))
+        self.assertNotIn("tok@", json.dumps(raw))
+
+    def test_an_ipv6_endpoint_keeps_its_brackets(self):
+        raw = self._raw({"github.copilot.chat.otel.otlpEndpoint":
+                         "https://[2001:db8::1]:4318/v1?api-key=S"})
+        self.assertEqual(raw["github.copilot.chat.otel.otlpEndpoint"],
+                         "https://[2001:db8::1]:4318/v1")
+
+
+class TestProfileSettingsMerge(unittest.TestCase):
+    """The riskiest profile wins the posture, but a quieter profile's settings
+    are still evidence and must survive the merge."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="merge-", dir=str(Path.home())))
+        self.ud = self.home / "Library" / "Application Support" / "Code" / "User"
+        (self.ud / "profiles" / "work").mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _extract(self):
+        ex = GitHubCopilotSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+        return ex.extract_settings()
+
+    def test_non_winning_profile_keys_survive_the_merge(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True}), encoding="utf-8")
+        (self.ud / "profiles" / "work" / "settings.json").write_text(
+            json.dumps({"chat.tools.terminal.ignoreDefaultAutoApproveRules": True}),
+            encoding="utf-8")
+        rec = self._extract()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertTrue(rec["raw_settings"]["chat.tools.global.autoApprove"])
+        self.assertTrue(rec["raw_settings"]["chat.tools.terminal.ignoreDefaultAutoApproveRules"],
+                        "a quieter profile's settings are evidence too")
+
+    def test_the_winning_profile_wins_a_key_collision(self):
+        (self.ud / "settings.json").write_text(
+            json.dumps({"chat.agent.sandbox.enabled": "off"}), encoding="utf-8")
+        (self.ud / "profiles" / "work" / "settings.json").write_text(
+            json.dumps({"chat.tools.global.autoApprove": True,
+                        "chat.agent.sandbox.enabled": "on"}), encoding="utf-8")
+        rec = self._extract()
+        self.assertEqual(rec["permission_mode"], "bypassPermissions")
+        self.assertEqual(rec["raw_settings"]["chat.agent.sandbox.enabled"], "on")
+
+if __name__ == "__main__":
+    unittest.main()

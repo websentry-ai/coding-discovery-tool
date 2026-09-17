@@ -21,8 +21,10 @@ from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...macos_extraction_helpers import is_running_as_root
 from ...utils import (
+    copilot_cli_sessions_recent,
     machine_global_binary_owned_by_user,
     resolve_npm_global_tool_bin,
+    user_login_shell_tool_path,
     run_command,
 )
 
@@ -462,6 +464,10 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             except (PermissionError, OSError):
                 continue
 
+        login_shell_path = user_login_shell_tool_path("copilot", user_home)
+        if login_shell_path:
+            return login_shell_path
+
         return None
 
     def _detect_for_user(self, user_home: Path) -> Optional[Dict]:
@@ -473,8 +479,22 @@ class MacOSCopilotCliDetector(BaseToolDetector):
         dict whose ``install_path`` is the resolved binary, or None.
         """
         binary = self._resolve_binary(user_home)
+        config_dir = _resolve_copilot_dir(user_home)
         if not binary:
-            return None
+            # Last resort: the CLI writes session-state/<id>/events.jsonl itself, so a
+            # recent one proves it ran under a node manager or prefix we do not probe.
+            # Reporting nothing there marks a live install absent, and prunable.
+            if not copilot_cli_sessions_recent(config_dir):
+                return None
+            return {
+                "name": self.tool_name,
+                "version": "unknown",
+                "publisher": "GitHub",
+                # No binary to point at; the config dir is stable, which install_path
+                # must be — it is part of the manifest identity.
+                "install_path": str(config_dir),
+                "_config_path": str(config_dir),
+            }
 
         return {
             "name": self.tool_name,
@@ -486,5 +506,5 @@ class MacOSCopilotCliDetector(BaseToolDetector):
             # Resolved config dir (~/.copilot, COPILOT_HOME-aware): install_path is
             # now the binary, but the extractors still key on the config dir.
             # Underscore-prefixed so it stays internal (stripped from the payload).
-            "_config_path": str(_resolve_copilot_dir(user_home)),
+            "_config_path": str(config_dir),
         }

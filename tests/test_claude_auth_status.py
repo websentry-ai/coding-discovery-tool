@@ -33,6 +33,15 @@ _MOD = "scripts.coding_discovery_tools.utils"
 class TestGetPlanFromKeychain(unittest.TestCase):
     """Tests for _get_plan_from_keychain direct Keychain reader."""
 
+    def setUp(self):
+        # Identity, so these assert branch logic rather than the runner's PATH.
+        helpers = patch(
+            "scripts.coding_discovery_tools.utils._safe_helper",
+            side_effect=lambda name: name,
+        )
+        helpers.start()
+        self.addCleanup(helpers.stop)
+
     def _mock_result(self, stdout="", returncode=0):
         mock = MagicMock(spec=subprocess.CompletedProcess)
         mock.stdout = stdout
@@ -162,6 +171,18 @@ class TestGetPlanFromKeychain(unittest.TestCase):
         _get_plan_from_keychain("alice")
         cmd = mock_run.call_args[0][0]
         self.assertEqual(cmd[:3], ["launchctl", "asuser", "501"])
+
+    @patch("scripts.coding_discovery_tools.utils.subprocess.run")
+    @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Darwin")
+    @patch("scripts.coding_discovery_tools.utils._is_daemon_container", return_value=True)
+    @patch("scripts.coding_discovery_tools.utils._get_uid_for_user", return_value=None)
+    def test_unscoped_container_read_is_skipped(
+        self, _mock_uid, _mock_container, _mock_sys, _mock_root, mock_run
+    ):
+        """Without the wrapper or a keychain path it reads the scanner's own keychain."""
+        self.assertIsNone(_get_plan_from_keychain("alice"))
+        mock_run.assert_not_called()
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=True)
@@ -326,6 +347,14 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
     def setUp(self):
         self.claude_binary = "/usr/local/bin/claude"
         self.username = "testuser"
+        # Identity, so these keep asserting branch logic rather than PATH layout;
+        # the absolute form is pinned by test_root_execs_resolve_to_absolute_helpers.
+        helpers = patch(
+            "scripts.coding_discovery_tools.utils._safe_helper",
+            side_effect=lambda name: name,
+        )
+        helpers.start()
+        self.addCleanup(helpers.stop)
         patcher = patch(
             "scripts.coding_discovery_tools.utils._get_plan_from_keychain",
             return_value=None,
@@ -431,7 +460,7 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
     def test_uses_launchctl_asuser_when_root_on_macos(
         self, _mock_root, _mock_sys, mock_run, _mock_uid, _mock_shell
     ):
-        """On macOS as root, command uses 'launchctl asuser <uid>' with user shell."""
+        """On macOS as root: launchctl asuser adopts the namespace, sudo drops the uid."""
         mock_run.return_value = self._mock_result(
             stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"})
         )
@@ -440,9 +469,10 @@ class TestGetClaudeSubscriptionType(unittest.TestCase):
         self.assertEqual(args[0], "launchctl")
         self.assertEqual(args[1], "asuser")
         self.assertEqual(args[2], "501")
-        self.assertEqual(args[3], "/bin/zsh")
-        self.assertEqual(args[4], "-lc")
-        self.assertIn("auth status --json", args[5])
+        self.assertEqual(args[3:7], ["sudo", "-n", "-u", self.username])
+        self.assertEqual(args[7], "/bin/zsh")
+        self.assertEqual(args[8], "-lc")
+        self.assertIn("auth status --json", args[9])
 
     @patch("scripts.coding_discovery_tools.utils.subprocess.run")
     @patch("scripts.coding_discovery_tools.utils._is_root", return_value=False)

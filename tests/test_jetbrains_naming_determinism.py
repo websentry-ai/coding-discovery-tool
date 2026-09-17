@@ -9,6 +9,8 @@ Two defects this locks down:
 unittest, not pytest: CI runs `python -m unittest discover -s tests -t .`.
 """
 
+import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -19,11 +21,30 @@ from unittest import mock
 from scripts.coding_discovery_tools.jetbrains_naming_helpers import (
     VERSION_SUFFIX,
     should_skip_folder,
+    version_sort_key,
+)
+from scripts.coding_discovery_tools.linux.github_copilot.copilot_rules_extractor import (
+    LinuxGitHubCopilotRulesExtractor,
 )
 from scripts.coding_discovery_tools.linux.jetbrains.jetbrains import LinuxJetBrainsDetector
+from scripts.coding_discovery_tools.linux.jetbrains.mcp_config_extractor import (
+    LinuxJetBrainsMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.macos.github_copilot.copilot_rules_extractor import (
+    MacOSGitHubCopilotRulesExtractor,
+)
 from scripts.coding_discovery_tools.macos.jetbrains import jetbrains as jetbrains_macos
 from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import MacOSJetBrainsDetector
+from scripts.coding_discovery_tools.macos.jetbrains.mcp_config_extractor import (
+    MacOSJetBrainsMCPConfigExtractor,
+)
+from scripts.coding_discovery_tools.windows.github_copilot.copilot_rules_extractor import (
+    WindowsGitHubCopilotRulesExtractor,
+)
 from scripts.coding_discovery_tools.windows.jetbrains.jetbrains import WindowsJetBrainsDetector
+from scripts.coding_discovery_tools.windows.jetbrains.mcp_config_extractor import (
+    WindowsJetBrainsMCPConfigExtractor,
+)
 
 DETECTORS = [MacOSJetBrainsDetector, LinuxJetBrainsDetector, WindowsJetBrainsDetector]
 
@@ -174,6 +195,82 @@ class TestConfigDirScan(_TempHomeTestCase):
         self.assertEqual({(ide["display_name"], ide["version"]) for ide in found}, EXPECTED_SCAN)
 
 
+class TestAndroidStudioVendorDir(_TempHomeTestCase):
+    """Android Studio is an IntelliJ-platform IDE, but Google ships it under its
+    own vendor dir, so a JetBrains-only root never saw it."""
+
+    SETTINGS_DIRS = {
+        MacOSJetBrainsDetector: Path("Library") / "Application Support",
+        LinuxJetBrainsDetector: Path(".config"),
+    }
+
+    def test_android_studio_is_found_beside_jetbrains_ides(self) -> None:
+        for detector_cls, settings_dir in self.SETTINGS_DIRS.items():
+            with self.subTest(detector=detector_cls.__name__):
+                home = self.tmp_path / detector_cls.__name__
+                _make_config_dir(home / settings_dir / "JetBrains", ["IntelliJIdea2025.2"])
+                _make_config_dir(home / settings_dir / "Google", ["AndroidStudio2025.2.3"])
+
+                found = detector_cls()._scan_jetbrains_config_dir(home)
+
+                self.assertEqual(
+                    {(ide["display_name"], ide["version"]) for ide in found},
+                    {("IntelliJ IDEA", "2025.2"), ("Android Studio", "2025.2.3")},
+                )
+
+    def test_windows_scan_covers_both_vendor_dirs(self) -> None:
+        roaming = self.tmp_path / "AppData" / "Roaming"
+        _make_config_dir(roaming / "JetBrains", ["IntelliJIdea2025.2"])
+        _make_config_dir(roaming / "Google", ["AndroidStudio2025.2.3"])
+        detector = WindowsJetBrainsDetector()
+        detector.user_home = self.tmp_path
+
+        found = detector._scan_all_config_dirs()
+
+        self.assertEqual(
+            {(ide["display_name"], ide["version"]) for ide in found},
+            {("IntelliJ IDEA", "2025.2"), ("Android Studio", "2025.2.3")},
+        )
+
+    def test_missing_google_dir_is_not_an_error(self) -> None:
+        """The vendor dir is absent on every machine without Android Studio."""
+        _make_config_dir(
+            self.tmp_path / "Library" / "Application Support" / "JetBrains", ["PyCharm2025.2"]
+        )
+
+        found = MacOSJetBrainsDetector()._scan_jetbrains_config_dir(self.tmp_path)
+
+        self.assertEqual({ide["display_name"] for ide in found}, {"PyCharm"})
+
+    def test_mcp_extractors_do_not_filter_out_android_studio(self) -> None:
+        """The extractors gate folders on IDE_PATTERNS, a list separate from the
+        detector's name mapping, so it has to know Android Studio too."""
+        for extractor_cls in (
+            MacOSJetBrainsMCPConfigExtractor,
+            LinuxJetBrainsMCPConfigExtractor,
+            WindowsJetBrainsMCPConfigExtractor,
+        ):
+            with self.subTest(extractor=extractor_cls.__name__):
+                patterns = extractor_cls.IDE_PATTERNS
+                self.assertTrue(
+                    any(p in "AndroidStudio2026.1.4" for p in patterns),
+                    f"{extractor_cls.__name__} would skip the Android Studio config folder",
+                )
+
+    def test_copilot_rules_extractors_treat_android_studio_as_jetbrains(self) -> None:
+        """Global JetBrains Copilot rules live at a shared, IDE-agnostic path, but
+        are only read when the tool name is recognised as a JetBrains IDE."""
+        for extractor_cls in (
+            MacOSGitHubCopilotRulesExtractor,
+            LinuxGitHubCopilotRulesExtractor,
+            WindowsGitHubCopilotRulesExtractor,
+        ):
+            with self.subTest(extractor=extractor_cls.__name__):
+                self.assertTrue(
+                    extractor_cls()._is_jetbrains_tool("GitHub Copilot (Android Studio)")
+                )
+
+
 class TestPrefixCollisionSurvivesFiltering(_TempHomeTestCase):
 
     def test_edu_edition_is_not_dropped_alongside_regular_install(self) -> None:
@@ -246,6 +343,45 @@ class TestPerUserVersionFiltering(unittest.TestCase):
             {"/Users/alice/PyCharm2024.1", "/Users/bob/PyCharm2025.2"},
         )
 
+    def test_prerelease_does_not_lose_to_the_stable_it_supersedes(self) -> None:
+        """A non-numeric segment used to be dropped, so 2025.2-EAP scored (2025,)
+        and lost to 2025.1 — reporting the old version and skipping the EAP's plugins."""
+        ides = [
+            {"display_name": "Rider", "version": "2025.1"},
+            {"display_name": "Rider", "version": "2025.2-EAP"},
+        ]
+        for detector_cls in DETECTORS:
+            with self.subTest(detector=detector_cls.__name__):
+                kept = detector_cls._filter_old_versions(list(ides))
+                self.assertEqual(["2025.2-EAP"], [ide["version"] for ide in kept])
+
+
+    def test_same_number_stable_beats_eap_whatever_the_scan_order(self) -> None:
+        """Config dirs arrive in os.listdir order, so a tie would resolve by
+        filesystem layout and could drop the stable install's plugins."""
+        stable = {"display_name": "Rider", "version": "2025.2"}
+        eap = {"display_name": "Rider", "version": "2025.2-EAP"}
+        for order in ([stable, eap], [eap, stable]):
+            for detector_cls in DETECTORS:
+                with self.subTest(detector=detector_cls.__name__,
+                                  order=[i["version"] for i in order]):
+                    kept = detector_cls._filter_old_versions(list(order))
+                    self.assertEqual(["2025.2"], [ide["version"] for ide in kept])
+
+
+class TestVersionSortKey(unittest.TestCase):
+
+    def test_orders_versions_newest_highest(self) -> None:
+        self.assertLess(version_sort_key("2024.3"), version_sort_key("2025.1"))
+        self.assertLess(version_sort_key("2025.1"), version_sort_key("2025.2-EAP"))
+        self.assertLess(version_sort_key("2025.2-EAP"), version_sort_key("2025.2"))
+        self.assertLess(version_sort_key("2025.2"), version_sort_key("2025.2.3"))
+
+    def test_unparseable_sorts_lowest(self) -> None:
+        for version in ("Unknown", "", "EAP"):
+            with self.subTest(version=version):
+                self.assertLess(version_sort_key(version), version_sort_key("1.0"))
+
 
 class TestRootScanDoesNotRescanHome(_TempHomeTestCase):
 
@@ -275,6 +411,116 @@ class TestVersionSuffixRegex(unittest.TestCase):
         elapsed = time.monotonic() - start
 
         self.assertLess(elapsed, 0.1)
+
+
+
+
+class TestJetBrainsDeniedConfigDir(unittest.TestCase):
+    """A sibling home's Library is 0700, and ``Path.exists()`` raises on it rather
+    than returning False. That escaped the try below it, failed GitHub Copilot
+    detection for the user, and marked the whole device scan incomplete."""
+
+    _UTILS = "scripts.coding_discovery_tools.utils"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "clariadmin"
+        self.support = self.home / "Library" / "Application Support"
+        (self.support / "JetBrains").mkdir(parents=True)
+
+    def tearDown(self):
+        try:
+            os.chmod(self.support, 0o700)
+        except OSError:
+            pass
+        self.tmp.cleanup()
+
+    def _detect(self, own_home):
+        det = MacOSJetBrainsDetector()
+        det.user_home = self.home
+        with mock.patch(f"{self._UTILS}._is_root", return_value=False), \
+             mock.patch(f"{self._UTILS}._is_scanning_users_own_home", return_value=own_home):
+            return det.detect()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sibling_home_does_not_fail_the_scan(self):
+        os.chmod(self.support, 0o000)
+        self.assertIsNone(self._detect(own_home=False))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_own_home_raises_so_nothing_is_pruned(self):
+        os.chmod(self.support, 0o000)
+        with self.assertRaises(PermissionError):
+            self._detect(own_home=True)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_stat_able_but_unlistable_dir_is_not_reported_absent(self):
+        """0700 on the config dir itself: it stats fine, so a stat-based probe calls
+        it present and the listing error below reads as "no IDEs" — prunable."""
+        os.chmod(self.support / "JetBrains", 0o000)
+        try:
+            with self.assertRaises(PermissionError):
+                self._detect(own_home=True)
+            self.assertIsNone(self._detect(own_home=False))
+        finally:
+            os.chmod(self.support / "JetBrains", 0o700)
+
+    def test_absent_config_dir_is_not_an_error(self):
+        shutil.rmtree(self.support / "JetBrains")
+        self.assertIsNone(self._detect(own_home=True))
+
+
+class TestWindowsJetBrainsDeniedConfigDir(unittest.TestCase):
+    """Windows caught the denial but returned the same empty list as a genuine
+    absence, so a locked-out scan read as "no JetBrains" with nothing to flag it."""
+
+    _UTILS = "scripts.coding_discovery_tools.utils"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "clariadmin"
+        self.roaming = self.home / "AppData" / "Roaming"
+        (self.roaming / "JetBrains").mkdir(parents=True)
+
+    def tearDown(self):
+        try:
+            os.chmod(self.roaming, 0o700)
+        except OSError:
+            pass
+        self.tmp.cleanup()
+
+    def _detect(self, own_home):
+        det = WindowsJetBrainsDetector()
+        det.user_home = self.home
+        with mock.patch(f"{self._UTILS}._is_root", return_value=False), \
+             mock.patch(f"{self._UTILS}._windows_process_is_elevated", return_value=False), \
+             mock.patch(f"{self._UTILS}._is_scanning_users_own_home", return_value=own_home):
+            return det.detect()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_sibling_home_does_not_fail_the_scan(self):
+        os.chmod(self.roaming, 0o000)
+        self.assertIsNone(self._detect(own_home=False))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_denied_own_home_raises_so_nothing_is_pruned(self):
+        os.chmod(self.roaming, 0o000)
+        with self.assertRaises(PermissionError):
+            self._detect(own_home=True)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_stat_able_but_unlistable_dir_is_not_reported_absent(self):
+        os.chmod(self.roaming / "JetBrains", 0o000)
+        try:
+            with self.assertRaises(PermissionError):
+                self._detect(own_home=True)
+            self.assertIsNone(self._detect(own_home=False))
+        finally:
+            os.chmod(self.roaming / "JetBrains", 0o700)
+
+    def test_absent_config_dir_is_not_an_error(self):
+        shutil.rmtree(self.roaming / "JetBrains")
+        self.assertIsNone(self._detect(own_home=True))
 
 
 if __name__ == "__main__":

@@ -141,6 +141,21 @@ class TestAugmentDetection(unittest.TestCase):
             jb.return_value.detect.return_value = []
             self.assertIsNone(self.detector.detect())
 
+    def test_resolve_falls_back_to_path_for_own_home(self):
+        # No per-user binary here, but auggie is on PATH (e.g. Homebrew) and the
+        # shared own-home gate allows it -> resolved via the CWD-guarded which.
+        with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
+                patch(f"{_DETECTOR_MOD}._is_scanning_users_own_home", return_value=True):
+            self.assertEqual(_resolve_auggie_binary(self.user_home),
+                             Path("/opt/homebrew/bin/auggie"))
+
+    def test_resolve_no_path_fallback_when_gate_refuses(self):
+        # When the shared gate refuses (other user's home, or running privileged),
+        # the scanner's PATH auggie must NOT be resolved for this home.
+        with patch(f"{_DETECTOR_MOD}._which_no_cwd", return_value="/opt/homebrew/bin/auggie"), \
+                patch(f"{_DETECTOR_MOD}._is_scanning_users_own_home", return_value=False):
+            self.assertIsNone(_resolve_auggie_binary(self.user_home))
+
     def test_vscode_row_from_extensions_json(self):
         self._write_vscode_ext(version="2.0.1")
         with patch.object(self.detector, "_make_jetbrains_detector") as jb:

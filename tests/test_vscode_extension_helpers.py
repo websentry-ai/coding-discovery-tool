@@ -34,6 +34,10 @@ class TestExtensionsDirForEditor(unittest.TestCase):
             self.home / ".vscode" / "extensions",
         )
         self.assertEqual(
+            extensions_dir_for_editor(self.home, "Code - Insiders"),
+            self.home / ".vscode-insiders" / "extensions",
+        )
+        self.assertEqual(
             extensions_dir_for_editor(self.home, "Cursor"),
             self.home / ".cursor" / "extensions",
         )
@@ -88,7 +92,7 @@ class TestFindExtensionInEditor(unittest.TestCase):
             str(self.home / ".vscode" / "extensions" / f"{CLINE_EXT_ID}-3.7.0"),
         )
 
-    def test_entry_present_absolute_location_path_preferred(self):
+    def test_entry_present_absolute_location_path_supported(self):
         self._write_registry("Cursor", [
             {
                 "identifier": {"id": CLINE_EXT_ID},
@@ -99,6 +103,19 @@ class TestFindExtensionInEditor(unittest.TestCase):
         location, version = find_extension_in_editor(self.home, "Cursor", CLINE_EXT_ID)
         self.assertEqual(location, "/abs/ext/path")
         self.assertEqual(version, "1.0.0")
+
+    def test_native_fs_path_wins_over_uri_path(self):
+        self._write_registry("Code", [
+            {
+                "identifier": {"id": CLINE_EXT_ID},
+                "location": {
+                    "path": "/c:/Users/alice/.vscode/extensions/cline",
+                    "fsPath": r"c:\Users\alice\.vscode\extensions\cline",
+                },
+            }
+        ])
+        location, _version = find_extension_in_editor(self.home, "Code", CLINE_EXT_ID)
+        self.assertEqual(location, r"c:\Users\alice\.vscode\extensions\cline")
 
     def test_entry_present_without_version_returns_none_version(self):
         self._write_registry("Code", [{"identifier": {"id": CLINE_EXT_ID}}])

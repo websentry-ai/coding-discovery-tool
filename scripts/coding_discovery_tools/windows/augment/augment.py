@@ -17,6 +17,7 @@ from typing import List, Optional
 from ...windows.jetbrains.jetbrains import WindowsJetBrainsDetector
 from ...windows_extraction_helpers import is_running_as_admin
 from ...macos.augment.augment import MacOSAugmentDetector
+from ...utils import _which_no_cwd, _is_scanning_users_own_home
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,16 @@ class WindowsAugmentDetector(MacOSAugmentDetector):
                         return str(candidate)
                 except OSError:
                     continue
+
+            # PATH fallback, only for the scanning user's own home (shared gate)
+            # and CWD-guarded via _which_no_cwd.
+            try:
+                if _is_scanning_users_own_home(user_home):
+                    found = _which_no_cwd("auggie")
+                    if found:
+                        return found
+            except (OSError, RuntimeError):
+                pass
         except (PermissionError, OSError) as exc:
             logger.debug(f"Error resolving Auggie CLI binary for {user_home}: {exc}")
         return None

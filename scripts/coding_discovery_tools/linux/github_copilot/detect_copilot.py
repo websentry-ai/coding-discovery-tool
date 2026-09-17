@@ -6,20 +6,19 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseCopilotDetector as BaseCopilotDetectorBase
+from ...jetbrains_naming_helpers import plugin_entries
 from ...linux.jetbrains.jetbrains import LinuxJetBrainsDetector
 from ...linux_extraction_helpers import get_linux_user_homes
+from ...utils import copilot_chat_evidence_row, record_vscode_bundle_probe
+from ...vscode_extension_helpers import (
+    VSCODE_EDITOR_DISPLAY_NAMES,
+    extensions_dir_for_editor,
+    find_extension_in_editor_channels,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _load_extension_json(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
 
 
 # Recent VS Code ships GitHub Copilot / Copilot Chat as BUILT-IN extensions
@@ -33,6 +32,7 @@ _VSCODE_APP_EXTENSION_ROOTS = [
     Path("/opt/visual-studio-code/resources/app/extensions"),
     Path("/opt/visual-studio-code-insiders/resources/app/extensions"),
     Path("/snap/code/current/usr/share/code/resources/app/extensions"),
+    Path("/snap/code-insiders/current/usr/share/code-insiders/resources/app/extensions"),
 ]
 _VSCODE_BUILTIN_COPILOT_DIRS = ("copilot", "copilot-chat")
 # Per-user VS Code data dirs — presence means the user actually uses VS Code, so
@@ -67,6 +67,15 @@ def _read_builtin_copilot_identity(ext_dir: Path):
     return name_label, version
 
 
+# Editors whose Copilot rows the rules/MCP extractors can enrich.
+SUPPORTED_IDES = VSCODE_EDITOR_DISPLAY_NAMES
+
+_MARKETPLACE_EXTENSIONS = (
+    ("github.copilot", "GitHub Copilot"),
+    ("github.copilot-chat", "GitHub Copilot Chat"),
+)
+
+
 class LinuxCopilotDetector(BaseCopilotDetectorBase):
     """Detects GitHub Copilot across VS Code and all JetBrains IDEs on Linux."""
 
@@ -81,7 +90,16 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
         return all_results
 
     def _detect_vscode_all_users(self) -> List[Dict]:
+        """Scoped to ``user_home`` when set, so one user's Copilot is never
+        attributed to every profile on the box."""
         results = []
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            try:
+                return self._detect_vscode_for_user(Path(scoped_home))
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Skipping VS Code Copilot for {scoped_home}: {e}")
+                return []
         for user_home in get_linux_user_homes():
             try:
                 results.extend(self._detect_vscode_for_user(user_home))
@@ -91,30 +109,27 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
 
     def _detect_vscode_for_user(self, user_home: Path) -> List[Dict]:
         results = []
-        vscode_ext_path = user_home / ".vscode" / "extensions" / "extensions.json"
-        extensions_data = _load_extension_json(vscode_ext_path)
+        code_found = False
 
-        for ext in extensions_data:
-            ext_id = ext.get("identifier", {}).get("id", "").lower()
-            if ext_id == "github.copilot":
+        for ide_key, ide_name in SUPPORTED_IDES.items():
+            for ext_id, label in _MARKETPLACE_EXTENSIONS:
+                found = find_extension_in_editor_channels(user_home, ide_key, ext_id)
+                if found is None:
+                    continue
+                dir_key, version = found
                 results.append({
-                    "name": "GitHub Copilot (VS Code)",
-                    "version": ext.get("version", "unknown"),
+                    "name": f"{label} ({ide_name})",
+                    "version": version or "unknown",
                     "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent),
+                    "install_path": str(extensions_dir_for_editor(user_home, dir_key)),
                 })
-            elif ext_id == "github.copilot-chat":
-                results.append({
-                    "name": "GitHub Copilot Chat (VS Code)",
-                    "version": ext.get("version", "unknown"),
-                    "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent),
-                })
+                if ide_key == "Code":
+                    code_found = True
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
         # marketplace Copilot extension is present, so built-in users — and their
         # VS Code MCP servers (~/.config/Code/User/mcp.json) — aren't missed.
-        if not results:
+        if not code_found:
             results.extend(self._detect_vscode_builtin_copilot(user_home))
 
         return results
@@ -141,6 +156,7 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
             return []
 
         for ext_root in _VSCODE_APP_EXTENSION_ROOTS:
+            record_vscode_bundle_probe(ext_root)
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
                 copilot_dir = ext_root / dir_name
                 try:
@@ -157,17 +173,17 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
                     "install_path": str(copilot_dir),
                 }]
         logger.debug(f"VS Code in use under {user_home} but no built-in Copilot extension found")
-        return []
+        return copilot_chat_evidence_row(user_home)
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         results = []
         all_ides = LinuxJetBrainsDetector().detect() or []
         for ide in all_ides:
-            for plugin_name in ide.get("plugins", []):
-                if "copilot" in plugin_name.lower():
+            for plugin in plugin_entries(ide):
+                if "copilot" in plugin["name"].lower():
                     results.append({
                         "name": f"GitHub Copilot ({ide['name']})",
-                        "version": ide.get("version", "unknown"),
+                        "version": plugin.get("version") or ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide["name"],
                         "install_path": ide.get("_config_path") or ide.get("install_path"),

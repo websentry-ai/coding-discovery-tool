@@ -17,14 +17,16 @@ import json
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
+from ...jetbrains_naming_helpers import plugin_entries
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 from ...macos_extraction_helpers import is_running_as_root
-from ...utils import run_command
+from ...utils import run_command, _which_no_cwd, _is_scanning_users_own_home
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,9 @@ def _resolve_auggie_binary(user_home: Path) -> Optional[Path]:
       - ``~/.local/bin/auggie`` (npm/standalone user install)
       - ``~/.bun/bin/auggie`` (Bun global install)
       - ``~/.nvm/versions/node/*/bin/auggie`` (nvm-managed Node; newest first)
+      - ``PATH`` (Homebrew, system installs) — only when ``user_home`` is the
+        scanning user's own home, so root's PATH is never attributed to another
+        user in an all-users scan.
 
     Best-effort only: any error is swallowed and None is returned. Never raises.
     """
@@ -83,6 +88,16 @@ def _resolve_auggie_binary(user_home: Path) -> Optional[Path]:
                 except OSError:
                     continue
         except OSError:
+            pass
+
+        # PATH fallback (Homebrew, system installs), only for the scanning user's
+        # own home (shared gate) and CWD-guarded via _which_no_cwd.
+        try:
+            if _is_scanning_users_own_home(user_home):
+                found = _which_no_cwd("auggie")
+                if found:
+                    return Path(found)
+        except (OSError, RuntimeError):
             pass
     except (PermissionError, OSError) as exc:
         logger.debug(f"Error resolving Auggie CLI binary for {user_home}: {exc}")
@@ -279,14 +294,17 @@ class MacOSAugmentDetector(BaseToolDetector):
 
         results: List[Dict] = []
         for ide in ides:
-            plugins = ide.get("plugins", [])
-            if not any(_JETBRAINS_PLUGIN_MATCH in str(name).lower() for name in plugins):
+            plugins = plugin_entries(ide)
+            plugin = next(
+                (p for p in plugins if _JETBRAINS_PLUGIN_MATCH in str(p.get("name", "")).lower()), None
+            )
+            if plugin is None:
                 continue
             ide_path = ide.get("config_path") or ide.get("install_path")
             owner_home = self._augment_owner_home_for_path(ide_path, candidate_homes)
             results.append({
                 "name": f"Augment ({ide['name']})",
-                "version": ide.get("version", "unknown"),
+                "version": plugin.get("version") or ide.get("version", "unknown"),
                 "publisher": "Augment Computer",
                 "ide": ide["name"],
                 "install_path": ide_path,

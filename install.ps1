@@ -6,8 +6,23 @@ param(
     [string]$Domain,
 
     [Parameter(Mandatory=$false)]
-    [string]$AppName
+    [string]$AppName,
+
+    # Deprecated and ignored: the scan authenticates with -ApiKey. Declared so a
+    # stale MDM policy or cron that still passes it is not rejected outright.
+    [Parameter(Mandatory=$false)]
+    [string]$DiscoveryKey,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$McpScan,
+
+    [Parameter(Mandatory=$false)]
+    [string]$McpServerName
 )
+
+if (-not [string]::IsNullOrWhiteSpace($DiscoveryKey)) {
+    Write-Warning "-DiscoveryKey is deprecated and ignored - the scan uses -ApiKey."
+}
 
 $REPO_URL = "https://github.com/websentry-ai/coding-discovery-tool.git"
 
@@ -49,29 +64,77 @@ function Get-PythonCommand {
 }
 
 function Test-GitInstalled {
-    try { $null = & git --version 2>&1; return $true } catch { return $false }
+    try {
+        $v = & git --version 2>&1
+        return ($LASTEXITCODE -eq 0 -and "$v" -match 'git version')
+    } catch { return $false }
+}
+
+function Test-RepositoryDownloaded {
+    return (Test-Path (Join-Path $TEMP_DIR "scripts"))
+}
+
+function Get-RepositoryWithGit {
+    New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+    try {
+        & git clone --depth 1 --branch $BRANCH --filter=blob:none --sparse $REPO_URL $TEMP_DIR 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Push-Location $TEMP_DIR
+            & git sparse-checkout set scripts/ 2>&1 | Out-Null
+            Pop-Location
+            if (Test-RepositoryDownloaded) { return $true }
+        }
+        Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+        & git clone --depth 1 --branch $BRANCH $REPO_URL $TEMP_DIR 2>&1 | Out-Null
+        return ($LASTEXITCODE -eq 0 -and (Test-RepositoryDownloaded))
+    } catch { return $false }
+}
+
+function Get-RepositoryWithArchive {
+    # No Git required: download the branch archive from GitHub and expand it.
+    # Mirrors download_with_curl in install.sh. Invoke-WebRequest uses the
+    # Windows certificate store, so customer-installed CAs (Zscaler etc.) work.
+    $archiveUrl = "https://github.com/websentry-ai/coding-discovery-tool/archive/refs/heads/$BRANCH.zip"
+    $zipPath = "$TEMP_DIR.zip"
+    $extractDir = "$TEMP_DIR-extract"
+    try {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+        Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force -ErrorAction Stop
+        # The archive has a single top-level folder, e.g. coding-discovery-tool-main
+        $root = Get-ChildItem -Path $extractDir -Directory | Select-Object -First 1
+        if (-not $root) { return $false }
+        New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+        Get-ChildItem -Path $root.FullName -Force | Move-Item -Destination $TEMP_DIR -Force
+        return (Test-RepositoryDownloaded)
+    } catch {
+        # Say which step failed so certificate, proxy, extraction and disk
+        # problems are distinguishable from the log alone.
+        Write-Warning ("Archive download failed: " + $_.Exception.Message)
+        return $false
+    } finally {
+        Remove-Item -Path $zipPath, $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-Repository {
-    if (-not (Test-GitInstalled)) {
-        Write-ErrorMessage "Git is not installed."
-        return $false
-    }
-    New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
-    
-    try {
-        & git clone --depth 1 --branch $BRANCH --filter=blob:none --sparse $REPO_URL $TEMP_DIR 2>&1 | Out-Null
-        Push-Location $TEMP_DIR
-        & git sparse-checkout set scripts/ 2>&1 | Out-Null
-        Pop-Location
-        return $true
-    } catch {
-        try {
-            Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
-            & git clone --depth 1 --branch $BRANCH $REPO_URL $TEMP_DIR 2>&1 | Out-Null
+    if (Test-GitInstalled) {
+        if (Get-RepositoryWithGit) {
+            Write-Success "Repository downloaded (via git)"
             return $true
-        } catch { return $false }
+        }
+        Write-Warning "Git download failed, trying archive download..."
+        Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Info "Git not found, downloading archive instead..."
     }
+    if (Get-RepositoryWithArchive) {
+        Write-Success "Repository downloaded (via archive)"
+        return $true
+    }
+    Write-ErrorMessage "Could not download the repository with git or as an archive."
+    return $false
 }
 
 # --- MAIN EXECUTION ---
@@ -88,6 +151,11 @@ function Main {
 
     if (-not $ApiKey -or -not $Domain) {
         Write-ErrorMessage "Missing required arguments: -ApiKey and -Domain"
+        exit 1
+    }
+
+    if ($McpScan -and [string]::IsNullOrWhiteSpace($McpServerName)) {
+        Write-ErrorMessage "Missing required argument: -McpServerName is required with -McpScan"
         exit 1
     }
 
@@ -132,22 +200,34 @@ function Main {
 
     if (-not (Get-Repository)) { Write-ErrorMessage "Failed to download repository."; exit 1 }
 
+    $previousApiKey = $env:UNBOUND_API_KEY
     Push-Location $TEMP_DIR
     try {
-        # NOTE: --api-key appears in the Python process command line (Win32_Process.CommandLine /
-        # Event Log 4688). This is a pre-existing limitation of the Python entry point,
-        # the wrapper already avoids exposing the key at the PS level.
-        $pythonArgs = @("-m", "scripts.coding_discovery_tools.ai_tools_discovery", "--api-key", $ApiKey, "--domain", $Domain)
-        if ($AppName) { $pythonArgs += @("--app_name", $AppName) }
+        # The scan reads UNBOUND_API_KEY / UNBOUND_MCP_SERVER_JSON from the environment,
+        # so the key and the server config stay out of Win32_Process.CommandLine.
+        if ($McpScan) {
+            $env:UNBOUND_API_KEY = $ApiKey
+            $pythonArgs = @("-m", "scripts.coding_discovery_tools.scan_single_mcp_server", "--name", $McpServerName, "--domain", $Domain)
+        } else {
+            # NOTE: --api-key appears in the Python process command line (Win32_Process.CommandLine /
+            # Event Log 4688). This is a pre-existing limitation of the Python entry point,
+            # the wrapper already avoids exposing the key at the PS level.
+            $pythonArgs = @("-m", "scripts.coding_discovery_tools.ai_tools_discovery", "--api-key", $ApiKey, "--domain", $Domain)
+            if ($AppName) { $pythonArgs += @("--app_name", $AppName) }
+        }
         
         $env:PYTHONWARNINGS = "ignore" # Suppress syntax warnings
 
         if ($pythonCmd -eq "py -3") { & py -3 @pythonArgs } else { & $pythonCmd @pythonArgs }
+        $pythonExitCode = $LASTEXITCODE
     }
     finally {
+        $env:UNBOUND_API_KEY = $previousApiKey
         Pop-Location
         Remove-TempDirectory
     }
+
+    if ($pythonExitCode -ne 0) { exit $pythonExitCode }
 }
 
 Main

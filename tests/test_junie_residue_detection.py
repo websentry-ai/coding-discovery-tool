@@ -61,12 +61,14 @@ def _isolate_abs(present: Path = None):
     return patch("pathlib.Path.exists", fake_exists), patch.object(os, "access", fake_access)
 
 
-def _stat_for_uid(target: Path, uid: int):
+def _stat_for_uid(target: Path, uid: int, extra: dict = None):
     real_stat = os.stat
+    owners = {str(target): uid}
+    owners.update({str(k): v for k, v in (extra or {}).items()})
 
     def fake_stat(path, *args, **kwargs):
-        if str(path) == str(target):
-            return Mock(st_uid=uid)
+        if str(path) in owners:
+            return Mock(st_uid=owners[str(path)])
         return real_stat(path, *args, **kwargs)
 
     return fake_stat
@@ -82,11 +84,12 @@ def _pwd_home(uid_to_home: dict):
 
 
 def _make_junie_detector(plugin_path=None):
-    """A junie detector stub for the central ``_detect_junie`` path. The plugin
-    signal is delegated via ``_has_junie_jetbrains_plugin``; default None."""
-    det = Mock()
-    det.tool_name = "Junie"
-    det._has_junie_jetbrains_plugin = Mock(return_value=plugin_path)
+    """A real detector for the central ``_detect_junie`` path, which delegates
+    surface enumeration to it. Only the JetBrains scan is stubbed."""
+    from scripts.coding_discovery_tools.macos.junie.junie import MacOSJunieDetector
+    det = MacOSJunieDetector()
+    surfaces = [("PyCharm", plugin_path, None)] if plugin_path else []
+    det._junie_jetbrains_surfaces = Mock(return_value=surfaces)
     return det
 
 
@@ -143,9 +146,9 @@ class TestJunieCentralPathPosix(unittest.TestCase):
              patch(f"{_MOD}.run_command", return_value=None):
             result = detect_tool_for_user(det, self.home)
         self.assertIsNotNone(result)
-        self.assertEqual(result["name"], "Junie")
-        self.assertEqual(result["install_path"], str(junie))
-        self.assertEqual(result["version"], "3.4.5")
+        self.assertEqual(result[0]["name"], "Junie")
+        self.assertEqual(result[0]["install_path"], str(junie))
+        self.assertEqual(result[0]["version"], "3.4.5")
 
     def test_versioned_binary_detected_newest(self):
         base = self.home / ".local" / "share" / "junie" / "versions"
@@ -158,7 +161,7 @@ class TestJunieCentralPathPosix(unittest.TestCase):
             result = detect_tool_for_user(det, self.home)
         self.assertIsNotNone(result)
         # Numeric version sort picks 1.10.0 over 1.9.0 (not a string sort).
-        self.assertEqual(result["install_path"], str(newest))
+        self.assertEqual(result[0]["install_path"], str(newest))
 
     # --- plugin signal: detected -----------------------------------------
 
@@ -169,7 +172,7 @@ class TestJunieCentralPathPosix(unittest.TestCase):
              patch(f"{_MOD}.run_command", return_value=None):
             result = detect_tool_for_user(det, self.home)
         self.assertIsNotNone(result)
-        self.assertEqual(result["install_path"], "/cfg/PyCharm2024.1")
+        self.assertEqual(result[0]["install_path"], "/cfg/PyCharm2024.1")
 
     def test_version_unknown_when_no_config(self):
         _make_exec(self.home / ".local" / "bin" / "junie")
@@ -178,7 +181,7 @@ class TestJunieCentralPathPosix(unittest.TestCase):
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = detect_tool_for_user(det, self.home)
-        self.assertEqual(result["version"], "Unknown")
+        self.assertEqual(result[0]["version"], "Unknown")
 
 
 class TestFindJunieBinaryRootAttribution(unittest.TestCase):
@@ -208,7 +211,7 @@ class TestFindJunieBinaryRootAttribution(unittest.TestCase):
         other = self.home.parent / "someone_else"
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502)), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other})), \
              patch(f"{_MOD}.run_command", return_value=None):
             self.assertIsNone(find_junie_binary_for_user(self.home))
@@ -220,7 +223,7 @@ class TestFindJunieBinaryRootAttribution(unittest.TestCase):
         self._install_isolation(_HOMEBREW)
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501)), \
+             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501, {self.home: 501})), \
              patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})), \
              patch(f"{_MOD}.run_command", return_value=None):
             self.assertEqual(find_junie_binary_for_user(self.home), str(_HOMEBREW))
@@ -283,6 +286,27 @@ class TestFindJunieBinaryWindows(unittest.TestCase):
         (self.home / ".junie").mkdir()
         with patch(f"{_MOD}.platform.system", return_value="Windows"):
             self.assertIsNone(find_junie_binary_for_user(self.home))
+
+
+class TestJunieVersionFromConfigNeverRaises(unittest.TestCase):
+    """An unreadable config must not take the scan down.
+
+    A function-local ``import json`` left the name unbound when ``exists()``
+    raised, so the ``except`` clause itself raised (DISCOVERY-TOOL-SCRIPT-19).
+    """
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def test_permission_error_on_exists_is_handled(self):
+        from scripts.coding_discovery_tools.macos.junie.junie import MacOSJunieDetector
+
+        class _Denied(type(Path())):
+            def exists(self, *args, **kwargs):
+                raise PermissionError(13, "Permission denied")
+
+        det = MacOSJunieDetector.__new__(MacOSJunieDetector)
+        self.assertIsNone(det._get_version_from_config(_Denied("/nonexistent/.junie")))
 
 
 if __name__ == "__main__":

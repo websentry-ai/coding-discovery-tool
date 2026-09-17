@@ -7,6 +7,7 @@ on macOS to avoid code duplication.
 
 import logging
 import os
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -16,6 +17,51 @@ from .mcp_extraction_helpers import is_home_dotdir_descendant
 from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
+
+MACHINE_APPS_DIR = Path("/Applications")
+
+
+def path_scope_root(candidate: Path, user_home: Path) -> Optional[Path]:
+    """The root that owns ``candidate``: machine-wide, or the scanned user's home."""
+    if candidate.parent == MACHINE_APPS_DIR:
+        return MACHINE_APPS_DIR
+    return user_home if user_home in candidate.parents else None
+
+
+def path_in_scope(candidate: Path, user_home: Path) -> bool:
+    """True when ``candidate`` is really inside a root we attribute to this user.
+
+    Lexical containment is not enough: a link anywhere below the root redirects out
+    of it, and ``dir_state`` follows links, so one user's evidence could be attributed
+    to another. Every component below the root is checked, hidden ones (``.Trash``)
+    rejected outright. A component we cannot lstat is kept, not dropped: unknown is
+    not absence.
+    """
+    root = path_scope_root(candidate, user_home)
+    if root is None:
+        return False
+    current = root
+    for part in candidate.relative_to(root).parts:
+        if part.startswith("."):
+            return False
+        current = current / part
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError:
+            return True
+        if stat.S_ISLNK(mode):
+            return False
+    return True
+
+
+def macos_app_candidates(app_path: Path, user_home: Optional[Path] = None) -> List[Path]:
+    """``app_path``, then the same bundle under the scanned user's ``~/Applications``,
+    where a non-admin install lands. Only machine-wide paths gain the sibling."""
+    candidates = [app_path]
+    if app_path.parent == MACHINE_APPS_DIR:
+        home = user_home if user_home is not None else Path.home()
+        candidates.append(home / "Applications" / app_path.name)
+    return candidates
 
 
 def is_running_as_root() -> bool:
@@ -94,9 +140,10 @@ def should_skip_path(path: Path) -> bool:
     return not SKIP_DIRS.isdisjoint(path.parts)
 
 
-# Precomputed once so the per-path check is a single C-level ``str.startswith`` over
-# a tuple rather than a Python generator that re-iterates every skip dir per path.
+# Precomputed so the per-path check is a single C-level ``str.startswith`` over a
+# tuple rather than a Python generator that re-iterates every skip dir per path.
 _SKIP_SYSTEM_PREFIXES = tuple(SKIP_SYSTEM_DIRS)
+_SKIP_SYSTEM_SOURCE = SKIP_SYSTEM_DIRS
 
 
 def should_skip_system_path(path: Path) -> bool:
@@ -109,6 +156,12 @@ def should_skip_system_path(path: Path) -> bool:
     Returns:
         True if path should be skipped, False otherwise
     """
+    global _SKIP_SYSTEM_PREFIXES, _SKIP_SYSTEM_SOURCE  # pylint: disable=global-statement
+    # SKIP_SYSTEM_DIRS stays authoritative: rebuild only when it is swapped, so
+    # the steady-state cost is one identity check.
+    if SKIP_SYSTEM_DIRS is not _SKIP_SYSTEM_SOURCE:
+        _SKIP_SYSTEM_SOURCE = SKIP_SYSTEM_DIRS
+        _SKIP_SYSTEM_PREFIXES = tuple(SKIP_SYSTEM_DIRS)
     # Same result as ``any(path_str.startswith(d) for d in SKIP_SYSTEM_DIRS)``.
     return str(path).startswith(_SKIP_SYSTEM_PREFIXES)
 

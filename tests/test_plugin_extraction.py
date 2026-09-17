@@ -627,5 +627,183 @@ class TestMcpProvenanceTagging(unittest.TestCase):
             self.assertEqual(projects[0]["plugin_id"], "my-plugin@marketplace")
 
 
+class TestCodexPluginEnumeration(unittest.TestCase):
+    """extract_codex_plugins: resilience, symlink/containment, version selection."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mk_plugin(self, codex, marketplace, plugin, skill, version=None, hashname="h1"):
+        base = codex / "plugins" / "cache" / marketplace / plugin / hashname
+        (base / "skills" / skill).mkdir(parents=True)
+        (base / "skills" / skill / "SKILL.md").write_text(f"# {skill}", encoding="utf-8")
+        if version is not None:
+            (base / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+            (base / ".codex-plugin" / "plugin.json").write_text(
+                json.dumps({"name": plugin, "version": version}), encoding="utf-8")
+        return base
+
+    def _enable(self, codex, *ids):
+        codex.mkdir(parents=True, exist_ok=True)
+        (codex / "config.toml").write_text(
+            "".join(f'[plugins."{i}"]\nenabled = true\n' for i in ids), encoding="utf-8")
+
+    def test_selects_highest_version_not_newest_mtime(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        self._mk_plugin(codex, "openai-curated", "linear", "linear", version="0.0.9", hashname="hi")
+        low = self._mk_plugin(codex, "openai-curated", "linear", "linear", version="0.0.3", hashname="lo")
+        os.utime(low, None)  # low version is the newest by mtime -> version must still win
+        self._enable(codex, "linear@openai-curated")
+        plugins = extract_codex_plugins(codex)
+        self.assertEqual(len(plugins), 1)
+        self.assertTrue(plugins[0]["install_path"].endswith("hi"))
+
+    def test_unreadable_marketplace_does_not_abort_the_rest(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        self._mk_plugin(codex, "good", "alpha", "alpha")
+        bad = codex / "plugins" / "cache" / "bad"
+        (bad / "beta").mkdir(parents=True)
+        os.chmod(bad, 0o000)
+        try:
+            names = {p["plugin_name"] for p in extract_codex_plugins(codex)}
+            self.assertIn("alpha", names)  # good marketplace still scanned
+        finally:
+            os.chmod(bad, 0o755)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_symlinked_plugin_dir_escaping_home_is_rejected(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        outside = self.tmp / "evil"
+        (outside / "skills" / "secret").mkdir(parents=True)
+        (outside / "skills" / "secret" / "SKILL.md").write_text("# secret", encoding="utf-8")
+        cache = codex / "plugins" / "cache" / "openai-curated"
+        cache.mkdir(parents=True)
+        os.symlink(outside, cache / "linear")
+        self._enable(codex, "linear@openai-curated")
+        self.assertEqual(extract_codex_plugins(codex), [])  # symlink escape rejected
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_within_home_skill_symlink_is_not_read(self):
+        """A crafted plugin whose skills/<name>/SKILL.md symlinks to another file under
+        the SAME home (e.g. ~/.ssh/id_ed25519) must not be read or reported."""
+        from scripts.coding_discovery_tools.codex_skills_helpers import (
+            extract_codex_user_level_items, CODEX_ITEM_CONFIGS)
+        from scripts.coding_discovery_tools.macos_extraction_helpers import extract_single_rule_file
+        home = self.tmp / "alice"
+        secret = home / ".ssh" / "id_ed25519"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("PRIVATE KEY MATERIAL", encoding="utf-8")
+        inst = home / ".codex" / "plugins" / "cache" / "openai-curated" / "evil" / "h" / "skills" / "x"
+        inst.mkdir(parents=True)
+        os.symlink(secret, inst / "SKILL.md")
+        self._enable(home / ".codex", "evil@openai-curated")
+        us = []
+        extract_codex_user_level_items(home, us, extract_single_rule_file, CODEX_ITEM_CONFIGS)
+        self.assertFalse([s for s in us if "PRIVATE KEY" in (s.get("content") or "")])
+        self.assertNotIn("x", [s.get("skill_name") for s in us])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_symlinked_codex_home_ancestor_is_rejected(self):
+        # A symlinked ~/.codex redirecting the whole boundary into another tree must
+        # be refused before traversal, so realpath containment can't be fooled.
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        victim = self.tmp / "victim"
+        self._mk_plugin(victim, "openai-curated", "linear", "linear")
+        self._enable(victim, "linear@openai-curated")
+        home = self.tmp / "alice"
+        home.mkdir()
+        os.symlink(victim, home / ".codex")
+        self.assertEqual(extract_codex_plugins(home / ".codex"), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_symlinked_plugins_dir_ancestor_is_rejected(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        victim = self.tmp / "victim"
+        self._mk_plugin(victim, "openai-curated", "linear", "linear")
+        codex = self.tmp / ".codex"
+        codex.mkdir(parents=True)
+        self._enable(codex, "linear@openai-curated")
+        os.symlink(victim / "plugins", codex / "plugins")
+        self.assertEqual(extract_codex_plugins(codex), [])
+
+    def _one_plugin(self, install):
+        return [{"install_path": str(install), "has_skills": True,
+                 "plugin_id": "p@m", "marketplace_name": "m"}]
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink semantics")
+    def test_plugin_skill_symlink_refused_by_fd_read(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_plugin_skills
+        inst = self.tmp / "inst"
+        (inst / "skills" / "x").mkdir(parents=True)
+        secret = self.tmp / "secret.txt"
+        secret.write_text("SECRET", encoding="utf-8")
+        os.symlink(secret, inst / "skills" / "x" / "SKILL.md")  # O_NOFOLLOW refuses at open
+        self.assertEqual(extract_plugin_skills(self._one_plugin(inst)), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX hardlink semantics")
+    def test_plugin_skill_hardlink_refused_by_fd_read(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_plugin_skills
+        inst = self.tmp / "inst2"
+        (inst / "skills" / "y").mkdir(parents=True)
+        other = self.tmp / "other.txt"
+        other.write_text("OTHER", encoding="utf-8")
+        os.link(other, inst / "skills" / "y" / "SKILL.md")  # st_nlink == 2 -> fstat refuses
+        self.assertEqual(extract_plugin_skills(self._one_plugin(inst)), [])
+
+    def test_plugin_skill_legit_read(self):
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_plugin_skills
+        inst = self.tmp / "inst3"
+        (inst / "skills" / "z").mkdir(parents=True)
+        (inst / "skills" / "z" / "SKILL.md").write_text("# Hello", encoding="utf-8")
+        got = extract_plugin_skills(self._one_plugin(inst))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["content"], "# Hello")
+        self.assertFalse(got[0]["truncated"])
+
+    def test_multiline_string_cannot_false_disable_plugin(self):
+        """An `enabled = false` embedded in a TOML multiline string must not disable a
+        real plugin (Codex is enabled-unless-disabled, so only genuine records count)."""
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import _codex_disabled_plugin_ids
+        codex = self.tmp / ".codex"
+        codex.mkdir(parents=True)
+        (codex / "config.toml").write_text(
+            'note = """\n'
+            '[plugins."real@openai-curated"]\n'
+            'enabled = false\n'
+            '"""\n'
+            '[plugins."reallyoff@openai-curated"]\n'
+            'enabled = false\n',
+            encoding="utf-8",
+        )
+        disabled = _codex_disabled_plugin_ids(codex)
+        self.assertIn("reallyoff@openai-curated", disabled)     # genuine record honored
+        self.assertNotIn("real@openai-curated", disabled)       # string-embedded one ignored
+
+    def test_installed_plugin_enabled_by_default_and_comment_tolerant(self):
+        """Codex reports an installed plugin unless it is explicitly turned off. A config
+        with no plugin table, or `enabled = true # comment`, must still be reported."""
+        from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_codex_plugins
+        codex = self.tmp / ".codex"
+        self._mk_plugin(codex, "openai-curated", "linear", "linear")
+        # MCP-only config, no [plugins."..."] table at all -> default enabled
+        (codex / "config.toml").write_text('[mcp_servers.foo]\nurl = "x"\n', encoding="utf-8")
+        self.assertIn("linear", {p["plugin_name"] for p in extract_codex_plugins(codex)})
+        # explicit enable with a trailing comment -> still reported
+        (codex / "config.toml").write_text(
+            '[plugins."linear@openai-curated"]\nenabled = true  # on\n', encoding="utf-8")
+        self.assertIn("linear", {p["plugin_name"] for p in extract_codex_plugins(codex)})
+        # explicit disable (with comment / case) -> skipped
+        (codex / "config.toml").write_text(
+            '[plugins."linear@openai-curated"]\nenabled = False  # off\n', encoding="utf-8")
+        self.assertEqual(extract_codex_plugins(codex), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,10 +54,17 @@ from .macos_extraction_helpers import (  # noqa: F401
 # over a tuple instead of a Python generator that re-iterates every skip dir on
 # every path — this predicate runs on every entry of every walk.
 _LINUX_SKIP_SYSTEM_PREFIXES = tuple(d + '/' for d in _LINUX_SKIP_SYSTEM_DIRS)
+_LINUX_SKIP_SYSTEM_SOURCE = _LINUX_SKIP_SYSTEM_DIRS
 
 
 def should_skip_system_path(path: Path) -> bool:
     """Return True for Linux virtual-filesystem and system directories."""
+    global _LINUX_SKIP_SYSTEM_PREFIXES, _LINUX_SKIP_SYSTEM_SOURCE  # pylint: disable=global-statement
+    # The set stays authoritative: rebuild only when it is swapped, so the
+    # steady-state cost is one identity check.
+    if _LINUX_SKIP_SYSTEM_DIRS is not _LINUX_SKIP_SYSTEM_SOURCE:
+        _LINUX_SKIP_SYSTEM_SOURCE = _LINUX_SKIP_SYSTEM_DIRS
+        _LINUX_SKIP_SYSTEM_PREFIXES = tuple(d + '/' for d in _LINUX_SKIP_SYSTEM_DIRS)
     path_str = str(path)
     # Same result as ``any(s == d or s.startswith(d + '/') for d in ...)``, but the
     # prefix scan runs in C via ``startswith(tuple)`` instead of a Python loop.

@@ -8,6 +8,7 @@ from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
+from ...macos_extraction_helpers import macos_app_candidates
 from ...utils import run_command
 
 logger = logging.getLogger(__name__)
@@ -58,9 +59,11 @@ class MacOSAntigravityDetector(BaseToolDetector):
         Returns:
             Path to the app if found, None otherwise
         """
+        user_home = getattr(self, 'user_home', None)
         for app_path in self.POSSIBLE_APP_PATHS:
-            if app_path.exists():
-                return app_path
+            for candidate in macos_app_candidates(app_path, user_home):
+                if candidate.exists():
+                    return candidate
         return None
 
     def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:

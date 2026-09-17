@@ -6,7 +6,9 @@ on Windows and macOS to avoid code duplication.
 """
 
 import logging
+import ntpath
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,207 @@ from typing import List, Dict, Optional, Tuple, Callable
 from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
 
 logger = logging.getLogger(__name__)
+
+_PROFILE_LIST_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+# LOCAL SYSTEM / LOCAL SERVICE / NETWORK SERVICE — S-1-5-18 is what an MDM runs as.
+_SERVICE_PROFILE_SIDS = frozenset({"S-1-5-18", "S-1-5-19", "S-1-5-20"})
+
+
+def registry_profile_paths() -> Tuple[List[Path], bool]:
+    """Profile paths Windows records in ``ProfileList``, and whether the read was
+    complete.
+
+    This is the authoritative answer to "who has a profile here", and unlike a
+    ``C:\\Users`` listing it carries the real location, so a profile relocated to
+    another drive is still found. ``.bak`` keys are kept — Windows renames a key
+    that way when a profile fails to load, and the profile is still a real user's.
+
+    UNC paths are returned too, even though they must not be scanned: the caller
+    needs them to recognise a roaming profile's local cache under ``C:\\Users``.
+
+    ``complete`` is False when any entry could not be read, so the caller can
+    tell a whole profile list from a partial one and never treat a partial list
+    as proof that a walked profile is not real.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return [], False
+
+    paths: List[Path] = []
+    complete = True
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                sid = None
+                try:
+                    sid = winreg.EnumKey(key, index)
+                    base_sid = sid[:-4] if sid.endswith(".bak") else sid
+                    if base_sid in _SERVICE_PROFILE_SIDS:
+                        continue
+                    with winreg.OpenKey(key, sid) as sub_key:
+                        raw, kind = winreg.QueryValueEx(sub_key, "ProfileImagePath")
+                except OSError as exc:
+                    complete = False
+                    logger.debug(f"Could not read profile {sid or index}: {exc}", exc_info=True)
+                    continue
+                if not isinstance(raw, str) or not raw:
+                    complete = False
+                    logger.debug(f"Profile {sid} has no usable ProfileImagePath")
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    raw = ntpath.expandvars(raw)
+                paths.append(Path(raw))
+    except OSError as exc:
+        logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}", exc_info=True)
+        return [], False
+    return paths, complete
+
+
+_PROFILE_VARS = ("USERPROFILE", "HOMEPATH", "APPDATA", "LOCALAPPDATA")
+_LOCAL_DRIVE = re.compile(r"^[A-Za-z]:\\")
+_DRIVE_REMOTE = 4
+# Where a package manager installs. Anywhere else is someone's own directory, whose
+# name can carry a customer or project, so it is counted rather than sent.
+_MACHINE_ROOT_VARS = ("ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SystemRoot")
+
+
+def _under(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or inside it, on a separator boundary."""
+    path = ntpath.normcase(ntpath.normpath(path)).rstrip("\\")
+    root = ntpath.normcase(ntpath.normpath(root)).rstrip("\\")
+    return path == root or path.startswith(root + "\\")
+
+
+def _is_local_drive(path: str) -> bool:
+    """Whether probing ``path`` stays off the network.
+
+    A drive letter is not enough: ``Z:\\`` can be a mapped share, so the drive type
+    is asked before anything touches the filesystem.
+    """
+    if not _LOCAL_DRIVE.match(path) or path.startswith("\\\\"):
+        return False
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.GetDriveTypeW(path[:3]) != _DRIVE_REMOTE
+    except (AttributeError, OSError):
+        return True
+
+
+def _is_machine_root(entry: str) -> bool:
+    """Whether ``entry`` sits under a Windows-owned root, whose names are not the customer's."""
+    for var in _MACHINE_ROOT_VARS:
+        root = os.environ.get(var)
+        if root and _under(entry, root):
+            return True
+    return False
+
+
+def _expand_for_profile(entry: str, profile: Optional[str]) -> str:
+    """Expand ``entry``, resolving per-user variables against ``profile`` not the scanner."""
+    if profile:
+        for var, value in (("USERPROFILE", profile), ("HOMEPATH", profile),
+                           ("APPDATA", ntpath.join(profile, "AppData", "Roaming")),
+                           ("LOCALAPPDATA", ntpath.join(profile, "AppData", "Local"))):
+            entry = re.sub(rf"%{var}%", lambda _, v=value: v, entry, flags=re.IGNORECASE)
+    elif any(f"%{var}%".lower() in entry.lower() for var in _PROFILE_VARS):
+        return entry
+    return ntpath.expandvars(entry)
+
+
+def _profile_image_paths(winreg) -> Dict[str, str]:
+    """``{SID: profile dir}`` from ``ProfileList``."""
+    profiles: Dict[str, str] = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                sid = None
+                try:
+                    sid = winreg.EnumKey(key, index)
+                    with winreg.OpenKey(key, sid) as sub_key:
+                        raw, kind = winreg.QueryValueEx(sub_key, "ProfileImagePath")
+                except OSError as exc:
+                    logger.debug(f"Could not read profile {sid or index}: {exc}", exc_info=True)
+                    continue
+                if not isinstance(raw, str) or not raw:
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    raw = ntpath.expandvars(raw)
+                profiles[sid[:-4] if sid.endswith(".bak") else sid] = ntpath.normpath(raw).rstrip("\\")
+    except OSError as exc:
+        logger.debug(f"Could not read {_PROFILE_LIST_KEY}: {exc}", exc_info=True)
+    return profiles
+
+
+def registry_user_path_dirs() -> List[str]:
+    """Existing PATH directories from every loaded user hive, profile-relative.
+
+    A CLI is invoked by name, so its directory is on the user's PATH whatever prefix
+    installed it, and the candidate list can only name prefixes it already knows.
+    Only loaded hives answer: mounting a logged-out profile's NTUSER.DAT is a side
+    effect a probe has no business causing.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    profiles = _profile_image_paths(winreg)
+    roots = list(profiles.values())
+    dirs: List[str] = []
+    seen = set()
+    withheld = 0
+    try:
+        with winreg.OpenKey(winreg.HKEY_USERS, "") as users:
+            for index in range(winreg.QueryInfoKey(users)[0]):
+                sid = None
+                try:
+                    sid = winreg.EnumKey(users, index)
+                    if sid.endswith("_Classes") or sid in _SERVICE_PROFILE_SIDS:
+                        continue
+                    with winreg.OpenKey(users, sid + r"\Environment") as env:
+                        raw, kind = winreg.QueryValueEx(env, "Path")
+                except OSError as exc:
+                    logger.debug(f"Could not read PATH for {sid or index}: {exc}", exc_info=True)
+                    continue
+                if not isinstance(raw, str):
+                    continue
+                profile = profiles.get(sid)
+                for entry in raw.split(";"):
+                    entry = entry.strip().rstrip("\\")
+                    if not entry:
+                        continue
+                    if kind == winreg.REG_EXPAND_SZ:
+                        entry = _expand_for_profile(entry, profile)
+                    # Collapse first: ~\..\..\bob\bin would otherwise redact to a path naming bob.
+                    entry = ntpath.normpath(entry).rstrip("\\")
+                    key = ntpath.normcase(entry)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    # Before any filesystem call: isdir on \\host\share authenticates
+                    # this scan's token, which under MDM is Local System.
+                    if not _is_local_drive(entry):
+                        logger.debug(f"Skipping non-local PATH entry: {entry}")
+                        continue
+                    try:
+                        if not os.path.isdir(entry):
+                            continue
+                    except OSError as exc:
+                        logger.debug(f"Could not stat PATH entry {entry}: {exc}", exc_info=True)
+                        continue
+                    if profile and _under(entry, profile):
+                        dirs.append("~" + entry[len(profile):])
+                    elif _is_machine_root(entry) and not any(_under(entry, r) for r in roots):
+                        dirs.append(entry)
+                    else:
+                        withheld += 1
+                        logger.debug(f"Withholding PATH entry outside a known root: {entry}")
+    except OSError as exc:
+        logger.debug(f"Could not read HKEY_USERS Environment: {exc}", exc_info=True)
+    if withheld:
+        dirs.append(f"<{withheld} withheld>")
+    return dirs
 
 
 # Maps the globalStorage IDE-folder key (as used by Cline/Roo ``SUPPORTED_IDES``)
@@ -445,24 +648,99 @@ def read_truncated_file(file_path: Path) -> str:
         return ""
 
 
-def is_running_as_admin() -> bool:
+def windows_admin_state() -> Optional[bool]:
     """
-    Check if the current process is running as administrator.
-    
+    Whether the current process holds administrator rights.
+
     Returns:
-        True if running as administrator, False otherwise
+        True or False, or None when the check itself could not run.
     """
     try:
         import ctypes
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except Exception:
-        # Fallback: check if current user is Administrator or SYSTEM
-        try:
-            import getpass
-            current_user = getpass.getuser().lower()
-            return current_user in ["administrator", "system"]
-        except Exception:
+        return None
+
+
+def _running_as_local_system() -> bool:
+    """
+    True when the process runs as NT AUTHORITY\\SYSTEM (SID S-1-5-18).
+
+    IsUserAnAdmin() only reports enabled Administrators-group membership, which
+    SYSTEM does not have — its rights come from its own SID — so IsUserAnAdmin()
+    returns False/undetermined for SYSTEM. Recognize SYSTEM separately, otherwise
+    an MDM/all-users scan run as SYSTEM collapses to the empty systemprofile.
+    """
+    # Read the token's user SID through the Win32 API rather than spawning
+    # whoami: a subprocess running as SYSTEM is an execute-as-SYSTEM vector and
+    # can fail silently. windows_admin_state() above already uses ctypes.
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        TOKEN_QUERY = 0x0008
+        TokenUser = 1
+        LOCAL_SYSTEM_SID = "S-1-5-18"
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD)]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+                kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
             return False
+        try:
+            size = wintypes.DWORD()
+            advapi32.GetTokenInformation(token, TokenUser, None, 0, ctypes.byref(size))
+            if not size.value:
+                return False
+            buf = (ctypes.c_byte * size.value)()
+            if not advapi32.GetTokenInformation(
+                    token, TokenUser, buf, size, ctypes.byref(size)):
+                return False
+            # TOKEN_USER begins with SID_AND_ATTRIBUTES whose first member is the PSID.
+            psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            str_sid = wintypes.LPWSTR()
+            if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(str_sid)):
+                return False
+            try:
+                return str_sid.value == LOCAL_SYSTEM_SID
+            finally:
+                kernel32.LocalFree(str_sid)
+        finally:
+            kernel32.CloseHandle(token)
+    except Exception as e:
+        # A silent failure reverts SYSTEM to non-admin and can empty an all-users
+        # scan, so log it rather than leaving it invisible.
+        logger.debug("SYSTEM SID detection failed: %s", e)
+        return False
+
+
+def is_running_as_admin() -> bool:
+    """
+    Check if the current process is running as administrator.
+
+    Returns:
+        True if running as administrator, False otherwise
+    """
+    # Administrators-group membership is the primary signal. SYSTEM is root but
+    # is NOT in that group, so IsUserAnAdmin() returns False/undetermined for it;
+    # recognize SYSTEM by its SID so an MDM/all-users scan still enumerates every
+    # profile instead of collapsing to the empty systemprofile.
+    if windows_admin_state() is True:
+        return True
+    return _running_as_local_system()
 
 
 def _other_user_appdata_local_dirs() -> List[Path]:

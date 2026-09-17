@@ -10,7 +10,7 @@
 #
 # Usage:
 #   .\setup-scheduled-scan.ps1 -ApiKey <key> -Domain <url>
-#   .\setup-scheduled-scan.ps1 -Command onboard -ApiKey <key> -DiscoveryKey <key> -Domain <url>
+#   .\setup-scheduled-scan.ps1 -Command onboard -ApiKey <key> -Domain <url>
 #   .\setup-scheduled-scan.ps1 -Uninstall
 #
 # =============================================================================
@@ -102,8 +102,9 @@ Usage:
 
 Options:
   -Command <name>     'discover' (default) or 'onboard'
-  -ApiKey <key>       User API key (or discovery key when -Command discover)
-  -DiscoveryKey <k>   Org discovery key (optional; only for sudo/MDM all-users scans)
+  -ApiKey <key>       API key (user key, or admin key for sudo/MDM all-users scans)
+  -DiscoveryKey <k>   Deprecated and ignored by current CLIs; the device owner is
+                      resolved from the hardware serial. Accepted for back-compat.
   -Domain <url>       Backend URL
   -Uninstall          Remove the scheduled task
 '@
@@ -399,8 +400,9 @@ if ([string]::IsNullOrEmpty($ApiKey)) {
     Write-Host "Error: -ApiKey is required"
     Show-Usage
 }
-# -DiscoveryKey is optional for onboard: per-user onboarding scans with the
-# user's own API key (WEB-4891). It is only needed for sudo/MDM all-users scans.
+# -DiscoveryKey is deprecated and optional. Per-user onboarding scans with the
+# user's own API key; sudo/MDM all-users scans resolve the device owner from the
+# hardware serial. Still accepted, and forwarded when present, for older CLIs.
 if ($Command -eq 'discover' -and [string]::IsNullOrEmpty($Domain)) {
     Write-Host "Error: -Domain is required when -Command discover"
     Show-Usage

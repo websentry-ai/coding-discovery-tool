@@ -13,14 +13,20 @@ false-NEGATIVE guard); residue-only ``~/.claude`` -> NOT detected (the FP fix);
 and a present-but-non-executable file -> NOT detected.
 """
 
+import json
 import os
+import platform
+import shutil
 import tempfile
+import time
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.user_tool_detector import (
+    _EXTENSION_VERSION,
     _detect_claude_code,
     find_claude_binary_for_user,
 )
@@ -38,17 +44,33 @@ _USR_LOCAL = Path("/usr/local/bin/claude")
 _USR_BIN = Path("/usr/bin/claude")
 
 
-def _stat_for_uid(target: Path, uid: int):
-    """os.stat side_effect: return a fake stat (chosen ``uid``) for ``target``,
-    pass through to the real os.stat for every other path."""
+def _stat_for_uid(target: Path, uid: int, extra: dict = None):
+    """os.stat side_effect: fake ``uid`` for ``target`` (and for any path in
+    ``extra``), pass through to the real os.stat for everything else."""
     real_stat = os.stat
+    owners = {str(target): uid}
+    owners.update({str(k): v for k, v in (extra or {}).items()})
 
     def fake_stat(path, *args, **kwargs):
-        if str(path) == str(target):
-            return Mock(st_uid=uid)
+        if str(path) in owners:
+            return Mock(st_uid=owners[str(path)])
         return real_stat(path, *args, **kwargs)
 
     return fake_stat
+
+
+def _absent_unless_under(home: Path):
+    """Path.exists side_effect hiding machine-global candidates, so a real
+    system-wide claude on the test host can't satisfy a user-scoped case."""
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        try:
+            return real_exists(self, *args, **kwargs) and self.is_relative_to(home)
+        except (OSError, ValueError):
+            return False
+
+    return fake_exists
 
 
 def _stat_raises_for(target: Path, exc: OSError = None):
@@ -272,6 +294,37 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(yarn))
 
+    def test_legacy_local_install_detected(self):
+        legacy = self.home / ".claude" / "local" / "claude"
+        self._make_exec(legacy)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(legacy))
+
+    def test_native_versions_dir_detected_newest_first(self):
+        versions = self.home / ".local" / "share" / "claude" / "versions"
+        self._make_exec(versions / "2.1.9")
+        self._make_exec(versions / "2.1.10")
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(versions / "2.1.10"))
+
+    def test_pnpm_global_binary_detected(self):
+        pnpm = self.home / ".local" / "share" / "pnpm" / "claude"
+        self._make_exec(pnpm)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(pnpm))
+
     def test_nvm_binary_detected(self):
         nvm = self.home / ".nvm" / "versions" / "node" / "v20.0.0" / "bin" / "claude"
         self._make_exec(nvm)
@@ -284,12 +337,14 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
 
     def test_which_backstop_detected(self):
         """No HOME/Homebrew binary, but ``which claude`` resolves to a real
-        executable -> detected. Proves the PATH backstop (non-root case)."""
+        executable -> detected. Proves the PATH backstop for the one case it is
+        valid in: the home being scanned is the scanner's own."""
         which_target = self.home / "custom" / "claude"
         self._make_exec(which_target)
         det = _make_detector()
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_MOD}._is_scanning_users_own_home", return_value=True), \
              patch(f"{_MOD}.run_command", return_value=str(which_target)):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
@@ -340,14 +395,15 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         self.assertEqual(result, str(self.home / ".local" / "bin" / "claude"))
 
     def test_homebrew_skipped_when_root(self):
-        """Under a root/MDM multi-user scan, the MACHINE-GLOBAL Homebrew /
-        /usr/local candidates must be SKIPPED — probing them per-user would
-        attribute one shared install to EVERY user. With Homebrew "present" but
-        no user_home-relative binary, the finder returns None under root. Fails
-        against the pre-guard code, which probed Homebrew regardless of root."""
+        """Under a root/MDM multi-user scan, a MACHINE-GLOBAL Homebrew /
+        /usr/local binary owned by SOMEONE ELSE must be skipped — attributing it
+        per-user would fan one shared install out to everyone. With Homebrew
+        "present" but no user_home-relative binary, the finder returns None."""
         self._with_abs(_HOMEBREW)  # /opt/homebrew/bin/claude "present"+exec
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 502, {self.home: 501})), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertIsNone(result)
@@ -369,35 +425,48 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
     # claude binary is attributed to its OWNER (Homebrew/usr-local) or to every
     # scanned user when root-owned (apt/dnf /usr/bin), instead of being dropped.
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution")
     def test_homebrew_owned_by_this_user_detected_when_root(self):
-        """W1: root scan, /opt/homebrew/bin/claude present and owned by a uid
-        whose home == the scanned user_home -> attributed (returned). Fails
-        against pre-W1 code, which dropped all machine-global candidates under
-        root."""
+        """W1: root scan, /opt/homebrew/bin/claude present and owned by the same
+        uid as the scanned home -> attributed (returned). Fails against pre-W1
+        code, which dropped all machine-global candidates under root."""
         self._with_abs(_HOMEBREW)  # present + executable
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 501)), \
-             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({501: self.home})), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 501, {self.home: 501})), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertEqual(result, str(_HOMEBREW))
 
-    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution uses pwd (absent on Windows)")
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution")
     def test_homebrew_owned_by_other_user_not_detected_when_root(self):
         """W1 (the FP guard): root scan, /opt/homebrew/bin/claude owned by a
-        DIFFERENT user's home -> skipped; with no user-local binary the finder
-        returns None (one user's Homebrew install is not fanned out)."""
+        DIFFERENT uid than the scanned home -> skipped; with no user-local binary
+        the finder returns None (one user's Homebrew install is not fanned out)."""
         self._with_abs(_HOMEBREW)
-        other_home = self.home.parent / "someone_else"
         with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
              patch(f"{_MOD}.is_running_as_root", return_value=True), \
-             patch(f"{_UTILS}.os.stat", side_effect=_stat_for_uid(_HOMEBREW, 502)), \
-             patch(f"{_UTILS}.pwd.getpwuid", side_effect=_pwd_home({502: other_home})), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 502, {self.home: 501})), \
              patch(f"{_MOD}.run_command", return_value=None):
             result = find_claude_binary_for_user(self.home)
         self.assertIsNone(result)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: machine-global owner attribution")
+    def test_owner_uid_matches_across_the_data_volume_firmlink(self):
+        """/Users/x and /System/Volumes/Data/Users/x are ONE inode that resolve()
+        does not collapse, so comparing home PATHS dropped the owner's own
+        install. Comparing uids cannot see the difference."""
+        self._with_abs(_HOMEBREW)
+        firmlinked = Path("/System/Volumes/Data") / str(self.home).lstrip("/")
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_UTILS}.os.stat",
+                   side_effect=_stat_for_uid(_HOMEBREW, 501, {firmlinked: 501})), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = find_claude_binary_for_user(firmlinked)
+        self.assertEqual(result, str(_HOMEBREW))
 
     def test_usr_bin_root_owned_detected_when_root(self):
         """W1: root scan, /usr/bin/claude owned by uid 0 (apt/dnf system-wide)
@@ -435,6 +504,134 @@ class TestClaudeCodeResidueDetectionPosix(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestClaudeCodeDetectorPosix(unittest.TestCase):
+    """The OS detector's own ``detect()`` — the single-user path, which used to
+    fall back to ``~/.claude`` while ``_detect_claude_code`` already gated on the
+    binary."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _detect(self):
+        from scripts.coding_discovery_tools.macos.claude_code.claude_code import MacOSClaudeDetector
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch("pathlib.Path.home", return_value=self.home), \
+             patch(f"{_MOD}.run_command", return_value=None), \
+             patch.object(Path, "exists", _absent_unless_under(self.home)):
+            return MacOSClaudeDetector().detect()
+
+    def test_residue_claude_dir_only_not_detected(self):
+        (self.home / ".claude").mkdir()
+        self.assertIsNone(self._detect())
+
+    def test_local_bin_binary_detected(self):
+        binary = self.home / ".local" / "bin" / "claude"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        os.chmod(binary, 0o755)
+        (self.home / ".claude").mkdir()
+        result = self._detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+
+    @unittest.skipIf(os.name == "nt", "shell shim is POSIX-only")
+    def test_version_comes_from_the_detected_binary(self):
+        """The reported version must belong to the binary detection found, not to
+        whichever claude an independent search happens to reach first."""
+        binary = self.home / ".local" / "bin" / "claude"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\necho '9.9.9 (Claude Code)'\n")
+        os.chmod(binary, 0o755)
+        result = self._detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["version"], "9.9.9")
+
+
+@unittest.skipIf(os.name == "nt", "the PATH backstop is POSIX-only, and utils.pwd is None on Windows")
+class TestPathBackstopScopedToOwnHome(unittest.TestCase):
+    """``which claude`` resolves the SCANNER's PATH. A non-root scan still walks
+    every home in /Users, so trusting it for another user credits them with the
+    scanner's install — 49 of 49 misattributed rows in prod were this shape."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.scanner_home = root / "scanner"
+        self.other_home = root / "clariadmin"
+        self.other_home.mkdir(parents=True)
+        binary = self.scanner_home / ".local" / "bin" / "claude"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        os.chmod(binary, 0o755)
+        self.scanner_binary = binary
+
+    def _find(self, user_home):
+        """Non-root, with the scanner's ``which`` pointing at its own binary.
+
+        ``_is_scanning_users_own_home`` is left unpatched so the real predicate
+        decides: under the test process it is only true for the scanner's home.
+        """
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_UTILS}.pwd.getpwuid", return_value=SimpleNamespace(pw_dir=str(self.scanner_home))), \
+             patch(f"{_MOD}.run_command", return_value=str(self.scanner_binary)), \
+             patch.object(Path, "exists", _absent_unless_under(Path(self.tmp.name))):
+            return find_claude_binary_for_user(user_home)
+
+    def test_another_users_home_does_not_inherit_the_scanner_binary(self):
+        self.assertIsNone(self._find(self.other_home))
+
+    def test_the_scanners_own_home_still_resolves_via_path(self):
+        self.assertEqual(str(self.scanner_binary), self._find(self.scanner_home))
+
+
+class TestWindowsClaudeVersionProbe(unittest.TestCase):
+    """Windows get_version must probe the resolved binary, and must never hand a
+    shim path to cmd.exe, which re-parses the command line."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _command_for(self, binary):
+        from scripts.coding_discovery_tools.windows.claude_code import claude_code as mod
+        with patch.object(mod, "run_command", return_value="1.2.3") as run:
+            mod.WindowsClaudeDetector().get_version(binary)
+        return run.call_args.args[0] if run.call_args else None
+
+    def test_exe_is_invoked_directly(self):
+        self.assertEqual(self._command_for(r"C:\p\claude.exe"), [r"C:\p\claude.exe", "--version"])
+
+    def test_no_binary_keeps_the_path_search(self):
+        self.assertEqual(self._command_for(None), ["cmd", "/c", "claude", "--version"])
+
+    def test_shim_is_never_executed(self):
+        """A profile dir may contain a cmd metacharacter (``C:\\Users\\a&b``), so a
+        shim path must never reach a shell — no subprocess at all."""
+        self.assertIsNone(self._command_for(r"C:\Users\a&b\npm\claude.cmd"))
+
+    def test_shim_version_read_from_package_json(self):
+        from scripts.coding_discovery_tools.windows.claude_code.claude_code import WindowsClaudeDetector
+        shim = Path(self.tmp.name) / "a&b" / "npm" / "claude.cmd"
+        pkg = shim.parent / "node_modules" / "@anthropic-ai" / "claude-code"
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text('{"version": "3.2.1"}', encoding="utf-8")
+        self.assertEqual(WindowsClaudeDetector().get_version(str(shim)), "3.2.1")
+
+    def test_shim_without_metadata_is_unknown(self):
+        from scripts.coding_discovery_tools.windows.claude_code.claude_code import WindowsClaudeDetector
+        shim = Path(self.tmp.name) / "npm" / "claude.cmd"
+        shim.parent.mkdir(parents=True)
+        self.assertIsNone(WindowsClaudeDetector().get_version(str(shim)))
+
+
 class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
     """Windows: ``platform.system() == 'Windows'`` candidate list."""
 
@@ -469,6 +666,26 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
             result = _detect_claude_code(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(cmd))
+
+    def test_legacy_local_install_detected(self):
+        exe = self.home / ".claude" / "local" / "claude.exe"
+        self._make_exec(exe)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(exe))
+
+    def test_native_versions_dir_detected(self):
+        versions = self.home / ".local" / "share" / "claude" / "versions"
+        self._make_exec(versions / "2.1.10")
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(versions / "2.1.10"))
 
     def test_npm_exe_binary_detected(self):
         exe = self.home / "AppData" / "Roaming" / "npm" / "claude.exe"
@@ -518,6 +735,413 @@ class TestClaudeCodeResidueDetectionWindows(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(exe))
 
+    def test_nvm_windows_shim_detected(self):
+        """nvm-windows moves the npm global prefix to ``%APPDATA%\\nvm\\<version>``."""
+        cmd = self.home / "AppData" / "Roaming" / "nvm" / "v22.11.0" / "claude.cmd"
+        self._make_exec(cmd)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cmd))
+
+    def test_volta_shim_detected(self):
+        exe = self.home / "AppData" / "Local" / "Volta" / "bin" / "claude.exe"
+        self._make_exec(exe)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(exe))
+
+    def test_pnpm_shim_detected(self):
+        cmd = self.home / "AppData" / "Local" / "pnpm" / "claude.cmd"
+        self._make_exec(cmd)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(cmd))
+
+    def test_nvm_dir_with_shell_metacharacters_ignored(self):
+        """A dir like ``x&&calc`` would inject a command into the shell=True probe."""
+        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20"):
+            with self.subTest(name=name):
+                self._make_exec(
+                    self.home / "AppData" / "Roaming" / "nvm" / name / "claude.cmd"
+                )
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNone(result)
+
+    def test_another_users_nvm_shim_not_attributed(self):
+        """Every added root is ``user_home``-relative."""
+        other = Path(self.tmp.name).parent / "other-profile"
+        self._make_exec(other / "AppData" / "Roaming" / "nvm" / "v22.11.0" / "claude.cmd")
+        self.addCleanup(shutil.rmtree, other, True)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNone(result)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNvmVersionAllowlist(unittest.TestCase):
+    """Asserted on the pattern, not the filesystem: Windows cannot create a dir whose
+    name holds a newline, so the ``\\Z`` anchor is untestable through mkdir there."""
+
+    def test_accepts_real_version_dirs(self):
+        for name in ("v22.11.0", "20.9.0", "v18", "1.2.3.4"):
+            with self.subTest(name=name):
+                self.assertTrue(utils_mod._NVM_WINDOWS_VERSION_DIR.match(name))
+
+    def test_rejects_trailing_newline(self):
+        """Python ``$`` also matches before a trailing newline; ``\\Z`` does not."""
+        for name in ("v22.11.0\n", "20.9.0\n", "v1\n&&calc"):
+            with self.subTest(name=name):
+                self.assertIsNone(utils_mod._NVM_WINDOWS_VERSION_DIR.match(name))
+
+    def test_rejects_shell_metacharacters(self):
+        for name in ("x&&calc", "v1^b", "%SYSTEMROOT%", "node20", "v1;rm", "v1 v2"):
+            with self.subTest(name=name):
+                self.assertIsNone(utils_mod._NVM_WINDOWS_VERSION_DIR.match(name))
+
+
+class TestToolConfigDirsDiagnostic(unittest.TestCase):
+    """Diagnostic only. On a ZERO-tool scan these dirs separate "machine has no AI
+    tooling" from "a tool ran here and we missed its binary". Never a detection gate
+    — that is what the residue tests above pin."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_no_config_dirs(self):
+        self.assertEqual([], utils_mod.tool_config_dirs_present(self.home))
+
+    def test_reports_each_tool_dir(self):
+        for d in (".claude", ".copilot", ".cursor"):
+            (self.home / d).mkdir()
+        self.assertEqual(["claude", "copilot", "cursor"],
+                         utils_mod.tool_config_dirs_present(self.home))
+
+    def test_ignores_files_and_unknown_dirs(self):
+        (self.home / ".claude").write_text("")      # file, not a dir
+        (self.home / ".notatool").mkdir()
+        self.assertEqual([], utils_mod.tool_config_dirs_present(self.home))
+
+    def test_missing_home_never_raises(self):
+        self.assertEqual([], utils_mod.tool_config_dirs_present(self.home / "nope"))
+
+    def test_is_a_queryable_sentry_tag(self):
+        """Must be tags, not just context, or they can't be grouped on in Sentry."""
+        self.assertIn("config_dirs_present", utils_mod._SENTRY_TAG_KEYS)
+        self.assertIn("config_dirs", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestWslDistrosPresent(unittest.TestCase):
+    """A tool installed inside a WSL distro is on a filesystem no detector walks,
+    so a zero-tool scan there has an explanation nothing else can show."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.packages = self.home / "AppData" / "Local" / "Packages"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_package(self, name, leaf=None, is_dir=False):
+        state = self.packages / name / "LocalState"
+        state.mkdir(parents=True)
+        if leaf and is_dir:
+            (state / leaf).mkdir()
+        elif leaf:
+            (state / leaf).write_text("")
+
+    def test_no_packages_dir(self):
+        self.assertEqual([], utils_mod.wsl_distros_present(self.home))
+
+    def test_wsl2_distro_found_by_its_disk_image(self):
+        self._make_package("CanonicalGroupLimited.Ubuntu22.04LTS_79rhkp1fndgsc", "ext4.vhdx")
+        self.assertEqual(["CanonicalGroupLimited.Ubuntu22.04LTS"],
+                         utils_mod.wsl_distros_present(self.home))
+
+    def test_wsl1_distro_found_by_its_rootfs(self):
+        self._make_package("TheDebianProject.DebianGNULinux_76v4gfsz19hv4", "rootfs", is_dir=True)
+        self.assertEqual(["TheDebianProject.DebianGNULinux"],
+                         utils_mod.wsl_distros_present(self.home))
+
+    def test_ordinary_store_app_is_not_a_distro(self):
+        self._make_package("Microsoft.WindowsCalculator_8wekyb3d8bbwe")
+        self.assertEqual([], utils_mod.wsl_distros_present(self.home))
+
+    def test_unreadable_package_never_raises(self):
+        self._make_package("CanonicalGroupLimited.Ubuntu_79rhkp1fndgsc", "ext4.vhdx")
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "denied")):
+            self.assertEqual([], utils_mod.wsl_distros_present(self.home))
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("wsl_distros", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestVscodeEditorsPresent(unittest.TestCase):
+    """A zero-tool scan can't otherwise tell "no editor here" from "editor in use
+    and we missed its Copilot extension"."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.base = {
+            "Darwin": ("Library", "Application Support"),
+            "Windows": ("AppData", "Roaming"),
+            "Linux": (".config",),
+        }[platform.system()]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_editor(self, name):
+        self.home.joinpath(*self.base, name, "User").mkdir(parents=True)
+
+    def test_no_editors(self):
+        self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+
+    def test_reports_each_editor_including_forks_and_insiders(self):
+        for name in ("Code", "Code - Insiders", "Cursor"):
+            self._make_editor(name)
+        self.assertEqual(["Code", "Code - Insiders", "Cursor"],
+                         utils_mod.vscode_editors_present(self.home))
+
+    def test_editor_dir_without_user_subdir_is_not_counted(self):
+        self.home.joinpath(*self.base, "Code").mkdir(parents=True)
+        self.assertEqual([], utils_mod.vscode_editors_present(self.home))
+
+    def test_unreadable_dir_is_reported_not_passed_off_as_absence(self):
+        """Empty would claim the machine has no editor, which is the one thing
+        this probe exists to rule out."""
+        self._make_editor("Code")
+        with patch("os.stat", side_effect=PermissionError(13, "denied")):
+            self.assertEqual(["unreadable"], utils_mod.vscode_editors_present(self.home))
+
+    def test_is_a_queryable_sentry_tag(self):
+        self.assertIn("vscode_editors", utils_mod._SENTRY_TAG_KEYS)
+
+
+class TestClaudeCodeVSCodeExtensionBinary(unittest.TestCase):
+    """The extension bundles the CLI at ``resources/native-binary/claude`` — a real
+    binary install no fixed candidate path reaches. Gated on a live
+    ``extensions.json`` entry, and probed last."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _plant(self, ext_root: str, exe: str, listed: bool = True, with_binary: bool = True) -> Path:
+        """Install the extension under ``<home>/<ext_root>``; returns the bundled binary."""
+        ext_dir = self.home / ext_root / "anthropic.claude-code-2.1.260"
+        binary = ext_dir / "resources" / "native-binary" / exe
+        if with_binary:
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_text("")
+            os.chmod(binary, 0o755)
+        else:
+            ext_dir.mkdir(parents=True, exist_ok=True)
+        entries = [{"identifier": {"id": "anthropic.claude-code"}, "version": "2.1.260",
+                    "relativeLocation": ext_dir.name}] if listed else []
+        registry = self.home / ext_root / "extensions.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(json.dumps(entries))
+        return binary
+
+    def _detect_windows(self):
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Windows"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            return _detect_claude_code(det, self.home)
+
+    def test_bundled_binary_detected_in_vscode(self):
+        binary = self._plant(".vscode/extensions", "claude.exe")
+        result = self._detect_windows()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+
+    def test_bundled_binary_detected_in_forks(self):
+        for ext_root in (".cursor/extensions", ".windsurf/extensions",
+                         ".vscode-oss/extensions", ".antigravity/extensions"):
+            with self.subTest(ext_root=ext_root):
+                self.tearDown()
+                self.setUp()
+                binary = self._plant(ext_root, "claude.exe")
+                self.assertEqual(self._detect_windows()["install_path"], str(binary))
+
+    def test_uninstalled_extension_residue_not_detected(self):
+        """Uninstall: dir and binary still on disk, but delisted from the registry."""
+        self._plant(".vscode/extensions", "claude.exe", listed=False)
+        self.assertIsNone(self._detect_windows())
+
+    def test_listed_extension_without_binary_not_detected(self):
+        self._plant(".vscode/extensions", "claude.exe", with_binary=False)
+        self.assertIsNone(self._detect_windows())
+
+    def test_standalone_install_wins_over_extension(self):
+        """Both surfaces present -> one row, pointing at the standalone install."""
+        self._plant(".vscode/extensions", "claude.exe")
+        npm = self.home / "AppData" / "Roaming" / "npm" / "claude.cmd"
+        npm.parent.mkdir(parents=True, exist_ok=True)
+        npm.write_text("")
+        os.chmod(npm, 0o755)
+        self.assertEqual(self._detect_windows()["install_path"], str(npm))
+
+    def test_registry_location_is_never_used(self):
+        """The recorded location is a VS Code URI (``/c:/Users/...`` on Windows) and is
+        user-writable while the binary it names is executed, so it must not be followed:
+        the real install still resolves, and a location pointing elsewhere is ignored."""
+        real = self._plant(".vscode/extensions", "claude.exe")
+        decoy = self.home / "elsewhere" / "resources" / "native-binary" / "claude.exe"
+        decoy.parent.mkdir(parents=True, exist_ok=True)
+        decoy.write_text("")
+        os.chmod(decoy, 0o755)
+        registry = self.home / ".vscode" / "extensions" / "extensions.json"
+        registry.write_text(json.dumps([{
+            "identifier": {"id": "anthropic.claude-code"},
+            "version": "2.1.260",
+            "location": {"$mid": 1, "path": "/c:/nope", "scheme": "file"},
+            "relativeLocation": "anthropic.claude-code-2.1.260",
+        }]))
+        self.assertEqual(self._detect_windows()["install_path"], str(real))
+
+    def test_platform_suffixed_install_dir_detected(self):
+        """Real dirs carry a platform suffix: anthropic.claude-code-2.1.217-darwin-arm64."""
+        ext_root = self.home / ".vscode" / "extensions"
+        binary = ext_root / "anthropic.claude-code-2.1.260-win32-x64" / "resources" / "native-binary" / "claude.exe"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("")
+        os.chmod(binary, 0o755)
+        ext_root.joinpath("extensions.json").write_text(json.dumps([{
+            "identifier": {"id": "anthropic.claude-code"}, "version": "2.1.260",
+            "relativeLocation": "anthropic.claude-code-2.1.260-win32-x64",
+        }]))
+        self.assertEqual(self._detect_windows()["install_path"], str(binary))
+
+    def test_corrupt_registry_never_raises(self):
+        registry = self.home / ".vscode" / "extensions" / "extensions.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text("{not json")
+        self.assertIsNone(self._detect_windows())
+
+    @unittest.skipIf(os.name == "nt", "POSIX branch: os.access(X_OK) has no Windows semantics")
+    def test_bundled_binary_detected_on_posix(self):
+        """Same surface on macOS/Linux, where the bundled binary has no suffix."""
+        binary = self._plant(".vscode/extensions", "claude")
+        p_exists, p_access = _isolate_abs()
+        p_exists.start()
+        p_access.start()
+        self.addCleanup(p_exists.stop)
+        self.addCleanup(p_access.stop)
+        det = _make_detector()
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+             patch(f"{_MOD}.run_command", return_value=None):
+            result = _detect_claude_code(det, self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+
+    def test_live_version_selected_over_superseded_dirs(self):
+        """Superseded version dirs keep working binaries, so the registry's live
+        version must pick the dir actually in use."""
+        ext_root = self.home / ".vscode" / "extensions"
+        for ver in ("2.1.187", "2.1.217", "2.1.202"):
+            b = ext_root / f"anthropic.claude-code-{ver}-win32-x64" / "resources" / "native-binary" / "claude.exe"
+            b.parent.mkdir(parents=True, exist_ok=True)
+            b.write_text("")
+            os.chmod(b, 0o755)
+        ext_root.joinpath("extensions.json").write_text(json.dumps([{
+            "identifier": {"id": "anthropic.claude-code"}, "version": "2.1.217",
+            "relativeLocation": "anthropic.claude-code-2.1.217-win32-x64",
+        }]))
+        self.assertIn("2.1.217", self._detect_windows()["install_path"])
+
+    def test_glob_metacharacters_in_version_rejected(self):
+        """The registry version reaches a glob pattern and is user-writable."""
+        for bad in ("../../evil", "2.1.*", "2.1.260\n", "*"):
+            with self.subTest(version=bad):
+                self.assertIsNone(_EXTENSION_VERSION.match(bad))
+        for good in ("2.1.260", "2", "2.1.260.1"):
+            with self.subTest(version=good):
+                self.assertIsNotNone(_EXTENSION_VERSION.match(good))
+
+
+class TestClaudeCodeSessionEvidence(unittest.TestCase):
+    """No binary resolves, but Claude Code's own session files prove it ran. Our
+    backfill reads these same files, so a device can have them while discovery
+    reports the tool absent, and absent is prunable."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.claude_dir = self.home / ".claude"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _session(self, age_days=0):
+        project = self.claude_dir / "projects" / "-Users-someone-repo"
+        project.mkdir(parents=True, exist_ok=True)
+        path = project / "1f0681e6-60aa-47e1-b06e-47bd389cf42d.jsonl"
+        path.write_text("{}", encoding="utf-8")
+        if age_days:
+            stale = time.time() - age_days * 86400
+            os.utime(path, (stale, stale))
+        return path
+
+    def _detect(self):
+        det = _make_detector()
+        with patch(f"{_MOD}.find_claude_binary_for_user", return_value=None):
+            return _detect_claude_code(det, self.home)
+
+    def test_recent_session_detected_without_a_binary(self):
+        self._session()
+        result = self._detect()
+        self.assertIsNotNone(result)
+        self.assertEqual("unknown", result["version"])
+        # Stable across scans: install_path is part of the manifest identity, so a
+        # per-project path would churn the row.
+        self.assertEqual(str(self.claude_dir), result["install_path"])
+
+    def test_stale_session_not_detected(self):
+        self._session(age_days=utils_mod.SESSION_EVIDENCE_MAX_AGE_DAYS + 5)
+        self.assertIsNone(self._detect())
+
+    def test_config_dir_alone_is_not_evidence(self):
+        """The residue case the binary gate exists for: settings without sessions."""
+        self.claude_dir.mkdir()
+        (self.claude_dir / "settings.json").write_text("{}", encoding="utf-8")
+        (self.claude_dir / "projects").mkdir()
+        self.assertIsNone(self._detect())
+
+    def test_binary_still_wins_when_present(self):
+        self._session()
+        det = _make_detector()
+        with patch(f"{_MOD}.find_claude_binary_for_user", return_value="/usr/local/bin/claude"):
+            result = _detect_claude_code(det, self.home)
+        self.assertEqual("/usr/local/bin/claude", result["install_path"])

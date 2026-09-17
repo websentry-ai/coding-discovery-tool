@@ -5,7 +5,14 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseCopilotDetector
-from ...vscode_extension_helpers import find_extension_in_editor
+from ...constants import is_symlink_or_junction
+from ...jetbrains_naming_helpers import plugin_entries
+from ...vscode_extension_helpers import (
+    VSCODE_EDITOR_DISPLAY_NAMES,
+    extensions_dir_for_editor,
+    find_extension_in_editor_channels,
+)
+from ...utils import copilot_chat_evidence_row, record_vscode_bundle_probe
 from ...windows_extraction_helpers import is_running_as_admin
 from ..jetbrains.jetbrains import WindowsJetBrainsDetector
 
@@ -58,6 +65,33 @@ _VSCODE_USER_DATA_DIRS = [
 ]
 
 
+def _safe_descendant_directory(path: Path, trusted_root: Path) -> bool:
+    try:
+        relative_parts = path.relative_to(trusted_root).parts
+    except ValueError:
+        return False
+    current = trusted_root
+    for part in relative_parts:
+        current /= part
+        if is_symlink_or_junction(current):
+            return False
+        try:
+            if not current.is_dir():
+                return False
+        except OSError:
+            return False
+    return True
+
+
+# Editors whose Copilot rows the rules/MCP extractors can enrich.
+SUPPORTED_IDES = VSCODE_EDITOR_DISPLAY_NAMES
+
+_MARKETPLACE_EXTENSIONS = (
+    ("github.copilot", "GitHub Copilot"),
+    ("github.copilot-chat", "GitHub Copilot Chat"),
+)
+
+
 class WindowsGitHubCopilotDetector(BaseCopilotDetector):
     """
     Detects GitHub Copilot across VS Code and all JetBrains IDEs on Windows.
@@ -87,8 +121,19 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         """
         Detect VS Code Copilot for all users when running as administrator.
         For regular users, only checks their own directory.
+
+        When ``user_home`` is set the scan is scoped to THAT user, so one user's
+        Copilot is never attributed to every profile on the box.
         """
         results = []
+
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            try:
+                return self._detect_vscode_for_user(Path(scoped_home))
+            except PermissionError as e:
+                logger.debug(f"Skipping VS Code Copilot for {scoped_home}: {e}")
+                return []
 
         if is_running_as_admin():
             users_dir = Path("C:\\Users")
@@ -118,28 +163,30 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         for uninstalled Copilot. This matches the SAFE macOS/Linux path.
         """
         results = []
-        vscode_ext_dir = user_home / ".vscode" / "extensions"
+        code_found = False
 
-        for ext_id, name in (
-            ("github.copilot", "GitHub Copilot (VS Code)"),
-            ("github.copilot-chat", "GitHub Copilot Chat (VS Code)"),
-        ):
-            entry = find_extension_in_editor(user_home, "Code", ext_id)
-            if entry is None:
-                continue
-            _location, version = entry
-            results.append({
-                "name": name,
-                "version": version or "unknown",
-                "publisher": "GitHub",
-                "install_path": str(vscode_ext_dir),
-            })
-            logger.info(f"Detected: {name} v{version or 'unknown'} at {vscode_ext_dir}")
+        for ide_key, ide_name in SUPPORTED_IDES.items():
+            for ext_id, label in _MARKETPLACE_EXTENSIONS:
+                found = find_extension_in_editor_channels(user_home, ide_key, ext_id)
+                if found is None:
+                    continue
+                dir_key, version = found
+                name = f"{label} ({ide_name})"
+                ext_dir = extensions_dir_for_editor(user_home, dir_key)
+                results.append({
+                    "name": name,
+                    "version": version or "unknown",
+                    "publisher": "GitHub",
+                    "install_path": str(ext_dir),
+                })
+                if ide_key == "Code":
+                    code_found = True
+                logger.info(f"Detected: {name} v{version or 'unknown'} at {ext_dir}")
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code install) when no
         # marketplace Copilot extension is present, so built-in users — and their
         # VS Code MCP servers (%APPDATA%\Code\User\mcp.json) — aren't missed.
-        if not results:
+        if not code_found:
             results.extend(self._detect_vscode_builtin_copilot(user_home))
 
         return results
@@ -147,12 +194,50 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
     def _vscode_app_extension_roots(self, user_home: Path) -> List[Path]:
         """VS Code install extension roots to probe for built-in Copilot: the
         per-user user-install location (under the user's LocalAppData) plus the
-        system-wide install locations."""
-        roots = []
+        system-wide install locations. Current Windows installers can add a
+        version/commit directory between the install root and ``resources``;
+        include those one-level-deep roots as well."""
         local_programs = user_home / "AppData" / "Local" / "Programs"
+        roots = list(_VSCODE_SYSTEM_APP_EXTENSION_ROOTS)
+        install_roots = []
         for app in ("Microsoft VS Code", "Microsoft VS Code Insiders"):
-            roots.append(local_programs / app / "resources" / "app" / "extensions")
-        roots.extend(_VSCODE_SYSTEM_APP_EXTENSION_ROOTS)
+            install_root = local_programs / app
+            direct_root = install_root / "resources" / "app" / "extensions"
+            if _safe_descendant_directory(direct_root, user_home):
+                roots.append(direct_root)
+            install_roots.append((install_root, user_home))
+
+        for direct_root in _VSCODE_SYSTEM_APP_EXTENSION_ROOTS:
+            try:
+                install_root = direct_root.parents[2]
+            except IndexError:
+                continue
+            install_roots.append((install_root, install_root))
+
+        for install_root, trusted_root in install_roots:
+            if install_root == trusted_root:
+                if is_symlink_or_junction(install_root):
+                    continue
+            elif not _safe_descendant_directory(install_root, trusted_root):
+                continue
+            try:
+                with os.scandir(install_root) as entries:
+                    version_dirs = sorted(
+                        Path(entry.path)
+                        for entry in entries
+                        if entry.is_dir(follow_symlinks=False)
+                    )
+            except OSError:
+                continue
+            for version_dir in version_dirs:
+                versioned_root = (
+                    version_dir / "resources" / "app" / "extensions"
+                )
+                if (
+                    _safe_descendant_directory(versioned_root, trusted_root)
+                    and versioned_root not in roots
+                ):
+                    roots.append(versioned_root)
         return roots
 
     def _detect_vscode_builtin_copilot(self, user_home: Path) -> List[Dict]:
@@ -177,19 +262,22 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
             return []
 
         for ext_root in self._vscode_app_extension_roots(user_home):
+            record_vscode_bundle_probe(ext_root)
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
                 copilot_dir = ext_root / dir_name
-                try:
-                    if not copilot_dir.is_dir():
-                        continue
-                except OSError:
+                if not _safe_descendant_directory(copilot_dir, ext_root):
                     continue
                 # The consolidated built-in "copilot" folder is actually the
                 # Copilot Chat extension (name="copilot-chat") — the MCP consumer
                 # — so label it accordingly (matches the marketplace
                 # github.copilot-chat mapping); a plain "copilot" stays generic.
                 version, name_label = "unknown", "GitHub Copilot (VS Code)"
-                data = _load_jsonc(copilot_dir / "package.json")
+                package_json = copilot_dir / "package.json"
+                data = (
+                    None
+                    if is_symlink_or_junction(package_json)
+                    else _load_jsonc(package_json)
+                )
                 if isinstance(data, dict):
                     version = data.get("version", "unknown")
                     ext_name = str(data.get("name") or "").lower()
@@ -204,13 +292,24 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                     "install_path": str(copilot_dir),
                 }]
         logger.debug(f"VS Code in use under {user_home} but no built-in Copilot extension found")
-        return []
+        return copilot_chat_evidence_row(user_home)
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """
         Detect JetBrains Copilot for all users when running as administrator.
+
+        When ``user_home`` is set the scan is scoped to THAT user, so one user's
+        Copilot plugin is never attributed to every profile on the box.
         """
         detected_results = []
+
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            try:
+                return self._detect_jetbrains_for_user(Path(scoped_home))
+            except PermissionError as e:
+                logger.debug(f"Skipping JetBrains Copilot for {scoped_home}: {e}")
+                return []
 
         if is_running_as_admin():
             users_dir = Path("C:\\Users")
@@ -245,13 +344,13 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         all_ides = jetbrains_detector.detect() or []
 
         for ide in all_ides:
-            plugins = ide.get("plugins", [])
+            plugins = plugin_entries(ide)
 
-            for plugin_name in plugins:
-                if "copilot" in plugin_name.lower():
+            for plugin in plugins:
+                if "copilot" in plugin["name"].lower():
                     detected_results.append({
                         "name": f"GitHub Copilot ({ide['name']})",
-                        "version": ide.get("version", "unknown"),
+                        "version": plugin.get("version") or ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide['name'],
                         "install_path": ide.get("_config_path") or ide.get("install_path")

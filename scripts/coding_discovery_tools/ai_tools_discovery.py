@@ -28,8 +28,8 @@ from typing import Dict, Iterator, List, Optional, Callable
 # killed — a SIGKILL leaves a fresh-mtime lock that would otherwise block the next
 # run. Kept in sync with the parent timeouts in setup/mdm/onboard.py and
 # unbound-cli's discover.js (which pass --timeout and use a larger kill backstop).
-# 150 minutes. Pass --timeout <=0 to disable.
-DEFAULT_RUN_TIMEOUT_SECONDS = 9000
+# 200 minutes. Pass --timeout <=0 to disable.
+DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 
 SCRIPT_VERSION = "1.1.0"
 
@@ -73,6 +73,7 @@ try:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        GitHubCopilotSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -89,14 +90,16 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
     from . import cache as discovery_cache
+    from . import mcp_tools_cache
     from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
@@ -140,6 +143,7 @@ except ImportError:
         JetBrainsMCPConfigExtractorFactory,
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
+        GitHubCopilotSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -156,14 +160,16 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, get_claude_subscription_type, get_cursor_subscription_type, in_container, _get_queue_file_path
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools import cache as discovery_cache
+    from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
 logger = logging.getLogger(__name__)
@@ -208,6 +214,92 @@ def _normalise_path(p: str) -> str:
         n = n[0].upper() + n[1:]
     n = n.rstrip('/')
     return n
+
+
+def _refresh_mcp_tools_cache(tool_name: str, user_name: str, projects: List[Dict],
+                             sentry_ctx: Optional[Dict] = None) -> None:
+    """Refresh the local MCP tools cache (mcp-tools-cache.json) for one
+    (tool, user) from the report's projects[].mcpServers[].
+
+    Runs on EVERY discovery run — including when the payload-hash dedup skips
+    the upload — because the cache is a hot-path artifact for the PreToolUse
+    hook, independent of upload dedup. Never raises: a cache failure must not
+    break the run (log + Sentry warning, continue).
+    """
+    try:
+        server_entries, errored_cache_keys = mcp_tools_cache.collect_server_entries(projects)
+        provider_server_observations = (
+            mcp_tools_cache.collect_provider_server_observations(projects)
+        )
+        mcp_tools_cache.update_user_entries(
+            tool_name,
+            user_name,
+            server_entries,
+            errored_cache_keys,
+            provider_server_observations or None,
+        )
+    except Exception as e:
+        logger.warning(f"  Could not update MCP tools cache for {tool_name}/{user_name}: {e}")
+        report_to_sentry(
+            e,
+            {**(sentry_ctx or {}), "phase": "mcp_tools_cache", "tool_name": tool_name, "user": user_name},
+            level="warning",
+        )
+
+
+def _install_key(user, tool):
+    """Manifest identity: per-user AND per-install-path. Used at every populate/gate/discard site so the key can't drift."""
+    return (user, tool.get('name', 'Unknown'), tool.get('install_path'))
+
+
+def _home_for_user(user: str):
+    """The home directory the scan should read for ``user`` on this platform."""
+    if platform.system() == "Darwin":
+        return Path(f"/Users/{user}")
+    if platform.system() == "Windows":
+        return windows_home_for_user(user)
+    if platform.system() == "Linux":
+        return linux_home_for_user(user)
+    return Path.home()
+
+
+def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
+    """Whether this install sits inside a DIFFERENT enumerated user's home."""
+    # install_path only: ``tool`` is globally deduped by name+install_path, so its
+    # ``_config_path`` is whichever user was enumerated first and would disown the rest.
+    path = _normalise_path(tool.get("install_path") or "")
+    if not path:
+        return False
+    mine = _normalise_path(str(user_home))
+    if mine and (path == mine or path.startswith(mine + "/")):
+        return False
+    for other in other_homes:
+        theirs = _normalise_path(str(other))
+        if theirs and theirs != mine and (path == theirs or path.startswith(theirs + "/")):
+            return True
+    return False
+
+
+# Mirrors the machine-global candidate lists in user_tool_detector.
+_MACHINE_GLOBAL_BIN_DIRS = frozenset({
+    Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path("/usr/bin"),
+})
+
+
+def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
+    """Whether a machine-global binary belongs to someone other than ``user_home``."""
+    path = tool.get("install_path") or ""
+    if not path:
+        return False
+    try:
+        candidate = Path(path)
+        if candidate.parent not in _MACHINE_GLOBAL_BIN_DIRS:
+            return False
+        return not machine_global_binary_owned_by_user(candidate, Path(user_home))
+    except (OSError, ValueError, RuntimeError) as e:
+        # Fail open, but say so: a failed check must not look like confirmed ownership.
+        logger.debug(f"Ownership check failed for {path} against {user_home}: {e}", exc_info=True)
+        return False
 
 
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
@@ -266,6 +358,49 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
         return True
 
     return owns_install
+
+
+def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool:
+    """Data this user owns. Per-tool: Augment excludes managed-scope permissions, Copilot CLI does not."""
+    if tool_name == "GitHub Copilot CLI":
+        return _copilot_cli_owned_by_user(tool_filtered, user_home)
+    if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
+        return _augment_owned_by_user(tool_filtered, user_home)
+    if tool_filtered.get("projects"):
+        return True
+    perms = tool_filtered.get("permissions")
+    return perms is not None and perms.get("settings_source") != "managed"
+
+
+def _decode_project_path(path):
+    """VS Code / Copilot-family tools store a project folder with spaces as a
+    percent-encoded path (e.g. "FHA%20Asset%20Optimizer"); decode the space escape
+    so analytics shows the real name. Only %20 is touched, so a path that
+    legitimately contains a literal "%" (or an encoded slash) is left intact."""
+    if isinstance(path, str) and "%20" in path:
+        return path.replace("%20", " ")
+    return path
+
+
+_PATH_KEYS = ("path", "project_path")
+
+
+def _normalize_encoded_paths(obj):
+    """Decode the %20 space-escape in every reported path anywhere in a tool's
+    discovery result, in place. Project paths reach analytics from several fields
+    besides the top-level project entry — the per-rule / per-skill / per-MCP
+    ``project_path`` and nested ``path`` keys — so we walk the whole structure and
+    normalise each, ensuring no percent-encoded folder name escapes from any source.
+    Only %20 is touched (see _decode_project_path)."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in _PATH_KEYS and isinstance(value, str):
+                obj[key] = _decode_project_path(value)
+            else:
+                _normalize_encoded_paths(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _normalize_encoded_paths(item)
 
 
 class AIToolsDetector:
@@ -356,6 +491,7 @@ class AIToolsDetector:
 
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
+            self._github_copilot_settings_extractor = GitHubCopilotSettingsExtractorFactory.create(self.system)
 
             # GitHub Copilot CLI MCP + rules + settings + skills extractors (macOS/Windows; None elsewhere)
             self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
@@ -398,6 +534,7 @@ class AIToolsDetector:
             # for EACH user independently (user A's CLI doesn't steal canonical
             # status from user B who only has VS Code).
             self._canonical_augment_surface_by_config: Dict[str, str] = {}
+            self._canonical_junie_surface_by_config: Dict[str, str] = {}
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -448,8 +585,15 @@ class AIToolsDetector:
                     else:
                         tools.append(tool_info)
             except Exception as e:
-                logger.warning(f"Error detecting {detector.tool_name}: {e}")
-                report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
+                # exc_info keeps the traceback on the machine even when no alert is sent.
+                logger.warning(
+                    f"Error detecting {detector.tool_name} for {user_home or 'current user'}: {e}",
+                    exc_info=True,
+                )
+                # A home the scan cannot read is the norm on a multi-user box, not a
+                # defect to triage. Still a failure below, so the tool is never pruned.
+                if not isinstance(e, PermissionError):
+                    report_to_sentry(e, {"phase": "detect", "tool_name": detector.tool_name}, level="warning")
                 # Detection errored: record the tool so the caller can keep it (presence unknown != uninstalled).
                 if failures is not None:
                     failures.add(detector.tool_name)
@@ -1174,23 +1318,39 @@ class AIToolsDetector:
 
     @staticmethod
     def _union_mcp_servers(existing: List[Dict], incoming: List[Dict]) -> List[Dict]:
-        """Combine two MCP-server lists, de-duplicated by server name.
+        def identity(server):
+            if not isinstance(server, dict):
+                return None
+            provider_id = server.get("providerId")
+            provider_server_id = server.get("providerServerId")
+            provider_profile_id = server.get("providerProfileId")
+            if not isinstance(provider_profile_id, str):
+                provider_profile_id = None
+            if (
+                isinstance(provider_id, str)
+                and isinstance(provider_server_id, str)
+            ):
+                return (
+                    "vscode-provider",
+                    provider_id,
+                    provider_server_id,
+                    provider_profile_id,
+                )
+            name = server.get("name")
+            return ("name", name) if name is not None else None
 
-        Multiple config sources can resolve to the same project path — most
-        notably a project whose root is the user's home directory, which yields
-        both a ``~/.claude.json`` ``projects[<home>]`` entry and a home-rooted
-        ``~/.mcp.json`` entry. Unioning (instead of overwriting) keeps both
-        sources' servers; first-seen wins, so the higher-precedence source
-        merged earlier is preserved on a name conflict.
-        """
         merged = list(existing or [])
-        seen = {s.get("name") for s in merged if isinstance(s, dict)}
+        seen = set()
+        for server in merged:
+            server_identity = identity(server)
+            if server_identity is not None:
+                seen.add(server_identity)
         for server in (incoming or []):
-            name = server.get("name") if isinstance(server, dict) else None
-            if name is not None and name in seen:
+            server_identity = identity(server)
+            if server_identity is not None and server_identity in seen:
                 continue
-            if name is not None:
-                seen.add(name)
+            if server_identity is not None:
+                seen.add(server_identity)
             merged.append(server)
         return merged
 
@@ -1460,9 +1620,8 @@ class AIToolsDetector:
                             for username in get_all_users_macos():
                                 user_homes.add(str(Path("/Users") / username))
                         elif self.system == "Windows":
-                            win_users_dir = Path(Path.home().anchor) / "Users"
-                            for username in get_all_users_windows():
-                                user_homes.add(str(win_users_dir / username))
+                            for home in windows_user_homes().values():
+                                user_homes.add(str(home))
                         elif self.system == "Linux":
                             for username in get_all_users_linux():
                                 # `root` user's home is /root, not /home/root.
@@ -1518,8 +1677,8 @@ class AIToolsDetector:
                     pass
             elif self.system == "Windows":
                 try:
-                    for username in get_all_users_windows():
-                        user_plugins = Path(Path.home().anchor) / "Users" / username / ".claude" / "plugins"
+                    for home in windows_user_homes().values():
+                        user_plugins = home / ".claude" / "plugins"
                         if user_plugins.exists() and user_plugins not in plugins_dirs_to_scan:
                             plugins_dirs_to_scan.append(user_plugins)
                 except Exception:
@@ -1763,7 +1922,21 @@ class AIToolsDetector:
 
         filtered_tool = tool.copy()
         filtered_tool['projects'] = filtered_projects
-        
+
+        # A tool carrying one record per user reports THIS user's posture; without
+        # it every other user's report loses its permissions to whoever ranked first.
+        by_user = filtered_tool.pop('_permissions_by_user', None)
+        if by_user:
+            own = []
+            for rec in by_user:
+                rec_path = _normalise_path(rec.get('settings_path', ''))
+                if rec_path == user_home_norm or rec_path.startswith(user_home_norm + '/'):
+                    own.append(rec)
+            if own:
+                filtered_tool['permissions'] = own[0]  # already riskiest-first
+            else:
+                filtered_tool.pop('permissions', None)
+
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
@@ -2039,12 +2212,12 @@ class AIToolsDetector:
         enriched (the IDE branch in process_single_tool reads this). None when
         neither is present."""
         detected_lower = {t.get("name", "").lower() for t in tools}
-        if "github copilot chat (vs code)" in detected_lower:
-            self._canonical_vscode_copilot = "github copilot chat (vs code)"
-        elif "github copilot (vs code)" in detected_lower:
-            self._canonical_vscode_copilot = "github copilot (vs code)"
-        else:
-            self._canonical_vscode_copilot = None
+        for editor in (name.lower() for name in VSCODE_EDITOR_DISPLAY_NAMES.values()):
+            for label in (f"github copilot chat ({editor})", f"github copilot ({editor})"):
+                if label in detected_lower:
+                    self._canonical_vscode_copilot = label
+                    return
+        self._canonical_vscode_copilot = None
 
     # -- Augment Code: memoized shared-config accessors -----------------------
 
@@ -2153,6 +2326,24 @@ class AIToolsDetector:
             cfg: chosen
             for cfg, names_lower in names_by_config.items()
             if (chosen := self._pick_canonical_augment_name(names_lower)) is not None
+        }
+
+    def _set_canonical_junie_surface(self, tools: List[Dict]) -> None:
+        """Pick, per user's ``~/.junie``, the one Junie surface that carries the shared
+        config. The CLI wins, else the first JetBrains surface. Keyed by
+        ``_config_path`` so a root multi-user scan picks a winner for EACH user.
+        """
+        names_by_config: Dict[str, List[str]] = {}
+        for tool in tools:
+            name_lower = tool.get("name", "").lower()
+            if not name_lower.startswith("junie"):
+                continue
+            names_by_config.setdefault(tool.get("_config_path") or "", []).append(name_lower)
+
+        self._canonical_junie_surface_by_config = {
+            cfg: next((n for n in names if n == "junie"), names[0])
+            for cfg, names in names_by_config.items()
+            if names
         }
 
     def _process_augment_tool(self, tool: Dict) -> Dict:
@@ -2284,6 +2475,14 @@ class AIToolsDetector:
         return result
 
     def process_single_tool(self, tool: Dict) -> Dict:
+        """Discover a single tool, then normalise reported project paths at this
+        one chokepoint that every tool routes through."""
+        result = self._process_single_tool_raw(tool)
+        if isinstance(result, dict):
+            _normalize_encoded_paths(result)
+        return result
+
+    def _process_single_tool_raw(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
 
@@ -2395,7 +2594,6 @@ class AIToolsDetector:
             # when a VS Code Copilot surface was ALREADY detected).
             is_canonical_vscode = (
                 "ide" not in tool
-                and tool_name.endswith("(vs code)")
                 and tool_name == self._canonical_vscode_copilot
             )
             if is_canonical_vscode:
@@ -2446,6 +2644,27 @@ class AIToolsDetector:
                 "projects": projects_list,
             }
 
+            # Canonical row only, mirroring the skills attachment above, so a
+            # multi-row install reports one permission record.
+            # Permissions come from the editor's own settings.json, so only a
+            # stock VS Code row may carry them; shared ~/.copilot skills above
+            # are editor-independent and stay on whichever row is canonical.
+            if (is_canonical_vscode and tool_name.endswith("(vs code)")
+                    and self._github_copilot_settings_extractor):
+                logger.info(f"  Extracting {tool_name} permissions...")
+                try:
+                    by_user = self._github_copilot_settings_extractor.extract_settings_by_user()
+                    if by_user:
+                        # Riskiest first. The per-user filter narrows this to each
+                        # user's own record; the head is what an unscoped report shows.
+                        tool_dict["_permissions_by_user"] = by_user
+                        tool_dict["permissions"] = by_user[0]
+                        logger.info(f"  ✓ Added permissions to {tool_name} report")
+                    else:
+                        logger.info("  ℹ No Copilot permissions found")
+                except Exception as e:
+                    logger.error(f"Error extracting {tool_name} permissions: {e}", exc_info=True)
+
             return tool_dict
 
         # Process tools using helper methods to reduce duplication
@@ -2485,8 +2704,8 @@ class AIToolsDetector:
                         pass
                 elif self.system == "Windows":
                     try:
-                        for username in get_all_users_windows():
-                            user_plugins = Path(Path.home().anchor) / "Users" / username / ".cursor" / "plugins"
+                        for home in windows_user_homes().values():
+                            user_plugins = home / ".cursor" / "plugins"
                             if user_plugins.exists() and user_plugins not in cursor_plugins_dirs:
                                 cursor_plugins_dirs.append(user_plugins)
                     except Exception:
@@ -2721,15 +2940,21 @@ class AIToolsDetector:
                 extract_skills_func=self.extract_all_opencode_skills,
             )
 
-        elif tool_name.lower() == "junie":
-            projects_dict = self._process_tool_with_rules_and_mcp(
-                tool,
-                self._junie_rules_extractor,
-                self._junie_mcp_extractor,
-                self.extract_all_junie_rules,
-                skills_extractor=self._junie_skills_extractor,
-                extract_skills_func=self.extract_all_junie_skills,
-            )
+        elif tool_name.lower().startswith("junie"):
+            if tool_name.lower() != self._canonical_junie_surface_by_config.get(
+                tool.get("_config_path") or ""
+            ):
+                logger.info(f"  {tool.get('name')} is a non-canonical Junie surface; emitting bare row")
+                projects_dict = {}
+            else:
+                projects_dict = self._process_tool_with_rules_and_mcp(
+                    tool,
+                    self._junie_rules_extractor,
+                    self._junie_mcp_extractor,
+                    self.extract_all_junie_rules,
+                    skills_extractor=self._junie_skills_extractor,
+                    extract_skills_func=self.extract_all_junie_skills,
+                )
 
         elif tool_name.lower() == "cursor cli":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -2875,6 +3100,7 @@ class AIToolsDetector:
         tools = self.detect_all_tools()
         self._set_canonical_vscode_copilot(tools)
         self._set_canonical_augment_surface(tools)
+        self._set_canonical_junie_surface(tools)
 
         tools_with_projects = []
         for tool in tools:
@@ -2894,6 +3120,9 @@ def main():
     parser.add_argument('--api-key', type=str, help='API key for authentication and report submission (or set UNBOUND_API_KEY env)')
     parser.add_argument('--domain', type=str, help='Domain of the backend to send the report to')
     parser.add_argument('--app_name', type=str, help='Application name (e.g., JumpCloud)')
+    # Deprecated and ignored: the scan authenticates with --api-key. Kept so a
+    # stale MDM policy or cron that still passes it is not rejected outright.
+    parser.add_argument('--discovery-key', type=str, help=argparse.SUPPRESS)
     parser.add_argument(
         '--timeout', type=int, default=DEFAULT_RUN_TIMEOUT_SECONDS,
         help='Self-imposed run timeout in seconds (default: %(default)s). On '
@@ -2961,6 +3190,8 @@ def main():
         "domain": args.domain,
         "app_name": args.app_name or "",
     }
+    # Reaches call sites that can't pass it, e.g. the detect loop inside the detector.
+    set_sentry_run_context(sentry_ctx)
 
     # Initialize variables before try block to avoid NameError in exception handler
     device_id = None
@@ -3193,6 +3424,7 @@ def main():
         scanned_manifest = set()
         # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
         incomplete_reasons = []
+        unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
         # --- Drain pending reports from previous run ---
         with time_step("drain_pending_queue", "queue"):
@@ -3280,17 +3512,22 @@ def main():
         logger.info("Detecting AI tools...")
         all_tools = []  # Store all unique tools across all users
         tools_by_user = {}  # Track which tools belong to which user
+        config_dirs_seen = set()  # no_tools_found discriminator; never a detection gate
+        scanned_homes = []  # same, for the config-dir age discriminator
+        wsl_seen = set()  # same, for the WSL-resident-install discriminator
+        editors_seen = set()  # same, for the editor-present-but-extension-missed discriminator
+        # The report loop disowns an install by testing it against the other homes.
+        all_user_homes = [_home_for_user(u) for u in all_users]
 
         for user in all_users:
-            if platform.system() == "Darwin":
-                user_home = Path(f"/Users/{user}")
-            elif platform.system() == "Windows":
-                user_home = Path(Path.home().anchor) / "Users" / user
-            elif platform.system() == "Linux":
-                user_home = linux_home_for_user(user)
-            else:
-                user_home = Path.home()
+            user_home = _home_for_user(user)
             logger.info(f"  Detecting tools for user: {user} (home: {user_home})")
+            scanned_homes.append(user_home)
+            if not home_is_readable(user_home):
+                unreadable_users.append(user)
+            config_dirs_seen.update(tool_config_dirs_present(user_home))
+            wsl_seen.update(wsl_distros_present(user_home))
+            editors_seen.update(vscode_editors_present(user_home))
             with time_step("detect_tools", "detect"):
                 user_detect_failures = set()
                 user_tools = detector.detect_all_tools(
@@ -3298,7 +3535,7 @@ def main():
                 )
             # Detected tools stay in the manifest even if a later read errors (a read failure isn't an uninstall).
             for detected in user_tools:
-                scanned_manifest.add((user, detected.get('name', 'Unknown')))
+                scanned_manifest.add(_install_key(user, detected))
             # Detector error = presence unknown -> incomplete, no prune (tool_name is an umbrella label, not a row key).
             if user_detect_failures:
                 incomplete_reasons.append(f"detector error for user {user}")
@@ -3328,6 +3565,8 @@ def main():
         detector._set_canonical_vscode_copilot(tools)
         # Pick the single Augment surface that should carry the shared config.
         detector._set_canonical_augment_surface(tools)
+        # Pick the single Junie surface that should carry the shared config.
+        detector._set_canonical_junie_surface(tools)
 
         # Resume observability: how many tools had their processing fully skipped.
         resume_tools_skipped = 0
@@ -3343,6 +3582,11 @@ def main():
             # resumed run — this is where re-processing (filesystem walk + CLI
             # subprocesses) is actually saved.
             if resume_done and all((tool_key, u) in resume_done for u in all_users):
+                # Checkpointed entries still have to pass the path gate: detection
+                # repopulated the manifest, and the manifest drives pruning.
+                for u in all_users:
+                    if _install_in_another_users_home(tool, _home_for_user(u), all_user_homes):
+                        scanned_manifest.discard(_install_key(u, tool))
                 logger.info(f"  · {tool_name} already reported by the resumed run; skipping re-processing")
                 resume_tools_skipped += 1
                 continue
@@ -3367,6 +3611,18 @@ def main():
                 tool_users_summary = []
 
                 for user_name in all_users:
+                    user_home = _home_for_user(user_name)
+
+                    # Before the resume skip: the manifest drives pruning, so a row
+                    # we would not emit must not survive as a resumed entry.
+                    if _install_in_another_users_home(tool, user_home, all_user_homes):
+                        logger.info(
+                            f"  Skipping {tool_name} for {user_name}: "
+                            f"{tool.get('install_path')!r} is in another user's home"
+                        )
+                        scanned_manifest.discard(_install_key(user_name, tool))
+                        continue
+
                     # Already reported by the resumed run -> skip its re-upload.
                     # Log the per-user skip AND record it in the summary so a
                     # partially-resumed tool's summary reflects every user (resumed
@@ -3375,23 +3631,27 @@ def main():
                         logger.info(f"  · {tool_name} for user {user_name} already reported by the resumed run; skipping re-processing")
                         tool_users_summary.append({'user': user_name, 'resumed': True})
                         continue
-                    if platform.system() == "Darwin":
-                        user_home = Path(f"/Users/{user_name}")
-                    elif platform.system() == "Windows":
-                        user_home = Path(Path.home().anchor) / "Users" / user_name
-                    elif platform.system() == "Linux":
-                        user_home = linux_home_for_user(user_name)
-                    else:
-                        user_home = Path.home()
 
                     try:
                         # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
-                        if (user_name, tool_name) not in scanned_manifest:
+                        if _install_key(user_name, tool) not in scanned_manifest:
                             continue
 
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+
+                        # Owned by someone else, unless this user has their own data
+                        # for it: Copilot's install_path is the shared binary.
+                        if _machine_global_install_disowned(tool, user_home) \
+                                and not _has_user_owned_data(tool_name, tool_filtered, user_home):
+                            logger.info(
+                                f"  Skipping {tool_name} for {user_name}: "
+                                f"{tool.get('install_path')!r} is owned by another user "
+                                f"and this user has no data for it"
+                            )
+                            scanned_manifest.discard(_install_key(user_name, tool))
+                            continue
 
                         # Ownership gate (Copilot CLI only): suppress a phantom install
                         # row for a user who neither owns the detected ~/.copilot config
@@ -3405,7 +3665,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard((user_name, tool_name))
+                            scanned_manifest.discard(_install_key(user_name, tool))
                             continue
 
                         # Ownership gate (Augment surfaces): same ~/.augment-keyed
@@ -3419,7 +3679,7 @@ def main():
                                 f"not owned by this user and no per-user data"
                             )
                             # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard((user_name, tool_name))
+                            scanned_manifest.discard(_install_key(user_name, tool))
                             continue
 
                         # Detect subscription plan for Claude Code
@@ -3437,14 +3697,19 @@ def main():
                                     logger.info(f"    Plan: {subscription}")
                                 else:
                                     logger.debug(f"    Could not detect plan for {user_name}")
-                                    # Only alert when the CLI actually succeeded (ok=True) at
-                                    # some stage but returned no plan.  If every stage failed
-                                    # (ok=False), the user never authenticated — not actionable.
+                                    # Alert when the CLI succeeded (ok=True) somewhere but
+                                    # returned no plan, or when the exec gate refused the
+                                    # binary.  Every stage failing on its own means the user
+                                    # never authenticated — not actionable.
                                     cli_succeeded = any(
                                         d.get("data", {}).get("ok") is True
                                         for d in plan_diagnostics
                                     )
-                                    if tool_filtered.get("projects") and cli_succeeded:
+                                    gate_refused = any(
+                                        d.get("data", {}).get("gate_refused")
+                                        for d in plan_diagnostics
+                                    )
+                                    if tool_filtered.get("projects") and (cli_succeeded or gate_refused):
                                         report_to_sentry(
                                             RuntimeError("Claude Code plan detection failed"),
                                             context={
@@ -3471,6 +3736,20 @@ def main():
                                     logger.debug(f"    Could not detect Cursor plan for {user_name}")
                             except Exception as e:
                                 logger.warning(f"    Could not detect Cursor plan for {user_name}: {e}")
+
+                        # Auggie stores no plan on disk; read the session token and
+                        # query Augment's billing API (works for every user, no exec).
+                        if tool_name.lower() == "auggie cli":
+                            try:
+                                with time_step("detect_subscriptions", "process"):
+                                    subscription = get_auggie_subscription_type(user_home)
+                                if subscription:
+                                    tool_filtered["plan"] = subscription
+                                    logger.info(f"    Plan: {subscription}")
+                                else:
+                                    logger.debug(f"    Could not detect Auggie plan for {user_name}")
+                            except Exception as e:
+                                logger.warning(f"    Could not detect Auggie plan for {user_name}: {e}")
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
@@ -3557,6 +3836,12 @@ def main():
                                 payload_logger.info(f"  Report structure: {single_tool_report}")
                             payload_logger.info("  " + "=" * 70)
                             payload_logger.info("")
+
+                        # Refresh ~/.unbound/mcp-tools-cache.json BEFORE the upload-dedup
+                        # branch below: the PreToolUse hook reads it on the hot path, so
+                        # it must be rewritten every run even when the upload is skipped.
+                        with time_step("update_mcp_tools_cache", "process"):
+                            _refresh_mcp_tools_cache(tool_name, user_name, projects, sentry_ctx)
 
                         # Per-(tool, home_user) hash dedup against ~/.unbound/discovery-cache.json.
                         # Backend already dedups on payload_hash; this short-circuits the upload
@@ -3648,6 +3933,9 @@ def main():
                 report_to_sentry(e, {**sentry_ctx, "phase": "process_tool", "tool_name": tool_name}, level="warning")
                 logger.info("")
 
+        # Per-tool key, stale from here on; later events inherit this dict.
+        sentry_ctx.pop("tool_name", None)
+
         # --- Persist any failed reports for the next run ---
         with time_step("persist_failed_reports", "queue"):
             if failed_reports:
@@ -3681,7 +3969,7 @@ def main():
                     "os": platform.system(),
                     "tool_count": len(tools),
                     "user_count": len(all_users),
-                    "manifest_size": len(scanned_manifest),
+                    "manifest_size": len({(hu, tn) for hu, tn, _ in scanned_manifest}),
                     "scan_incomplete": bool(incomplete_reasons),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
@@ -3724,11 +4012,55 @@ def main():
                     "homes_enumerated": homes_enumerated,
                     "users_scanned": len(all_users),
                     "used_fallback_user": homes_enumerated == 0,
+                    # >0 means a tool ran on this box and we missed its binary.
+                    "config_dirs_present": len(config_dirs_seen),
+                    "config_dirs": ",".join(sorted(config_dirs_seen)),
+                    # A tool inside a distro is on a filesystem no detector walks.
+                    "wsl_distros": ",".join(sorted(wsl_seen)),
+                    # Non-empty means an editor is in use and we missed its extension.
+                    "vscode_editors": ",".join(sorted(editors_seen)),
+                    # Empty with an editor in use means the app bundle is somewhere we
+                    # never probe; non-empty means we found it and the Copilot folder
+                    # was not inside.
+                    "vscode_bundles": ",".join(vscode_bundles_probed()),
+                    # missing | unreadable | present | listed, per editor: the three
+                    # ways the marketplace registry lookup returns nothing.
+                    "vscode_registry": ",".join(vscode_registry_state()),
+                    # Which half of the Cowork AND-gate came back empty, and whether it was denied.
+                    "cowork_probe": ",".join(cowork_probes()),
+                    # Same for Xcode, plus the agent subfolders a CodingAssistant tree holds.
+                    "xcode_probe": ",".join(xcode_probes()),
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),
+                    "in_container": in_container(),
+                    # Old = uninstall residue; recent = in use and we missed it.
+                    "config_dirs_age_days": newest_tool_config_dir_age_days(scanned_homes),
+                    # resolved | unresolved (npm not on PATH) | not_probed (root scan)
+                    "npm_prefix": npm_prefix_state(),
                 }
+                # A name visible here that we did not report is a path bug, not an empty box.
+                surfaces, surfaces_total, surfaces_truncated = install_surface_listing(scanned_homes)
+                no_tools_ctx["install_surfaces"] = surfaces
+                no_tools_ctx["install_surfaces_total"] = surfaces_total
+                no_tools_ctx["install_surfaces_truncated"] = surfaces_truncated
+                rejected = rejected_binaries()
+                if rejected:
+                    # Found on disk, then not attributed to the scanned user.
+                    no_tools_ctx["rejected_count"] = len(rejected)
+                    no_tools_ctx["rejected_reasons"] = ",".join(sorted({r for _, r in rejected}))
+                    # Basenames only: a full path can carry a username.
+                    no_tools_ctx["rejected_tools"] = ",".join(
+                        sorted({os.path.basename(p) for p, _ in rejected})
+                    )
                 if hasattr(os, "getuid"):
                     no_tools_ctx["is_root"] = os.getuid() == 0
+                elif platform.system() == "Windows":
+                    # Every Windows detector gates its all-users walk on this same probe.
+                    admin_state = _windows_process_is_elevated()
+                    no_tools_ctx["is_elevated"] = admin_state
+                    no_tools_ctx["detect_scope"] = "all_users" if admin_state else "single_home"
+                    no_tools_ctx["scan_home"] = os.path.basename(os.path.expanduser("~"))
+                    no_tools_ctx["user_path_dirs"] = windows_user_path_dirs()
                 report_to_sentry(
                     RuntimeError("Discovery found no tools"),
                     context=no_tools_ctx,
@@ -3744,8 +4076,9 @@ def main():
         if incomplete_reasons:
             manifest, covered = None, None
         else:
-            manifest = [{"home_user": hu, "tool_name": tn} for hu, tn in sorted(scanned_manifest)]
-            covered = all_users
+            manifest = [{"home_user": hu, "tool_name": tn}
+                        for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
+            covered = [u for u in all_users if u not in unreadable_users]
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
@@ -3802,6 +4135,9 @@ def main():
             pass
         if _have_lock:
             discovery_cache.release_lock()
+        # Scoped to this run: a programmatic caller must not inherit the previous
+        # run's device_id, nor have its events suppressed by a stale loopback domain.
+        set_sentry_run_context({})
 
 
 if __name__ == "__main__":

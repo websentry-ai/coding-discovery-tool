@@ -9,20 +9,38 @@ import json
 import logging
 import os
 import platform
+import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
-from .constants import VERSION_TIMEOUT
+from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
+    _is_scanning_users_own_home,
+    _read_own_regular_file,
+    claude_code_sessions_recent,
+    dir_state,
+    fail_if_anomalous,
+    extract_version_number,
     machine_global_binary_owned_by_user,
+    record_cowork_probe,
     resolve_npm_global_tool_bin,
     run_command,
+    user_login_shell_tool_path,
+    windows_node_manager_shims,
+)
+from .vscode_extension_helpers import (
+    VSCODE_EDITOR_KEYS,
+    extensions_dir_for_editor,
+    find_extension_in_editor,
 )
 
 logger = logging.getLogger(__name__)
+
+# Junie CLI version directories look like "1.4.2" / "v2025.1".
+_JUNIE_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*$")
 
 
 def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
@@ -46,11 +64,7 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     detector.user_home = user_home
 
     tool_name = detector.tool_name.lower()
-    
-    # System-wide tools (same for all users) - detect normally
-    if tool_name in ["cursor", "windsurf", "antigravity", "replit"]:
-        return detector.detect()
-    
+
     # User-specific tools - check user's home directory paths
     # Priority: npm (via nvm) installs, then Bun fallback
     
@@ -82,6 +96,10 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     elif tool_name == "claude cowork":
         return _detect_claude_cowork(detector, user_home)
 
+    # Xcode coding intelligence detection
+    elif tool_name == "xcode coding intelligence":
+        return _detect_xcode(detector, user_home)
+
     # Junie detection
     elif tool_name == "junie":
         return _detect_junie(detector, user_home)
@@ -97,13 +115,28 @@ def _detect_claude_code(detector: BaseToolDetector, user_home: Path) -> Optional
     directory survives uninstall (residue), so detecting on it produces false
     positives. ~/.claude remains available to the rules/MCP extractor, which only
     runs once the tool is detected here.
+
+    When no binary resolves, falls back to the session files under
+    ``~/.claude/projects``. Those are written by Claude Code when it runs, unlike the
+    config dir, so they carry none of the residue problem above.
     """
     claude_bin = find_claude_binary_for_user(user_home)
     if claude_bin:
         return {
             "name": detector.tool_name,
-            "version": detector.get_version(),
+            "version": detector.get_version(claude_bin),
             "install_path": claude_bin
+        }
+
+    # Last resort: the session files Claude Code writes prove it ran under an install
+    # path we do not probe. Reporting nothing marks a live install absent, and absent
+    # is prunable.
+    claude_dir = user_home / ".claude"
+    if claude_code_sessions_recent(claude_dir):
+        return {
+            "name": detector.tool_name,
+            "version": "unknown",
+            "install_path": str(claude_dir),
         }
 
     return None
@@ -123,64 +156,117 @@ def _detect_extension_tool(
     return detector.detect()
 
 
-def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect Codex installation for a user."""
-    # Check user's .nvm versions for codex (npm installs - most common)
-    nvm_versions = user_home / ".nvm" / "versions"
-    if nvm_versions.exists():
+def _npm_cli_version(path: Path, npm_package: str, user_home: Path) -> Optional[str]:
+    """Version of the install at ``path``, read from its npm ``package.json``.
+
+    The binary is never executed: it sits in a user-writable directory and the
+    scan runs as root/SYSTEM. The metadata is read through
+    ``_read_own_regular_file``, which binds its regular-file, redirect and size
+    checks to the opened fd, so the scanned user cannot swap the path underneath.
+    """
+    bin_dir = path.parent
+    candidates = [
+        bin_dir / "node_modules" / npm_package / "package.json",
+        bin_dir.parent / "lib" / "node_modules" / npm_package / "package.json",
+    ]
+    for package_json in candidates:
+        raw = _read_own_regular_file(package_json, user_home, MAX_CONFIG_FILE_SIZE)
+        if not raw:
+            continue
         try:
-            for version_dir in nvm_versions.iterdir():
-                if version_dir.is_dir():
-                    codex_bin = version_dir / "bin" / "codex"
-                    if codex_bin.exists():
-                        return {
-                            "name": detector.tool_name,
-                            "version": detector.get_version(),
-                            "install_path": str(codex_bin)
-                        }
-        except (PermissionError, OSError):
-            pass
-    
-    # Fallback: Check Bun global binaries
-    bun_bin = user_home / ".bun" / "bin" / "codex"
-    if bun_bin.exists():
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        version = data.get("version") if isinstance(data, dict) else None
+        if isinstance(version, str):
+            return version
+    logger.debug(f"No readable {npm_package} package.json beside {path}")
+    return None
+
+
+
+def _detect_npm_global_cli(detector: BaseToolDetector, user_home: Path, tool: str,
+                           npm_package: str) -> Optional[Dict]:
+    """Resolve an npm-distributed CLI under ``user_home``: nvm, the per-OS global
+    locations, then Bun. ``detector.detect()`` resolves the SCANNER's PATH, so it
+    is skipped when root (mirrors ``_detect_gemini_cli``)."""
+    def found(path) -> Dict:
         return {
             "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(bun_bin)
+            "version": _npm_cli_version(Path(path), npm_package, user_home) or "Unknown",
+            "install_path": str(path),
         }
 
+    is_root = is_running_as_root()
+
+    nvm_node = user_home / ".nvm" / "versions" / "node"
+    try:
+        version_dirs = sorted(nvm_node.iterdir()) if nvm_node.exists() else []
+    except (PermissionError, OSError):
+        version_dirs = []
+    for version_dir in version_dirs:
+        candidate = version_dir / "bin" / tool
+        try:
+            if candidate.exists():
+                return found(candidate)
+        except OSError:
+            continue
+
+    if platform.system() == "Windows":
+        npm_dir = user_home / "AppData" / "Roaming" / "npm"
+        candidates = [
+            npm_dir / f"{tool}.cmd",
+            npm_dir / f"{tool}.ps1",
+            npm_dir / tool,
+            user_home / ".bun" / "bin" / f"{tool}.exe",
+            *windows_node_manager_shims(user_home, tool),
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    return found(candidate)
+            except OSError:
+                continue
+    else:
+        machine_global = [Path(f"/opt/homebrew/bin/{tool}"), Path(f"/usr/local/bin/{tool}")]
+        user_relative = [
+            user_home / ".local" / "bin" / tool,
+            user_home / ".npm-global" / "bin" / tool,
+        ]
+        for candidate in machine_global + user_relative:
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    if is_root and candidate in machine_global \
+                            and not machine_global_binary_owned_by_user(candidate, user_home):
+                        continue
+                    return found(candidate)
+            except OSError:
+                continue
+
+        npm_resolved = resolve_npm_global_tool_bin(tool, user_home, is_root)
+        if npm_resolved:
+            return found(npm_resolved)
+
+        bun_bin = user_home / ".bun" / "bin" / tool
+        try:
+            if bun_bin.exists():
+                return found(bun_bin)
+        except OSError:
+            pass
+
+    if is_root:
+        return None
     return detector.detect()
+
+
+def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect Codex installation for a user."""
+    return _detect_npm_global_cli(detector, user_home, "codex", "@openai/codex")
 
 
 def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
     """Detect OpenCode installation for a user."""
-    # Check user's .nvm versions for opencode
-    nvm_versions = user_home / ".nvm" / "versions"
-    if nvm_versions.exists():
-        try:
-            for version_dir in nvm_versions.iterdir():
-                if version_dir.is_dir():
-                    opencode_bin = version_dir / "bin" / "opencode"
-                    if opencode_bin.exists():
-                        return {
-                            "name": detector.tool_name,
-                            "version": detector.get_version(),
-                            "install_path": str(opencode_bin)
-                        }
-        except (PermissionError, OSError):
-            pass
-    
-    # Fallback: Check Bun global binaries
-    bun_bin = user_home / ".bun" / "bin" / "opencode"
-    if bun_bin.exists():
-        return {
-            "name": detector.tool_name,
-            "version": detector.get_version(),
-            "install_path": str(bun_bin)
-        }
-
-    return detector.detect()
+    return _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai")
 
 
 def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
@@ -345,22 +431,15 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
 
     Requires BOTH the on-disk Cowork sessions tree AND a present Claude Desktop
     install. The per-user Claude config tree (which holds the sessions dir)
-    survives uninstall (anthropics/claude-code#25013), so on Linux/Windows
-    gating on the sessions dir alone produced false positives. macOS already
-    AND-requires ``/Applications/Claude.app``; Linux/Windows now AND-require an
-    install dir resolved by the OS detector's ``_find_install_dir`` (keeping the
-    install-dir candidate lists in the OS modules — one source of truth).
+    survives uninstall (anthropics/claude-code#25013), so gating on the sessions
+    dir alone produced false positives. All three OSes AND-require an install dir
+    resolved by the OS detector's ``_find_install_dir`` (keeping the install-dir
+    candidate lists in the OS modules — one source of truth).
     """
     system = platform.system()
     if system == "Darwin":
-        app_path = Path("/Applications/Claude.app")
-        try:
-            if not app_path.exists():
-                return None
-        except OSError:
-            return None
         sessions_dir = user_home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
-        require_install_dir = False
+        require_install_dir = True
     elif system == "Linux":
         sessions_dir = user_home / ".config" / "Claude" / COWORK_SESSIONS_DIR
         require_install_dir = True
@@ -368,29 +447,66 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         sessions_dir = user_home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
         require_install_dir = True
 
-    try:
-        if not (sessions_dir.exists() and sessions_dir.is_dir()):
-            return None
-    except (PermissionError, OSError):
+    sessions_state = dir_state(sessions_dir)
+    record_cowork_probe("sessions", sessions_state)
+    if sessions_state == "unreadable":
+        fail_if_anomalous(user_home, f"Cowork sessions dir unreadable: {sessions_dir}")
+        return None
+    if sessions_state != "present":
         return None
 
+    app_install = None
     if require_install_dir:
         find_install_dir = getattr(detector, "_find_install_dir", None)
         if not callable(find_install_dir):
+            record_cowork_probe("bundle", "no_probe")
             return None
         try:
             # Pass the scanned user's home so an admin/MDM multi-user scan probes
             # THIS user's per-user install dir, not the scanner's (Windows).
-            if find_install_dir(user_home) is None:
-                return None
-        except (PermissionError, OSError):
+            app_install = find_install_dir(user_home)
+        except OSError as e:
+            record_cowork_probe("bundle", "unreadable")
+            fail_if_anomalous(user_home, str(e))
+            return None
+        if app_install is None:
             return None
 
     return {
         "name": detector.tool_name,
-        "version": detector.get_version(),
+        # Probe the resolved bundle: get_version() with no arg uses the scanner's home.
+        "version": detector.get_version(app_install),
         "install_path": str(sessions_dir)
     }
+
+
+def _detect_xcode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect Xcode coding intelligence for a user.
+
+    The detector already scopes every probe to ``detector.user_home``, which the
+    caller has set, so this only has to turn a denied read into the anomaly path
+    instead of the clean absence that would permit a prune.
+    """
+    try:
+        return detector.detect()
+    except OSError as e:
+        fail_if_anomalous(user_home, str(e))
+        return None
+
+
+def junie_version_from_binary(binary_path: str) -> Optional[str]:
+    """Read the Junie CLI version from its versioned install path.
+
+    The CLI installs to ``~/.local/share/junie/versions/<version>/junie``; the
+    ``~/.local/bin/junie`` shim is resolved first so a symlinked install also
+    yields its version. None when the path carries no version-shaped component.
+    """
+    try:
+        parts = Path(binary_path).resolve().parts
+        version = parts[parts.index("versions") + 1]
+    except (OSError, ValueError, IndexError):
+        return None
+    return version if _JUNIE_VERSION_DIR.match(version) else None
 
 
 def _junie_version_from_config(user_home: Path) -> Optional[str]:
@@ -426,32 +542,30 @@ def _detect_junie(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
     gating on it produced false positives. ``~/.junie`` remains the version
     source and the rules/MCP extraction source.
 
-    The JetBrains plugin check is delegated to the OS detector's
-    ``_has_junie_jetbrains_plugin`` (keeps the OS-specific JetBrains detector
-    choice in the OS module, mirroring the ``_find_install_dir`` delegation used
-    for Claude Cowork).
+    Every surface is emitted as its own row (mirroring Augment / GitHub Copilot),
+    so a machine with both the CLI and the plugin reports both rather than hiding
+    one. Surface enumeration is delegated to the OS detector's
+    ``_detect_junie_for_user`` (keeps the OS-specific JetBrains detector choice in
+    the OS module, mirroring the ``_find_install_dir`` delegation used for Claude
+    Cowork).
     """
+    per_user_detect = getattr(detector, "_detect_junie_for_user", None)
+    if callable(per_user_detect):
+        try:
+            return per_user_detect(user_home) or None
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Junie detection failed for {user_home}: {e}")
+            return None
+
     junie_bin = find_junie_binary_for_user(user_home)
     if junie_bin:
         return {
             "name": detector.tool_name,
-            "version": _junie_version_from_config(user_home) or "Unknown",
+            "version": junie_version_from_binary(junie_bin)
+            or _junie_version_from_config(user_home)
+            or "Unknown",
             "install_path": junie_bin,
         }
-
-    plugin_check = getattr(detector, "_has_junie_jetbrains_plugin", None)
-    if callable(plugin_check):
-        try:
-            plugin_path = plugin_check(user_home)
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Junie JetBrains plugin check failed for {user_home}: {e}")
-            plugin_path = None
-        if plugin_path:
-            return {
-                "name": detector.tool_name,
-                "version": _junie_version_from_config(user_home) or "Unknown",
-                "install_path": plugin_path,
-            }
 
     return None
 
@@ -498,7 +612,7 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
             if versions_dir.exists():
                 version_dirs = sorted(
                     (d for d in versions_dir.iterdir() if d.is_dir()),
-                    key=_cursor_agent_version_key,
+                    key=_version_sort_key,
                     reverse=True,
                 )
                 for version_dir in version_dirs:
@@ -543,7 +657,7 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
         if versions_dir.exists():
             version_dirs = sorted(
                 (d for d in versions_dir.iterdir() if d.is_dir()),
-                key=_cursor_agent_version_key,
+                key=_version_sort_key,
                 reverse=True,
             )
             for version_dir in version_dirs:
@@ -574,7 +688,64 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
             except (PermissionError, OSError):
                 pass
 
+    login_shell_path = user_login_shell_tool_path("junie", user_home)
+    if login_shell_path:
+        return login_shell_path
+
     return None
+
+
+CLAUDE_CODE_EXTENSION_ID = "anthropic.claude-code"
+# Registry versions reach a glob pattern, so anchor as strictly as the nvm dir allowlist.
+_EXTENSION_VERSION = re.compile(r"^\d+(?:\.\d+)*\Z")
+
+
+def claude_vscode_extension_binaries(user_home: Path) -> List[Path]:
+    """``claude`` binaries bundled inside the Claude Code VS Code extension.
+
+    Gated on a live ``extensions.json`` entry so uninstalled residue cannot match.
+    The install dir is globbed rather than taken from the registry entry, whose
+    recorded location is a VS Code URI (``/c:/Users/...`` on Windows) and is
+    user-writable while the binary it names gets executed.
+    """
+    exe = "claude.exe" if platform.system() == "Windows" else "claude"
+    binaries: List[Path] = []
+    for editor in VSCODE_EDITOR_KEYS:
+        extensions_dir = extensions_dir_for_editor(user_home, editor)
+        if extensions_dir is None:
+            continue
+        found = find_extension_in_editor(user_home, editor, CLAUDE_CODE_EXTENSION_ID)
+        if not found:
+            continue
+        # Dir is <id>-<version>[-<platform>]; superseded version dirs linger, so the
+        # live version from the registry picks the one actually in use.
+        version = found[1] if found[1] and _EXTENSION_VERSION.match(found[1]) else None
+        pattern = f"{CLAUDE_CODE_EXTENSION_ID}-{version}*" if version else f"{CLAUDE_CODE_EXTENSION_ID}-*"
+        try:
+            install_dirs = sorted(extensions_dir.glob(pattern), reverse=True)
+        except (PermissionError, OSError, ValueError) as exc:
+            logger.debug(f"Could not list {extensions_dir}: {exc}")
+            continue
+        binaries.extend(d / "resources" / "native-binary" / exe for d in install_dirs)
+    return binaries
+
+
+def claude_native_version_binaries(user_home: Path) -> List[Path]:
+    """Native-install binaries under ``~/.local/share/claude/versions``, newest first.
+
+    ``~/.local/bin/claude`` is a symlink into this directory, so a custom or
+    broken launcher leaves the installed versions as the only way to find it.
+    """
+    versions = user_home / ".local" / "share" / "claude" / "versions"
+    try:
+        return sorted(
+            (p for p in versions.iterdir() if p.is_file()),
+            key=_version_sort_key,
+            reverse=True,
+        )
+    except (PermissionError, OSError) as exc:
+        logger.debug(f"Could not list {versions}: {exc}")
+        return []
 
 
 def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
@@ -584,7 +755,9 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     On macOS/Linux: Homebrew (Apple Silicon and Intel), .local/bin, Bun,
     npm-global, yarn-global, nvm, and a ``which claude`` PATH backstop.
     On Windows: .local/bin, AppData npm (.cmd and bare), AppData Local Programs,
-    and Bun.
+    Bun, and the Node managers (nvm-windows, Volta, pnpm).
+    On both: the legacy ``migrate-installer`` target, the native versions dir,
+    the VS Code extension's bundled CLI, and the npm global prefix.
 
     Args:
         user_home: Path to the user's home directory
@@ -603,6 +776,9 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             # per-user Links dir (NOT under AppData\Local\Programs\claude).
             user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "claude.exe",
             user_home / ".bun" / "bin" / "claude.exe",
+            *windows_node_manager_shims(user_home, "claude"),
+            user_home / ".claude" / "local" / "claude.exe",
+            user_home / ".claude" / "local" / "node_modules" / ".bin" / "claude.cmd",
         ]
     else:
         user_relative = [
@@ -611,6 +787,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             user_home / ".npm-global" / "bin" / "claude",  # npm global prefix
             user_home / ".config" / "yarn" / "global"  # yarn global install
             / "node_modules" / ".bin" / "claude",
+            user_home / ".claude" / "local" / "claude",  # legacy migrate-installer
+            user_home / ".claude" / "local" / "node_modules" / ".bin" / "claude",
         ]
         # Homebrew, /usr/local and /usr/bin are MACHINE-GLOBAL — they are
         # ALWAYS probed, but under a root/MDM multi-user scan each is
@@ -623,6 +801,9 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             Path("/usr/bin/claude"),               # apt/dnf system package
         ]
         candidates = machine_global + user_relative
+
+    candidates += claude_native_version_binaries(user_home)
+    candidates += claude_vscode_extension_binaries(user_home)
 
     is_root = is_running_as_root()
     for candidate in candidates:
@@ -662,15 +843,24 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     except (PermissionError, OSError):
         pass
 
+    # POSIX-shaped (``<prefix>/bin/<tool>``); the Windows candidates cover it above.
+    if platform.system() != "Windows":
+        # Only the scanner's own home can trust scanner-derived lookups; the
+        # helper already refuses root, so it subsumes the previous is_root gate.
+        npm_resolved = resolve_npm_global_tool_bin(
+            "claude", user_home, not _is_scanning_users_own_home(user_home)
+        )
+        if npm_resolved:
+            return npm_resolved
+
     # PATH backstop: catch custom install prefixes the explicit list misses.
-    # Only meaningful in the single-user / non-root case — the resolved PATH
-    # is the SCANNER's, not ``user_home``'s. Under a root/MDM multi-user scan
-    # it would resolve root's claude for a user who has none, mis-attributing
-    # the install. The explicit candidate list above is comprehensive and
-    # already user_home-relative, so we skip ``which`` when root, and on
-    # Windows (where ``which`` is not a command — the .exe/.cmd candidates
-    # above already cover it).
-    if not is_running_as_root() and platform.system() != "Windows":
+    # Gated on scanning the scanner's OWN home, not on being non-root: a
+    # non-root scan still walks every home in /Users, and ``which`` resolves the
+    # SCANNER's PATH, so for any other user it reports that user as owning the
+    # scanner's install. The explicit candidate list above is comprehensive and
+    # already user_home-relative. Skipped on Windows, where ``which`` is not a
+    # command and the .exe/.cmd candidates already cover it.
+    if _is_scanning_users_own_home(user_home) and platform.system() != "Windows":
         which_path = run_command(["which", "claude"], VERSION_TIMEOUT)
         if which_path:
             try:
@@ -680,11 +870,15 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             except (PermissionError, OSError):
                 pass
 
+    login_shell_path = user_login_shell_tool_path("claude", user_home)
+    if login_shell_path:
+        return login_shell_path
+
     return None
 
 
-def _cursor_agent_version_key(version_dir: Path):
-    """Numeric (major, minor, patch) key for a "X.Y.Z" version-dir name.
+def _version_sort_key(version_dir: Path):
+    """Numeric (major, minor, patch) key for a "X.Y.Z" version name.
 
     A string sort would order "1.10.0" before "1.9.0" and report a stale version;
     malformed names yield () and sort earliest.
@@ -720,6 +914,11 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
             # extensionless symlink into ~/.local/bin.
             user_home / ".local" / "bin" / "cursor-agent",
             user_home / ".local" / "bin" / "cursor-agent.exe",
+            user_home / "AppData" / "Roaming" / "npm" / "cursor-agent.cmd",
+            user_home / "AppData" / "Roaming" / "npm" / "cursor-agent.exe",
+            user_home / "AppData" / "Local" / "Microsoft" / "WinGet" / "Links" / "cursor-agent.exe",
+            user_home / ".bun" / "bin" / "cursor-agent.exe",
+            *windows_node_manager_shims(user_home, "cursor-agent"),
         ]
         for candidate in candidates:
             try:
@@ -735,7 +934,7 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
             if versions_dir.exists():
                 version_dirs = sorted(
                     (d for d in versions_dir.iterdir() if d.is_dir()),
-                    key=_cursor_agent_version_key,
+                    key=_version_sort_key,
                     reverse=True,
                 )
                 for version_dir in version_dirs:
@@ -768,7 +967,7 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
         if versions_dir.exists():
             version_dirs = sorted(
                 (d for d in versions_dir.iterdir() if d.is_dir()),
-                key=_cursor_agent_version_key,
+                key=_version_sort_key,
                 reverse=True,
             )
             for version_dir in version_dirs:
@@ -800,5 +999,9 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
                     return str(resolved)
             except (PermissionError, OSError):
                 pass
+
+    login_shell_path = user_login_shell_tool_path("cursor-agent", user_home)
+    if login_shell_path:
+        return login_shell_path
 
     return None

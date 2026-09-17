@@ -2,6 +2,7 @@
 Claude Code detection for Windows
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -46,8 +47,23 @@ class WindowsClaudeDetector(BaseToolDetector):
 
         return None
 
-    def get_version(self) -> Optional[str]:
-        """Extract Claude Code version."""
+    def get_version(self, binary: Optional[str] = None) -> Optional[str]:
+        """Extract Claude Code version.
+
+        Probes ``binary`` when detection already resolved one, so the reported
+        version belongs to the install being reported.
+
+        A ``.cmd``/``.bat`` shim is read, never run: CreateProcess cannot execute
+        one, and routing it through ``cmd`` would let a profile directory holding
+        a metacharacter (``C:\\Users\\a&b\\...``) execute part of its own path.
+        """
+        if binary is not None:
+            path = Path(binary)
+            if path.suffix.lower() in (".cmd", ".bat"):
+                return self._version_from_npm_metadata(path)
+            output = run_command([str(path), "--version"], VERSION_TIMEOUT)
+            return extract_version_number(output) if output else None
+
         # Try cmd.exe
         output = run_command(["cmd", "/c", "claude", "--version"], VERSION_TIMEOUT)
         if output:
@@ -59,6 +75,18 @@ class WindowsClaudeDetector(BaseToolDetector):
             return extract_version_number(output)
 
         return None
+
+    def _version_from_npm_metadata(self, shim: Path) -> Optional[str]:
+        """Version of the npm package an npm shim belongs to, read from its
+        ``package.json`` — the same layout ``_looks_like_install`` gates on."""
+        package_json = shim.parent / "node_modules" / "@anthropic-ai" / "claude-code" / "package.json"
+        try:
+            data = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            logger.debug(f"Could not read Claude Code version from {package_json}: {e}")
+            return None
+        version = data.get("version") if isinstance(data, dict) else None
+        return version if isinstance(version, str) else None
 
     def _check_in_path(self) -> Optional[Dict]:
         """Check if claude is in PATH."""

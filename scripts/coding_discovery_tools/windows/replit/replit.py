@@ -207,17 +207,21 @@ class WindowsReplitDetector(BaseToolDetector):
         dirs. The real-artifact gate in ``_find_install_dir`` (``Update.exe`` /
         ``app-*\\Replit.exe`` / ``resources\\app.asar`` / legacy
         ``resources\\app\\package.json``) still applies, so this restores
-        multi-user coverage WITHOUT a residue gate.
+        multi-user coverage WITHOUT a residue gate. When ``user_home`` is set the
+        scan is scoped to THAT user (plus machine-wide dirs), so another user's
+        per-user install is never attributed to them; the ``%LOCALAPPDATA%`` env
+        var is ignored there because it resolves the SCANNER's profile.
         """
+        scoped_home = getattr(self, 'user_home', None)
         roots = []
-        local_app = os.environ.get("LOCALAPPDATA")
+        local_app = None if scoped_home else os.environ.get("LOCALAPPDATA")
         if local_app:
             # Squirrel direct install (primary) + Programs fallback.
             roots.append(Path(local_app))
             roots.append(Path(local_app) / "Programs")
         else:
             try:
-                local_default = Path.home() / "AppData" / "Local"
+                local_default = (scoped_home or Path.home()) / "AppData" / "Local"
                 roots.append(local_default)
                 roots.append(local_default / "Programs")
             except (RuntimeError, OSError):
@@ -229,7 +233,7 @@ class WindowsReplitDetector(BaseToolDetector):
             base = os.environ.get(env)
             roots.append(Path(base) if base else default)
 
-        if is_running_as_admin():
+        if scoped_home is None and is_running_as_admin():
             # Other users' Squirrel direct installs (AppData\Local\<name>) AND
             # their Programs\<name> fallbacks.
             roots.extend(self._other_user_local_appdata_dirs())

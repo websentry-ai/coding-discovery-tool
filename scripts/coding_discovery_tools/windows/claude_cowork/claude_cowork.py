@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
+from ...utils import dir_state, record_cowork_probe
 
 logger = logging.getLogger(__name__)
 
@@ -93,22 +94,29 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
             "install_path": str(sessions_dir),
         }
 
-    def get_version(self) -> Optional[str]:
+    def get_version(self, app_install: Optional[Path] = None) -> Optional[str]:
         """Best-effort version detection.
 
         Claude Desktop on Windows ships installer metadata in several
         possible locations; rather than guessing wrong we return None and
         let the backend treat the version as unknown. This matches the
         behavior we use when version detection fails for other tools.
+        ``app_install`` is accepted for a uniform call signature with the
+        central path; it is unused here.
         """
         return None
 
     def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
         home = user_home or getattr(self, "user_home", None) or Path.home()
+        outcome = "absent"
         for candidate in _candidate_install_dirs(Path(home)):
-            try:
-                if candidate.exists() and candidate.is_dir():
-                    return candidate
-            except OSError:
-                continue
+            state = dir_state(candidate)
+            if state == "present":
+                record_cowork_probe("bundle", "present")
+                return candidate
+            if state == "unreadable":
+                outcome = "unreadable"
+        record_cowork_probe("bundle", outcome)
+        if outcome == "unreadable":
+            raise PermissionError("Claude Desktop install dir unreadable")
         return None

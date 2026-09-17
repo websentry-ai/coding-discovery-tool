@@ -5,21 +5,19 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseCopilotDetector as BaseCopilotDetectorBase
+from ...jetbrains_naming_helpers import plugin_entries
 from ...macos.jetbrains.jetbrains import MacOSJetBrainsDetector
-from ...macos_extraction_helpers import is_running_as_root
+from ...macos_extraction_helpers import MACHINE_APPS_DIR, is_running_as_root
+from ...utils import copilot_chat_evidence_row, record_vscode_bundle_probe
+from ...vscode_extension_helpers import (
+    VSCODE_EDITOR_DISPLAY_NAMES,
+    extensions_dir_for_editor,
+    find_extension_in_editor_channels,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _load_extension_json(path: Path) -> List[Dict]:
-    """Helper function to parse the VS Code extensions file."""
-    if not path.exists():
-        return []
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
 
 
 # Recent VS Code ships GitHub Copilot / Copilot Chat as BUILT-IN extensions
@@ -29,9 +27,22 @@ def _load_extension_json(path: Path) -> List[Dict]:
 # Copilot folder name.
 _VSCODE_APP_EXTENSION_ROOTS = [
     Path("/Applications/Visual Studio Code.app/Contents/Resources/app/extensions"),
+    Path("/Applications/Code.app/Contents/Resources/app/extensions"),
     Path("/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/extensions"),
 ]
 _VSCODE_BUILTIN_COPILOT_DIRS = ("copilot", "copilot-chat")
+
+
+def _app_extension_roots(user_home: Path) -> List[Path]:
+    """Bundle extension roots, machine-wide then under the user's ~/Applications."""
+    roots = list(_VSCODE_APP_EXTENSION_ROOTS)
+    for root in _VSCODE_APP_EXTENSION_ROOTS:
+        try:
+            roots.append(user_home / "Applications" / root.relative_to(MACHINE_APPS_DIR))
+        except ValueError:
+            continue
+    return roots
+
 
 # Per-user VS Code data dirs. Their presence means the user actually uses VS Code,
 # so a machine-wide built-in Copilot can be attributed to them (and not to every
@@ -67,6 +78,15 @@ def _read_builtin_copilot_identity(ext_dir: Path):
     return name_label, version
 
 
+# Editors whose Copilot rows the rules/MCP extractors can enrich.
+SUPPORTED_IDES = VSCODE_EDITOR_DISPLAY_NAMES
+
+_MARKETPLACE_EXTENSIONS = (
+    ("github.copilot", "GitHub Copilot"),
+    ("github.copilot-chat", "GitHub Copilot Chat"),
+)
+
+
 class MacOSCopilotDetector(BaseCopilotDetectorBase):
     """
     Detects GitHub Copilot across VS Code and all JetBrains IDEs on macOS.
@@ -96,8 +116,16 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         """
         Detect VS Code Copilot for all users when running as root.
         For regular users, only checks their own directory.
+
+        When ``user_home`` is set the scan is scoped to THAT user, so one user's
+        Copilot is never attributed to every profile on the machine.
         """
         results = []
+
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            # Errors propagate: a read failure must not look like an absent tool.
+            return self._detect_vscode_for_user(Path(scoped_home))
 
         if is_running_as_root():
             users_dir = Path("/Users")
@@ -121,33 +149,28 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         Detect VS Code Copilot for a specific user.
         """
         results = []
-        vscode_ext_path = user_home / '.vscode' / 'extensions' / 'extensions.json'
+        code_found = False
 
-        extensions_data = _load_extension_json(vscode_ext_path)
-
-        for ext in extensions_data:
-            ext_id = ext.get('identifier', {}).get('id', '').lower()
-
-            if ext_id == "github.copilot":
+        for ide_key, ide_name in SUPPORTED_IDES.items():
+            for ext_id, label in _MARKETPLACE_EXTENSIONS:
+                found = find_extension_in_editor_channels(user_home, ide_key, ext_id)
+                if found is None:
+                    continue
+                dir_key, version = found
                 results.append({
-                    "name": "GitHub Copilot (VS Code)",
-                    "version": ext.get('version', 'unknown'),
+                    "name": f"{label} ({ide_name})",
+                    "version": version or "unknown",
                     "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent)
+                    "install_path": str(extensions_dir_for_editor(user_home, dir_key))
                 })
-            elif ext_id == "github.copilot-chat":
-                results.append({
-                    "name": "GitHub Copilot Chat (VS Code)",
-                    "version": ext.get('version', 'unknown'),
-                    "publisher": "GitHub",
-                    "install_path": str(vscode_ext_path.parent)
-                })
+                if ide_key == "Code":
+                    code_found = True
 
         # Fall back to BUILT-IN Copilot (bundled in the VS Code app) when no
         # marketplace Copilot extension is installed. Without this, users on the
         # built-in Copilot are never detected and their VS Code MCP servers
         # (``Code/User/mcp.json``) are silently skipped.
-        if not results:
+        if not code_found:
             results.extend(self._detect_vscode_builtin_copilot(user_home))
 
         return results
@@ -167,19 +190,22 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         servers — unlike the marketplace path, where ``github.copilot`` and
         ``github.copilot-chat`` are genuinely separate installs.
         """
+        # os.stat, not Path.exists: 3.14 returns False there for an unreadable path,
+        # and an unreadable home must not look like an absent tool.
         uses_vscode = False
         for rel in _VSCODE_USER_DATA_DIRS:
             try:
-                if (user_home / rel).exists():
-                    uses_vscode = True
-                    break
-            except OSError:
+                os.stat(user_home / rel)
+            except (FileNotFoundError, NotADirectoryError):
                 continue
+            uses_vscode = True
+            break
         if not uses_vscode:
             logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
             return []
 
-        for ext_root in _VSCODE_APP_EXTENSION_ROOTS:
+        for ext_root in _app_extension_roots(user_home):
+            record_vscode_bundle_probe(ext_root)
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
                 copilot_dir = ext_root / dir_name
                 try:
@@ -196,13 +222,20 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
                     "install_path": str(copilot_dir),
                 }]
         logger.debug("VS Code in use under %s but no built-in Copilot extension found", user_home)
-        return []
+        return copilot_chat_evidence_row(user_home)
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """
         Detect JetBrains Copilot for all users when running as root.
+
+        Scoped to ``user_home`` when set, for the same reason as the VS Code scan.
         """
         detected_results = []
+
+        scoped_home = getattr(self, 'user_home', None)
+        if scoped_home is not None:
+            # Errors propagate: a read failure must not look like an absent tool.
+            return self._detect_jetbrains_for_user(Path(scoped_home))
 
         if is_running_as_root():
             users_dir = Path("/Users")
@@ -233,13 +266,13 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         all_ides = jetbrains_detector.detect() or []
 
         for ide in all_ides:
-            plugins = ide.get("plugins", [])
+            plugins = plugin_entries(ide)
 
-            for plugin_name in plugins:
-                if "copilot" in plugin_name.lower():
+            for plugin in plugins:
+                if "copilot" in plugin["name"].lower():
                     detected_results.append({
                         "name": f"GitHub Copilot ({ide['name']})",
-                        "version": ide.get("version", "unknown"),
+                        "version": plugin.get("version") or ide.get("version", "unknown"),
                         "publisher": "GitHub",
                         "ide": ide['name'],
                         "install_path": ide.get("config_path") or ide.get("install_path")

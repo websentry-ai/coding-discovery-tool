@@ -5,6 +5,7 @@ per-user ``~/.vscode/extensions/extensions.json``) was never detected, so the
 user's VS Code MCP servers (``Code/User/mcp.json``) were silently skipped.
 """
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -14,6 +15,9 @@ from unittest.mock import patch
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.macos.github_copilot.detect_copilot import (
     MacOSCopilotDetector,
+)
+from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import (
+    MacOSJetBrainsDetector,
 )
 
 _MOD = "scripts.coding_discovery_tools.macos.github_copilot.detect_copilot"
@@ -259,6 +263,201 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
         res = self._detect()
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["name"], "GitHub Copilot (VS Code)")
+
+    def test_builtin_detected_in_versioned_user_install(self):
+        self._make_code_user_dir()
+        copilot = (
+            self.user_home
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "Microsoft VS Code"
+            / "520fb30b2d"
+            / "resources"
+            / "app"
+            / "extensions"
+            / "copilot"
+        )
+        copilot.mkdir(parents=True)
+        (copilot / "package.json").write_text(
+            json.dumps({"name": "copilot-chat", "version": "0.64.0"}),
+            encoding="utf-8",
+        )
+
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", []):
+            res = self.Detector()._detect_vscode_for_user(self.user_home)
+
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["name"], "GitHub Copilot Chat (VS Code)")
+        self.assertEqual(res[0]["version"], "0.64.0")
+        self.assertEqual(res[0]["install_path"], str(copilot))
+
+    def test_versioned_user_install_symlink_is_ignored(self):
+        if os.name == "nt":
+            self.skipTest("Windows test runners may not permit symlink creation")
+        self._make_code_user_dir()
+        external = Path(self.tmp) / "external-install"
+        copilot = external / "resources" / "app" / "extensions" / "copilot"
+        copilot.mkdir(parents=True)
+        (copilot / "package.json").write_text(
+            json.dumps({"name": "copilot-chat", "version": "0.64.0"}),
+            encoding="utf-8",
+        )
+        install_root = (
+            self.user_home
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "Microsoft VS Code"
+        )
+        install_root.mkdir(parents=True)
+        (install_root / "redirect").symlink_to(external, target_is_directory=True)
+
+        with patch(f"{_WIN_MOD}._VSCODE_SYSTEM_APP_EXTENSION_ROOTS", []):
+            result = self.Detector()._detect_vscode_for_user(self.user_home)
+
+        self.assertEqual(result, [])
+
+    def test_builtin_copilot_reparse_point_is_ignored(self):
+        self._make_code_user_dir()
+
+        with patch(
+            f"{_WIN_MOD}.is_symlink_or_junction",
+            side_effect=lambda path: path == self.copilot,
+        ):
+            result = self._detect()
+
+        self.assertEqual(result, [])
+
+    def test_builtin_package_reparse_point_is_not_read(self):
+        self._make_code_user_dir()
+        package_json = self.copilot / "package.json"
+
+        with patch(
+            f"{_WIN_MOD}.is_symlink_or_junction",
+            side_effect=lambda path: path == package_json,
+        ):
+            result = self._detect()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["version"], "unknown")
+
+
+class TestMacOSScopedToUserHome(unittest.TestCase):
+    """A scoped scan must read only ``user_home``, and must not turn a read
+    failure into an absent tool (which would make the install prunable)."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.mkdtemp()
+        self.alice = self._make_home("alice")
+        self.bob = self._make_home("bob")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_home(self, name):
+        return Path(self.tmp) / name
+
+    def _give_vscode_copilot(self, home):
+        p = home / ".vscode" / "extensions" / "extensions.json"
+        p.parent.mkdir(parents=True)
+        p.write_text(
+            json.dumps([{"identifier": {"id": "github.copilot-chat"}, "version": "0.40.1"}]),
+            encoding="utf-8",
+        )
+
+    def _give_jetbrains_ide(self, home, folder):
+        (home / "Library" / "Application Support" / "JetBrains" / folder / "plugins").mkdir(parents=True)
+
+    def _vscode_scan(self, home):
+        det = MacOSCopilotDetector()
+        det.user_home = home
+        return det._detect_vscode_all_users()
+
+    def test_vscode_copilot_only_reported_for_its_owner(self):
+        self._give_vscode_copilot(self.alice)
+        self.bob.mkdir(parents=True)
+
+        self.assertEqual(len(self._vscode_scan(self.alice)), 1)
+        self.assertEqual(self._vscode_scan(self.bob), [])
+
+    def test_jetbrains_scan_reads_only_the_scoped_home(self):
+        self._give_jetbrains_ide(self.alice, "IntelliJIdea2025.2")
+        self._give_jetbrains_ide(self.bob, "PyCharm2024.1")
+
+        det = MacOSJetBrainsDetector()
+        det.user_home = self.alice
+
+        self.assertEqual(
+            [ide["folder_name"] for ide in det._scan_for_ides()], ["IntelliJIdea2025.2"]
+        )
+
+    def test_unreadable_scoped_home_raises_instead_of_reporting_absent(self):
+        det = MacOSJetBrainsDetector()
+        det.user_home = self.alice
+
+        with patch.object(
+            MacOSJetBrainsDetector,
+            "_scan_jetbrains_config_dir",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            with self.assertRaises(PermissionError):
+                det._scan_for_ides()
+
+    def test_unreadable_user_data_dir_raises_instead_of_reporting_absent(self):
+        det = MacOSCopilotDetector()
+        det.user_home = self.alice
+
+        # Patches the syscall, not Path.exists: 3.14 returns False there, so a
+        # Path.exists mock would pass while the shipped code still reported absent.
+        with patch("os.stat", side_effect=PermissionError(13, "Permission denied")):
+            with self.assertRaises(PermissionError):
+                det._detect_vscode_builtin_copilot(self.alice)
+
+
+class TestVscodeInsidersCoverage(unittest.TestCase):
+    """Insiders is a VS Code channel, not its own row, so its marketplace Copilot
+    must be found and reported under the existing ``(VS Code)`` label."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.mkdtemp()
+        self.home = Path(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_registry(self, ext_root: str):
+        p = self.home / ext_root / "extensions.json"
+        p.parent.mkdir(parents=True)
+        p.write_text(
+            json.dumps([{"identifier": {"id": "github.copilot-chat"}, "version": "0.64.1"}]),
+            encoding="utf-8",
+        )
+
+    def test_insiders_only_copilot_is_detected_as_vs_code(self):
+        (self.home / "Library" / "Application Support" / "Code - Insiders" / "User").mkdir(parents=True)
+        self._make_registry(".vscode-insiders/extensions")
+
+        det = MacOSCopilotDetector()
+        det.user_home = self.home
+        results = det._detect_vscode_for_user(self.home)
+
+        self.assertEqual(["GitHub Copilot Chat (VS Code)"], [r["name"] for r in results])
+        self.assertEqual((".vscode-insiders", "extensions"),
+                         Path(results[0]["install_path"]).parts[-2:])
+
+    def test_stable_wins_when_both_channels_have_copilot(self):
+        self._make_registry(".vscode/extensions")
+        self._make_registry(".vscode-insiders/extensions")
+
+        det = MacOSCopilotDetector()
+        det.user_home = self.home
+        results = det._detect_vscode_for_user(self.home)
+
+        self.assertEqual(1, len(results))
+        self.assertEqual((".vscode", "extensions"), Path(results[0]["install_path"]).parts[-2:])
 
 
 if __name__ == "__main__":

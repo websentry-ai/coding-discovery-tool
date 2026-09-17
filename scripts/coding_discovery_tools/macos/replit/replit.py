@@ -15,6 +15,7 @@ from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
+from ...macos_extraction_helpers import macos_app_candidates
 from ...utils import run_command
 
 logger = logging.getLogger(__name__)
@@ -107,12 +108,15 @@ class MacOSReplitDetector(BaseToolDetector):
         Returns:
             Path to Replit.app if found, None otherwise
         """
-        try:
-            if self.APPLICATION_PATH.exists() and self.APPLICATION_PATH.is_dir():
-                logger.debug(f"Found Replit application at: {self.APPLICATION_PATH}")
-                return self.APPLICATION_PATH
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not check Replit application path: {e}")
+        user_home = getattr(self, 'user_home', None)
+        for candidate in macos_app_candidates(self.APPLICATION_PATH, user_home):
+            try:
+                if candidate.exists() and candidate.is_dir():
+                    logger.debug(f"Found Replit application at: {candidate}")
+                    return candidate
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not check Replit application path: {e}")
+                continue
 
         return None
 

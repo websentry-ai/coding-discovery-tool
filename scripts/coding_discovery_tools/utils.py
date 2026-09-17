@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import random
 import re
 import shlex
 import shutil
@@ -26,7 +27,8 @@ try:
 except ImportError:
     pwd = None  # Not available on Windows
 
-from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, is_symlink_or_junction, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
+from .vscode_extension_helpers import VSCODE_EDITOR_KEYS, reset_vscode_registry_state, vscode_registry_state
 
 logger = logging.getLogger(__name__)
 
@@ -74,17 +76,48 @@ def extract_version_number(text: str) -> Optional[str]:
     return text.strip() if text.strip() else None
 
 
+def _running_as_root() -> bool:
+    if os.name == "nt":
+        return _windows_process_is_elevated()
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def safe_exec_argv(command: list) -> Optional[list]:
+    """``command`` with argv[0] resolved, or None when it is unsafe to run.
+
+    Root-only: running your own binary as yourself escalates nothing, and gating it
+    there would drop versions for ordinary Homebrew installs. Skipped on Windows,
+    where _is_safe_exec_path cannot refuse anything and resolving would be the only
+    effect.
+    """
+    if not command or os.name == "nt" or not _running_as_root() or not os.path.isabs(str(command[0])):
+        return command
+    resolved = os.path.realpath(str(command[0]))
+    if not _is_safe_exec_path(resolved):
+        logger.debug(f"Refusing to execute {command[0]}: another account could have planted it")
+        return None
+    # Stem, not filename: npm ships claude as claude.exe.
+    named = Path(str(command[0])).name
+    if Path(resolved).name != named and Path(resolved).stem != Path(named).stem:
+        logger.debug(f"Refusing to execute {command[0]}: resolves to {Path(resolved).name}")
+        return None
+    return [resolved, *command[1:]]
+
+
 def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     """
     Run a shell command and return its output.
-    
+
     Args:
         command: Command and arguments as list
         timeout: Command timeout in seconds
-        
+
     Returns:
         Command output as string or None if failed
     """
+    command = safe_exec_argv(command)
+    if command is None:
+        return None
     try:
         result = subprocess.run(
             command,
@@ -97,6 +130,127 @@ def run_command(command: list, timeout: int = COMMAND_TIMEOUT) -> Optional[str]:
     except Exception as e:
         logger.debug(f"Command {command} failed: {e}")
     return None
+
+
+def run_command_status(command: list, timeout: int = COMMAND_TIMEOUT) -> Tuple[Optional[str], bool]:
+    """``(output, ran)`` — like ``run_command``, but says whether it got to run.
+
+    ``run_command`` returns None both for a clean search that matched nothing and
+    for a timeout, so a caller cannot tell absence from ignorance. ``ran`` is True
+    only for a clean exit-zero run, so a caller may read an empty output as absence.
+    """
+    command = safe_exec_argv(command)
+    if command is None:
+        return None, False
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        logger.debug(f"Command {command} failed: {e}")
+        return None, False
+    if result.returncode != 0:
+        logger.debug(f"Command {command} exited {result.returncode}")
+        return None, False
+    return (result.stdout.strip() or None), True
+
+
+LOGIN_SHELL_TIMEOUT = 10
+LOGIN_SHELL_TOOLS = ("claude", "junie", "cursor-agent", "copilot")
+_MARKER = "__unbound__"
+
+_login_shell_cache: Dict[str, Dict[str, str]] = {}
+_safe_helper_cache: Dict[str, Optional[str]] = {}
+
+
+def _safe_helper(name: str) -> Optional[str]:
+    """Absolute path for a helper we exec as root, or None if PATH offers no safe one.
+
+    These run before any privilege drop, so a bare name would let root's own PATH
+    decide what executes. Skipping beats falling back to the bare name.
+    """
+    if name not in _safe_helper_cache:
+        _safe_helper_cache[name] = _which_no_cwd(name)
+    return _safe_helper_cache[name]
+
+
+def _login_shell_owner(user_home: Path):
+    """passwd entry for ``user_home``, only when that account's own home IS this path."""
+    try:
+        entry = pwd.getpwuid(user_home.stat().st_uid)
+    except (KeyError, PermissionError, OSError) as e:
+        logger.debug(f"No passwd entry for {user_home}: {e}")
+        return None
+    try:
+        if os.path.realpath(entry.pw_dir) != os.path.realpath(str(user_home)):
+            logger.debug(f"{user_home} is owned by {entry.pw_name}, whose home is elsewhere")
+            return None
+    except OSError:
+        return None
+    return entry
+
+
+def user_login_shell_tool_path(tool: str, user_home: Path) -> Optional[str]:
+    """Absolute path ``user_home``'s own login shell resolves for ``tool``, else None.
+
+    Root-only: a non-root scan already has the ``which`` backstop.
+    """
+    if platform.system() == "Windows" or pwd is None or not _running_as_root():
+        return None
+
+    key = str(user_home)
+    if key not in _login_shell_cache:
+        _login_shell_cache[key] = _resolve_login_shell_tools(user_home)
+    return _login_shell_cache[key].get(tool)
+
+
+def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
+    entry = _login_shell_owner(user_home)
+    if entry is None:
+        return {}
+
+    sudo = _safe_helper("sudo")
+    if sudo is None:
+        logger.debug("No safe sudo on PATH; skipping the login-shell lookup")
+        return {}
+
+    # Marker-prefixed so profile banner output cannot be mistaken for a path.
+    script = "; ".join(
+        f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
+        for tool in LOGIN_SHELL_TOOLS
+    )
+    try:
+        result = subprocess.run(
+            [sudo, "-n", "-u", entry.pw_name, "-i", "sh", "-c", script],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=LOGIN_SHELL_TIMEOUT,
+        )
+    except Exception as e:
+        logger.debug(f"Login-shell lookup as {entry.pw_name} failed: {e}")
+        return {}
+
+    found: Dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith(_MARKER) or "\t" not in line:
+            continue
+        tool, _, path = line[len(_MARKER):].partition("\t")
+        resolved = Path(path.strip())
+        # The name as given, so a profile cannot rename another binary as a tool.
+        if resolved.name != tool:
+            logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
+            continue
+        try:
+            # Ownership on the target, not the link: the candidate loops reject
+            # another account's install and this must not add it back.
+            real = Path(os.path.realpath(str(resolved)))
+            if (resolved.is_absolute() and real.is_file() and os.access(str(real), os.X_OK)
+                    and machine_global_binary_owned_by_user(real, user_home)):
+                found[tool] = str(resolved)
+            else:
+                logger.debug(f"Login shell gave an unusable path for {tool}: {path!r}")
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not stat {path!r} for {tool}: {e}")
+    if not found:
+        logger.debug(f"Login shell resolved no tools for {entry.pw_name} (rc={result.returncode})")
+    return found
 
 
 def resolve_npm_global_tool_bin(
@@ -129,11 +283,9 @@ def resolve_npm_global_tool_bin(
 
     # 1. Dynamic npm global prefix — SCANNER-scoped, so non-root only.
     if not is_root:
-        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        prefix = _npm_global_prefix()
         if prefix:
-            prefix = prefix.strip()
-            if prefix:
-                candidates.append(Path(prefix) / "bin" / tool)
+            candidates.append(Path(prefix) / "bin" / tool)
 
     # 2. Machine-global Homebrew prefix — non-root only (shared install).
     if not is_root:
@@ -142,17 +294,25 @@ def resolve_npm_global_tool_bin(
     # 3. user_home-relative fallbacks — always safe (scoped to this user).
     candidates.append(user_home / ".npm-global" / "bin" / tool)
     candidates.append(user_home / ".local" / "share" / "pnpm" / tool)  # pnpm global
-    try:
-        nvm_node = user_home / ".nvm" / "versions" / "node"
-        if nvm_node.exists():
-            for version_dir in sorted(nvm_node.iterdir()):
+    candidates.append(user_home / "Library" / "pnpm" / tool)  # pnpm global, macOS
+    candidates.append(user_home / ".volta" / "bin" / tool)
+    candidates.append(user_home / ".asdf" / "shims" / tool)
+    for versions_dir, rel in (
+        (user_home / ".nvm" / "versions" / "node", ("bin",)),
+        (user_home / ".local" / "share" / "fnm" / "node-versions", ("installation", "bin")),
+        (user_home / ".local" / "share" / "mise" / "installs" / "node", ("bin",)),
+    ):
+        try:
+            if not versions_dir.exists():
+                continue
+            for version_dir in sorted(versions_dir.iterdir()):
                 try:
                     if version_dir.is_dir():
-                        candidates.append(version_dir / "bin" / tool)
+                        candidates.append(version_dir.joinpath(*rel, tool))
                 except (PermissionError, OSError):
                     continue
-    except (PermissionError, OSError) as e:
-        logger.debug(f"Could not enumerate nvm node dirs for {tool}: {e}")
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not enumerate {versions_dir} for {tool}: {e}")
 
     for candidate in candidates:
         try:
@@ -162,6 +322,458 @@ def resolve_npm_global_tool_bin(
             continue
 
     return None
+
+
+# Diagnostic only — never a detection gate. These dirs survive uninstall and are
+# written by other surfaces, which is why detection moved to the binary. On a
+# ZERO-tool scan their presence separates "machine has no AI tooling" from "a tool
+# ran here and we missed its binary".
+_TOOL_CONFIG_DIRS = (
+    ".claude", ".codex", ".copilot", ".cursor", ".augment",
+    ".gemini", ".windsurf", ".junie", ".openclaw",
+)
+
+
+def tool_config_dirs_present(user_home: Path) -> List[str]:
+    """Names of AI-tool config dirs under ``user_home``. Never raises."""
+    found = []
+    for name in _TOOL_CONFIG_DIRS:
+        try:
+            if (user_home / name).is_dir():
+                found.append(name.lstrip("."))
+        except (PermissionError, OSError):
+            continue
+    return found
+
+
+# Where each platform keeps a VS Code-family editor's per-user data dir.
+_VSCODE_USER_DATA_BASE = {
+    "Darwin": ("Library", "Application Support"),
+    "Windows": ("AppData", "Roaming"),
+    "Linux": (".config",),
+}
+
+def vscode_editors_present(user_home: Path) -> List[str]:
+    """VS Code-family editors with a user-data dir under ``user_home``. Never raises.
+
+    Diagnostic only. On a ZERO-tool scan it separates "no editor on this machine"
+    from "editor in use and we missed its Copilot extension", so a path it could
+    not read is reported as ``unreadable`` rather than as absence.
+    """
+    base = _VSCODE_USER_DATA_BASE.get(platform.system())
+    if base is None:
+        return []
+    found = []
+    for editor in VSCODE_EDITOR_KEYS:
+        path = user_home.joinpath(*base, editor, "User")
+        try:
+            # os.stat, not is_dir(): 3.14 returns False for an unreadable path.
+            if stat.S_ISDIR(os.stat(path).st_mode):
+                found.append(editor)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as e:
+            logger.debug("Could not read VS Code user data dir %s: %s", path, e, exc_info=True)
+            if "unreadable" not in found:
+                found.append("unreadable")
+    return found
+
+
+# A tool's own session files prove it RAN on this machine. A config dir does not:
+# our installer creates ~/.claude, ~/.codex and ~/.copilot on every managed device,
+# which is why detection moved to the binary in the first place. Bounded, because
+# workspaceStorage holds one dir per workspace and the scan runs under a watchdog.
+SESSION_EVIDENCE_MAX_AGE_DAYS = 30
+_EVIDENCE_DIR_CAP = 300
+# Copilot Chat writes transcripts under the stable and Insiders channels only.
+_VSCODE_CHAT_EDITORS = ("Code", "Code - Insiders")
+
+
+def _descend_without_redirect(base: Path, *parts) -> Optional[Path]:
+    """``base`` joined with ``parts``, or None when ANY component is a link or junction.
+
+    Checked one component at a time on purpose: ``lstat`` resolves a path's ancestors
+    transparently, so a guard on the leaf alone sees nothing when the redirect sits at
+    ``Library``, ``Application Support``, ``.config``, ``AppData``, ``Roaming`` or
+    ``Code``. An unprivileged account can plant one of those and, during a root scan,
+    hand another profile's tree to this probe under its own lexical path.
+    """
+    current = base
+    for part in parts:
+        current = current / part
+        if is_symlink_or_junction(current):
+            logger.debug("Not descending into %s: redirected at %s", base, current)
+            return None
+    return current
+
+
+def _newest_dirs_first(directory: Path, cap: int = _EVIDENCE_DIR_CAP) -> List[Path]:
+    """Real subdirectories of ``directory``, newest first, capped. Never raises.
+
+    Sorted rather than left in ``scandir`` order: this backs a LAST-RESORT probe, so
+    the one workspace holding a recent transcript must not fall outside the cap on
+    the luck of filesystem ordering — missing it leaves a live install reported
+    absent, and absent is prunable. Links and junctions are skipped: under a
+    privileged all-users scan, a workspace redirected outside the home would
+    attribute another user's tool to this one.
+    """
+    if is_symlink_or_junction(directory):
+        return []
+    entries = []
+    try:
+        with os.scandir(directory) as scan:
+            for entry in scan:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if is_symlink_or_junction(entry.path):
+                        continue
+                    entries.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry.path)))
+                except OSError:
+                    continue
+    except (PermissionError, OSError):
+        return []
+    entries.sort(key=lambda pair: pair[0], reverse=True)
+    if len(entries) > cap:
+        logger.debug("Reading the %d newest of %d entries under %s", cap, len(entries), directory)
+    return [path for _, path in entries[:cap]]
+
+
+def _has_recent_file(directory: Path, pattern: str, cutoff: float) -> bool:
+    """True when ``directory`` holds a real file matching ``pattern`` modified since
+    ``cutoff``. Links are skipped, for the same redirect reason. Never raises."""
+    if is_symlink_or_junction(directory):
+        return False
+    try:
+        for path in directory.glob(pattern):
+            try:
+                if is_symlink_or_junction(path):
+                    continue
+                st = os.stat(path)
+                if stat.S_ISREG(st.st_mode) and st.st_mtime >= cutoff:
+                    return True
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+    return False
+
+
+def copilot_chat_evidence(user_home: Path,
+                          max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> Optional[Path]:
+    """The VS Code ``User`` dir whose Copilot Chat transcripts were written recently.
+
+    ``workspaceStorage/<id>/GitHub.copilot-chat/transcripts/*.jsonl`` is written by the
+    Copilot Chat extension itself, so a fresh one proves the extension ran here even
+    when neither the marketplace registry nor the app bundle can be read. The mtime
+    bound is what keeps it from resurrecting an uninstalled extension, whose
+    workspaceStorage survives removal (microsoft/vscode#119022).
+    """
+    base = _VSCODE_USER_DATA_BASE.get(platform.system())
+    if base is None:
+        return None
+    cutoff = time.time() - (max_age_days * 86400)
+    for editor in _VSCODE_CHAT_EDITORS:
+        user_dir = _descend_without_redirect(user_home, *base, editor, "User")
+        if user_dir is None:
+            continue
+        for workspace in _newest_dirs_first(user_dir / "workspaceStorage"):
+            transcripts = _descend_without_redirect(workspace, "GitHub.copilot-chat", "transcripts")
+            if transcripts is not None and _has_recent_file(transcripts, "*.jsonl", cutoff):
+                return user_dir
+    return None
+
+
+def copilot_chat_evidence_row(user_home: Path) -> List[Dict]:
+    """One Copilot Chat row backed by recent transcripts, or ``[]``. Never raises.
+
+    Last resort, after both the marketplace registry and the app bundle come back
+    empty. Reporting nothing there marks a live install absent, and an absent install
+    is prunable — so a user whose editor we cannot read drops out of inventory.
+    """
+    user_dir = copilot_chat_evidence(user_home)
+    if user_dir is None:
+        return []
+    return [{
+        "name": "GitHub Copilot Chat (VS Code)",
+        "version": "unknown",
+        "publisher": "GitHub",
+        # The editor's User dir, not the transcript's workspace dir: install_path is
+        # part of the manifest identity, so a per-workspace path would churn the row.
+        "install_path": str(user_dir),
+    }]
+
+
+def copilot_cli_sessions_recent(copilot_dir: Path,
+                                max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> bool:
+    """True when the Copilot CLI wrote a session under ``copilot_dir`` recently.
+
+    ``session-state/<id>/events.jsonl`` is written by the CLI itself; the presence of
+    ``~/.copilot`` alone is not evidence of anything but our own installer.
+
+    One leaf check is the whole chain here, unlike the VS Code probe: ``copilot_dir``
+    is ``<user_home>/.copilot``, a single component below the home. A ``COPILOT_HOME``
+    override can point elsewhere, but ``_resolve_copilot_dir`` honours it only for the
+    running user's own home, so it redirects nobody but its owner.
+    """
+    if is_symlink_or_junction(copilot_dir):
+        return False
+    cutoff = time.time() - (max_age_days * 86400)
+    for session in _newest_dirs_first(copilot_dir / "session-state"):
+        if _has_recent_file(session, "events.jsonl", cutoff):
+            return True
+    return False
+
+
+def fail_if_anomalous(user_home, detail: str) -> None:
+    """Raise only when this scan had any business reading ``user_home``.
+
+    A denied read leaves presence unknown, and raising is what marks the scan
+    incomplete so nothing is pruned from it. But an unprivileged scan cannot read a
+    sibling home at all, macOS homes are 0700, so raising there would mark every scan
+    on every multi-user box incomplete and nothing would ever be pruned.
+    """
+    privileged = _windows_process_is_elevated() if platform.system() == "Windows" else _is_root()
+    if privileged or _is_scanning_users_own_home(Path(user_home)):
+        raise PermissionError(detail)
+    logger.debug("Read denied under %s; expected for another user's home", user_home)
+
+
+def claude_code_sessions_recent(claude_dir: Path,
+                                max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> bool:
+    """True when Claude Code wrote a session under ``claude_dir`` recently.
+
+    ``projects/<slug>/<id>.jsonl`` is written by Claude Code itself. ``~/.claude``
+    alone is not evidence: it holds settings and MCP config, survives an uninstall,
+    and our installer creates it on every managed device.
+    """
+    if is_symlink_or_junction(claude_dir):
+        return False
+    cutoff = time.time() - (max_age_days * 86400)
+    for project in _newest_dirs_first(claude_dir / "projects"):
+        if _has_recent_file(project, "*.jsonl", cutoff):
+            return True
+    return False
+
+
+def dir_state(path) -> str:
+    """``present``, ``absent`` or ``unreadable`` for a directory. Never raises.
+
+    os.stat, not Path.exists(): 3.14 returns False for an unreadable path, so a
+    denied directory would otherwise report as an absent tool.
+    """
+    try:
+        return "present" if stat.S_ISDIR(os.stat(path).st_mode) else "absent"
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return "absent"
+    except OSError:
+        return "unreadable"
+
+
+# Where each platform keeps the per-user application data every detector reads.
+_USER_DATA_DIR = {"Darwin": "Library", "Windows": "AppData", "Linux": ".config"}
+
+
+def _listable_state(path) -> str:
+    """``present``, ``absent`` or ``unreadable`` for a directory we must LIST.
+
+    Listing, not stat: a 0700 directory still stats fine from outside, so only an
+    attempted read distinguishes denied from empty.
+    """
+    try:
+        with os.scandir(path) as entries:
+            next(iter(entries), None)
+        return "present"
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        return "unreadable"
+
+
+def home_is_readable(user_home) -> bool:
+    """Whether the scan can see everything it must read for this user. Never raises.
+
+    Not the home alone: a macOS home is listable by its group while ``Library``
+    inside it is 0700, so a home-level check would call a user covered whose tool
+    data we cannot reach. Only a denial disqualifies — a home or data dir that is
+    not there holds nothing we could have missed.
+    """
+    user_home = Path(user_home)
+    paths = [user_home]
+    data_dir = _USER_DATA_DIR.get(platform.system())
+    if data_dir is not None:
+        paths.append(user_home / data_dir)
+    return all(_listable_state(path) != "unreadable" for path in paths)
+
+
+def wsl_distros_present(user_home: Path) -> List[str]:
+    """Names of WSL distros installed for ``user_home``. Never raises.
+
+    WSL2 keeps the distro in ``LocalState/ext4.vhdx``, WSL1 in ``LocalState/rootfs``.
+    One relocated by ``wsl --import`` is not found.
+    """
+    found = []
+    try:
+        packages = user_home / "AppData" / "Local" / "Packages"
+        for package in packages.iterdir():
+            try:
+                state = package / "LocalState"
+                if (state / "ext4.vhdx").exists() or (state / "rootfs").is_dir():
+                    found.append(package.name.split("_")[0])
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+    return found
+
+
+def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
+    """Days since the most recently touched AI-tool config dir across ``user_homes``.
+
+    Separates uninstall residue (old) from a tool in active use whose binary we
+    failed to resolve (recent). None when no config dir is readable.
+    """
+    newest = None
+    for user_home in user_homes:
+        for name in _TOOL_CONFIG_DIRS:
+            try:
+                mtime = (Path(user_home) / name).stat().st_mtime
+            except (PermissionError, OSError):
+                continue
+            if newest is None or mtime > newest:
+                newest = mtime
+    if newest is None:
+        return None
+    return max(0, int((time.time() - newest) // 86400))
+
+
+_PATH_TAG_MAX_CHARS = 180
+
+
+def windows_user_path_dirs() -> str:
+    """Loaded users' PATH directories, profile-relative, for the no-tools tag.
+
+    An over-budget entry is skipped, not a stopping point: ending the loop would
+    let one long entry hide every short candidate behind it.
+    """
+    if platform.system() != "Windows":
+        return ""
+    from .windows_extraction_helpers import registry_user_path_dirs
+    out, used = [], 0
+    for entry in registry_user_path_dirs():
+        if used + len(entry) + 1 > _PATH_TAG_MAX_CHARS:
+            continue
+        out.append(entry)
+        used += len(entry) + 1
+    return ",".join(out)
+
+
+_SURFACE_MAX_HOMES = 5
+_SURFACE_MAX_NAMES = 120
+_SURFACE_MAX_NAME_CHARS = 64
+_SURFACE_MAX_TOTAL_CHARS = 8000
+
+
+def _install_surface_roots(user_homes) -> List[Tuple[str, Path]]:
+    """(label, path) install surfaces for this platform. Labels carry no username.
+
+    Signal before noise: the shared char budget is spent in this order, and
+    AppData\\Local is hundreds of cache entries, so listing it per home ahead of
+    the rest would starve the later homes entirely.
+    """
+    system = platform.system()
+    roots: List[Tuple[str, Path]] = []
+    bulk: List[Tuple[str, Path]] = []
+    if system == "Windows":
+        # Env vars, not a literal C:\ — a D:\Program Files install is invisible otherwise.
+        for label, var in (("ProgramFiles", "ProgramW6432"),
+                           ("ProgramFiles", "ProgramFiles"),
+                           ("ProgramFiles(x86)", "ProgramFiles(x86)")):
+            value = os.environ.get(var)
+            if value:
+                roots.append((label, Path(value)))
+    elif system == "Darwin":
+        roots.append(("/Applications", Path("/Applications")))
+
+    for index, user_home in enumerate(list(user_homes)[:_SURFACE_MAX_HOMES]):
+        user_home = Path(user_home)
+        suffix = f"#{index}" if index else ""
+        if system == "Windows":
+            local = user_home / "AppData" / "Local"
+            # Programs joins its parent: every per-user editor install lands inside it.
+            roots.append((f"LocalAppData\\Programs{suffix}", local / "Programs"))
+            roots.append((f"Roaming{suffix}", user_home / "AppData" / "Roaming"))
+            bulk.append((f"LocalAppData{suffix}", local))
+        elif system == "Darwin":
+            roots.append((f"~/Applications{suffix}", user_home / "Applications"))
+    return roots + bulk
+
+
+def install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:
+    """Top-level names in the OS install surfaces, for the zero-tool event. Never raises.
+
+    A name here that we did not report is a path bug, not an empty machine. The
+    caller wraps the whole event, so a raise would drop the other discriminators too.
+    """
+    surfaces: Dict[str, Dict] = {}
+    total = 0
+    truncated = False
+    try:
+        used_chars = 0
+        seen_paths = set()
+        for label, path in _install_surface_roots(user_homes):
+            try:
+                resolved = os.path.realpath(path)
+            except OSError:
+                resolved = str(path)
+            if resolved in seen_paths or label in surfaces:
+                continue
+            seen_paths.add(resolved)
+            names: List[str] = []
+            count = 0
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        count += 1
+                        name = entry.name[:_SURFACE_MAX_NAME_CHARS]
+                        if (len(names) >= _SURFACE_MAX_NAMES
+                                or used_chars + len(name) + 1 > _SURFACE_MAX_TOTAL_CHARS):
+                            truncated = True
+                            continue
+                        names.append(name)
+                        used_chars += len(name) + 1
+                state = "present"
+            except (FileNotFoundError, NotADirectoryError):
+                state = "absent"
+            except OSError:
+                state = "unreadable"
+            surfaces[label] = {"state": state, "n": count, "names": sorted(names)}
+            total += count
+    except Exception as surface_err:
+        logger.debug(f"Install-surface listing failed: {surface_err}")
+    return surfaces, total, truncated
+
+
+_NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
+
+
+def windows_node_manager_shims(user_home: Path, tool: str) -> List[Path]:
+    """``user_home``-relative shims for Windows Node managers that move the npm global prefix."""
+    roots = [
+        user_home / "AppData" / "Local" / "Volta" / "bin",
+        user_home / "AppData" / "Local" / "pnpm",
+    ]
+    try:
+        nvm_root = user_home / "AppData" / "Roaming" / "nvm"
+        # Version dirs only: the shim is probed under shell=True and `&`/`^` are legal in dir names.
+        roots.extend(
+            d for d in sorted(nvm_root.iterdir())
+            if d.is_dir() and _NVM_WINDOWS_VERSION_DIR.match(d.name)
+        )
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Could not enumerate nvm-windows dirs for {tool}: {e}")
+
+    return [root / f"{tool}{ext}" for root in roots for ext in (".cmd", ".exe")]
 
 
 def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> bool:
@@ -176,7 +788,17 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
       system-wide and available to every user, so attribute to whoever is being
       scanned.
 
-    Never raises: any stat/pwd failure returns False (do not attribute).
+    Compared by uid against the home's own uid. Resolving the owner to a home
+    PATH instead fails closed when the binary is genuinely theirs: a directory
+    account with no local passwd record, a home that is not ``/Users/<dirname>``,
+    or the Data-volume firmlink that ``resolve()`` does not collapse.
+
+    POSIX only, by caller: ``machine_global`` is empty on Windows so nothing
+    reaches here. Do not add a Windows caller — ``st_uid`` is always 0 there,
+    indistinguishable from a root-owned system-wide binary, so every shared
+    binary would be attributed to every user.
+
+    Never raises: any stat failure returns False (do not attribute).
 
     Args:
         candidate: Absolute path to a machine-global binary.
@@ -191,16 +813,14 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
         return False
     if uid == 0:
         return True  # system-wide -> available to every scanned user
-    if pwd is None:
-        return False  # POSIX-only; should never be hit on Windows
     try:
-        owner_home = Path(pwd.getpwuid(uid).pw_dir)
-    except (KeyError, OSError, AttributeError):
+        owned = uid == os.stat(str(user_home)).st_uid
+    except (OSError, PermissionError):
+        record_rejected_binary(candidate, "home_stat_failed")
         return False
-    try:
-        return owner_home.resolve() == user_home.resolve()
-    except (OSError, RuntimeError):
-        return owner_home == user_home
+    if not owned:
+        record_rejected_binary(candidate, "owner_mismatch")
+    return owned
 
 
 def get_hostname() -> str:
@@ -376,35 +996,82 @@ def get_all_users_macos() -> List[str]:
     return users
 
 
-def get_all_users_windows() -> List[str]:
+@functools.lru_cache(maxsize=1)
+def windows_user_homes() -> Dict[str, Path]:
     """
-    Get all user directory names from C:\\Users on Windows.
+    Map every Windows profile on this machine to its real home directory.
 
-    Filters out hidden directories and well-known system/service
-    directories listed in WINDOWS_SKIP_USER_DIRS.
+    The ``C:\\Users`` listing alone answers neither question we need: it cannot
+    see a profile relocated to another drive, and it treats any leftover folder
+    as a user. ``ProfileList`` is Windows' own record, so the two are combined —
+    a walked folder is kept only when a profile record vouches for the name, and
+    registry profiles the walk missed are added at their real path.
+
+    A profile whose recorded path is a UNC share still vouches for its local
+    ``C:\\Users`` cache, and an incomplete registry read vouches for nothing, so
+    neither can remove a real user. Names are reconciled case-insensitively, as
+    Windows paths are, and reported with the profile record's spelling, so one
+    profile is never scanned twice under two spellings of its name.
+
+    Cached for the process: a scan resolves the same machine throughout, and the
+    call sites would otherwise re-walk ``C:\\Users`` for every tool/user pair.
 
     Returns:
-        List of usernames (directory names under C:\\Users), or an
-        empty list if not running on Windows or the path does not exist.
+        ``{home_user: home path}``, empty when not running on Windows.
     """
     if platform.system() != "Windows":
-        return []
+        return {}
 
+    walked: Dict[str, Path] = {}
     try:
         win_users_dir = Path(Path.home().anchor) / "Users"
-        if not win_users_dir.exists():
-            return []
-
-        users = []
-        for user_dir in win_users_dir.iterdir():
-            if (user_dir.is_dir()
-                    and not user_dir.name.startswith('.')
-                    and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
-                users.append(user_dir.name)
-        return users
+        if win_users_dir.exists():
+            for user_dir in win_users_dir.iterdir():
+                if (user_dir.is_dir()
+                        and not user_dir.name.startswith('.')
+                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
+                    walked[user_dir.name] = user_dir
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from Windows Users directory: {e}")
-        return []
+
+    from .windows_extraction_helpers import registry_profile_paths
+    registry, complete = registry_profile_paths()
+    if not registry:
+        return walked
+
+    homes: Dict[str, Path] = {}
+    vouched: Dict[str, str] = {}
+    for path in registry:
+        if not path.name:
+            continue
+        key = path.name.lower()
+        vouched.setdefault(key, path.name)
+        if not str(path).startswith("\\\\"):
+            homes.setdefault(key, path)
+
+    resolved = {vouched[key]: path for key, path in homes.items()}
+    for name, path in walked.items():
+        key = name.lower()
+        if key in homes:
+            continue
+        if complete and key not in vouched:
+            continue
+        resolved[vouched.get(key, name)] = path
+    return resolved
+
+
+def get_all_users_windows() -> List[str]:
+    """
+    Names of the Windows profiles on this machine. See ``windows_user_homes``.
+    """
+    return list(windows_user_homes())
+
+
+def windows_home_for_user(username: str) -> Path:
+    """Home directory for a Windows profile, which is not always under C:\\Users."""
+    return windows_user_homes().get(
+        username, Path(Path.home().anchor) / "Users" / username
+    )
 
 
 def get_all_users_linux() -> List[str]:
@@ -751,6 +1418,9 @@ def send_scan_event(
         "scan_event": scan_event,
     }
 
+    # Differentiates a lifecycle-send failure from a per-tool one in the dedup signature.
+    sentry_context = dict(sentry_context or {}, scan_event=scan_event)
+
     if app_name:
         payload["app_name"] = app_name
 
@@ -778,6 +1448,11 @@ def send_scan_event(
     )
 
 
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_SECONDS = 15
+BACKOFF_CAP_SECONDS = 120
+
+
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.
@@ -803,8 +1478,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
     NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
-    MAX_ATTEMPTS = 3
-    BACKOFF_SECONDS = [2, 4]
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     ctx = sentry_context or {}
@@ -890,7 +1563,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
                     if attempt < MAX_ATTEMPTS:
-                        _backoff(attempt, BACKOFF_SECONDS)
+                        _backoff(attempt)
                         continue
                     try:
                         raise RuntimeError(error_msg)
@@ -919,7 +1592,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     return (False, False)
 
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     try:
                         error_detail = f"HTTP {http_code}"
@@ -933,7 +1606,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             except subprocess.TimeoutExpired:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     try:
                         raise RuntimeError("curl timeout")
@@ -941,10 +1614,16 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                     return (False, True)
 
+            except OSError as e:
+                # curl missing or not executable: local, not transient, so sleeping cannot help.
+                logger.error(f"Cannot execute curl: {e}")
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
+
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
                 if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt, BACKOFF_SECONDS)
+                    _backoff(attempt)
                 else:
                     report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                     return (False, True)
@@ -970,10 +1649,11 @@ def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
         logger.error(f"Backend response: {error_body}")
 
 
-def _backoff(attempt: int, delays: List[int]) -> None:
-    """Sleep for the backoff duration corresponding to the given attempt."""
-    wait = delays[attempt - 1]
-    logger.info(f"  Retrying in {wait}s...")
+def _backoff(attempt: int) -> None:
+    """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed together from retrying together."""
+    ceiling = min(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), BACKOFF_CAP_SECONDS)
+    wait = random.uniform(ceiling / 2, ceiling)
+    logger.info(f"  Retrying in {wait:.1f}s...")
     time.sleep(wait)
 
 
@@ -1184,7 +1864,13 @@ def _run_auth_status(
     - (True, None, "claude.ai", "/login managed key")   — org-managed login
     - (True, None, None, None)                   — user is not logged in
     - (False, None, None, None)                  — command failed
+
+    The direct branch runs a resolved binary without dropping privileges, unlike the
+    launchctl and su branches, so it takes the same gate as run_command.
     """
+    cmd = safe_exec_argv(cmd)
+    if cmd is None:
+        return False, None, None, None
     try:
         result = subprocess.run(
             cmd,
@@ -1247,6 +1933,7 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
     is_root = _is_root()
     is_darwin = platform.system() == "Darwin"
 
+    keychain_path = None
     if is_root:
         real_home = _get_real_home(username)
         if real_home:
@@ -1256,8 +1943,14 @@ def _get_plan_from_keychain(username: str) -> Optional[str]:
     is_container = is_darwin and _is_daemon_container()
     if is_darwin and (is_root or is_container):
         uid = _get_uid_for_user(username)
-        if uid is not None:
-            cmd = ["launchctl", "asuser", str(uid)] + cmd
+        launchctl = _safe_helper("launchctl")
+        if uid is not None and launchctl:
+            cmd = [launchctl, "asuser", str(uid)] + cmd
+        elif keychain_path is None:
+            # Neither scoped to their keychain nor run as them: this would read
+            # the scanner's own, so a hit would belong to the wrong account.
+            logger.debug(f"No keychain context for {username}; skipping the probe")
+            return None
 
     try:
         result = subprocess.run(
@@ -1452,10 +2145,14 @@ def get_claude_subscription_type(
 
         if use_launchctl:
             uid = _get_uid_for_user(username)
-            if uid is not None:
+            launchctl = _safe_helper("launchctl")
+            sudo = _safe_helper("sudo")
+            if uid is not None and launchctl and sudo:
                 shell = _get_compatible_shell(username)
+                # asuser adopts the namespace but not the uid; sudo drops it.
                 cmd = [
-                    "launchctl", "asuser", str(uid),
+                    launchctl, "asuser", str(uid),
+                    sudo, "-n", "-u", username,
                     shell, "-lc",
                     auth_cmd,
                 ]
@@ -1523,6 +2220,8 @@ def get_claude_subscription_type(
                     f"(daemon container detected)"
                 )
         ok, plan, auth_method, key_source = _run_auth_status(cmd, username, method="direct", env=env)
+        # Distinguishes "we declined to run it" from "it ran and said nothing".
+        gate_refused = safe_exec_argv(cmd) is None
         if diagnostics is not None:
             diagnostics.append({
                 "category": "direct_exec",
@@ -1535,6 +2234,7 @@ def get_claude_subscription_type(
                     "key_source": key_source,
                     "binary": claude_binary,
                     "shell_fallback": shell_fallback,
+                    "gate_refused": gate_refused,
                     "daemon_container": is_container if is_darwin else False,
                 },
             })
@@ -1638,6 +2338,443 @@ def get_cursor_subscription_type(user_home: Path) -> Optional[str]:
                 pass
 
 
+def _windows_process_is_elevated():
+    """True/False, or None when the check could not run.
+
+    Shares one probe with the detectors so telemetry can never report a
+    privilege the scan did not actually have. SYSTEM is not in the
+    Administrators group, so it must be recognised by SID first, exactly as
+    ``is_running_as_admin`` does; None still means the check could not run.
+    """
+    from .windows_extraction_helpers import (
+        _running_as_local_system,
+        windows_admin_state,
+    )
+    if _running_as_local_system():
+        return True
+    return windows_admin_state()
+
+
+def _binary_in_cwd(path: str) -> bool:
+    """True if ``path`` is inside the current working directory (a possible
+    planted binary). A binary directly in the cwd counts even at a filesystem
+    root; the nested-subtree check is skipped for a root cwd so real PATH installs
+    aren't rejected. Case-folded for Windows. Fails closed on error."""
+    try:
+        nc = os.path.normcase  # case-fold on Windows; no-op on POSIX
+        real_cwd = os.path.realpath(os.getcwd())
+        cwd_is_root = os.path.dirname(real_cwd) == real_cwd
+        abs_parent = os.path.dirname(os.path.abspath(path))
+        # Check the parent lexically (catches a leaf like <cwd>/auggie) and
+        # resolved (catches symlinks that would escape the tree).
+        for parent, base in ((abs_parent, os.path.abspath(os.getcwd())),
+                             (os.path.realpath(abs_parent), real_cwd)):
+            parent, base = nc(parent), nc(base)
+            if parent == base:
+                return True
+            if not cwd_is_root:
+                try:
+                    if os.path.commonpath([parent, base]) == base:
+                        return True
+                except ValueError:
+                    pass  # different drive -> not under this cwd
+        return False
+    except OSError:
+        return True
+
+
+def _is_safe_exec_path(path: str) -> bool:
+    """True if a resolved binary at ``path`` is safe to execute during a scan — not
+    one another local account could have planted. POSIX: the binary and the
+    every directory above it must be owned by the running user or root and not
+    group/world-writable, so a shared-writable PATH entry (e.g. a group-writable
+    ``/usr/local/bin``) can't supply it. Ancestors are walked because a writable one
+    lets the binary be swapped underneath an otherwise safe leaf. Windows has no
+    comparable cheap check, so only the CWD guard applies there. Fails closed on any
+    error."""
+    if os.name == "nt":
+        return True
+    try:
+        euid = os.geteuid()
+        target = os.path.realpath(path)
+        while True:
+            info = os.stat(target)
+            if info.st_uid not in (euid, 0):
+                return False
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+            parent = os.path.dirname(target)
+            if parent == target:
+                return True
+            target = parent
+    except OSError:
+        return False
+
+
+def _which_no_cwd(name: str) -> Optional[str]:
+    """``shutil.which`` that rejects a match planted in the CWD or supplied by a
+    shared-writable directory another local account could plant into."""
+    found = shutil.which(name)
+    if not found:
+        return None
+    found = os.path.abspath(found)
+    if _binary_in_cwd(found) or not _is_safe_exec_path(found):
+        return None
+    return found
+
+
+def _is_scanning_users_own_home(user_home: Optional[Path]) -> bool:
+    """True only if ``user_home`` is the scanning account's own home and the
+    process isn't privileged. Both the plan probe and the detector PATH fallbacks
+    gate on this so they can't drift. POSIX refuses ``euid == 0`` and compares the
+    passwd home (not the spoofable ``$HOME``); Windows refuses an admin token and
+    compares ``Path.home()``. Fails closed on any error."""
+    if user_home is None:
+        return False
+    try:
+        if platform.system() == "Windows":
+            if _windows_process_is_elevated():
+                return False
+            own_home = Path.home()
+        else:
+            if not hasattr(os, "geteuid") or os.geteuid() == 0:
+                return False
+            try:
+                own_home = Path(pwd.getpwuid(os.geteuid()).pw_dir) if pwd else Path.home()
+            except (KeyError, OSError):
+                return False  # arbitrary UID with no passwd entry — soft-fail
+        return Path(user_home).resolve() == own_home.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+_AUGMENT_TENANT_HOST_SUFFIX = ".augmentcode.com"
+_SESSION_MAX_BYTES = 1_000_000  # session.json is well under a KB; cap the read
+
+
+def _windows_system_dir() -> Optional[str]:
+    """The real Windows system directory (e.g. ``C:\\Windows\\System32``) from the OS
+    via ``GetSystemDirectoryW``, not the ``%SystemRoot%`` env — so a caller-controlled
+    env can't steer a trusted-path lookup. None on failure. Windows only."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        k32.GetSystemDirectoryW.restype = wintypes.UINT
+        buf = ctypes.create_unicode_buffer(260)
+        n = k32.GetSystemDirectoryW(buf, 260)
+        if not n or n >= 260:
+            return None
+        return buf.value
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _trusted_curl() -> Optional[str]:
+    """Absolute path to the system curl (trusted OS locations only, never PATH),
+    or None. Keeps a privileged scan from handing the token to a planted curl."""
+    if platform.system() == "Windows":
+        sysdir = _windows_system_dir()
+        if not sysdir:
+            return None
+        candidates = [os.path.join(sysdir, "curl.exe")]
+    else:
+        candidates = ["/usr/bin/curl", "/bin/curl"]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _is_symlink_or_reparse(p: Path) -> bool:
+    """True if ``p`` is a symlink or a Windows reparse point (junction), which
+    could redirect a read elsewhere. Fails closed (True) if undetermined."""
+    try:
+        st = os.lstat(str(p))
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(st, "st_file_attributes", 0) & reparse)
+
+
+def _strip_extended_prefix(p: str) -> str:
+    """Drop a Windows extended-length prefix (``\\\\?\\``, ``\\??\\``, ``\\\\?\\UNC\\``)
+    so a ``GetFinalPathNameByHandle`` result compares against a plain ``realpath``."""
+    if p.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + p[len("\\\\?\\UNC\\"):]
+    for pre in ("\\\\?\\", "\\??\\"):
+        if p.startswith(pre):
+            return p[len(pre):]
+    return p
+
+
+def _windows_final_path(fd: int) -> Optional[str]:
+    """The real filesystem path an open fd points to (junctions/symlinks resolved),
+    read from the handle so a later path swap can't change it. None on any failure.
+    Windows only; a privileged scan uses this instead of an owner check because
+    Windows file ownership is unreliable (elevated writes are owned by the
+    Administrators group, not the user)."""
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR,
+                                                  wintypes.DWORD, wintypes.DWORD]
+        k32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+        handle = msvcrt.get_osfhandle(fd)
+        needed = k32.GetFinalPathNameByHandleW(handle, None, 0, 0)  # NORMALIZED|DOS
+        if not needed:
+            return None
+        buf = ctypes.create_unicode_buffer(needed)
+        if not k32.GetFinalPathNameByHandleW(handle, buf, needed, 0):
+            return None
+        return buf.value
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _read_own_regular_file(path: Path, owner_ref: Path, max_bytes: int) -> Optional[str]:
+    """Read up to ``max_bytes`` of ``path`` as a regular file inside ``owner_ref``'s
+    home, or None. Hardened for an all-users scan: refuses redirects and non-regular
+    files, and re-checks the opened fd. Cross-user reads are allowed on both
+    platforms — POSIX verifies the fd's own owner, Windows verifies the handle's
+    real path stays inside the home (ownership is unreliable there)."""
+    # Refuse a redirect at the file or its parent dir, and capture the file's own
+    # identity — lstat never follows — to compare against the opened fd below.
+    if _is_symlink_or_reparse(path.parent) or _is_symlink_or_reparse(path):
+        return None
+    try:
+        lst = os.lstat(str(path))
+    except OSError:
+        return None
+    if not stat.S_ISREG(lst.st_mode):
+        return None
+    try:
+        fd = os.open(str(path),
+                     os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None  # FIFO/device/dir — don't block or stream
+        # The opened fd must be the exact file lstat saw before the open — same
+        # inode and device — which catches a symlink/junction swapped in around
+        # the open (Windows has no effective O_NOFOLLOW for junctions).
+        if (st.st_ino, st.st_dev) != (lst.st_ino, lst.st_dev):
+            return None
+        # The file must belong to the home's owner. A pathname re-check (realpath,
+        # stat) can't guarantee this: a parent junction can be swapped back before
+        # it runs, so only the fd is trusted.
+        if platform.system() == "Windows":
+            # Windows ownership is unreliable (elevated writes are Administrators-
+            # owned, not the user's), so verify the handle's REAL path instead:
+            # GetFinalPathNameByHandle resolves every junction/symlink from the open
+            # handle, so a redirect swapped in around the open resolves to its true
+            # target and is refused when it falls outside the owner's home.
+            final = _windows_final_path(fd)
+            if final is None:
+                return None
+            real = os.path.normcase(_strip_extended_prefix(final))
+            home = os.path.normcase(_strip_extended_prefix(os.path.realpath(str(owner_ref))))
+            if not (real == home or real.startswith(home.rstrip("\\") + "\\")):
+                return None
+        else:
+            # POSIX: the fd's own owner can't be forged by a path swap.
+            try:
+                if st.st_uid != os.stat(str(owner_ref)).st_uid:
+                    return None
+            except OSError:
+                return None
+        return os.read(fd, max_bytes).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _augment_tenant_host(url: str) -> Optional[str]:
+    """Return the host if ``url`` is an ``https://…augmentcode.com`` tenant URL,
+    else None. The only gate on where the token is sent, so it rejects anything
+    that could resolve elsewhere or break the curl config. String parsing only
+    (no urllib, for Zscaler)."""
+    if not url or "://" not in url:
+        return None
+    # Reject spaces/control chars — they'd break the config line built from this.
+    if any(ord(c) <= 32 or ord(c) == 127 for c in url):
+        return None
+    scheme, rest = url.split("://", 1)
+    if scheme.lower() != "https":
+        return None
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in host:                      # strip user:pass@ credentials
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):             # IPv6 literal — never an Augment tenant
+        return None
+    host = host.split(":", 1)[0].lower()   # strip :port
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", host):   # real host chars only
+        return None
+    if host == "augmentcode.com" or host.endswith(_AUGMENT_TENANT_HOST_SUFFIX):
+        return host
+    return None
+
+
+def _read_auggie_session(user_home: Path) -> Optional[Tuple[str, str]]:
+    """Return ``(tenant_base_url, access_token)`` from ``~/.augment/session.json``,
+    or None. A plain file read, so it works for any user's home in an all-users
+    scan; the base URL is rebuilt from the validated host only."""
+    home = Path(user_home)
+    raw = _read_own_regular_file(home / ".augment" / "session.json", home, _SESSION_MAX_BYTES)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = data.get("accessToken")
+    tenant = data.get("tenantURL")
+    if not isinstance(token, str) or not isinstance(tenant, str):
+        return None
+    # Usable as a header value: bounded, no control chars.
+    if not 0 < len(token) <= 4096 or any(ord(c) < 32 or ord(c) == 127 for c in token):
+        return None
+    host = _augment_tenant_host(tenant)
+    if host is None:
+        return None
+    return "https://" + host + "/", token
+
+
+def _read_auggie_plan_via_cli(user_home: Path) -> Optional[str]:
+    """Fallback plan lookup: ask the user's own ``auggie`` CLI. Only runs in a
+    self-scan (``_is_scanning_users_own_home`` — same gate the detector uses), so
+    a privileged all-users scan never executes another user's binary. Used when the
+    stored token is expired/invalid and the billing API can't answer; the CLI reads
+    (and can refresh) its own session. ``auggie account status --json`` prints
+    ``planName``."""
+    if not _is_scanning_users_own_home(user_home):
+        return None
+    auggie = _which_no_cwd("auggie")
+    if auggie is None:
+        return None
+    try:
+        result = subprocess.run(
+            [auggie, "account", "status", "--json"],
+            capture_output=True, text=True, timeout=AUTH_STATUS_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("auggie account status fallback failed: %s", e)
+        return None
+    if result.returncode != 0:
+        logger.debug("auggie account status rc=%s", result.returncode)
+        return None
+    try:
+        parsed = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    plan = parsed.get("planName")
+    if not isinstance(plan, str):
+        return None
+    plan = plan.strip()
+    if not plan or len(plan) > 100 or not plan.isprintable():
+        return None
+    return plan
+
+
+def get_auggie_subscription_type(user_home: Optional[Path]) -> Optional[str]:
+    """Get the Auggie (Augment) subscription plan for ``user_home``, or None.
+
+    Auggie keeps no plan on disk. Primary path: read the session token from
+    ``~/.augment/session.json`` and query Augment's billing endpoint with curl — a
+    file read plus an HTTP call, never running a binary, so it works for any user in
+    an all-users scan. If that can't answer (a dead/expired token, unreadable
+    session, no curl) and we're scanning our OWN home, fall back to the user's
+    ``auggie`` CLI. Best-effort, optional field.
+    """
+    if user_home is None:
+        return None
+    plan = _auggie_plan_via_billing_api(user_home)
+    if plan is not None:
+        return plan
+    return _read_auggie_plan_via_cli(user_home)
+
+
+def _auggie_plan_via_billing_api(user_home: Path) -> Optional[str]:
+    """Query Augment's billing endpoint for the plan using the stored session
+    token, or None. See ``get_auggie_subscription_type`` for the overall flow."""
+    # Trusted curl only, never PATH (see _trusted_curl).
+    curl = _trusted_curl()
+    if curl is None:
+        logger.debug("no trusted curl found; skipping auggie plan lookup")
+        return None
+    session = _read_auggie_session(user_home)
+    if session is None:
+        return None
+    base_url, token = session
+
+    # Token goes via the stdin config, never argv (not ps-visible). curl (not
+    # urllib) uses the system cert store, for customer VPN/proxy CAs (Zscaler).
+    def _cfg_quote(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+    config = (
+        'silent\n'
+        'fail\n'                 # non-2xx -> non-zero exit, no error body to parse
+        'proto = "=https"\n'     # https only, even if the URL were somehow rewritten
+        'max-filesize = %d\n'    # bound the response so it can't inflate memory
+        'request = "POST"\n'
+        'header = "Authorization: Bearer %s"\n'
+        'header = "Content-Type: application/json"\n'
+        'data = "{}"\n'
+        'max-time = %d\n'
+        'url = "%s"\n'
+    ) % (_SESSION_MAX_BYTES, _cfg_quote(token), AUTH_STATUS_TIMEOUT,
+         _cfg_quote(base_url + "get-billing-summary"))
+
+    try:
+        result = subprocess.run(
+            # -q: ignore any ambient ~/.curlrc on this token-bearing request.
+            [curl, "-q", "--config", "-"],
+            input=config,
+            capture_output=True,
+            text=True,
+            timeout=AUTH_STATUS_TIMEOUT + 5,
+        )
+    except subprocess.TimeoutExpired:
+        logger.debug("auggie billing lookup timed out")
+        return None
+    except OSError as e:
+        logger.debug("Could not run auggie billing lookup: %s", e)
+        return None
+
+    if result.returncode != 0:
+        # Log the code only — curl output can carry account details.
+        logger.debug("auggie billing lookup curl rc=%s", result.returncode)
+        return None
+    try:
+        parsed = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        logger.debug("auggie billing lookup returned non-JSON")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    plan = parsed.get("plan_name")
+    if not isinstance(plan, str):
+        return None
+    plan = plan.strip()
+    # Bound it before it enters logs/report: printable only (rejects control
+    # chars, DEL, and line/paragraph separators that could smear a log line).
+    if not plan or len(plan) > 100 or not plan.isprintable():
+        return None
+    return plan
+
+
 # ---------------------------------------------------------------------------
 # Sentry error reporting via raw HTTP (no SDK dependency)
 # ---------------------------------------------------------------------------
@@ -1672,7 +2809,14 @@ def _parse_sentry_dsn(dsn: str) -> Optional[Dict[str, str]]:
 _SENTRY_TAG_KEYS = (
     "device_id", "app_name", "system_user",
     "tool_name", "domain", "phase", "http_code",
-    "is_root", "used_fallback_user", "homes_enumerated", "users_scanned",
+    "is_root", "is_elevated", "detect_scope",
+    "used_fallback_user", "homes_enumerated", "users_scanned",
+    "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
+    "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
+    "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
+    "user_path_dirs",
+    # Scalars only: entry names are unbounded cardinality, so the listing stays in extra.
+    "install_surfaces_total", "install_surfaces_truncated",
 )
 
 # Per-run guards. report_to_sentry() is wired into ~20 previously log-only paths
@@ -1695,6 +2839,130 @@ _sentry_event_count = 0
 _sentry_consecutive_fails = 0
 _sentry_dead_this_run = False
 
+# Held by reference, so the fields main() adds later (device_id, run_id) reach
+# every event without each call site having to thread the context through.
+_sentry_run_context: Dict = {}
+
+
+def set_sentry_run_context(context: Dict) -> None:
+    """Register the run context merged into every ``report_to_sentry`` event."""
+    global _sentry_run_context
+    _sentry_run_context = context
+
+
+# Binaries found on disk but not attributed; a silent rejection is otherwise
+# indistinguishable from never having found the tool at all.
+_REJECTED_BINARIES_CAP = 10
+_rejected_binaries = []
+
+# VS Code-family app bundles whose extensions dir was found this run. Without it a
+# zero-tool scan on a machine that is plainly using VS Code cannot say whether no
+# install was found at any probed path or one was found and its bundled Copilot
+# folder was absent — the fix differs completely between the two.
+_VSCODE_BUNDLES_CAP = 8
+_vscode_bundles_found = set()
+# Dirs between an app bundle and its extensions dir: <bundle>/Contents/Resources/app
+# on macOS, <install>/resources/app elsewhere, and bare <install> for the Linux
+# distro layout.
+_VSCODE_BUNDLE_TAIL = frozenset({"extensions", "app", "resources", "contents"})
+
+# Both halves of the Cowork gate return a bare None, so absent, denied and never-installed read alike.
+_COWORK_PROBES_CAP = 6
+_cowork_probes = set()
+
+# Same for the Xcode gate, plus the agent subfolders that say which extractors are worth building.
+_XCODE_PROBES_CAP = 8
+_xcode_probes = set()
+
+# Root scans skip the probe by design, so "not_probed" is expected there.
+_npm_prefix_state = "not_probed"
+_NPM_PREFIX_UNSET = object()
+_npm_prefix_cached = _NPM_PREFIX_UNSET
+
+
+def _npm_global_prefix() -> Optional[str]:
+    """``npm prefix -g``, resolved once per run. It reports the SCANNER's npm, so it
+    cannot vary between the tools and users a scan walks, and the resolver is called
+    once per pair — 9 call sites times every profile on the machine."""
+    global _npm_prefix_cached, _npm_prefix_state
+    if _npm_prefix_cached is _NPM_PREFIX_UNSET:
+        prefix = run_command(["npm", "prefix", "-g"], COMMAND_TIMEOUT)
+        _npm_prefix_cached = prefix.strip() if prefix and prefix.strip() else None
+        _npm_prefix_state = "resolved" if _npm_prefix_cached else "unresolved"
+    return _npm_prefix_cached
+
+
+def record_rejected_binary(candidate, reason: str) -> None:
+    """Note a real binary that was found and then not attributed. Never raises."""
+    try:
+        if len(_rejected_binaries) < _REJECTED_BINARIES_CAP:
+            _rejected_binaries.append((str(candidate), reason))
+    except Exception:
+        pass
+
+
+def rejected_binaries() -> list:
+    """The run's rejected binaries as ``(path, reason)`` pairs."""
+    return list(_rejected_binaries)
+
+
+def record_cowork_probe(part: str, state: str) -> None:
+    """Note how one half of the Cowork gate resolved. Never raises."""
+    try:
+        if len(_cowork_probes) < _COWORK_PROBES_CAP:
+            _cowork_probes.add(f"{part}:{state}")
+    except Exception as e:
+        logger.debug("Could not record Cowork probe %r:%r: %s", part, state, e, exc_info=True)
+
+
+def cowork_probes() -> list:
+    """This run's Cowork gate outcomes as ``<part>:<present|absent|unreadable>``."""
+    return sorted(_cowork_probes)
+
+
+def record_xcode_probe(part: str, state: str) -> None:
+    """Note how one part of the Xcode gate resolved. Never raises."""
+    try:
+        if len(_xcode_probes) < _XCODE_PROBES_CAP:
+            _xcode_probes.add(f"{part}:{state}")
+    except Exception as e:
+        logger.debug("Could not record Xcode probe %r:%r: %s", part, state, e, exc_info=True)
+
+
+def xcode_probes() -> list:
+    """This run's Xcode gate outcomes as ``<part>:<state>``."""
+    return sorted(_xcode_probes)
+
+
+def record_vscode_bundle_probe(ext_root) -> None:
+    """Note a VS Code-family app bundle whose extensions dir exists. Never raises."""
+    try:
+        ext_root = Path(ext_root)
+        if not ext_root.is_dir():
+            return
+        parts = list(ext_root.parts)
+        while parts and parts[-1].lower() in _VSCODE_BUNDLE_TAIL:
+            parts.pop()
+        if len(_vscode_bundles_found) < _VSCODE_BUNDLES_CAP:
+            _vscode_bundles_found.add(parts[-1] if parts else str(ext_root))
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def vscode_bundles_probed() -> list:
+    """VS Code-family app bundles found on disk this run."""
+    return sorted(_vscode_bundles_found)
+
+
+def npm_prefix_state() -> str:
+    """Whether ``npm prefix -g`` answered this run: resolved, unresolved, or not_probed.
+
+    An npm-global CLI is found under that prefix, so a scan whose PATH lacks npm
+    never looks where the tool actually is — indistinguishable, until now, from
+    looking and finding nothing.
+    """
+    return _npm_prefix_state
+
 
 def reset_sentry_run_state() -> None:
     """Reset the per-run Sentry dedup / circuit-breaker state."""
@@ -1703,6 +2971,17 @@ def reset_sentry_run_state() -> None:
     _sentry_event_count = 0
     _sentry_consecutive_fails = 0
     _sentry_dead_this_run = False
+    _rejected_binaries.clear()
+    _vscode_bundles_found.clear()
+    _cowork_probes.clear()
+    _login_shell_cache.clear()
+    _safe_helper_cache.clear()
+    reset_vscode_registry_state()
+    global _sentry_run_context
+    _sentry_run_context = {}
+    global _npm_prefix_state, _npm_prefix_cached
+    _npm_prefix_state = "not_probed"
+    _npm_prefix_cached = _NPM_PREFIX_UNSET
 
 
 def _ip_is_loopback(host: str) -> bool:
@@ -1774,7 +3053,8 @@ def report_to_sentry(
             logger.debug("Sentry reporting skipped (no valid DSN configured)")
             return
 
-        ctx = context or {}
+        # Run context first: a per-call key (phase, tool_name) always wins.
+        ctx = {**_sentry_run_context, **(context or {})}
 
         if _is_ci_or_local_event(ctx):
             logger.debug("Sentry reporting skipped (CI/local run)")
@@ -1790,7 +3070,8 @@ def report_to_sentry(
         # Collapse duplicate events and hard-cap the synchronous curls per run.
         # priority events skip the count cap + breaker (but never dedup) so a
         # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
-        signature = (type(exception).__name__, ctx.get("phase"), ctx.get("tool_name"))
+        signature = (type(exception).__name__, ctx.get("phase"),
+                     ctx.get("tool_name"), ctx.get("scan_event"))
         if signature in _sentry_sent_signatures:
             return
         if not priority and _sentry_event_count >= _SENTRY_MAX_EVENTS_PER_RUN:

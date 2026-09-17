@@ -33,16 +33,22 @@ class WindowsCursorDetector(BaseToolDetector):
         cursor_paths = self._get_search_paths()
 
         for cursor_path in cursor_paths:
-            if not cursor_path.exists():
+            # Another user's profile is ACL-denied to a non-elevated scan and Path.exists() re-raises it, hiding the machine-wide candidates; PermissionError only, so any other OSError still propagates and marks the run incomplete instead of pruning a real install.
+            try:
+                if not cursor_path.exists():
+                    continue
+
+                cursor_exe = cursor_path / "Cursor.exe"
+                has_exe = cursor_exe.exists()
+                has_resources = (cursor_path / "resources" / "app").exists()
+            except PermissionError as e:
+                logger.debug(f"Could not probe Cursor path {cursor_path}: {e}")
                 continue
 
-            cursor_exe = cursor_path / "Cursor.exe"
-            has_resources = (cursor_path / "resources" / "app").exists()
-
-            if cursor_exe.exists() or has_resources:
+            if has_exe or has_resources:
                 return {
                     "name": self.tool_name,
-                    "version": self._get_version_for_path(cursor_exe) if cursor_exe.exists() else None,
+                    "version": self._get_version_for_path(cursor_exe) if has_exe else None,
                     "install_path": str(cursor_path)
                 }
 
@@ -58,8 +64,12 @@ class WindowsCursorDetector(BaseToolDetector):
         cursor_paths = self._get_search_paths()
         for cursor_path in cursor_paths:
             cursor_exe = cursor_path / "Cursor.exe"
-            if cursor_exe.exists():
-                return self._get_version_for_path(cursor_exe)
+            try:
+                if cursor_exe.exists():
+                    return self._get_version_for_path(cursor_exe)
+            except PermissionError as e:
+                logger.debug(f"Could not probe Cursor exe {cursor_exe}: {e}")
+                continue
         return None
 
     def _get_search_paths(self) -> List[Path]:
@@ -69,7 +79,8 @@ class WindowsCursorDetector(BaseToolDetector):
         Returns:
             List of Path objects
         """
-        user_home = Path.home()
+        # Scope to this user's home when set, so a multi-user scan can't attribute another user's per-user install.
+        user_home = getattr(self, 'user_home', None) or Path.home()
         return [
             user_home / "AppData" / "Local" / "Programs" / "cursor",
             user_home / "AppData" / "Local" / "Programs" / "Cursor",

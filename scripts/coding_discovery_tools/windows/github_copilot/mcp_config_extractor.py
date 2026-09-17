@@ -3,10 +3,12 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, Dict, List
+from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 from ...mcp_extraction_helpers import (
+    append_vscode_cached_mcp_servers,
     enumerate_vscode_mcp_files,
     extract_ide_global_configs_with_root_support,
     transform_mcp_servers_to_array,
@@ -37,16 +39,15 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         (cross-surface misattribution when both are installed). ``tool_name=None``
         keeps the legacy union. Mirrors the identity-aware rules extractor.
         """
-        name = (tool_name or "").lower()
-        is_vscode = ("vs code" in name) or ("vscode" in name)
-        want_vscode = (not tool_name) or is_vscode
-        want_jetbrains = (not tool_name) or (not is_vscode)
+        editor_dirs = vscode_family_editor_dirs(tool_name)
+        want_vscode = bool(editor_dirs)
+        want_jetbrains = (not tool_name) or not want_vscode
 
         projects = []
 
         if want_vscode:
             # VS Code global + workspace .vscode/mcp.json (JetBrains doesn't read it).
-            projects.extend(self._extract_vscode_configs())
+            projects.extend(self._extract_vscode_configs(editor_dirs))
             projects.extend(self._extract_workspace_configs())
 
         if want_jetbrains:
@@ -59,16 +60,16 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
             "projects": projects
         }
 
-    def _extract_vscode_configs(self) -> List[Dict]:
+    def _extract_vscode_configs(self, editor_dirs: List[str]) -> List[Dict]:
         """
         Extract global MCP configs from VS Code.
         """
         return extract_ide_global_configs_with_root_support(
-            self._extract_vscode_configs_for_user,
+            lambda user_home: self._extract_vscode_configs_for_user(user_home, editor_dirs),
             tool_name="GitHub Copilot (VS Code)"
         )
 
-    def _extract_vscode_configs_for_user(self, user_home: Path) -> List[Dict]:
+    def _extract_vscode_configs_for_user(self, user_home: Path, editor_dirs: List[str]) -> List[Dict]:
         """
         Extract VS Code MCP configs for a specific user.
 
@@ -81,16 +82,21 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         configs: List[Dict] = []
 
         appdata_roaming = user_home / "AppData" / "Roaming"
-        code_user_bases = [
-            appdata_roaming / "Code" / "User",
-            appdata_roaming / "Code - Insiders" / "User",
-        ]
+        code_user_bases = [appdata_roaming / editor / "User" for editor in editor_dirs]
+        if "Code" in editor_dirs:
+            code_user_bases.append(appdata_roaming / "Code - Insiders" / "User")
 
         for code_user_base in code_user_bases:
             for mcp_file in enumerate_vscode_mcp_files(code_user_base):
                 config = self._read_mcp_config(mcp_file, str(mcp_file.parent))
                 if config:
                     configs.append(config)
+            append_vscode_cached_mcp_servers(
+                configs,
+                code_user_base,
+                user_home,
+                "windows",
+            )
 
         return configs
 
@@ -168,7 +174,8 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         try:
             for item in current_dir.iterdir():
                 try:
-                    if should_skip_path(item, system_dirs):
+                    # .vscode is in SKIP_DIRS; exempt the leaf so the check below is reachable.
+                    if item.name != ".vscode" and should_skip_path(item, system_dirs):
                         continue
 
                     try:
@@ -179,12 +186,12 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
                         continue
 
                     if item.is_dir():
-                        if item.name in SKIP_DIRS and item.name != ".vscode":
+                        if is_symlink_or_junction(item):
                             continue
                         if item.name == ".vscode":
                             self._check_vscode_mcp(item, configs)
                             continue
-                        if item.is_symlink():
+                        if item.name in SKIP_DIRS:
                             continue
                         self._walk_for_workspace_mcp(root_path, item, configs, system_dirs, current_depth + 1)
 
@@ -204,7 +211,9 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         Check a .vscode directory for mcp.json and extract its config.
         """
         mcp_json = vscode_dir / "mcp.json"
-        if mcp_json.exists() and mcp_json.is_file():
+        if is_symlink_or_junction(mcp_json):
+            return
+        if mcp_json.is_file():
             project_root = str(vscode_dir.parent)
             config = self._read_mcp_config(mcp_json, project_root)
             if config:

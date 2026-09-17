@@ -498,7 +498,6 @@ _MCP_MOD = (
 _MCP_HELPERS_MOD = "scripts.coding_discovery_tools.mcp_extraction_helpers"
 
 
-@unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot CLI extractor")
 class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
     """Workspace ``.mcp.json`` at a project root is surfaced for the CLI.
 
@@ -530,6 +529,7 @@ class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
         ):
             return self.extractor._extract_workspace_configs()
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot CLI extractor")
     def test_workspace_mcp_json_surfaces_serena(self):
         self._write(self.repo / ".mcp.json", {
             "mcpServers": {"serena": {"command": "uvx", "args": ["serena"]}},
@@ -550,6 +550,7 @@ class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
     def test_no_workspace_mcp_json_yields_nothing(self):
         self.assertEqual(self._scan_workspace(), [])
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot CLI extractor")
     def test_extract_mcp_config_combines_user_and_workspace(self):
         """``extract_mcp_config`` merges the User config dir and Workspace repo
         into distinct project rows (the orchestrator lists both on the CLI)."""
@@ -578,6 +579,7 @@ class TestCopilotCliWorkspaceMcpExtraction(unittest.TestCase):
             {s["name"] for s in by_path[str(self.repo)]["mcpServers"]}, {"serena"}
         )
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot CLI extractor")
     def test_end_to_end_workspace_serena_on_cli_row(self):
         """Guarantee for the reported user: serena in a repo's ``.mcp.json`` lands
         on the GitHub Copilot CLI tool row via the orchestrator branch."""

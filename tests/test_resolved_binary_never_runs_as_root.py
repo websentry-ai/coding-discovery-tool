@@ -23,7 +23,6 @@ _MOD = "scripts.coding_discovery_tools.utils"
 
 
 @unittest.skipIf(os.name == "nt", "_is_safe_exec_path is a no-op on Windows")
-@unittest.skipUnless(sys.platform == "darwin", "asserts macOS helper paths (launchctl)")
 class TestResolvedBinaryNeverRunsAsRoot(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -108,6 +107,7 @@ class TestResolvedBinaryNeverRunsAsRoot(unittest.TestCase):
             U.get_claude_subscription_type("alice", str(self.binary), user_home=self.home)
         return calls
 
+    @unittest.skipUnless(sys.platform == "darwin", "asserts the macOS helper path for launchctl")
     def test_root_execs_resolve_to_absolute_helpers(self):
         """launchctl and sudo run before any privilege drop, so PATH must not pick them."""
         calls = self._plan_probe_calls(lambda name: f"/sbin/{name}")

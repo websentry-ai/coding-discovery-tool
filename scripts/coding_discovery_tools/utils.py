@@ -692,7 +692,19 @@ def install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:
     Diagnostic only, for the zero-tool event: every detector gates on a hard-coded
     path, so a name sitting here that we did not report is a path bug rather than
     an empty machine. Returns (surfaces, total_entries, truncated).
+
+    The whole body is guarded, not just the per-surface probes: the caller's own
+    handler wraps the entire event, so anything raised here would take the
+    pre-existing discriminators down with it instead of dropping this field alone.
     """
+    try:
+        return _install_surface_listing(user_homes)
+    except Exception as surface_err:
+        logger.debug(f"Install-surface listing failed: {surface_err}")
+        return {}, 0, False
+
+
+def _install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:
     surfaces: Dict[str, Dict] = {}
     total = 0
     truncated = False

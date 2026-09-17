@@ -7,6 +7,7 @@ on macOS to avoid code duplication.
 
 import logging
 import os
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -17,6 +18,39 @@ from .mcp_extraction_helpers import is_home_dotdir_descendant
 logger = logging.getLogger(__name__)
 
 MACHINE_APPS_DIR = Path("/Applications")
+
+
+def path_scope_root(candidate: Path, user_home: Path) -> Optional[Path]:
+    """The root that owns ``candidate``: machine-wide, or the scanned user's home."""
+    if candidate.parent == MACHINE_APPS_DIR:
+        return MACHINE_APPS_DIR
+    return user_home if user_home in candidate.parents else None
+
+
+def path_in_scope(candidate: Path, user_home: Path) -> bool:
+    """True when ``candidate`` is really inside a root we attribute to this user.
+
+    Lexical containment is not enough: a link anywhere below the root redirects out
+    of it, and ``dir_state`` follows links, so one user's evidence could be attributed
+    to another. Every component below the root is checked, hidden ones (``.Trash``)
+    rejected outright. A component we cannot lstat is kept, not dropped: unknown is
+    not absence.
+    """
+    root = path_scope_root(candidate, user_home)
+    if root is None:
+        return False
+    current = root
+    for part in candidate.relative_to(root).parts:
+        if part.startswith("."):
+            return False
+        current = current / part
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError:
+            return True
+        if stat.S_ISLNK(mode):
+            return False
+    return True
 
 
 def macos_app_candidates(app_path: Path, user_home: Optional[Path] = None) -> List[Path]:

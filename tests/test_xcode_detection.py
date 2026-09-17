@@ -2,8 +2,11 @@
 
 Xcode ships on most developer Macs, so the app bundle alone must not produce a
 tool row — detection AND-requires the per-user CodingAssistant tree that Apple
-documents for agent config, MCP servers and skills. A denied read of that tree
-must raise rather than report the clean absence that would permit a prune.
+documents for agent config, MCP servers and skills.
+
+The gate's failure modes matter as much as its success: a denied read and a
+failed probe must both reach the anomaly path, because only a clean absence may
+let the backend prune a live install.
 """
 
 import plistlib
@@ -12,12 +15,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import scripts.coding_discovery_tools.macos_extraction_helpers as helpers_mod
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
 from scripts.coding_discovery_tools.macos.xcode import MacOSXcodeDetector
 from scripts.coding_discovery_tools.macos.xcode import xcode as xcode_mod
 
 _ASSISTANT = Path("Library") / "Developer" / "Xcode" / "CodingAssistant"
+_MOD = "scripts.coding_discovery_tools.macos.xcode.xcode"
 
 
 def _make_bundle(app: Path, version: str = "26.1") -> None:
@@ -36,11 +41,12 @@ class XcodeDetectionTests(unittest.TestCase):
         self.home.mkdir(parents=True)
         self.apps = root / "Applications"
         self.apps.mkdir()
-        # Neither xcode-select nor mdfind may answer for the scanner's own Mac.
+        # Both probes answer "ran, found nothing" unless a test says otherwise.
         patches = [
             patch.object(xcode_mod, "MACHINE_APPS_DIR", self.apps),
-            patch.object(xcode_mod, "_active_developer_bundle", lambda: None),
-            patch.object(xcode_mod, "run_command", lambda *a, **k: None),
+            patch.object(helpers_mod, "MACHINE_APPS_DIR", self.apps),
+            patch(f"{_MOD}._active_developer_bundle", lambda: (None, True)),
+            patch(f"{_MOD}._spotlight_candidates", lambda home: ([], True)),
         ]
         for p in patches:
             p.start()
@@ -77,29 +83,50 @@ class XcodeDetectionTests(unittest.TestCase):
         _make_bundle(self.home / "Applications" / "Xcode.app", "26.2")
         (self.home / _ASSISTANT / "gemini").mkdir(parents=True)
 
-        row = self._detector().detect()
+        self.assertEqual(self._detector().detect()["version"], "26.2")
 
-        self.assertEqual(row["version"], "26.2")
-
-    def test_all_agent_dirs_are_probed(self):
+    def test_unknown_agent_dirs_are_counted_never_named(self):
         _make_bundle(self.apps / "Xcode.app")
-        for name in ("ClaudeAgentConfig", "codex", "gemini"):
+        for name in ("ClaudeAgentConfig", "codex", "s3-creds-backup"):
             (self.home / _ASSISTANT / name).mkdir(parents=True)
 
         self._detector().detect()
 
-        self.assertIn("agents:ClaudeAgentConfig+codex+gemini", utils_mod.xcode_probes())
+        self.assertIn("agents:ClaudeAgentConfig+codex+other:1", utils_mod.xcode_probes())
+        self.assertNotIn("s3-creds-backup", ",".join(utils_mod.xcode_probes()))
 
     def test_denied_coding_assistant_raises_instead_of_reporting_absent(self):
         _make_bundle(self.apps / "Xcode.app")
         (self.home / _ASSISTANT).mkdir(parents=True)
-        denied = self.home / "Library" / "Developer" / "Xcode"
-        denied.chmod(0o000)
-        self.addCleanup(denied.chmod, 0o755)
 
-        with self.assertRaises(PermissionError):
-            self._detector().detect()
+        with patch(f"{_MOD}.dir_state", return_value="unreadable"):
+            with self.assertRaises(PermissionError):
+                self._detector().detect()
         self.assertIn("coding_assistant:unreadable", utils_mod.xcode_probes())
+
+    def test_denied_agent_listing_is_not_reported_as_none(self):
+        _make_bundle(self.apps / "Xcode.app")
+        (self.home / _ASSISTANT).mkdir(parents=True)
+
+        with patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
+            self._detector().detect()
+
+        self.assertIn("agents:unreadable", utils_mod.xcode_probes())
+
+    def test_failed_probe_raises_rather_than_reporting_absent(self):
+        (self.home / _ASSISTANT / "codex").mkdir(parents=True)
+
+        with patch(f"{_MOD}._spotlight_candidates", lambda home: ([], False)):
+            with self.assertRaises(PermissionError):
+                self._detector().detect()
+        self.assertIn("bundle:unknown", utils_mod.xcode_probes())
+
+    def test_redirected_coding_assistant_is_out_of_scope(self):
+        _make_bundle(self.apps / "Xcode.app")
+
+        with patch(f"{_MOD}.path_in_scope", return_value=False):
+            self.assertIsNone(self._detector().detect())
+        self.assertIn("coding_assistant:redirected", utils_mod.xcode_probes())
 
 
 class XcodeFactoryTests(unittest.TestCase):

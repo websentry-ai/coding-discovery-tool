@@ -571,3 +571,101 @@ class TestStagingParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSinglePassGuarantee(unittest.TestCase):
+    """The filesystem is read once per subtree, not once per tool. Nothing else
+    asserts it: a skip_id that stops matching leaves every other test passing."""
+
+    def setUp(self):
+        clear_cache()
+        self.addCleanup(clear_cache)
+
+    def _tree(self, root):
+        for rel in ("proj_a/.cursor", "proj_b/.windsurf", "proj_c/nested/.roo"):
+            (Path(root) / rel).mkdir(parents=True)
+
+    def _counted_scandir(self):
+        """Wrap os.scandir inside the module under test and record the dirs listed."""
+        calls = []
+        real = os.scandir
+
+        def counting(path):
+            calls.append(str(path))
+            return real(path)
+
+        return calls, counting
+
+    def test_second_tool_adds_no_filesystem_listings(self):
+        with TemporaryDirectory() as tmp:
+            self._tree(tmp)
+            root = Path(tmp)
+            calls, counting = self._counted_scandir()
+            orig = pdi.os.scandir
+            pdi.os.scandir = counting
+            try:
+                get_subtree_index(root, root, _never_skip, "shared-id")
+                first = len(calls)
+                self.assertGreater(first, 0, "no listing happened at all")
+                # A second tool with the same prune must be served from the cache.
+                get_subtree_index(root, root, _never_skip, "shared-id")
+                self.assertEqual(
+                    len(calls), first,
+                    "second tool re-listed the tree; the shared index is not being hit",
+                )
+            finally:
+                pdi.os.scandir = orig
+
+    def test_each_directory_is_listed_exactly_once_per_build(self):
+        with TemporaryDirectory() as tmp:
+            self._tree(tmp)
+            root = Path(tmp)
+            calls, counting = self._counted_scandir()
+            orig = pdi.os.scandir
+            pdi.os.scandir = counting
+            try:
+                get_subtree_index(root, root, _never_skip, "once-id")
+            finally:
+                pdi.os.scandir = orig
+            self.assertEqual(
+                sorted(calls), sorted(set(calls)),
+                f"a directory was listed more than once: {calls}",
+            )
+
+    def test_a_different_prune_id_does_not_share_the_index(self):
+        # Correctness side of the same coin: sharing across prunes would serve one
+        # tool an index built under another tool's skip rules.
+        with TemporaryDirectory() as tmp:
+            self._tree(tmp)
+            root = Path(tmp)
+            calls, counting = self._counted_scandir()
+            orig = pdi.os.scandir
+            pdi.os.scandir = counting
+            try:
+                get_subtree_index(root, root, _never_skip, "prune-a")
+                first = len(calls)
+                get_subtree_index(root, root, _never_skip, "prune-b")
+                self.assertGreater(
+                    len(calls), first,
+                    "a different skip_id reused the cached tree; prunes are not isolated",
+                )
+            finally:
+                pdi.os.scandir = orig
+
+    def test_a_second_scan_in_one_process_sees_new_directories(self):
+        # One scan per process today, so staleness is unreachable; this pins the
+        # constraint for a caller that loops without clear_cache().
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "proj_a/.cursor").mkdir(parents=True)
+            first = get_subtree_index(root, root, _never_skip, "lifetime-id")
+            self.assertIn(".cursor", first)
+            (root / "proj_b/.windsurf").mkdir(parents=True)
+            stale = get_subtree_index(root, root, _never_skip, "lifetime-id")
+            self.assertNotIn(
+                ".windsurf", stale,
+                "cache is not process-lifetime; the staleness constraint changed",
+            )
+            clear_cache()
+            fresh = get_subtree_index(root, root, _never_skip, "lifetime-id")
+            self.assertIn(".windsurf", fresh)

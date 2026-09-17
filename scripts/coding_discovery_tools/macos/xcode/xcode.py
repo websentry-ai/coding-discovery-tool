@@ -66,20 +66,20 @@ def agent_summary(assistant_dir: Path) -> str:
     return "+".join(known)[:_MAX_AGENT_PROBE_LEN] or "none"
 
 
-def _active_developer_bundle() -> Tuple[Optional[Path], bool]:
-    """``(bundle, probed)`` for the Xcode ``xcode-select`` points at.
+def _active_developer_bundle() -> Optional[Path]:
+    """The Xcode ``xcode-select`` points at, as a fast path only.
 
-    ``probed`` is False only when the command could not run. A clean answer that
-    names no bundle — Command Line Tools only, or no developer dir — is absence.
+    Never an absence oracle: it exits non-zero when no developer dir is set, which
+    is indistinguishable from a failure, and it names Command Line Tools rather than
+    a bundle on a CLT-only Mac. Spotlight decides absence.
     """
     output, ran = run_command_status(["xcode-select", "-p"], COMMAND_TIMEOUT)
-    if not ran:
-        return None, False
-    if output:
-        for parent in Path(output).parents:
-            if parent.suffix == ".app":
-                return parent, True
-    return None, True
+    if not ran or not output:
+        return None
+    for parent in Path(output).parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
 
 
 def _spotlight_candidates(user_home: Path) -> Tuple[List[Path], bool]:
@@ -148,7 +148,7 @@ class MacOSXcodeDetector(BaseToolDetector):
         home = self._scan_home(user_home)
         outcome = "absent"
 
-        active, active_probed = _active_developer_bundle()
+        active = _active_developer_bundle()
         fixed = [MACHINE_APPS_DIR / "Xcode.app", home / "Applications" / "Xcode.app"]
         for candidate in ([active] if active else []) + fixed:
             if not path_in_scope(candidate, home):
@@ -169,7 +169,7 @@ class MacOSXcodeDetector(BaseToolDetector):
             if state == "unreadable":
                 outcome = "unreadable"
 
-        if outcome == "absent" and not (active_probed and spotlight_probed):
+        if outcome == "absent" and not spotlight_probed:
             outcome = "unknown"
         record_xcode_probe("bundle", outcome)
         if outcome != "absent":

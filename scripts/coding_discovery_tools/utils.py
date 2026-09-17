@@ -136,8 +136,8 @@ def run_command_status(command: list, timeout: int = COMMAND_TIMEOUT) -> Tuple[O
     """``(output, ran)`` — like ``run_command``, but says whether it got to run.
 
     ``run_command`` returns None both for a clean search that matched nothing and
-    for a timeout, so a caller cannot tell absence from ignorance. ``ran`` is False
-    only when the process could not be executed; a non-zero exit is still an answer.
+    for a timeout, so a caller cannot tell absence from ignorance. ``ran`` is True
+    only for a clean exit-zero run, so a caller may read an empty output as absence.
     """
     command = safe_exec_argv(command)
     if command is None:
@@ -147,8 +147,10 @@ def run_command_status(command: list, timeout: int = COMMAND_TIMEOUT) -> Tuple[O
     except Exception as e:
         logger.debug(f"Command {command} failed: {e}")
         return None, False
-    output = result.stdout.strip() if result.returncode == 0 else ""
-    return (output or None), True
+    if result.returncode != 0:
+        logger.debug(f"Command {command} exited {result.returncode}")
+        return None, False
+    return (result.stdout.strip() or None), True
 
 
 LOGIN_SHELL_TIMEOUT = 10

@@ -12,6 +12,7 @@ let the backend prune a live install.
 import plistlib
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,7 +46,7 @@ class XcodeDetectionTests(unittest.TestCase):
         patches = [
             patch.object(xcode_mod, "MACHINE_APPS_DIR", self.apps),
             patch.object(helpers_mod, "MACHINE_APPS_DIR", self.apps),
-            patch(f"{_MOD}._active_developer_bundle", lambda: (None, True)),
+            patch(f"{_MOD}._active_developer_bundle", lambda: None),
             patch(f"{_MOD}._spotlight_candidates", lambda home: ([], True)),
         ]
         for p in patches:
@@ -136,11 +137,21 @@ class XcodeDetectionTests(unittest.TestCase):
         _make_bundle(app, "26.3")
         self.assertEqual(xcode_mod._read_bundle_version(app), "26.3")
 
-    def test_empty_search_is_absence_but_a_dead_binary_is_unknown(self):
-        real = utils_mod.run_command_status
-        self.assertEqual(real(["mdfind", "kMDItemCFBundleIdentifier == 'com.nope.nothing'"]),
-                         (None, True))
-        self.assertEqual(real(["definitely-not-a-binary-xyz"]), (None, False))
+    def test_run_command_status_separates_absence_from_ignorance(self):
+        """Platform-agnostic: no real binary is invoked, since mdfind is macOS-only
+        and the test matrix also runs Windows."""
+        def result(returncode, stdout=""):
+            return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+        with patch("subprocess.run", return_value=result(0, "")):
+            self.assertEqual(utils_mod.run_command_status(["mdfind", "q"]), (None, True))
+        with patch("subprocess.run", return_value=result(0, "/Applications/Xcode.app\n")):
+            self.assertEqual(utils_mod.run_command_status(["mdfind", "q"]),
+                             ("/Applications/Xcode.app", True))
+        with patch("subprocess.run", return_value=result(2, "")):
+            self.assertEqual(utils_mod.run_command_status(["mdfind", "q"]), (None, False))
+        with patch("subprocess.run", side_effect=FileNotFoundError("no such binary")):
+            self.assertEqual(utils_mod.run_command_status(["mdfind", "q"]), (None, False))
 
     def test_redirected_coding_assistant_is_out_of_scope(self):
         _make_bundle(self.apps / "Xcode.app")

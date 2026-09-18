@@ -2830,7 +2830,7 @@ _SENTRY_TAG_KEYS = (
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
-    "xcode_probe", "copilot_xcode_probe", "user_path_dirs",
+    "xcode_probe", "copilot_xcode_probe", "copilot_app_probe", "user_path_dirs",
     # Scalars only: entry names are unbounded cardinality, so the listing stays in extra.
     "install_surfaces_total", "install_surfaces_truncated",
 )
@@ -2890,6 +2890,7 @@ _cowork_probes = set()
 _XCODE_PROBES_CAP = 8
 _xcode_probes = set()
 _copilot_xcode_probes = set()
+_copilot_app_probes = set()
 
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
@@ -2963,6 +2964,20 @@ def record_copilot_xcode_probe(part: str, state: str) -> None:
 def copilot_xcode_probes() -> list:
     """This run's Copilot for Xcode gate outcomes as ``<part>:<state>``."""
     return sorted(_copilot_xcode_probes)
+
+
+def record_copilot_app_probe(part: str, state: str) -> None:
+    """Note how one Copilot app install dir resolved. Never raises."""
+    try:
+        if len(_copilot_app_probes) < _XCODE_PROBES_CAP:
+            _copilot_app_probes.add(f"{part}:{state}")
+    except Exception as e:
+        logger.debug("Could not record Copilot app probe %r:%r: %s", part, state, e, exc_info=True)
+
+
+def copilot_app_probes() -> list:
+    """This run's Copilot app install-dir outcomes as ``<part>:<state>``."""
+    return sorted(_copilot_app_probes)
 
 
 def record_vscode_bundle_probe(ext_root) -> None:

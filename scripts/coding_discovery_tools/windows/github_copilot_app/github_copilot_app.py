@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from ...coding_tool_base import BaseToolDetector
-from ...utils import dir_state, windows_program_files_roots
+from ...utils import dir_state, record_copilot_app_probe, windows_program_files_roots
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ class WindowsGitHubCopilotAppDetector(BaseToolDetector):
         outcome = "absent"
         for install_dir in self._install_dirs(user_home):
             state = _install_state(install_dir)
+            record_copilot_app_probe(install_dir.name, state)
             if state == "present":
                 return {
                     "name": self.tool_name,

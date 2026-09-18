@@ -94,17 +94,21 @@ class GitHubCopilotAppTests(unittest.TestCase):
         detector.user_home = self.home
         return detector
 
+    def _install(self, parent, name="GitHubCopilot"):
+        install = parent / name
+        install.mkdir(parents=True)
+        (install / "copilot-desktop.exe").write_text("")
+        return install
+
     def test_machine_wide_install_is_detected(self):
-        install = self.program_files / "GitHubCopilot"
-        install.mkdir()
+        install = self._install(self.program_files)
         with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
             result = self._detector().detect()
         self.assertEqual(result["name"], "GitHub Copilot App")
         self.assertEqual(result["install_path"], str(install))
 
     def test_per_user_install_is_detected(self):
-        install = self.home / "AppData" / "Local" / "Programs" / "GitHub Copilot"
-        install.mkdir(parents=True)
+        install = self._install(self.home / "AppData" / "Local" / "Programs", "GitHub Copilot")
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(self._detector().detect()["install_path"], str(install))
 
@@ -113,9 +117,7 @@ class GitHubCopilotAppTests(unittest.TestCase):
             self.assertIsNone(self._detector().detect())
 
     def test_nothing_inside_the_directory_is_executed(self):
-        install = self.program_files / "GitHubCopilot"
-        install.mkdir()
-        (install / "copilot-desktop.exe").write_text("")
+        self._install(self.program_files)
         with patch.object(utils_mod, "run_command") as run:
             with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
                 result = self._detector().detect()
@@ -126,11 +128,22 @@ class GitHubCopilotAppTests(unittest.TestCase):
     def test_the_cli_detector_does_not_claim_the_app(self):
         """The app dir holds no `copilot.exe`, and the CLI resolver must not
         reach into it regardless."""
-        install = self.program_files / "GitHubCopilot"
-        install.mkdir()
-        (install / "copilot-desktop.exe").write_text("")
+        self._install(self.program_files)
         with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
             self.assertIsNone(WindowsCopilotCliDetector._resolve_windows_binary(self.home))
+
+    def test_empty_directory_left_by_an_uninstall_is_not_an_install(self):
+        (self.program_files / "GitHubCopilot").mkdir()
+        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+            self.assertIsNone(self._detector().detect())
+
+    def test_unreadable_directory_raises_instead_of_reporting_absence(self):
+        install = self.program_files / "GitHubCopilot"
+        install.mkdir()
+        with patch.object(Path, "glob", side_effect=PermissionError("denied")):
+            with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+                with self.assertRaises(PermissionError):
+                    self._detector().detect()
 
     def test_registered_on_windows_only(self):
         self.assertIsInstance(

@@ -4,19 +4,37 @@ Path.is_dir() answers False when stat fails; DirEntry.is_dir() raises. Those are
 only interchangeable when a raise skips exactly the one entry, which is true when
 the try/except sits INSIDE the loop and false when it wraps the whole loop.
 """
-import os, stat, tempfile, unittest
+import os, shutil, tempfile, unittest
 from pathlib import Path
-from unittest import mock
+
+
+def _symlinks_available():
+    """Windows only grants symlink creation to elevated or developer-mode users,
+    so the symlink cases are skipped there rather than failing the run."""
+    probe = tempfile.mkdtemp()
+    try:
+        os.symlink(os.path.join(probe, "target"), os.path.join(probe, "link"))
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
+SYMLINKS = _symlinks_available()
+needs_symlinks = unittest.skipUnless(SYMLINKS, "symlink creation is not permitted here")
 
 
 class TestPredicateEquivalence(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.d = Path(self.tmp)
         (self.d / "sub").mkdir()
         (self.d / "f.txt").write_text("x")
-        os.symlink(str(self.d / "sub"), str(self.d / "lnk"))
-        os.symlink(str(self.d / "nope"), str(self.d / "broken"))
+        if SYMLINKS:
+            os.symlink(str(self.d / "sub"), str(self.d / "lnk"))
+            os.symlink(str(self.d / "nope"), str(self.d / "broken"))
 
     def test_predicates_agree_on_every_entry_type(self):
         """dir, file, symlink-to-dir and broken symlink must answer identically."""
@@ -26,12 +44,14 @@ class TestPredicateEquivalence(unittest.TestCase):
             self.assertEqual(de.is_file(), p.is_file(), f"is_file differs for {de.name}")
             self.assertEqual(de.is_symlink(), p.is_symlink(), f"is_symlink differs for {de.name}")
 
+    @needs_symlinks
     def test_symlink_to_dir_is_followed_by_both(self):
         de = next(e for e in os.scandir(self.d) if e.name == "lnk")
         self.assertTrue(de.is_dir())            # follows, like Path.is_dir()
         self.assertTrue(Path(de.path).is_dir())
         self.assertTrue(de.is_symlink())
 
+    @needs_symlinks
     def test_broken_symlink_is_not_a_dir_for_either(self):
         de = next(e for e in os.scandir(self.d) if e.name == "broken")
         self.assertFalse(de.is_dir())

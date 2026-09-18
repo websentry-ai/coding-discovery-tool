@@ -93,7 +93,8 @@ class TestClaudeDesktopDetect(unittest.TestCase):
         here sets incomplete_reasons, which nulls the manifest device-wide."""
         with patch(f"{_MOD}.dir_state", return_value="unreadable"), \
                 patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=False), \
-                patch(f"{_UTILS_MOD}._is_root", return_value=False):
+                patch(f"{_UTILS_MOD}._is_root", return_value=False), \
+                patch(f"{_UTILS_MOD}._windows_process_is_elevated", return_value=False):
             self.assertIsNone(self.detector.detect())
 
     def test_spotlight_that_could_not_run_does_not_read_as_absent(self):

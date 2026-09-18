@@ -2521,8 +2521,6 @@ class AIToolsDetector:
         if tool_name == "github copilot cli":
             return self._process_copilot_cli_tool(tool)
 
-        # The desktop app reads no IDE config, so the substring branch below
-        # would attach another surface's rules and JetBrains MCP servers.
         if tool_name == "github copilot app":
             return {
                 "name": tool.get("name"),
@@ -4054,7 +4052,6 @@ def main():
                     # Same for Xcode, plus the agent subfolders a CodingAssistant tree holds.
                     "xcode_probe": ",".join(xcode_probes()),
                     "copilot_xcode_probe": ",".join(copilot_xcode_probes()),
-                    # Which Copilot app install dir was absent, and whether it was denied.
                     "copilot_app_probe": ",".join(copilot_app_probes()),
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),

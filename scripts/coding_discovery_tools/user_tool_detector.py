@@ -800,9 +800,8 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
         ]
         # The enterprise installer's root, already named by the managed rules,
         # settings and MCP extractors. Probed after the per-user paths so a
-        # user's own install still wins. Deliberately NOT machine_global: admin
-        # rights are needed to write here and every profile can run it, so it
-        # attributes to each scanned user like a root-owned /usr/bin/claude.
+        # user's own install still wins. Not machine_global: every profile can
+        # run it, so it attributes to each scanned user.
         candidates += [
             root / "ClaudeCode" / "claude.exe" for root in windows_program_files_roots()
         ]

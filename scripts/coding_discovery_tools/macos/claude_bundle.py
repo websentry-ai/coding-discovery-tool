@@ -9,11 +9,11 @@ rather than being duplicated in either detector.
 import logging
 import plistlib
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from ..constants import COMMAND_TIMEOUT
 from ..macos_extraction_helpers import path_in_scope
-from ..utils import dir_state, run_command
+from ..utils import dir_state, run_command_status
 
 logger = logging.getLogger(__name__)
 
@@ -41,22 +41,22 @@ def claude_app_support_dir(user_home: Path) -> Path:
     return user_home / "Library" / "Application Support" / "Claude"
 
 
-def spotlight_claude_bundles(user_home: Path) -> List[Path]:
-    """In-scope Claude.app bundles Spotlight knows about, best-effort and possibly empty.
+def spotlight_claude_bundles(user_home: Path) -> Tuple[List[Path], bool]:
+    """``(bundles, probed)`` for in-scope Claude.app bundles Spotlight knows about.
 
     Last resort only: the fixed paths miss an install anywhere else, and a user
-    whose bundle we cannot find reports as having no tool at all. Returns
-    candidates rather than an answer so the caller applies the same present /
-    unreadable handling it gives the fixed paths.
+    whose bundle we cannot find reports as having no tool at all. A search that
+    ran and matched nothing is absence; one that could not run is ignorance, and
+    reading that as absence is what pruned live Cowork rows in incident 326.
     """
-    output = run_command(["mdfind", f"kMDItemCFBundleIdentifier == '{CLAUDE_BUNDLE_ID}'"],
-                         COMMAND_TIMEOUT)
-    if not output:
-        logger.debug("Spotlight gave no answer for %s: absent, unindexed, denied under root, "
-                     "or mdfind unavailable", CLAUDE_BUNDLE_ID)
-        return []
+    output, ran = run_command_status(
+        ["mdfind", f"kMDItemCFBundleIdentifier == '{CLAUDE_BUNDLE_ID}'"], COMMAND_TIMEOUT
+    )
+    if not ran:
+        logger.debug("Spotlight could not run for %s", CLAUDE_BUNDLE_ID)
+        return [], False
     found = []
-    for line in output.splitlines():
+    for line in (output or "").splitlines():
         candidate = Path(line.strip())
         if candidate.suffix != ".app":
             continue
@@ -64,14 +64,15 @@ def spotlight_claude_bundles(user_home: Path) -> List[Path]:
             logger.debug("Ignoring out-of-scope Spotlight hit %s for %s", candidate, user_home)
             continue
         found.append(candidate)
-    return found
+    return found, True
 
 
 def resolve_claude_bundle(user_home: Path, on_probe: Optional[Callable[[str, str], None]] = None) -> Optional[Path]:
     """First readable Claude.app for this user: fixed paths first, Spotlight only if they miss.
 
-    Raises PermissionError when a candidate exists but cannot be read, so the
-    caller reports the install as unknown rather than absent.
+    Raises PermissionError when a candidate exists but cannot be read, or when
+    Spotlight never ran, so the caller reports the install as unknown rather
+    than absent. Only a probe that ran and found nothing means absent.
     """
     def probe(outcome: str) -> None:
         if on_probe:
@@ -85,7 +86,9 @@ def resolve_claude_bundle(user_home: Path, on_probe: Optional[Callable[[str, str
             return candidate
         if state == "unreadable":
             outcome = "unreadable"
-    for candidate in spotlight_claude_bundles(user_home):
+
+    candidates, probed = spotlight_claude_bundles(user_home)
+    for candidate in candidates:
         state = dir_state(candidate)
         if state == "present":
             probe("spotlight")
@@ -93,9 +96,12 @@ def resolve_claude_bundle(user_home: Path, on_probe: Optional[Callable[[str, str
         logger.debug("Spotlight hit %s is %s; trying the next result", candidate, state)
         if state == "unreadable":
             outcome = "unreadable"
+    if outcome == "absent" and not probed:
+        outcome = "unprobed"
+
     probe(outcome)
-    if outcome == "unreadable":
-        raise PermissionError("Claude Desktop install dir unreadable")
+    if outcome in ("unreadable", "unprobed"):
+        raise PermissionError(f"Claude Desktop install dir {outcome} under {user_home}")
     return None
 
 

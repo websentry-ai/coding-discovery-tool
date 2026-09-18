@@ -31,6 +31,7 @@ class MacOSClaudeDesktopMCPConfigExtractor(BaseMCPConfigExtractor):
         projects = self._extract_global_config()
 
         if not projects:
+            logger.debug("No Claude Desktop MCP config at %s", self.GLOBAL_MCP_CONFIG_PATH)
             return None
 
         return {

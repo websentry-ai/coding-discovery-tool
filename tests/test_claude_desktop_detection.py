@@ -17,6 +17,8 @@ from scripts.coding_discovery_tools.macos.claude_desktop import (
 )
 
 _BUNDLE_MOD = "scripts.coding_discovery_tools.macos.claude_bundle"
+_MOD = "scripts.coding_discovery_tools.macos.claude_desktop.claude_desktop"
+_UTILS_MOD = "scripts.coding_discovery_tools.utils"
 
 
 def _make_bundle(app: Path, version="1.2.3"):
@@ -38,7 +40,7 @@ class TestClaudeDesktopDetect(unittest.TestCase):
         patcher = patch(f"{_BUNDLE_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app")
         patcher.start()
         self.addCleanup(patcher.stop)
-        mdfind = patch(f"{_BUNDLE_MOD}.run_command", return_value=None)
+        mdfind = patch(f"{_BUNDLE_MOD}.run_command_status", return_value=(None, True))
         mdfind.start()
         self.addCleanup(mdfind.stop)
         self.addCleanup(self._tmp.cleanup)
@@ -78,6 +80,29 @@ class TestClaudeDesktopDetect(unittest.TestCase):
 
         with patch(f"{_BUNDLE_MOD}.Path.home", return_value=scanner_home):
             self.assertIsNone(self.detector.detect())
+
+    def test_unreadable_data_dir_raises_for_our_own_home(self):
+        """Our own home denied is a real anomaly: raise so nothing is pruned."""
+        with patch(f"{_MOD}.dir_state", return_value="unreadable"), \
+                patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                self.detector.detect()
+
+    def test_unreadable_sibling_home_does_not_fail_the_scan(self):
+        """A 0700 sibling is expected on an unprivileged multi-user box. Raising
+        here sets incomplete_reasons, which nulls the manifest device-wide."""
+        with patch(f"{_MOD}.dir_state", return_value="unreadable"), \
+                patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=False), \
+                patch(f"{_UTILS_MOD}._is_root", return_value=False):
+            self.assertIsNone(self.detector.detect())
+
+    def test_spotlight_that_could_not_run_does_not_read_as_absent(self):
+        """Incident 326: a failed probe is ignorance, not 'no Claude installed'."""
+        self.data_dir.mkdir(parents=True)
+        with patch(f"{_BUNDLE_MOD}.run_command_status", return_value=(None, False)), \
+                patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                self.detector.detect()
 
 
 class TestClaudeDesktopMCPExtractor(unittest.TestCase):

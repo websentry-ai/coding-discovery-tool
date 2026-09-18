@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from ...coding_tool_base import BaseToolDetector
-from ...utils import dir_state
+from ...utils import dir_state, fail_if_anomalous
 from ..claude_bundle import (
     claude_app_support_dir,
     claude_bundle_version,
@@ -49,12 +49,22 @@ class MacOSClaudeDesktopDetector(BaseToolDetector):
 
         state = dir_state(data_dir)
         if state == "unreadable":
-            raise PermissionError(f"Claude Desktop data dir unreadable: {data_dir}")
+            # Raising marks the scan incomplete device-wide, which is right for our
+            # own home but wrong for a 0700 sibling an unprivileged scan was never
+            # allowed to read — that denial is the norm, not a detector failure.
+            fail_if_anomalous(home, f"Claude Desktop data dir unreadable: {data_dir}")
+            return None
         if state != "present":
+            logger.debug("No Claude Desktop data dir at %s", data_dir)
             return None
 
-        app_install = self._find_install_dir()
+        try:
+            app_install = self._find_install_dir()
+        except OSError as e:
+            fail_if_anomalous(home, str(e))
+            return None
         if app_install is None:
+            logger.debug("Claude data dir %s has no app bundle; residue, not an install", data_dir)
             return None
 
         return {

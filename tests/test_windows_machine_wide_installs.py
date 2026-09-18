@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import scripts.coding_discovery_tools.macos_extraction_helpers as helpers_mod
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.user_tool_detector import find_claude_binary_for_user
 from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
@@ -34,6 +35,13 @@ class WindowsProgramFilesRootsTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(utils_mod.windows_program_files_roots(), [Path(r"C:\Program Files")])
 
+    def test_root_check_survives_a_windows_env_without_a_profile(self):
+        """os.getuid is absent on Windows and Path.home() raises when the profile
+        env is unset; the check must answer, not crash."""
+        with patch.object(helpers_mod.os, "getuid", create=True, side_effect=AttributeError):
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertIs(helpers_mod.is_running_as_root(), False)
+
     def test_no_roots_without_the_variables(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(utils_mod.windows_program_files_roots(), [])
@@ -52,6 +60,10 @@ class ClaudeEnterpriseInstallTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    def _env(self, **extra):
+        """Windows resolves Path.home() from the profile env, so keep it set."""
+        return {"USERPROFILE": str(self.home), **extra}
+
     def _install(self, name="claude.exe"):
         install_dir = self.program_files / "ClaudeCode"
         install_dir.mkdir()
@@ -62,11 +74,11 @@ class ClaudeEnterpriseInstallTests(unittest.TestCase):
 
     def test_enterprise_install_is_found(self):
         binary = self._install()
-        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertEqual(find_claude_binary_for_user(self.home), str(binary))
 
     def test_absent_install_still_reports_nothing(self):
-        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertIsNone(find_claude_binary_for_user(self.home))
 
     def test_user_install_wins_over_the_machine_wide_one(self):
@@ -75,7 +87,7 @@ class ClaudeEnterpriseInstallTests(unittest.TestCase):
         own.parent.mkdir(parents=True)
         own.write_text("")
         os.chmod(own, 0o755)
-        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertEqual(find_claude_binary_for_user(self.home), str(own))
 
 
@@ -88,6 +100,10 @@ class GitHubCopilotAppTests(unittest.TestCase):
         self.program_files = root / "Program Files"
         self.program_files.mkdir()
         self.addCleanup(self._tmp.cleanup)
+
+    def _env(self, **extra):
+        """Windows resolves Path.home() from the profile env, so keep it set."""
+        return {"USERPROFILE": str(self.home), **extra}
 
     def _detector(self):
         detector = WindowsGitHubCopilotAppDetector()
@@ -102,24 +118,24 @@ class GitHubCopilotAppTests(unittest.TestCase):
 
     def test_machine_wide_install_is_detected(self):
         install = self._install(self.program_files)
-        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             result = self._detector().detect()
         self.assertEqual(result["name"], "GitHub Copilot App")
         self.assertEqual(result["install_path"], str(install))
 
     def test_per_user_install_is_detected(self):
         install = self._install(self.home / "AppData" / "Local" / "Programs", "GitHub Copilot")
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, self._env(), clear=True):
             self.assertEqual(self._detector().detect()["install_path"], str(install))
 
     def test_absent_install_reports_nothing(self):
-        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertIsNone(self._detector().detect())
 
     def test_nothing_inside_the_directory_is_executed(self):
         self._install(self.program_files)
         with patch.object(utils_mod, "run_command") as run:
-            with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+            with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
                 result = self._detector().detect()
         self.assertIsNotNone(result)
         self.assertIsNone(result["version"])
@@ -129,19 +145,19 @@ class GitHubCopilotAppTests(unittest.TestCase):
         """The app dir holds no `copilot.exe`, and the CLI resolver must not
         reach into it regardless."""
         self._install(self.program_files)
-        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertIsNone(WindowsCopilotCliDetector._resolve_windows_binary(self.home))
 
     def test_empty_directory_left_by_an_uninstall_is_not_an_install(self):
         (self.program_files / "GitHubCopilot").mkdir()
-        with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertIsNone(self._detector().detect())
 
     def test_unreadable_directory_raises_instead_of_reporting_absence(self):
         install = self.program_files / "GitHubCopilot"
         install.mkdir()
         with patch.object(Path, "glob", side_effect=PermissionError("denied")):
-            with patch.dict(os.environ, {"ProgramW6432": str(self.program_files)}, clear=True):
+            with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
                 with self.assertRaises(PermissionError):
                     self._detector().detect()
 

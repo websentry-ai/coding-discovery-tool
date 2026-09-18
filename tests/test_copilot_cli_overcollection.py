@@ -20,6 +20,7 @@ existing ``test_copilot_cli_discovery.py`` convention.
 import os
 import shutil
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 
@@ -72,6 +73,7 @@ class TestTraversesOtherToolConfigDir(unittest.TestCase):
         self.assertIn(".antigravity", OTHER_TOOL_CONFIG_DIRS)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "drives the macOS rules walk")
 class TestRulesWalkSkipsOtherToolDirs(unittest.TestCase):
     """The real rules walk collects a genuine repo but not extension packages."""
 
@@ -107,6 +109,7 @@ class TestRulesWalkSkipsOtherToolDirs(unittest.TestCase):
         self.assertEqual(leaked, [], f"leaked extension-dir rules: {leaked}")
 
 
+@unittest.skipUnless(sys.platform == "darwin", "drives the macOS skills walk")
 class TestSkillsWalkSkipsOtherToolDirs(unittest.TestCase):
     """The skills walk keeps shared .claude/.agents repo skills but skips extensions."""
 

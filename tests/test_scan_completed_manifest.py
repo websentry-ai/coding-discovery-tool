@@ -921,6 +921,7 @@ class TestCoverageExcludesUnreadableHomes(unittest.TestCase):
         self.assertTrue(utils_mod.home_is_readable(self.root / "ghost"))
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    @unittest.skipUnless(sys.platform == "darwin", "asserts the macOS home/Library permission shape")
     def test_home_listable_but_data_dir_denied_is_not_covered(self):
         """The real shape on macOS: the home is group-readable while Library is 0700,
         so a home-level check alone would wrongly call this user covered."""

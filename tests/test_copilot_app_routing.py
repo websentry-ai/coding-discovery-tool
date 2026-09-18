@@ -1,14 +1,4 @@
-"""Windows GitHub Copilot app routing, and the machine-wide Claude root.
-
-The app's name contains "GitHub Copilot", so the generic IDE branch would attach
-another surface's workspace rules and, mapping to no VS Code editor, the
-JetBrains MCP servers.
-
-The Claude root is the other half: it must reach every scanned profile rather
-than pass through the POSIX owner gate, which cannot judge it (st_uid is always
-0 on Windows). The gate is forced on here — left to the runner it never fires,
-so the assertion would hold no matter what the code did.
-"""
+"""Windows GitHub Copilot app routing, and the machine-wide Claude root."""
 
 import os
 import platform
@@ -67,8 +57,7 @@ class MachineWideClaudeAttributionTests(unittest.TestCase):
             home.mkdir(parents=True)
             self.homes.append(home)
         self.addCleanup(self._tmp.cleanup)
-        # Root scan, and the gate disowns whatever it is handed: the only state
-        # in which routing the root through machine_global changes the answer.
+        # Without these the owner gate never fires and the test cannot fail.
         patches = [
             patch.object(platform, "system", return_value="Windows"),
             patch.object(detector_mod, "is_running_as_root", return_value=True),

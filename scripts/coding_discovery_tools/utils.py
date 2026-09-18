@@ -3021,6 +3021,7 @@ def reset_sentry_run_state() -> None:
     _vscode_bundles_found.clear()
     _cowork_probes.clear()
     _copilot_xcode_probes.clear()
+    _copilot_app_probes.clear()
     _login_shell_cache.clear()
     _safe_helper_cache.clear()
     reset_vscode_registry_state()

@@ -754,6 +754,21 @@ def install_surface_listing(user_homes) -> Tuple[Dict, int, bool]:
     return surfaces, total, truncated
 
 
+def windows_program_files_roots() -> List[Path]:
+    """Machine-wide install roots, from the environment so a non-C: install counts."""
+    roots, seen = [], set()
+    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        value = os.environ.get(var)
+        if not value:
+            continue
+        key = os.path.normcase(value.rstrip("\\"))
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(Path(value))
+    return roots
+
+
 _NVM_WINDOWS_VERSION_DIR = re.compile(r"^v?\d+(?:\.\d+)*\Z")
 
 

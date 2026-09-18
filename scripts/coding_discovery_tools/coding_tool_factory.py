@@ -552,6 +552,26 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_copilot_app_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the GitHub Copilot app detector. Windows only for now — the app
+        also ships for macOS and Linux, which are not covered yet.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.github_copilot_app import WindowsGitHubCopilotAppDetector
+            return WindowsGitHubCopilotAppDetector()
+        return None
+
+    @staticmethod
     def create_augment_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate Augment Code detector for the OS.
@@ -707,6 +727,10 @@ class ToolDetectorFactory:
         copilot_cli_detector = ToolDetectorFactory.create_copilot_cli_detector(os_name)
         if copilot_cli_detector is not None:
             detectors.append(copilot_cli_detector)
+
+        copilot_app_detector = ToolDetectorFactory.create_copilot_app_detector(os_name)
+        if copilot_app_detector is not None:
+            detectors.append(copilot_app_detector)
 
         # Add Augment Code detector (macOS + Windows + Linux)
         augment_detector = ToolDetectorFactory.create_augment_detector(os_name)

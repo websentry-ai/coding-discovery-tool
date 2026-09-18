@@ -110,10 +110,8 @@ def is_running_as_root() -> bool:
     try:
         return os.getuid() == 0
     except AttributeError:
-        # Windows doesn't have os.getuid(), fallback to checking home directory
-        # On Windows, this would be a different check anyway
-        home = Path.home()
-        return str(home) in ["/root", "/var/root"]
+        # Windows has no uid, and Path.home() raises when the profile env is unset.
+        return False
 
 
 def add_rule_to_project(

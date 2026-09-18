@@ -40,6 +40,11 @@ class CopilotAppRoutingTests(unittest.TestCase):
     def test_probe_is_a_queryable_sentry_tag(self):
         self.assertIn("copilot_app_probe", utils_mod._SENTRY_TAG_KEYS)
 
+    def test_probes_do_not_leak_into_the_next_run(self):
+        utils_mod.record_copilot_app_probe("GitHubCopilot", "present")
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual(utils_mod.copilot_app_probes(), [])
+
 
 class MachineWideClaudeAttributionTests(unittest.TestCase):
     def setUp(self):

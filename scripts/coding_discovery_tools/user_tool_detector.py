@@ -30,6 +30,7 @@ from .utils import (
     run_command,
     user_login_shell_tool_path,
     windows_node_manager_shims,
+    windows_program_files_roots,
 )
 from .vscode_extension_helpers import (
     VSCODE_EDITOR_KEYS,
@@ -797,6 +798,13 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             user_home / ".claude" / "local" / "claude.exe",
             user_home / ".claude" / "local" / "node_modules" / ".bin" / "claude.cmd",
         ]
+        # The enterprise installer's root, already named by the managed rules,
+        # settings and MCP extractors. Probed after the per-user paths so a
+        # user's own install still wins.
+        machine_global = [
+            root / "ClaudeCode" / "claude.exe" for root in windows_program_files_roots()
+        ]
+        candidates += machine_global
     else:
         user_relative = [
             user_home / ".local" / "bin" / "claude",   # Official installer

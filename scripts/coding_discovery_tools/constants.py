@@ -146,4 +146,14 @@ DSCL_TIMEOUT = 5
 WINDOWS_SKIP_USER_DIRS = frozenset({
     "Public", "Default", "Default User", "All Users", "TEMP",
 })
+_WINDOWS_SKIP_USER_DIRS_LOWER = frozenset(name.lower() for name in WINDOWS_SKIP_USER_DIRS)
+
+
+def is_skipped_windows_user_dir(name: str) -> bool:
+    """Whether ``name`` is a Windows-owned profile folder rather than a person's.
+
+    Windows paths are case-insensitive and ``ProfileImagePath`` records whatever
+    casing created the profile, so the names are matched case-insensitively.
+    """
+    return name.lower() in _WINDOWS_SKIP_USER_DIRS_LOWER
 

@@ -21,6 +21,7 @@ ingestion, so every emitted rule's keys must be a subset of the allowlist.
 
 import shutil
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -86,6 +87,7 @@ class TestProjectInstructionsAndPrompts(unittest.TestCase):
 
     # --- H4 ---------------------------------------------------------------
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot rules extractor")
     def test_top_level_instruction_collected(self):
         self._write(self.github_dir / "instructions" / "style.instructions.md")
         rules = _flatten_rules(self._walk())
@@ -95,6 +97,7 @@ class TestProjectInstructionsAndPrompts(unittest.TestCase):
         self.assertEqual(root, str(self.repo))
         self.assertEqual(rule["scope"], "project")
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot rules extractor")
     def test_nested_instruction_collected_with_repo_root(self):
         self._write(
             self.github_dir / "instructions" / "frontend" / "react.instructions.md"
@@ -121,6 +124,7 @@ class TestProjectInstructionsAndPrompts(unittest.TestCase):
 
     # --- H5 ---------------------------------------------------------------
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot rules extractor")
     def test_project_prompt_file_collected(self):
         self._write(self.github_dir / "prompts" / "refactor.prompt.md")
         rules = _flatten_rules(self._walk())
@@ -130,6 +134,7 @@ class TestProjectInstructionsAndPrompts(unittest.TestCase):
         self.assertEqual(root, str(self.repo))
         self.assertEqual(rule["scope"], "project")
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot rules extractor")
     def test_prompt_rule_has_only_allowed_fields(self):
         """CRITICAL: a prompt rule with any non-allowlisted key is dropped whole
         by the backend, so the emitted keys must be a subset of the allowlist."""
@@ -145,6 +150,7 @@ class TestProjectInstructionsAndPrompts(unittest.TestCase):
 
     # --- Workspace .claude/rules (Claude-format instructions) -------------
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot rules extractor")
     def test_claude_rules_md_collected_at_repo_root(self):
         self._write(self.repo / ".claude" / "rules" / "style.md")
         rules = _flatten_rules(self._walk())
@@ -154,6 +160,7 @@ class TestProjectInstructionsAndPrompts(unittest.TestCase):
         self.assertEqual(root, str(self.repo))
         self.assertEqual(rule["scope"], "project")
 
+    @unittest.skipUnless(sys.platform == "darwin", "drives the macOS Copilot rules extractor")
     def test_claude_rule_has_only_allowed_fields(self):
         self._write(self.repo / ".claude" / "rules" / "style.md")
         rules = _flatten_rules(self._walk())

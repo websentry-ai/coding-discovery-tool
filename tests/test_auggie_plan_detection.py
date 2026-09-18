@@ -411,7 +411,9 @@ class TestSafeExecPath(unittest.TestCase):
 
     def _bin_in(self, dir_mode, bin_mode):
         import tempfile
-        d = tempfile.mkdtemp()
+        # Under HOME: /tmp is world-writable (1777) and the gate walks ancestors,
+        # so a /tmp fixture would be refused on Linux regardless of dir_mode.
+        d = tempfile.mkdtemp(dir=Path.home())
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         os.chmod(d, dir_mode)
         b = os.path.join(d, "auggie")

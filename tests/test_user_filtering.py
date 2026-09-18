@@ -219,6 +219,45 @@ class TestGetAllUsersWindows(unittest.TestCase):
         for excluded in ("Public", "Default", "Default User", "All Users", "TEMP", ".hidden"):
             self.assertNotIn(excluded, result)
 
+    @patch("scripts.coding_discovery_tools.windows_extraction_helpers.registry_profile_paths",
+           return_value=([PureWindowsPath(r"C:\Users\temp"),
+                          PureWindowsPath(r"C:\Users\public"),
+                          PureWindowsPath(r"C:\Users\alice")], True))
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_skip_list_is_case_insensitive_for_registry_profiles(self, _mock_sys, _mock_registry):
+        """ProfileImagePath records whatever casing created the profile, and
+        Windows paths are case-insensitive, so the skip-list has to be too."""
+        with patch("scripts.coding_discovery_tools.utils.Path") as MockPath:
+            mock_home = MagicMock()
+            mock_home.anchor = "C:\\"
+            mock_users_dir = MagicMock()
+            mock_users_dir.exists.return_value = True
+            mock_users_dir.iterdir.return_value = []
+            MockPath.home.return_value = mock_home
+            MockPath.return_value.__truediv__ = MagicMock(return_value=mock_users_dir)
+            result = get_all_users_windows()
+        self.assertIn("alice", result)
+        self.assertNotIn("temp", result)
+        self.assertNotIn("public", result)
+
+    @patch("scripts.coding_discovery_tools.windows_extraction_helpers.registry_profile_paths",
+           return_value=([PureWindowsPath(r"C:\Users\TEMP"),
+                          PureWindowsPath(r"C:\Users\alice")], True))
+    @patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Windows")
+    def test_skip_list_applies_to_registry_profiles(self, _mock_sys, _mock_registry):
+        """The walk drops these names; the registry must not hand them back."""
+        with patch("scripts.coding_discovery_tools.utils.Path") as MockPath:
+            mock_home = MagicMock()
+            mock_home.anchor = "C:\\"
+            mock_users_dir = MagicMock()
+            mock_users_dir.exists.return_value = True
+            mock_users_dir.iterdir.return_value = []
+            MockPath.home.return_value = mock_home
+            MockPath.return_value.__truediv__ = MagicMock(return_value=mock_users_dir)
+            result = get_all_users_windows()
+        self.assertIn("alice", result)
+        self.assertNotIn("TEMP", result)
+
 
 class _FakeWinreg:
     """Enough of ``winreg`` to drive registry_profile_paths from a dict.
@@ -284,11 +323,40 @@ class TestRegistryProfilePaths(unittest.TestCase):
         self.assertEqual([PureWindowsPath(r"C:\Users\alice")], paths)
         self.assertTrue(complete)
 
+    def test_service_sid_families_excluded(self):
+        """Font Driver Host / UMFD, IIS app pools and DWM get one profile per
+        session, so each is a SID family and not a fixed SID."""
+        paths, complete = self._run({
+            "S-1-5-96-0-0": (r"C:\Users\UMFD-0", 1),
+            "S-1-5-96-0-1": (r"C:\Users\TEMP.Font Driver Host.011", 1),
+            "S-1-5-82-3006700770-424185619-1745488364-794895919": (
+                r"C:\Users\DefaultAppPool", 1),
+            "S-1-5-90-0-1": (r"C:\Users\DWM-1", 1),
+            "S-1-5-21-1-1-1-1000": (r"C:\Users\alice", 1),
+        })
+        self.assertEqual([PureWindowsPath(r"C:\Users\alice")], paths)
+        self.assertTrue(complete)
+
+    def test_real_account_sids_are_never_treated_as_service_profiles(self):
+        """Entra accounts are S-1-12-1-*; excluding them would blind a whole tenant."""
+        paths, _ = self._run({
+            "S-1-12-1-111-222-333-444": (r"C:\Users\entra.user", 1),
+            "S-1-5-21-1-1-1-1000": (r"C:\Users\alice", 1),
+        })
+        self.assertEqual(
+            [PureWindowsPath(r"C:\Users\entra.user"), PureWindowsPath(r"C:\Users\alice")],
+            paths,
+        )
+
     def test_bak_key_is_kept(self):
         """Windows renames a key .bak when a profile fails to load; the user is real."""
         paths, complete = self._run({"S-1-5-21-1-1-1-1000.bak": (r"C:\Users\alice", 1)})
         self.assertEqual([PureWindowsPath(r"C:\Users\alice")], paths)
         self.assertTrue(complete)
+
+    def test_bak_service_family_still_excluded(self):
+        paths, _ = self._run({"S-1-5-96-0-0.bak": (r"C:\Users\UMFD-0", 1)})
+        self.assertEqual([], paths)
 
     def test_bak_service_sid_still_excluded(self):
         paths, _ = self._run({"S-1-5-18.bak": (r"C:\Windows\system32\config\systemprofile", 1)})

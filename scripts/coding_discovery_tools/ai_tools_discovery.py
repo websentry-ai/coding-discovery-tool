@@ -66,6 +66,7 @@ try:
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
         AntigravityMCPConfigExtractorFactory,
+        ClaudeDesktopMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
@@ -90,7 +91,7 @@ try:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, windows_user_path_dirs, install_surface_listing
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -136,6 +137,7 @@ except ImportError:
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
         AntigravityMCPConfigExtractorFactory,
+        ClaudeDesktopMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
@@ -160,7 +162,7 @@ except ImportError:
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, windows_user_path_dirs, install_surface_listing
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -460,6 +462,9 @@ class AIToolsDetector:
             # Initialize Antigravity extractors (macOS and Windows)
             self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
             self._antigravity_mcp_extractor = AntigravityMCPConfigExtractorFactory.create(self.system)
+
+            # Claude Desktop: MCP config only — no rules or skills of its own
+            self._claude_desktop_mcp_extractor = ClaudeDesktopMCPConfigExtractorFactory.create(self.system)
             
             # Initialize Kilo Code extractors (macOS only, returns None for unsupported OS)
             self._kilocode_rules_extractor = KiloCodeRulesExtractorFactory.create(self.system)
@@ -2892,6 +2897,14 @@ class AIToolsDetector:
             else:
                 logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
+        elif tool_name == "claude desktop":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                None,
+                self._claude_desktop_mcp_extractor,
+                list
+            )
+
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(
                 tool,
@@ -4030,6 +4043,7 @@ def main():
                     "cowork_probe": ",".join(cowork_probes()),
                     # Same for Xcode, plus the agent subfolders a CodingAssistant tree holds.
                     "xcode_probe": ",".join(xcode_probes()),
+                    "copilot_xcode_probe": ",".join(copilot_xcode_probes()),
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),
                     "in_container": in_container(),

@@ -27,7 +27,7 @@ try:
 except ImportError:
     pwd = None  # Not available on Windows
 
-from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, is_symlink_or_junction, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT, WINDOWS_SKIP_USER_DIRS
+from .constants import AUTH_STATUS_TIMEOUT, COMMAND_TIMEOUT, CURSOR_DB_TIMEOUT, CURSOR_PLAN_KEY, DSCL_TIMEOUT, INVALID_SERIAL_VALUES, is_symlink_or_junction, KEYCHAIN_SERVICE_NAME, KEYCHAIN_TIMEOUT, MACOS_MIN_HUMAN_UID, is_skipped_windows_user_dir, MACOS_SKIP_USER_DIRS, NON_INTERACTIVE_SHELLS, VERSION_TIMEOUT
 from .vscode_extension_helpers import VSCODE_EDITOR_KEYS, reset_vscode_registry_state, vscode_registry_state
 
 logger = logging.getLogger(__name__)
@@ -1005,7 +1005,8 @@ def windows_user_homes() -> Dict[str, Path]:
     see a profile relocated to another drive, and it treats any leftover folder
     as a user. ``ProfileList`` is Windows' own record, so the two are combined —
     a walked folder is kept only when a profile record vouches for the name, and
-    registry profiles the walk missed are added at their real path.
+    registry profiles the walk missed are added at their real path. The skip-list
+    applies to both, so a name the walk drops cannot return through the registry.
 
     A profile whose recorded path is a UNC share still vouches for its local
     ``C:\\Users`` cache, and an incomplete registry read vouches for nothing, so
@@ -1029,7 +1030,7 @@ def windows_user_homes() -> Dict[str, Path]:
             for user_dir in win_users_dir.iterdir():
                 if (user_dir.is_dir()
                         and not user_dir.name.startswith('.')
-                        and user_dir.name not in WINDOWS_SKIP_USER_DIRS):
+                        and not is_skipped_windows_user_dir(user_dir.name)):
                     walked[user_dir.name] = user_dir
     except (PermissionError, OSError) as e:
         logger.warning(f"Could not list users from Windows Users directory: {e}")
@@ -1042,7 +1043,7 @@ def windows_user_homes() -> Dict[str, Path]:
     homes: Dict[str, Path] = {}
     vouched: Dict[str, str] = {}
     for path in registry:
-        if not path.name:
+        if not path.name or is_skipped_windows_user_dir(path.name):
             continue
         key = path.name.lower()
         vouched.setdefault(key, path.name)
@@ -2814,7 +2815,7 @@ _SENTRY_TAG_KEYS = (
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
-    "user_path_dirs",
+    "xcode_probe", "copilot_xcode_probe", "user_path_dirs",
     # Scalars only: entry names are unbounded cardinality, so the listing stays in extra.
     "install_surfaces_total", "install_surfaces_truncated",
 )
@@ -2873,6 +2874,7 @@ _cowork_probes = set()
 # Same for the Xcode gate, plus the agent subfolders that say which extractors are worth building.
 _XCODE_PROBES_CAP = 8
 _xcode_probes = set()
+_copilot_xcode_probes = set()
 
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
@@ -2934,6 +2936,20 @@ def xcode_probes() -> list:
     return sorted(_xcode_probes)
 
 
+def record_copilot_xcode_probe(part: str, state: str) -> None:
+    """Note how one part of the Copilot for Xcode gate resolved. Never raises."""
+    try:
+        if len(_copilot_xcode_probes) < _XCODE_PROBES_CAP:
+            _copilot_xcode_probes.add(f"{part}:{state}")
+    except Exception as e:
+        logger.debug("Could not record Copilot for Xcode probe %r:%r: %s", part, state, e, exc_info=True)
+
+
+def copilot_xcode_probes() -> list:
+    """This run's Copilot for Xcode gate outcomes as ``<part>:<state>``."""
+    return sorted(_copilot_xcode_probes)
+
+
 def record_vscode_bundle_probe(ext_root) -> None:
     """Note a VS Code-family app bundle whose extensions dir exists. Never raises."""
     try:
@@ -2974,6 +2990,7 @@ def reset_sentry_run_state() -> None:
     _rejected_binaries.clear()
     _vscode_bundles_found.clear()
     _cowork_probes.clear()
+    _copilot_xcode_probes.clear()
     _login_shell_cache.clear()
     _safe_helper_cache.clear()
     reset_vscode_registry_state()

@@ -27,7 +27,9 @@ class TestVersionProbeExecGate(unittest.TestCase):
         root = patch(f"{_MOD}._running_as_root", return_value=True)
         root.start()
         self.addCleanup(root.stop)
-        self.tmp = tempfile.TemporaryDirectory()
+        # Under HOME, not the system temp dir: /tmp is world-writable (1777) and
+        # the exec gate walks ancestors, so a /tmp fixture is refused on Linux.
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home())
         self.dir = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         self.binary = self.dir / "claude"

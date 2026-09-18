@@ -7,6 +7,7 @@ from .cursor import MacOSCursorDetector
 from .cursor_cli import MacOSCursorCliDetector
 from .claude_code import MacOSClaudeDetector
 from .claude_cowork import MacOSClaudeCoworkDetector, MacOSClaudeCoworkSkillsExtractor
+from .claude_desktop import MacOSClaudeDesktopDetector, MacOSClaudeDesktopMCPConfigExtractor
 from .windsurf import MacOSWindsurfDetector
 from .roo_code import MacOSRooDetector
 from .cline import MacOSClineDetector
@@ -15,6 +16,7 @@ from .codex import MacOSCodexDetector
 from .replit import MacOSReplitDetector
 from .opencode import MacOSOpenCodeDetector
 from .junie import MacOSJunieDetector
+from .github_copilot_xcode import MacOSGitHubCopilotXcodeDetector
 from .xcode import MacOSXcodeDetector
 
 __all__ = [
@@ -24,6 +26,8 @@ __all__ = [
     'MacOSClaudeDetector',
     'MacOSClaudeCoworkDetector',
     'MacOSClaudeCoworkSkillsExtractor',
+    'MacOSClaudeDesktopDetector',
+    'MacOSClaudeDesktopMCPConfigExtractor',
     'MacOSWindsurfDetector',
     'MacOSRooDetector',
     'MacOSClineDetector',
@@ -32,6 +36,7 @@ __all__ = [
     'MacOSReplitDetector',
     'MacOSOpenCodeDetector',
     'MacOSJunieDetector',
+    'MacOSGitHubCopilotXcodeDetector',
     'MacOSXcodeDetector',
 ]
 

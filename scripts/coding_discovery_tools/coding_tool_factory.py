@@ -170,6 +170,28 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_claude_desktop_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Claude Desktop detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos import MacOSClaudeDesktopDetector
+            return MacOSClaudeDesktopDetector()
+        elif os_name == "Windows":
+            from .windows import WindowsClaudeDesktopDetector
+            return WindowsClaudeDesktopDetector()
+        return None
+
+    @staticmethod
     def create_xcode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create the Xcode coding intelligence detector. macOS only — Xcode does
@@ -600,6 +622,11 @@ class ToolDetectorFactory:
         claude_cowork_detector = ToolDetectorFactory.create_claude_cowork_detector(os_name)
         if claude_cowork_detector is not None:
             detectors.append(claude_cowork_detector)
+
+        # Add Claude Desktop detector for macOS and Windows
+        claude_desktop_detector = ToolDetectorFactory.create_claude_desktop_detector(os_name)
+        if claude_desktop_detector is not None:
+            detectors.append(claude_desktop_detector)
         
         # Add Xcode coding intelligence detector for macOS
         xcode_detector = ToolDetectorFactory.create_xcode_detector(os_name)
@@ -1103,6 +1130,32 @@ class AntigravityMCPConfigExtractorFactory:
             return LinuxAntigravityMCPConfigExtractor()
         else:
             return None
+
+
+class ClaudeDesktopMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Claude Desktop MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate Claude Desktop MCP config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.claude_desktop.mcp_config_extractor import MacOSClaudeDesktopMCPConfigExtractor
+            return MacOSClaudeDesktopMCPConfigExtractor()
+        elif os_name == "Windows":
+            from .windows.claude_desktop.mcp_config_extractor import WindowsClaudeDesktopMCPConfigExtractor
+            return WindowsClaudeDesktopMCPConfigExtractor()
+        return None
 
 
 class KiloCodeRulesExtractorFactory:

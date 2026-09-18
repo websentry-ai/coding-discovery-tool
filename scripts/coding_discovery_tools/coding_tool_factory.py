@@ -190,6 +190,25 @@ class ToolDetectorFactory:
         return None
 
     @staticmethod
+    def create_copilot_xcode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the GitHub Copilot for Xcode detector. macOS only.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos import MacOSGitHubCopilotXcodeDetector
+            return MacOSGitHubCopilotXcodeDetector()
+        return None
+
+    @staticmethod
     def create_windsurf_detector(os_name: Optional[str] = None) -> BaseToolDetector:
         """
         Create appropriate Windsurf detector for the OS.
@@ -605,6 +624,10 @@ class ToolDetectorFactory:
         xcode_detector = ToolDetectorFactory.create_xcode_detector(os_name)
         if xcode_detector is not None:
             detectors.append(xcode_detector)
+
+        copilot_xcode_detector = ToolDetectorFactory.create_copilot_xcode_detector(os_name)
+        if copilot_xcode_detector is not None:
+            detectors.append(copilot_xcode_detector)
 
         # Add Cline detector for macOS and Windows
         cline_detector = ToolDetectorFactory.create_cline_detector(os_name)

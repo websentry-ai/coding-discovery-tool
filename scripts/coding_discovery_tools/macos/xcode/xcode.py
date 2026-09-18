@@ -10,14 +10,12 @@ intelligence never enabled), there is nothing to report on so we return None.
 
 import logging
 import os
-import plistlib
-import stat
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import COMMAND_TIMEOUT
-from ...macos_extraction_helpers import MACHINE_APPS_DIR, path_in_scope
+from ...macos_extraction_helpers import MACHINE_APPS_DIR, path_in_scope, read_bundle_version
 from ...utils import dir_state, record_xcode_probe, run_command_status
 
 logger = logging.getLogger(__name__)
@@ -35,13 +33,6 @@ _MAX_AGENT_PROBE_LEN = 64
 
 # O_NOFOLLOW/O_NONBLOCK are POSIX-only and O_BINARY is Windows-only. The detector is
 # macOS-only but its tests run on the Windows matrix, so resolve them defensively.
-_PLIST_OPEN_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_NOFOLLOW", 0)
-    | getattr(os, "O_NONBLOCK", 0)
-    | getattr(os, "O_BINARY", 0)
-)
-
 
 def coding_assistant_dir(user_home: Path) -> Path:
     """Where Xcode keeps this user's agent config, MCP servers and skills."""
@@ -100,31 +91,6 @@ def _spotlight_candidates(user_home: Path) -> Tuple[List[Path], bool]:
         if candidate.suffix == ".app" and path_in_scope(candidate, user_home):
             found.append(candidate)
     return found, True
-
-
-def _read_bundle_version(app_bundle: Path) -> Optional[str]:
-    """CFBundleShortVersionString, read without following a redirected Info.plist.
-
-    The bundle can sit under a user-writable home, so the plist is opened
-    O_NOFOLLOW and must be a regular file: a symlink to a FIFO would otherwise
-    block the whole scan under root.
-    """
-    info_plist = app_bundle / "Contents" / "Info.plist"
-    try:
-        if not stat.S_ISREG(os.lstat(info_plist).st_mode):
-            return None
-        fd = os.open(info_plist, _PLIST_OPEN_FLAGS)
-    except OSError as e:
-        logger.debug(f"Could not open {info_plist}: {e}")
-        return None
-    try:
-        with os.fdopen(fd, "rb") as fh:
-            plist = plistlib.load(fh)
-    except Exception as e:
-        logger.debug(f"Could not parse {info_plist}: {e}")
-        return None
-    version = plist.get("CFBundleShortVersionString") if isinstance(plist, dict) else None
-    return version.strip() if isinstance(version, str) and version.strip() else None
 
 
 class MacOSXcodeDetector(BaseToolDetector):
@@ -213,7 +179,7 @@ class MacOSXcodeDetector(BaseToolDetector):
             app_bundle = app_install or self._find_install_dir()
             if app_bundle is None:
                 return None
-            return _read_bundle_version(app_bundle)
+            return read_bundle_version(app_bundle)
         except Exception as e:
             logger.debug(f"Could not extract Xcode version: {e}")
             return None

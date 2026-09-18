@@ -177,7 +177,7 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name)
         # Neutralise Spotlight, like the real-bundle patch the OS tests already use.
-        spotlight = patch(f"{_MAC_MOD}.run_command", return_value=None)
+        spotlight = patch(f"{_BUNDLE_MOD}.run_command", return_value=None)
         spotlight.start()
         self.addCleanup(spotlight.stop)
 
@@ -251,7 +251,7 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
 
     def test_find_install_dir_records_bundle_absent(self):
         det = self._mac_detector()
-        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[self.home / "nope.app"]):
+        with patch(f"{_BUNDLE_MOD}.claude_app_candidates", return_value=[self.home / "nope.app"]):
             self.assertIsNone(det._find_install_dir(self.home))
         self.assertIn("bundle:absent", utils_mod.cowork_probes())
 
@@ -262,7 +262,7 @@ class TestCoworkProbeTelemetry(unittest.TestCase):
         (apps / "Claude.app").mkdir(parents=True)
         os.chmod(apps, 0o000)
         try:
-            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[apps / "Claude.app"]):
+            with patch(f"{_BUNDLE_MOD}.claude_app_candidates", return_value=[apps / "Claude.app"]):
                 with self.assertRaises(PermissionError):
                     det._find_install_dir(self.home)
             self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
@@ -285,11 +285,9 @@ class TestCoworkSpotlightFallback(unittest.TestCase):
         utils_mod.reset_sentry_run_state()
 
     def _resolve(self, mdfind_output):
-        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
-            _spotlight_candidates,
-        )
-        with patch(f"{_MAC_MOD}.run_command", return_value=mdfind_output):
-            return _spotlight_candidates(self.home)
+        from scripts.coding_discovery_tools.macos.claude_bundle import spotlight_claude_bundles
+        with patch(f"{_BUNDLE_MOD}.run_command", return_value=mdfind_output):
+            return spotlight_claude_bundles(self.home)
 
     def test_accepts_machine_wide_and_the_scanned_users_own(self):
         self.assertEqual([Path("/Applications/Claude.app")], self._resolve("/Applications/Claude.app"))
@@ -327,8 +325,8 @@ class TestCoworkSpotlightFallback(unittest.TestCase):
         (apps / "Claude.app").mkdir(parents=True)
         os.chmod(apps, 0o000)
         try:
-            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[]), \
-                    patch(f"{_MAC_MOD}.run_command", return_value=str(apps / "Claude.app")):
+            with patch(f"{_BUNDLE_MOD}.claude_app_candidates", return_value=[]), \
+                    patch(f"{_BUNDLE_MOD}.run_command", return_value=str(apps / "Claude.app")):
                 with self.assertRaises(PermissionError):
                     MacOSClaudeCoworkDetector()._find_install_dir(self.home)
             self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
@@ -346,8 +344,8 @@ class TestCoworkSpotlightFallback(unittest.TestCase):
         (apps / "Claude.app").mkdir(parents=True)
         os.chmod(apps, 0o000)
         try:
-            with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[]), \
-                    patch(f"{_MAC_MOD}._spotlight_candidates", return_value=[apps / "Claude.app"]):
+            with patch(f"{_BUNDLE_MOD}.claude_app_candidates", return_value=[]), \
+                    patch(f"{_BUNDLE_MOD}.spotlight_claude_bundles", return_value=[apps / "Claude.app"]):
                 with self.assertRaises(PermissionError):
                     MacOSClaudeCoworkDetector()._find_install_dir(self.home)
             self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
@@ -360,8 +358,8 @@ class TestCoworkSpotlightFallback(unittest.TestCase):
         )
         app = self.home / "Applications" / "Claude.app"
         app.mkdir(parents=True)
-        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[app]), \
-                patch(f"{_MAC_MOD}.run_command") as mdfind:
+        with patch(f"{_BUNDLE_MOD}.claude_app_candidates", return_value=[app]), \
+                patch(f"{_BUNDLE_MOD}.run_command") as mdfind:
             self.assertEqual(app, MacOSClaudeCoworkDetector()._find_install_dir(self.home))
         mdfind.assert_not_called()
         self.assertIn("bundle:present", utils_mod.cowork_probes())
@@ -372,14 +370,15 @@ class TestCoworkSpotlightFallback(unittest.TestCase):
         )
         app = self.home / "Applications" / "Claude.app"
         app.mkdir(parents=True)
-        with patch(f"{_MAC_MOD}._candidate_install_dirs", return_value=[self.home / "nope.app"]), \
-                patch(f"{_MAC_MOD}.run_command", return_value=str(app)):
+        with patch(f"{_BUNDLE_MOD}.claude_app_candidates", return_value=[self.home / "nope.app"]), \
+                patch(f"{_BUNDLE_MOD}.run_command", return_value=str(app)):
             self.assertEqual(app, MacOSClaudeCoworkDetector()._find_install_dir(self.home))
         self.assertIn("bundle:spotlight", utils_mod.cowork_probes())
 
 
 # ── OS detect() modules ──────────────────────────────────────────────────────
 
+_BUNDLE_MOD = "scripts.coding_discovery_tools.macos.claude_bundle"
 _WIN_MOD = "scripts.coding_discovery_tools.windows.claude_cowork.claude_cowork"
 _LINUX_MOD = "scripts.coding_discovery_tools.linux.claude_cowork.claude_cowork"
 _MAC_MOD = "scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork"
@@ -511,10 +510,10 @@ class TestMacOSCoworkDetect(unittest.TestCase):
         self.home = Path(self.tmp.name)
         self.scanner_home = Path(self.tmp_scanner.name)
         # Neutralise any real /Applications/Claude.app on the machine running the suite.
-        patcher = patch(f"{_MAC_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app")
+        patcher = patch(f"{_BUNDLE_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app")
         patcher.start()
         self.addCleanup(patcher.stop)
-        spotlight = patch(f"{_MAC_MOD}.run_command", return_value=None)
+        spotlight = patch(f"{_BUNDLE_MOD}.run_command", return_value=None)
         spotlight.start()
         self.addCleanup(spotlight.stop)
 

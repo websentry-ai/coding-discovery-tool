@@ -66,6 +66,7 @@ try:
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
         AntigravityMCPConfigExtractorFactory,
+        ClaudeDesktopMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
@@ -136,6 +137,7 @@ except ImportError:
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
         AntigravityMCPConfigExtractorFactory,
+        ClaudeDesktopMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
@@ -460,6 +462,9 @@ class AIToolsDetector:
             # Initialize Antigravity extractors (macOS and Windows)
             self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
             self._antigravity_mcp_extractor = AntigravityMCPConfigExtractorFactory.create(self.system)
+
+            # Claude Desktop: MCP config only — no rules or skills of its own
+            self._claude_desktop_mcp_extractor = ClaudeDesktopMCPConfigExtractorFactory.create(self.system)
             
             # Initialize Kilo Code extractors (macOS only, returns None for unsupported OS)
             self._kilocode_rules_extractor = KiloCodeRulesExtractorFactory.create(self.system)
@@ -2891,6 +2896,14 @@ class AIToolsDetector:
                     logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
             else:
                 logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+        elif tool_name == "claude desktop":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                None,
+                self._claude_desktop_mcp_extractor,
+                list
+            )
 
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(

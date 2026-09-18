@@ -35,7 +35,7 @@ def _get_cowork_sessions_dir() -> Optional[Path]:
     return Path(appdata) / "Claude" / COWORK_SESSIONS_DIR
 
 
-def _candidate_install_dirs(user_home: Path) -> List[Path]:
+def claude_install_candidates(user_home: Path) -> List[Path]:
     """Common locations where Claude Desktop is installed on Windows.
 
     ``user_home`` is the home of the user being scanned (not necessarily the
@@ -109,7 +109,7 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
     def _find_install_dir(self, user_home: Optional[Path] = None) -> Optional[Path]:
         home = user_home or getattr(self, "user_home", None) or Path.home()
         outcome = "absent"
-        for candidate in _candidate_install_dirs(Path(home)):
+        for candidate in claude_install_candidates(Path(home)):
             state = dir_state(candidate)
             if state == "present":
                 record_cowork_probe("bundle", "present")

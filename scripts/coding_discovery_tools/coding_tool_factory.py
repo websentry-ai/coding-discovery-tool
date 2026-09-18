@@ -172,8 +172,7 @@ class ToolDetectorFactory:
     @staticmethod
     def create_claude_desktop_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
-        Create the Claude Desktop detector. macOS only for now — the fleet is
-        overwhelmingly macOS and the Windows install surface differs.
+        Create appropriate Claude Desktop detector for the OS.
 
         Args:
             os_name: Operating system name (defaults to current OS)
@@ -187,6 +186,9 @@ class ToolDetectorFactory:
         if os_name == "Darwin":
             from .macos import MacOSClaudeDesktopDetector
             return MacOSClaudeDesktopDetector()
+        elif os_name == "Windows":
+            from .windows import WindowsClaudeDesktopDetector
+            return WindowsClaudeDesktopDetector()
         return None
 
     @staticmethod
@@ -621,7 +623,7 @@ class ToolDetectorFactory:
         if claude_cowork_detector is not None:
             detectors.append(claude_cowork_detector)
 
-        # Add Claude Desktop detector (macOS only)
+        # Add Claude Desktop detector for macOS and Windows
         claude_desktop_detector = ToolDetectorFactory.create_claude_desktop_detector(os_name)
         if claude_desktop_detector is not None:
             detectors.append(claude_desktop_detector)
@@ -1150,6 +1152,9 @@ class ClaudeDesktopMCPConfigExtractorFactory:
         if os_name == "Darwin":
             from .macos.claude_desktop.mcp_config_extractor import MacOSClaudeDesktopMCPConfigExtractor
             return MacOSClaudeDesktopMCPConfigExtractor()
+        elif os_name == "Windows":
+            from .windows.claude_desktop.mcp_config_extractor import WindowsClaudeDesktopMCPConfigExtractor
+            return WindowsClaudeDesktopMCPConfigExtractor()
         return None
 
 

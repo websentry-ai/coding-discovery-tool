@@ -100,6 +100,10 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     elif tool_name == "xcode coding intelligence":
         return _detect_xcode(detector, user_home)
 
+    # GitHub Copilot for Xcode detection
+    elif tool_name == "github copilot (xcode)":
+        return _detect_copilot_xcode(detector, user_home)
+
     # Junie detection
     elif tool_name == "junie":
         return _detect_junie(detector, user_home)
@@ -486,6 +490,19 @@ def _detect_xcode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
     The detector already scopes every probe to ``detector.user_home``, which the
     caller has set, so this only has to turn a denied read into the anomaly path
     instead of the clean absence that would permit a prune.
+    """
+    try:
+        return detector.detect()
+    except OSError as e:
+        fail_if_anomalous(user_home, str(e))
+        return None
+
+
+def _detect_copilot_xcode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect GitHub Copilot for Xcode for a user.
+
+    The detector scopes every probe to ``detector.user_home``; this only turns a
+    denied read into the anomaly path instead of a prunable absence.
     """
     try:
         return detector.detect()

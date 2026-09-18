@@ -7,6 +7,7 @@ on macOS to avoid code duplication.
 
 import logging
 import os
+import plistlib
 import stat
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,39 @@ def path_in_scope(candidate: Path, user_home: Path) -> bool:
         if stat.S_ISLNK(mode):
             return False
     return True
+
+
+_PLIST_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+
+def read_bundle_version(app_bundle: Path) -> Optional[str]:
+    """CFBundleShortVersionString, read without following a redirected Info.plist.
+
+    The bundle can sit under a user-writable home, so the plist is opened
+    O_NOFOLLOW and must be a regular file: a symlink to a FIFO would otherwise
+    block the whole scan under root.
+    """
+    info_plist = app_bundle / "Contents" / "Info.plist"
+    try:
+        if not stat.S_ISREG(os.lstat(info_plist).st_mode):
+            return None
+        fd = os.open(info_plist, _PLIST_OPEN_FLAGS)
+    except OSError as e:
+        logger.debug(f"Could not open {info_plist}: {e}")
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            plist = plistlib.load(fh)
+    except Exception as e:
+        logger.debug(f"Could not parse {info_plist}: {e}")
+        return None
+    version = plist.get("CFBundleShortVersionString") if isinstance(plist, dict) else None
+    return version.strip() if isinstance(version, str) and version.strip() else None
 
 
 def macos_app_candidates(app_path: Path, user_home: Optional[Path] = None) -> List[Path]:

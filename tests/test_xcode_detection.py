@@ -135,7 +135,7 @@ class XcodeDetectionTests(unittest.TestCase):
         read raise AttributeError and silently return no version off macOS."""
         app = self.apps / "Xcode.app"
         _make_bundle(app, "26.3")
-        self.assertEqual(xcode_mod._read_bundle_version(app), "26.3")
+        self.assertEqual(helpers_mod.read_bundle_version(app), "26.3")
 
     def test_run_command_status_separates_absence_from_ignorance(self):
         """Platform-agnostic: no real binary is invoked, since mdfind is macOS-only

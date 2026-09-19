@@ -697,6 +697,18 @@ class UserScopeMcpTests(unittest.TestCase):
             json.dumps({"mcpServers": {"claude-owned": {"command": "npx"}}}), encoding="utf-8")
         self.assertIsNone(self.extract())
 
+    def test_a_mixed_file_is_split_not_dropped(self):
+        """Both keys in one file: Visual Studio takes `servers`, Claude Code takes
+        `mcpServers`. Dropping it whole would lose every VS server on the file."""
+        (self.home / ".mcp.json").write_text(json.dumps({
+            "servers":    {"vs-owned":     {"url": "https://example/mcp"}},
+            "mcpServers": {"claude-owned": {"command": "npx"}},
+        }), encoding="utf-8")
+        config = self.extract()
+        names = [s["name"] for s in config["projects"][0]["mcpServers"]]
+        self.assertEqual(names, ["vs-owned"])
+        self.assertNotIn("claude-owned", names)
+
     def test_an_unreadable_user_scope_file_is_left_alone(self):
         """Under-report rather than risk duplicating what Claude Code already has."""
         (self.home / ".mcp.json").write_text("{not json", encoding="utf-8")

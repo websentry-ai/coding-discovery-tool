@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import is_symlink_or_junction
-from ...mcp_extraction_helpers import read_mcp_json
+from ...mcp_extraction_helpers import read_mcp_json, transform_mcp_servers_to_array
 from ...windows_extraction_helpers import (
     collect_workspace_config_dirs,
     scan_windows_user_directories,
@@ -42,19 +42,26 @@ MCP_FILENAME = "mcp.json"
 USER_MCP_FILENAME = ".mcp.json"
 
 
-def _claude_code_claims(mcp_json: Path) -> bool:
-    """Whether Claude Code's project walk will report this file itself.
+def _visual_studio_servers(mcp_json: Path) -> List[Dict]:
+    """The ``servers`` half of a shared user-scope file, as a server array.
 
-    It reads ``mcpServers`` and nothing else, so a file carrying that key is
-    already attributed and must not be claimed again here. Never raises: an
-    unreadable or malformed file is left alone, which under-reports rather than
-    duplicating.
+    The two tools read different keys -- Claude Code takes ``mcpServers`` and
+    nothing else (mcp_extraction_helpers.py:2486), Visual Studio writes
+    ``servers`` -- so a file carrying both is SPLIT, not handed to one of them.
+    Dropping it whole would lose every Visual Studio server on a mixed file;
+    claiming it whole would double-count every Claude Code one.
+
+    Never raises: an unreadable or malformed file yields nothing, which
+    under-reports rather than duplicating.
     """
     try:
         data = json.loads(mcp_json.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return True
-    return isinstance(data, dict) and bool(data.get("mcpServers"))
+    except (OSError, ValueError) as exc:
+        logger.debug(f"Could not parse {mcp_json}: {exc}")
+        return []
+    if not isinstance(data, dict):
+        return []
+    return transform_mcp_servers_to_array(data.get("servers") or {})
 
 
 class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
@@ -79,12 +86,13 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
         r"""``%USERPROFILE%\.mcp.json`` — what Visual Studio calls its *global* MCP
         server configuration.
 
-        Claimed only when Claude Code's project walk will not report it itself.
+        Only the ``servers`` half is claimed; ``mcpServers`` is left to Claude Code.
         Ownership splits on the key, because the two tools parse different ones:
         Claude Code reads ``mcpServers`` only (mcp_extraction_helpers.py:2486)
         while Visual Studio writes ``servers``. Measured on a live box with both
         installed: a ``servers``-shaped file is claimed by Visual Studio alone, an
-        ``mcpServers``-shaped one was claimed by BOTH until this check existed.
+        ``mcpServers``-shaped one was claimed by BOTH until ownership split. A file
+        carrying both keys is split between the two rather than dropped.
         Gating on Claude Code's mere presence is the wrong axis -- it leaves every
         ``servers``-shaped file reported by nobody.
         This is also the only one of Visual Studio's five MCP locations that lives
@@ -103,12 +111,11 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
             except (PermissionError, OSError) as e:
                 logger.debug(f"Could not stat {mcp_json}: {e}")
                 return
-            if _claude_code_claims(mcp_json):
-                logger.debug(f"Leaving {mcp_json} to Claude Code: it has mcpServers")
-                return
-            config = read_mcp_json(mcp_json, str(user_home), "Visual Studio")
-            if config:
-                configs.append(config)
+            servers = _visual_studio_servers(mcp_json)
+            if servers:
+                configs.append({"path": str(user_home), "mcpServers": servers})
+            else:
+                logger.debug(f"No Visual Studio-shaped servers in {mcp_json}")
 
         try:
             scan_windows_user_directories(for_user)

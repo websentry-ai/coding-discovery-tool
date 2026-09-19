@@ -3445,7 +3445,7 @@ def main():
         scanned_manifest = set()
         # Detector errors this run; reported as scan_incomplete.
         incomplete_reasons = []
-        incomplete_users = set()  # a detector errored here, so presence is unknown
+        incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
         # --- Drain pending reports from previous run ---
@@ -3561,7 +3561,7 @@ def main():
             # Detector error = presence unknown -> incomplete, no prune (tool_name is an umbrella label, not a row key).
             if user_detect_failures:
                 incomplete_reasons.append(f"detector error for user {user}")
-                incomplete_users.add(user)
+                incomplete_users.append(user)
 
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")

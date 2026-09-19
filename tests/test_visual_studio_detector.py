@@ -88,6 +88,25 @@ def state(version="17.14.3", product=ENTERPRISE, copilot=True):
     }
 
 
+def unprivileged():
+    """Patch BOTH privilege checks `fail_if_anomalous` can consult.
+
+    It branches on platform -- `_windows_process_is_elevated()` on Windows,
+    `_is_root()` elsewhere -- so patching one leaves the suite asserting nothing on
+    the other OS. These tests ran green on macOS while the Windows path, the one
+    that actually matters for an MDM scan, raised straight through them.
+    """
+    return (patch.object(utils_mod, "_is_root", return_value=False),
+            patch.object(utils_mod, "_windows_process_is_elevated", return_value=False),
+            patch.object(utils_mod, "_is_scanning_users_own_home", return_value=False))
+
+
+def privileged():
+    """Same, in the direction that must raise."""
+    return (patch.object(utils_mod, "_is_root", return_value=True),
+            patch.object(utils_mod, "_windows_process_is_elevated", return_value=True))
+
+
 class VersionFilterTests(unittest.TestCase):
     def test_17_9_sorts_below_17_10(self):
         """A string compare puts "17.9" above "17.10" and would drop the entire
@@ -233,9 +252,9 @@ class DetectTests(unittest.TestCase):
         """This user HAS a VS config dir, so an unreadable registry is a denial, not
         an absence — and a clean absence is what lets the backend prune."""
         self.give_user_a_vs_config()
-        with self.denied_instance_registry(), \
-                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([], False)), \
-                patch.object(utils_mod, "_is_root", return_value=True):
+        a, b = privileged()
+        with a, b, self.denied_instance_registry(), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([], False)):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
                 with self.assertRaises(PermissionError):
                     self.detector.detect()
@@ -244,19 +263,18 @@ class DetectTests(unittest.TestCase):
     def test_a_denied_registry_on_an_unprivileged_scan_still_does_not_raise(self):
         """Raising there would mark every scan on every multi-user box incomplete."""
         self.give_user_a_vs_config()
-        with self.denied_instance_registry(), \
-                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([], False)), \
-                patch.object(utils_mod, "_is_root", return_value=False), \
-                patch.object(utils_mod, "_is_scanning_users_own_home", return_value=False):
+        a, b, c = unprivileged()
+        with a, b, c, self.denied_instance_registry(), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([], False)):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
                 self.assertIsNone(self.detector.detect())
 
     def test_a_denied_registry_with_a_vswhere_answer_reports_normally(self):
         """vswhere answered, so nothing is unknown — no raise, rows as usual."""
         self.give_user_a_vs_config()
-        with self.denied_instance_registry(), \
-                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([state()], True)), \
-                patch.object(utils_mod, "_is_root", return_value=True):
+        a, b = privileged()
+        with a, b, self.denied_instance_registry(), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([state()], True)):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
                 rows = self.detector.detect()
         self.assertEqual(len(rows), 2)
@@ -278,7 +296,12 @@ class DetectTests(unittest.TestCase):
         (instance / "state.json").write_text("{not json", encoding="utf-8")
         self.write_instance("good")
         self.give_user_a_vs_config()
-        rows = self.detect()
+        # Explicitly unprivileged: a malformed sibling leaves that instance unknown,
+        # which an elevated scan must surface (UnresolvedInstanceTests covers that).
+        # Here the scan has no business reading it, so the good row still comes back.
+        a, b, c = unprivileged()
+        with a, b, c:
+            rows = self.detect()
         self.assertEqual(len(rows), 2)
         self.assertIn("state_json:malformed", utils_mod.vs_probes())
 
@@ -328,15 +351,15 @@ class DeniedUserConfigTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "root can read a 0000 directory")
     def test_privileged_scan_raises_so_the_run_is_marked_incomplete(self):
-        with patch.object(utils_mod, "_is_root", return_value=True):
-            with self.assertRaises(PermissionError):
-                self.detect()
+        a, b = privileged()
+        with a, b, self.assertRaises(PermissionError):
+            self.detect()
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "root can read a 0000 directory")
     def test_unprivileged_sibling_home_does_not_raise(self):
         """Raising there would mark every scan on every multi-user box incomplete."""
-        with patch.object(utils_mod, "_is_root", return_value=False), \
-                patch.object(utils_mod, "_is_scanning_users_own_home", return_value=False):
+        a, b, c = unprivileged()
+        with a, b, c:
             self.assertIsNone(self.detect())  # must not raise
 
 
@@ -563,8 +586,8 @@ class UnresolvedInstanceTests(unittest.TestCase):
         utils_mod.reset_sentry_run_state()
 
     def detect_privileged(self):
-        with patch.object(utils_mod, "_is_root", return_value=True), \
-                patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
+        a, b = privileged()
+        with a, b, patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
             return self.detector.detect()
 
     def test_a_malformed_sibling_makes_the_inventory_incomplete(self):

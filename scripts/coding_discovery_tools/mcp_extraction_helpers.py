@@ -1522,6 +1522,13 @@ def read_mcp_json(config_path, tool_path: str, tool_label: str) -> Optional[Dict
         content = _strip_jsonc_comments(content)
         content = _strip_trailing_commas(content)
         config_data = json.loads(content)
+        # A non-object root is valid JSON, so it arrives unraised and would
+        # AttributeError out of the caller's whole extract_mcp_config.
+        if not isinstance(config_data, dict):
+            logger.warning(f"{tool_label} MCP config {config_path} is not a JSON object")
+            return None
+        servers_obj = config_data.get("servers") or config_data.get("mcpServers", {})
+        servers = transform_mcp_servers_to_array(servers_obj)
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON in {tool_label} MCP config {config_path}: {e}")
         return None
@@ -1532,14 +1539,6 @@ def read_mcp_json(config_path, tool_path: str, tool_label: str) -> Optional[Dict
         logger.warning(f"Error reading {tool_label} MCP config {config_path}: {e}")
         return None
 
-    # A non-object root is valid JSON, so it arrives unraised and would AttributeError
-    # out of the caller's whole extract_mcp_config.
-    if not isinstance(config_data, dict):
-        logger.warning(f"{tool_label} MCP config {config_path} is not a JSON object")
-        return None
-
-    servers_obj = config_data.get("servers") or config_data.get("mcpServers", {})
-    servers = transform_mcp_servers_to_array(servers_obj)
     if not servers:
         return None
     return {"path": tool_path, "mcpServers": servers}

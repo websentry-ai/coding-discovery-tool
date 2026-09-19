@@ -677,29 +677,30 @@ class UserScopeMcpTests(unittest.TestCase):
         self._tmp.cleanup()
         helpers.reset_workspace_config_dirs()
 
-    def extract(self, claim_user_scope):
+    def extract(self):
         with patch.object(vs_mcp, "collect_workspace_config_dirs", return_value={".vs": []}), \
                 patch.object(vs_mcp, "scan_windows_user_directories",
                              side_effect=lambda cb: cb(self.home)):
-            return self.extractor.extract_mcp_config(claim_user_scope=claim_user_scope)
+            return self.extractor.extract_mcp_config()
 
-    def test_claimed_when_claude_code_is_absent(self):
-        config = self.extract(claim_user_scope=True)
+    def test_the_user_scope_file_is_claimed(self):
+        """Measured live: with Claude Code installed, its extractor returns
+        ~/.claude.json and NOT the home-rooted .mcp.json, so gating on Claude
+        Code's presence left this file reported by nobody."""
+        config = self.extract()
         self.assertEqual([p["path"] for p in config["projects"]], [str(self.home)])
         self.assertEqual([s["name"] for s in config["projects"][0]["mcpServers"]], ["github"])
 
-    def test_left_alone_when_claude_code_would_report_it(self):
-        self.assertIsNone(self.extract(claim_user_scope=False))
-
-    def test_the_flag_defaults_to_not_claiming(self):
-        """The orchestrator starts the flag at "Claude Code present": a wrong True
-        costs a missing row, a wrong False double-counts every server."""
-        detector = object.__new__(AIToolsDetector)
-        self.assertNotIn("_claude_code_detected", vars(detector))
-        detector._set_claude_code_detected([{"name": "Claude Code"}])
-        self.assertTrue(detector._claude_code_detected)
-        detector._set_claude_code_detected([{"name": "Visual Studio 2022 Enterprise"}])
-        self.assertFalse(detector._claude_code_detected)
+    def test_a_symlinked_user_scope_file_is_refused(self):
+        outside = Path(self._tmp.name) / "protected.json"
+        outside.write_text(json.dumps({"servers": {"leak": {"command": "x"}}}), encoding="utf-8")
+        target = self.home / ".mcp.json"
+        target.unlink()
+        try:
+            target.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        self.assertIsNone(self.extract())
 
 
 class DispatchTests(unittest.TestCase):

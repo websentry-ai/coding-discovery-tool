@@ -5,7 +5,7 @@ Visual Studio reads MCP servers from five locations
 (learn.microsoft.com/visualstudio/ide/mcp-servers), but four of them are shared
 with editors this tool already inventories:
 
-    %USERPROFILE%\.mcp.json          -> Claude Code, or here when it is absent
+    %USERPROFILE%\.mcp.json          -> here (Claude Code reads it but does not report it)
     <SOLUTIONDIR>\.mcp.json          -> Claude Code / Copilot CLI
     <SOLUTIONDIR>\.vscode\mcp.json   -> GitHub Copilot (VS Code)
     <SOLUTIONDIR>\.cursor\mcp.json   -> Cursor
@@ -15,8 +15,8 @@ Visual Studio borrows the other editors' files on purpose, so claiming them woul
 duplicate every server already attributed elsewhere rather than discover it.
 
 ``.vs\mcp.json`` is Visual Studio's alone. ``%USERPROFILE%\.mcp.json`` is claimed
-only when no Claude Code row exists to report it — nothing else would, and it is
-the one Visual Studio MCP location under the user's home, so it is the only one
+because nothing else reports it — verified live against Claude Code's own
+extractor — and it is the one Visual Studio MCP location under the user's home, so it is the only one
 that survives ``filter_tool_projects_by_user`` on the conventional ``C:\src\...``
 solution layout. A Visual Studio row still reports fewer servers than the IDE
 actually loads: a deliberate under-report, not a miss.
@@ -43,10 +43,8 @@ USER_MCP_FILENAME = ".mcp.json"
 class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Visual Studio MCP config on Windows systems."""
 
-    def extract_mcp_config(self, tool_name: Optional[str] = None,
-                           claim_user_scope: bool = False) -> Optional[Dict]:
-        """Solution-scoped ``.vs\\mcp.json`` servers, plus the user-scope file when
-        ``claim_user_scope`` — i.e. when no Claude Code row will report it."""
+    def extract_mcp_config(self, tool_name: Optional[str] = None) -> Optional[Dict]:
+        """Solution-scoped ``.vs\\mcp.json`` servers plus ``%USERPROFILE%\\.mcp.json``."""
         projects: List[Dict] = []
         # Shared walk: `.vs` and `.vscode` are collected in one pass over the drive.
         for vs_dir in collect_workspace_config_dirs().get(".vs", []):
@@ -54,8 +52,7 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
             if config:
                 projects.append(config)
 
-        if claim_user_scope:
-            projects.extend(self._user_scope_configs())
+        projects.extend(self._user_scope_configs())
 
         if not projects:
             return None
@@ -65,9 +62,10 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
         r"""``%USERPROFILE%\.mcp.json`` — what Visual Studio calls its *global* MCP
         server configuration.
 
-        Only read when Claude Code is absent. Claude Code treats the same path as a
-        home-rooted project config and already reports it, so claiming it
-        unconditionally would double-count every server rather than discover it.
+        Claimed unconditionally. Claude Code reads this path too, but measured on a
+        live Windows box with Claude Code installed its extractor returns
+        ``~/.claude.json`` and not the home-rooted ``.mcp.json`` -- so gating on
+        Claude Code's presence left the file reported by nobody at all.
         This is also the only one of Visual Studio's five MCP locations that lives
         under the user's home, so it is the only one that survives
         ``filter_tool_projects_by_user`` on the conventional ``C:\src\...`` layout.

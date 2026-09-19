@@ -26,7 +26,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
-import scripts.coding_discovery_tools.windows_extraction_helpers as helpers
 import scripts.coding_discovery_tools.windows.visual_studio.visual_studio as vs_mod
 import scripts.coding_discovery_tools.windows.visual_studio.mcp_config_extractor as vs_mcp
 from scripts.coding_discovery_tools.windows.visual_studio.mcp_config_extractor import (
@@ -447,47 +446,57 @@ class DefensiveParsingTests(unittest.TestCase):
         self.assertLessEqual(len(_version_text(_copilot_package(broken)["version"])), 64)
 
 
-class SharedWalkTests(unittest.TestCase):
-    """`.vs` and `.vscode` are both in SKIP_DIRS and sit in the same project trees,
-    so one pass collects both — a walk per consumer would traverse the whole drive
-    twice, and WEB-4755 was a 600s timeout on a single traversal."""
+class SolutionSearchTests(unittest.TestCase):
+    r"""`.vs` is searched under user home trees, not the whole drive.
+
+    `filter_tool_projects_by_user` discards every project outside the scanned
+    user's home before upload, so a drive-wide walk produces rows that are thrown
+    away -- measured at 101s and zero kept rows on a CI runner with VS installed.
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-        helpers.reset_workspace_config_dirs()
+        self.home = Path(self._tmp.name) / "nanda"
+        self.home.mkdir(parents=True)
+        self.extractor = WindowsVisualStudioMCPConfigExtractor()
 
     def tearDown(self):
         self._tmp.cleanup()
-        helpers.reset_workspace_config_dirs()
 
-    def walk(self, start):
-        found = {leaf: [] for leaf in helpers._WORKSPACE_CONFIG_LEAVES}
-        helpers._walk_workspace_config_dirs(self.root, start, found, set(), current_depth=1)
-        return found
+    def write_solution(self, rel, server):
+        vs = self.home / rel / ".vs"
+        vs.mkdir(parents=True)
+        (vs / "mcp.json").write_text(
+            json.dumps({"servers": {server: {"url": "https://e/mcp"}}}), encoding="utf-8")
 
-    def test_both_leaves_are_collected_in_one_pass(self):
-        repo = self.root / "Users" / "nanda" / "repo"
-        (repo / ".vs").mkdir(parents=True)
-        (repo / ".vscode").mkdir(parents=True)
-        found = self.walk(self.root / "Users")
-        self.assertEqual(found[".vs"], [repo / ".vs"])
-        self.assertEqual(found[".vscode"], [repo / ".vscode"])
+    def servers(self):
+        with patch.object(vs_mcp, "scan_windows_user_directories",
+                          side_effect=lambda cb: cb(self.home)):
+            config = self.extractor.extract_mcp_config()
+        return sorted(s["name"] for p in (config or {}).get("projects", [])
+                      for s in p.get("mcpServers", []))
 
-    def test_leaf_exemption_does_not_expose_skipped_parents(self):
-        """Exempting the leaf must not reach a `.vs` beneath node_modules/.git/venv."""
+    def test_a_solution_under_the_home_is_found(self):
+        self.write_solution("src/Demo", "solution-server")
+        self.assertIn("solution-server", self.servers())
+
+    def test_skipped_parents_still_hide_a_vs_dir(self):
         for parent in ("node_modules", ".git", "venv"):
-            (self.root / "Users" / "nanda" / "repo" / parent / "pkg" / ".vs").mkdir(parents=True)
-        self.assertEqual(self.walk(self.root / "Users")[".vs"], [])
+            self.write_solution(f"src/Demo/{parent}/pkg", f"leak-{parent}")
+        self.assertEqual(self.servers(), [])
 
-    def test_symlinked_leaf_is_skipped(self):
-        """A `.vs` symlink must not pull an out-of-tree solution into the project."""
-        outside = self.root / "outside" / ".vs"
+    def test_a_symlinked_vs_dir_is_skipped(self):
+        outside = Path(self._tmp.name) / "outside" / ".vs"
         outside.mkdir(parents=True)
-        repo = self.root / "Users" / "nanda" / "repo"
+        (outside / "mcp.json").write_text(
+            json.dumps({"servers": {"out-of-tree": {"url": "https://e/mcp"}}}), encoding="utf-8")
+        repo = self.home / "src" / "Demo"
         repo.mkdir(parents=True)
-        (repo / ".vs").symlink_to(outside, target_is_directory=True)
-        self.assertEqual(self.walk(self.root / "Users")[".vs"], [])
+        try:
+            (repo / ".vs").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        self.assertEqual(self.servers(), [])
 
 
 class SharedMcpReadTests(unittest.TestCase):
@@ -670,15 +679,14 @@ class UserScopeMcpTests(unittest.TestCase):
         (self.home / ".mcp.json").write_text(
             json.dumps({"servers": {"github": {"url": "https://api.githubcopilot.com/mcp/"}}}),
             encoding="utf-8")
-        helpers.reset_workspace_config_dirs()
         self.extractor = WindowsVisualStudioMCPConfigExtractor()
 
     def tearDown(self):
         self._tmp.cleanup()
-        helpers.reset_workspace_config_dirs()
 
     def extract(self):
-        with patch.object(vs_mcp, "collect_workspace_config_dirs", return_value={".vs": []}), \
+        with patch.object(WindowsVisualStudioMCPConfigExtractor, "_solution_configs",
+                          return_value=[]), \
                 patch.object(vs_mcp, "scan_windows_user_directories",
                              side_effect=lambda cb: cb(self.home)):
             return self.extractor.extract_mcp_config()

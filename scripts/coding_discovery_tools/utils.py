@@ -3043,9 +3043,6 @@ def reset_sentry_run_state() -> None:
     _copilot_xcode_probes.clear()
     _copilot_app_probes.clear()
     _vs_probes.clear()
-    # Local import: utils never imports the Windows helpers at module scope.
-    from .windows_extraction_helpers import reset_workspace_config_dirs
-    reset_workspace_config_dirs()
     _login_shell_cache.clear()
     _safe_helper_cache.clear()
     reset_vscode_registry_state()

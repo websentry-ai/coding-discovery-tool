@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import is_symlink_or_junction
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 from ...mcp_extraction_helpers import (
     read_mcp_json,
     transform_mcp_servers_to_array,
@@ -37,13 +37,15 @@ from ...mcp_extraction_helpers import (
     _strip_trailing_commas,
 )
 from ...windows_extraction_helpers import (
-    collect_workspace_config_dirs,
+    get_windows_system_directories,
     scan_windows_user_directories,
+    should_skip_path,
 )
 
 logger = logging.getLogger(__name__)
 
 MCP_FILENAME = "mcp.json"
+VS_DIR_NAME = ".vs"
 USER_MCP_FILENAME = ".mcp.json"
 
 
@@ -81,12 +83,7 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
     def extract_mcp_config(self, tool_name: Optional[str] = None) -> Optional[Dict]:
         """Solution-scoped ``.vs\\mcp.json`` servers plus ``%USERPROFILE%\\.mcp.json``."""
         projects: List[Dict] = []
-        # Shared walk: `.vs` and `.vscode` are collected in one pass over the drive.
-        for vs_dir in collect_workspace_config_dirs().get(".vs", []):
-            config = self._read_solution_config(vs_dir)
-            if config:
-                projects.append(config)
-
+        projects.extend(self._solution_configs())
         projects.extend(self._user_scope_configs())
 
         if not projects:
@@ -133,6 +130,59 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
         except (PermissionError, OSError) as e:
             logger.debug(f"Error scanning user directories for Visual Studio MCP: {e}")
         return configs
+
+    def _solution_configs(self) -> List[Dict]:
+        r"""``<SOLUTIONDIR>\.vs\mcp.json`` found beneath the user home trees.
+
+        Bounded to homes rather than the whole drive on purpose.
+        ``filter_tool_projects_by_user`` keeps only projects under the scanned
+        user's home, so a drive-wide walk spends its time on ``C:\Windows``,
+        ``C:\Program Files`` and the like to produce rows that are discarded
+        before upload. Measured on a CI runner with Visual Studio installed: 101
+        seconds, zero rows kept. The output is identical either way.
+        """
+        configs: List[Dict] = []
+        system_dirs = get_windows_system_directories()
+
+        def for_user(user_home: Path) -> None:
+            self._walk_for_solution_dirs(user_home, user_home, configs, system_dirs, 0)
+
+        try:
+            scan_windows_user_directories(for_user)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error scanning user directories for .vs configs: {e}")
+        return configs
+
+    def _walk_for_solution_dirs(self, root: Path, current: Path, configs: List[Dict],
+                                system_dirs: set, depth: int) -> None:
+        """Recurse for ``.vs`` dirs. Never raises."""
+        if depth > MAX_SEARCH_DEPTH:
+            return
+        try:
+            for item in current.iterdir():
+                try:
+                    # `.vs` is not in SKIP_DIRS, but its parents may be.
+                    if item.name != VS_DIR_NAME and should_skip_path(item, system_dirs):
+                        continue
+                    if not item.is_dir() or is_symlink_or_junction(item):
+                        continue
+                    if item.name == VS_DIR_NAME:
+                        config = self._read_solution_config(item)
+                        if config:
+                            configs.append(config)
+                        continue
+                    if item.name in SKIP_DIRS:
+                        continue
+                    self._walk_for_solution_dirs(root, item, configs, system_dirs, depth + 1)
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {item}: {e}")
+                    continue
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error walking {current}: {e}")
 
     def _read_solution_config(self, vs_dir: Path) -> Optional[Dict]:
         """Parse ``<vs_dir>/mcp.json``, keyed to the solution dir that owns it."""

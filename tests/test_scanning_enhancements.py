@@ -32,7 +32,6 @@ from scripts.coding_discovery_tools.macos.github_copilot.copilot_rules_extractor
 )
 from scripts.coding_discovery_tools import linux_extraction_helpers as linux_helpers
 from scripts.coding_discovery_tools import macos_extraction_helpers as macos_helpers
-from scripts.coding_discovery_tools import windows_extraction_helpers as windows_helpers
 from scripts.coding_discovery_tools.macos.github_copilot.mcp_config_extractor import (
     MacOSGitHubCopilotMCPConfigExtractor,
 )
@@ -765,21 +764,12 @@ class TestGitHubCopilotWorkspaceMCP(unittest.TestCase):
     # tmp_dir is under /var, which the posix system-dir filters reject; neutralise it so
     # these tests exercise the SKIP_DIRS interaction rather than the system-dir prefix.
     def _walk(self, extractor, start, configs):
+        extra = (set(),) if isinstance(extractor, WindowsGitHubCopilotMCPConfigExtractor) else ()
         with patch.object(macos_helpers, "SKIP_SYSTEM_DIRS", set()), \
                 patch.object(linux_helpers, "_LINUX_SKIP_SYSTEM_DIRS", set()):
-            if isinstance(extractor, WindowsGitHubCopilotMCPConfigExtractor):
-                # Windows shares one walk with the Visual Studio extractor, so the
-                # leaf exemption under test now lives in windows_extraction_helpers.
-                found = {leaf: [] for leaf in windows_helpers._WORKSPACE_CONFIG_LEAVES}
-                windows_helpers._walk_workspace_config_dirs(
-                    Path(self.tmp_dir), start, found, set(), current_depth=1
-                )
-                for vscode_dir in found[".vscode"]:
-                    extractor._check_vscode_mcp(vscode_dir, configs)
-            else:
-                extractor._walk_for_workspace_mcp(
-                    Path(self.tmp_dir), start, configs, current_depth=1
-                )
+            extractor._walk_for_workspace_mcp(
+                Path(self.tmp_dir), start, configs, *extra, current_depth=1
+            )
 
     def _write_mcp_json(self, vscode_dir, server_name):
         vscode_dir.mkdir(parents=True)

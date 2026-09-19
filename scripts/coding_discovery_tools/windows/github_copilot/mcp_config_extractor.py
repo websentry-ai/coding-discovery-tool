@@ -5,14 +5,17 @@ from typing import Optional, Dict, List
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import is_symlink_or_junction
+from ...constants import MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 from ...mcp_extraction_helpers import (
     append_vscode_cached_mcp_servers,
     enumerate_vscode_mcp_files,
     extract_ide_global_configs_with_root_support,
     read_mcp_json,
 )
-from ...windows_extraction_helpers import collect_workspace_config_dirs
+from ...windows_extraction_helpers import (
+    should_skip_path,
+    get_windows_system_directories,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,14 +128,80 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         Extract workspace-level .vscode\\mcp.json configs from project directories.
 
-        Since .vscode is in SKIP_DIRS, the general directory walk skips it. The
-        shared walk exempts that leaf and collects Visual Studio's ``.vs`` in the
-        same pass, so the whole drive is traversed once however many extractors ask.
+        Since .vscode is in SKIP_DIRS, the general directory walk skips it.
+        This method walks for project directories and directly checks for
+        .vscode\\mcp.json in each, bypassing the SKIP_DIRS filter.
         """
         configs = []
-        for vscode_dir in collect_workspace_config_dirs().get(".vscode", []):
-            self._check_vscode_mcp(vscode_dir, configs)
+        root_drive = Path.home().anchor
+        root_path = Path(root_drive)
+        system_dirs = get_windows_system_directories()
+
+        try:
+            top_level_dirs = [
+                item for item in root_path.iterdir()
+                if item.is_dir() and not item.name.startswith('.')
+                and not should_skip_path(item, system_dirs)
+            ]
+            for top_dir in top_level_dirs:
+                try:
+                    self._walk_for_workspace_mcp(root_path, top_dir, configs, system_dirs, current_depth=1)
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"Skipping {top_dir}: {e}")
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error accessing root directory for workspace MCP scan: {e}")
+
         return configs
+
+    def _walk_for_workspace_mcp(
+        self,
+        root_path: Path,
+        current_dir: Path,
+        configs: List[Dict],
+        system_dirs: set,
+        current_depth: int = 0
+    ) -> None:
+        """
+        Recursively walk directories looking for .vscode\\mcp.json files.
+        """
+        if current_depth > MAX_SEARCH_DEPTH:
+            return
+
+        try:
+            for item in current_dir.iterdir():
+                try:
+                    # .vscode is in SKIP_DIRS; exempt the leaf so the check below is reachable.
+                    if item.name != ".vscode" and should_skip_path(item, system_dirs):
+                        continue
+
+                    try:
+                        depth = len(item.relative_to(root_path).parts)
+                        if depth > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
+
+                    if item.is_dir():
+                        if is_symlink_or_junction(item):
+                            continue
+                        if item.name == ".vscode":
+                            self._check_vscode_mcp(item, configs)
+                            continue
+                        if item.name in SKIP_DIRS:
+                            continue
+                        self._walk_for_workspace_mcp(root_path, item, configs, system_dirs, current_depth + 1)
+
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {item}: {e}")
+                    continue
+
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error walking {current_dir}: {e}")
 
     def _check_vscode_mcp(self, vscode_dir: Path, configs: List[Dict]) -> None:
         """

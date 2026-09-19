@@ -87,23 +87,30 @@ def _version_tuple(version: str) -> tuple:
         return ()
 
 
-def _read_state(state_file: Path) -> Tuple[Optional[Dict], bool]:
-    """``(state, denied)`` for one ``state.json``. Denied is distinct from malformed
-    and from absent: only a denial leaves presence unknown."""
+def _read_state(state_file: Path) -> Tuple[Optional[Dict], str]:
+    """``(state, outcome)`` for one ``state.json``.
+
+    Four outcomes, not two: an instance dir with no state file is normal, but one
+    we could not read and one holding garbage both leave that instance unknown,
+    and an unknown instance must not be reported as an absent one.
+    """
     try:
         with open(state_file, "r", encoding="utf-8-sig") as handle:
             state = json.load(handle)
-        return (state if isinstance(state, dict) else None), False
+        if isinstance(state, dict):
+            return state, "ok"
+        record_vs_probe("state_json", "malformed")
+        return None, "malformed"
     except (FileNotFoundError, NotADirectoryError):
-        return None, False
+        return None, "absent"
     except (PermissionError, OSError) as exc:
         logger.debug("Could not read %s: %s", state_file, exc)
         record_vs_probe("state_json", "unreadable")
-        return None, True
+        return None, "unreadable"
     except (ValueError, UnicodeDecodeError) as exc:
         logger.debug("Malformed %s: %s", state_file, exc)
         record_vs_probe("state_json", "malformed")
-        return None, False
+        return None, "malformed"
 
 
 def _display_name(state: Dict) -> str:
@@ -242,38 +249,51 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         return None
 
     def _instance_states(self) -> Tuple[List[Dict], bool]:
-        """``(states, denied)``. ``denied`` is True when a read failed rather than
-        came back empty — the caller must not report a denial as "no Visual Studio"
-        for a user whose own config dir we just read successfully."""
+        """``(states, unresolved)``.
+
+        ``unresolved`` means some instance's state is unknown — denied, malformed,
+        or answered by a vswhere that cannot see the Copilot component. It is NOT
+        cleared by other instances parsing fine: only returned rows enter the
+        manifest, so one readable instance alongside one inaccessible one would
+        otherwise be reported as a complete inventory and the missing live install
+        pruned.
+        """
         instances_dir = self._instances_dir()
         if instances_dir is None:
             record_vs_probe("program_data", "absent")
-            return self._vswhere_states(), False
+            states, copilot_known = self._vswhere_states()
+            return states, not copilot_known
 
         state = _listable_state(instances_dir)
         record_vs_probe("instances", state)
         if state != "present":
-            states = self._vswhere_states()
-            return states, (state == "unreadable" and not states)
+            states, copilot_known = self._vswhere_states()
+            # A denied registry stays unresolved even when vswhere lists the IDEs:
+            # vswhere has no flag that reports packages, so Copilot presence is
+            # unknown and its row would be pruned as a clean absence.
+            return states, (state == "unreadable" and not copilot_known)
 
         states = []
-        denied = False
+        unresolved = False
         try:
             for instance_dir in instances_dir.iterdir():
                 if not instance_dir.is_dir():
                     continue
-                parsed, unreadable = _read_state(instance_dir / "state.json")
+                parsed, outcome = _read_state(instance_dir / "state.json")
                 if parsed:
                     states.append(parsed)
-                denied = denied or unreadable
+                elif outcome in ("unreadable", "malformed"):
+                    # A dir with no state file is normal; one we could not read or
+                    # could not parse leaves that instance unknown.
+                    unresolved = True
         except (PermissionError, OSError) as exc:
             logger.debug("Could not enumerate %s: %s", instances_dir, exc)
             record_vs_probe("instances", "unreadable")
-            states = self._vswhere_states()
-            return states, not states
+            states, copilot_known = self._vswhere_states()
+            return states, not copilot_known
         # Empty is a real answer here; only fall back when the registry could not
         # be read, so "probed cleanly, found nothing" stays distinct from "denied".
-        return states, denied
+        return states, unresolved
 
     def _vswhere_exe(self) -> Optional[Path]:
         """``vswhere.exe``, or None when the Installer is not on this machine.
@@ -308,28 +328,29 @@ class WindowsVisualStudioDetector(BaseToolDetector):
             return None
         return [item for item in parsed if isinstance(item, dict)]
 
-    def _vswhere_states(self) -> List[Dict]:
-        """Instances from the documented fallback API, in ``state.json`` shape.
+    def _vswhere_states(self) -> Tuple[List[Dict], bool]:
+        """``(states, copilot_known)`` from the documented fallback API.
 
         vswhere reports no ``packages`` array and has no flag that produces one
-        (``-requires`` filters, it does not report), so the Copilot component is
-        asked for with a second, filtered call rather than inferred from silence.
+        (``-requires`` filters, it does not report), so the component is asked for
+        with a second, filtered call. When that call cannot answer, ``copilot_known``
+        is False — silence from vswhere is not evidence Copilot is absent, and
+        emitting IDE rows without a Copilot row would let an existing one be pruned.
         """
         rows = self._run_vswhere()
         if rows is None:
-            return []
+            return [], False
         record_vs_probe("vswhere", "present")
 
         with_copilot = self._run_vswhere("-requires", _COPILOT_COMPONENT_ID)
         if with_copilot is None:
-            # Absence unproven: leave the marker off rather than assert "no Copilot".
             record_vs_probe("vswhere_copilot", "unknown")
-            copilot_paths = set()
-        else:
-            copilot_paths = {
-                item.get("installationPath") for item in with_copilot if item.get("installationPath")
-            }
-            record_vs_probe("vswhere_copilot", "present" if copilot_paths else "absent")
+            return [_from_vswhere(item) for item in rows], False
+
+        copilot_paths = {
+            item.get("installationPath") for item in with_copilot if item.get("installationPath")
+        }
+        record_vs_probe("vswhere_copilot", "present" if copilot_paths else "absent")
 
         states = []
         for item in rows:
@@ -340,7 +361,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
                 # depending on which path ran. "Installed, version unknown" is true.
                 state["packages"] = [{"id": _COPILOT_COMPONENT_ID, "version": None}]
             states.append(state)
-        return states
+        return states, True
 
     def detect(self) -> Optional[List[Dict]]:
         """IDE row per reportable instance, plus one Copilot row when the component
@@ -349,7 +370,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         if user_instance_dir is None:
             return None
 
-        states, denied = self._instance_states()
+        states, unresolved = self._instance_states()
         rows: List[Dict] = []
         copilot_package = None
         for state in states:
@@ -366,26 +387,32 @@ class WindowsVisualStudioDetector(BaseToolDetector):
                 # unusable path must drop the row, not emit it with None.
                 record_vs_probe("instances", "no_install_path")
                 continue
+            # Per instance, not per machine: Copilot is an optional component, so an
+            # Enterprise install carrying it says nothing about the Community one
+            # beside it, and the component version belongs to the instance that
+            # supplied it. Mirrors how the JetBrains detector scopes plugins.
+            package = _copilot_package(state)
             rows.append({
                 "name": _display_name(state),
                 "version": _version_text(state.get("installationVersion")),
                 "install_path": install_path,
-                "plugins": [],
+                "plugins": ["GitHub Copilot"] if package is not None else [],
             })
-            copilot_package = copilot_package or _copilot_package(state)
+            if package is not None and copilot_package is None:
+                copilot_package = package
+
+        # Not gated on `rows`: only returned rows enter the manifest, so a readable
+        # instance beside an unknown one would otherwise pass as a complete
+        # inventory and the missing live install would be pruned.
+        if unresolved:
+            fail_if_anomalous(
+                self._user_home, "Visual Studio instance state could not be resolved")
 
         if not rows:
-            if denied:
-                # This user has a VS config dir, so "no instances" here is a denial,
-                # not an absence — reporting it cleanly would let the backend prune
-                # a live install.
-                fail_if_anomalous(self._user_home, "Visual Studio instance registry unreadable")
             record_vs_probe("instances", "no_reportable")
             return None
 
         if copilot_package is not None:
-            for row in rows:
-                row["plugins"] = ["GitHub Copilot"]
             # Per-user install_path, not the machine-wide one: under a root scan the
             # Copilot row would otherwise fan out identically to every profile with
             # nothing to disown it.

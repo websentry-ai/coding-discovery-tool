@@ -23,6 +23,9 @@ import scripts.coding_discovery_tools.windows.visual_studio.mcp_config_extractor
 from scripts.coding_discovery_tools.windows.visual_studio.mcp_config_extractor import (
     WindowsVisualStudioMCPConfigExtractor,
 )
+from scripts.coding_discovery_tools.windows.visual_studio.visual_studio_rules_extractor import (
+    WindowsVisualStudioRulesExtractor,
+)
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 from scripts.coding_discovery_tools.mcp_extraction_helpers import read_mcp_json
 from scripts.coding_discovery_tools.coding_tool_factory import (
@@ -195,7 +198,7 @@ class DetectTests(unittest.TestCase):
         an absence — and a clean absence is what lets the backend prune."""
         self.give_user_a_vs_config()
         with self.denied_instance_registry(), \
-                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[]), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([], False)), \
                 patch.object(utils_mod, "_is_root", return_value=True):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
                 with self.assertRaises(PermissionError):
@@ -206,7 +209,7 @@ class DetectTests(unittest.TestCase):
         """Raising there would mark every scan on every multi-user box incomplete."""
         self.give_user_a_vs_config()
         with self.denied_instance_registry(), \
-                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[]), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([], False)), \
                 patch.object(utils_mod, "_is_root", return_value=False), \
                 patch.object(utils_mod, "_is_scanning_users_own_home", return_value=False):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
@@ -216,7 +219,7 @@ class DetectTests(unittest.TestCase):
         """vswhere answered, so nothing is unknown — no raise, rows as usual."""
         self.give_user_a_vs_config()
         with self.denied_instance_registry(), \
-                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[state()]), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=([state()], True)), \
                 patch.object(utils_mod, "_is_root", return_value=True):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
                 rows = self.detector.detect()
@@ -334,7 +337,8 @@ class VswhereFallbackTests(unittest.TestCase):
 
     def test_copilot_comes_from_the_requires_probe_not_from_silence(self):
         with patch.object(self.detector, "_run_vswhere", side_effect=[[self.ROW], [self.ROW]]):
-            states = self.detector._vswhere_states()
+            states, copilot_known = self.detector._vswhere_states()
+        self.assertTrue(copilot_known)
         package = _copilot_package(states[0])
         self.assertIsNotNone(package)          # present...
         self.assertIsNone(package["version"])  # ...but vswhere cannot name the version
@@ -342,8 +346,9 @@ class VswhereFallbackTests(unittest.TestCase):
     def test_copilot_absence_is_not_asserted_when_the_probe_fails(self):
         """An unanswerable probe must not read as "Copilot is not installed"."""
         with patch.object(self.detector, "_run_vswhere", side_effect=[[self.ROW], None]):
-            states = self.detector._vswhere_states()
+            states, copilot_known = self.detector._vswhere_states()
         self.assertIsNone(_copilot_package(states[0]))
+        self.assertFalse(copilot_known)   # silence is not evidence of absence
         self.assertIn("vswhere_copilot:unknown", utils_mod.vs_probes())
 
 
@@ -459,6 +464,139 @@ class SharedMcpReadTests(unittest.TestCase):
         results = [read_mcp_json(p, "/p", "Test") for p in (bad, good)]
         self.assertIsNone(results[0])
         self.assertEqual([s["name"] for s in results[1]["mcpServers"]], ["s"])
+
+
+class SideBySideInstanceTests(unittest.TestCase):
+    """Copilot is an optional component, so an Enterprise install carrying it says
+    nothing about the Community install beside it."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.program_data = root / "ProgramData"
+        self.instances = self.program_data / "Microsoft" / "VisualStudio" / "Packages" / "_Instances"
+        self.instances.mkdir(parents=True)
+        self.home = root / "Users" / "nanda"
+        (self.home / "AppData" / "Local" / "Microsoft" / "VisualStudio" / "17.14_a").mkdir(parents=True)
+        self.detector = WindowsVisualStudioDetector()
+        self.detector.user_home = self.home
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        utils_mod.reset_sentry_run_state()
+
+    def write(self, name, product, copilot, path):
+        body = {**state(product=product, copilot=copilot), "installationPath": path}
+        (self.instances / name).mkdir()
+        (self.instances / name / "state.json").write_text(json.dumps(body), encoding="utf-8")
+
+    def test_copilot_does_not_cross_instances(self):
+        self.write("ent", ENTERPRISE, True, r"C:\VS\2022\Enterprise")
+        self.write("com", COMMUNITY, False, r"C:\VS\2022\Community")
+        with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
+            rows = self.detector.detect()
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["Visual Studio 2022 Enterprise"]["plugins"], ["GitHub Copilot"])
+        self.assertEqual(by_name["Visual Studio 2022 Community"]["plugins"], [])
+        self.assertEqual(by_name[COPILOT_TOOL_NAME]["version"], "17.14.1")
+
+
+class UnresolvedInstanceTests(unittest.TestCase):
+    """Only returned rows enter the manifest, so a readable instance beside an
+    unknown one would pass as a complete inventory and the missing live install
+    would be pruned. `unresolved` must not be gated on `rows` being empty."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.program_data = root / "ProgramData"
+        self.instances = self.program_data / "Microsoft" / "VisualStudio" / "Packages" / "_Instances"
+        self.instances.mkdir(parents=True)
+        self.home = root / "Users" / "nanda"
+        (self.home / "AppData" / "Local" / "Microsoft" / "VisualStudio" / "17.14_a").mkdir(parents=True)
+        good = self.instances / "good"
+        good.mkdir()
+        (good / "state.json").write_text(json.dumps(state()), encoding="utf-8")
+        self.detector = WindowsVisualStudioDetector()
+        self.detector.user_home = self.home
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        utils_mod.reset_sentry_run_state()
+
+    def detect_privileged(self):
+        with patch.object(utils_mod, "_is_root", return_value=True), \
+                patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
+            return self.detector.detect()
+
+    def test_a_malformed_sibling_makes_the_inventory_incomplete(self):
+        bad = self.instances / "bad"
+        bad.mkdir()
+        (bad / "state.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(PermissionError):
+            self.detect_privileged()
+
+    def test_an_empty_instance_dir_is_normal_and_does_not_raise(self):
+        """A dir with no state file is routine — it must not disable pruning."""
+        (self.instances / "empty").mkdir()
+        rows = self.detect_privileged()
+        self.assertEqual([r["name"] for r in rows][0], "Visual Studio 2022 Enterprise")
+
+    def test_unknowable_copilot_from_vswhere_is_not_an_absence(self):
+        """vswhere lists the IDEs but cannot report packages, so emitting IDE rows
+        without a Copilot row would prune an existing one."""
+        with patch.object(vs_mod, "_listable_state", return_value="unreadable"), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states",
+                             return_value=([state()], False)):
+            with self.assertRaises(PermissionError):
+                self.detect_privileged()
+
+
+class RuleSymlinkTests(unittest.TestCase):
+    r"""These paths sit inside a profile its owner controls, but an all-user scan
+    reads them as Administrator or LOCAL SYSTEM. A junction at
+    `copilot-instructions.md` would otherwise put up to 50 KB of a file only the
+    elevated scanner can read into the uploaded report."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.home = root / "nanda"
+        (self.home / ".github" / "agents").mkdir(parents=True)
+        self.secret = root / "protected" / "secret.md"
+        self.secret.parent.mkdir()
+        self.secret.write_text("elevated-only content", encoding="utf-8")
+        self.extractor = WindowsVisualStudioRulesExtractor()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_a_symlinked_instructions_file_is_not_read(self):
+        (self.home / "copilot-instructions.md").symlink_to(self.secret)
+        self.assertEqual(self.extractor._rule_files(self.home), [])
+
+    def test_a_symlinked_agents_dir_is_not_walked(self):
+        outside = Path(self._tmp.name) / "elsewhere"
+        outside.mkdir()
+        (outside / "x.agent.md").write_text("---\nname: x\n---\n", encoding="utf-8")
+        agents = self.home / ".github" / "agents"
+        agents.rmdir()
+        agents.symlink_to(outside, target_is_directory=True)
+        self.assertEqual(self.extractor._rule_files(self.home), [])
+
+    def test_a_symlinked_agent_file_is_not_read(self):
+        (self.home / ".github" / "agents" / "x.agent.md").symlink_to(self.secret)
+        self.assertEqual(self.extractor._rule_files(self.home), [])
+
+    def test_real_files_inside_the_profile_are_still_read(self):
+        (self.home / "copilot-instructions.md").write_text("mine", encoding="utf-8")
+        (self.home / ".github" / "agents" / "x.agent.md").write_text("---\nname: x\n---\n",
+                                                                    encoding="utf-8")
+        self.assertEqual(
+            sorted(f.name for f in self.extractor._rule_files(self.home)),
+            ["copilot-instructions.md", "x.agent.md"])
 
 
 class UserScopeMcpTests(unittest.TestCase):

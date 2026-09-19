@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
+from ...constants import is_symlink_or_junction
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -63,18 +64,47 @@ class WindowsVisualStudioRulesExtractor:
     def _rule_files(self, user_home: Path) -> List[Path]:
         """The user-profile instruction and agent files that exist. Never raises."""
         files: List[Path] = []
-        try:
-            instructions = user_home / USER_INSTRUCTIONS_FILENAME
-            if instructions.is_file():
-                files.append(instructions)
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not stat {user_home / USER_INSTRUCTIONS_FILENAME}: {e}")
+        instructions = user_home / USER_INSTRUCTIONS_FILENAME
+        if self._readable_within_profile(instructions, user_home):
+            files.append(instructions)
 
-        try:
-            agents_dir = user_home / USER_AGENTS_DIR
-            if agents_dir.is_dir():
-                files.extend(f for f in agents_dir.glob(AGENT_FILE_GLOB) if f.is_file())
-        except (PermissionError, OSError) as e:
-            logger.debug(f"Could not list {user_home / USER_AGENTS_DIR}: {e}")
+        agents_dir = user_home / USER_AGENTS_DIR
+        if self._readable_within_profile(agents_dir, user_home, want_dir=True):
+            try:
+                files.extend(
+                    f for f in agents_dir.glob(AGENT_FILE_GLOB)
+                    if self._readable_within_profile(f, user_home)
+                )
+            except (PermissionError, OSError) as e:
+                logger.debug(f"Could not list {agents_dir}: {e}")
 
         return files
+
+    @staticmethod
+    def _readable_within_profile(path: Path, user_home: Path, want_dir: bool = False) -> bool:
+        r"""Whether ``path`` is a real file/dir whose target stays inside ``user_home``.
+
+        These paths are inside a profile the profile's owner controls, but an
+        all-user scan reads them as Administrator or LOCAL SYSTEM. A junction at
+        ``copilot-instructions.md`` or ``.github\agents`` would otherwise be followed
+        by ``is_file()``/``is_dir()`` and up to 50 KB of a file only the elevated
+        scanner can read would be copied into the uploaded rule content.
+
+        Both halves are needed: the reparse-point check rejects the obvious case
+        cheaply, and the resolved-path containment check catches a symlink anywhere
+        in the chain, including one on an intermediate directory. Never raises.
+        """
+        try:
+            if is_symlink_or_junction(path):
+                logger.debug(f"Skipping reparse point under {user_home}: {path}")
+                return False
+            if not (path.is_dir() if want_dir else path.is_file()):
+                return False
+            path.resolve(strict=True).relative_to(user_home.resolve(strict=True))
+            return True
+        except ValueError:
+            logger.debug(f"Skipping rule path resolving outside {user_home}: {path}")
+            return False
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Could not resolve {path}: {e}")
+            return False

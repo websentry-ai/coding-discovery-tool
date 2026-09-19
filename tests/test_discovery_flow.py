@@ -270,24 +270,7 @@ class TestMainCLI(unittest.TestCase):
         ]
         self._queue_file.write_text(json.dumps(envelope))
 
-        # ---- TEMPORARY DIAGNOSTIC (revert before merge) -------------------
-        # Windows CI times this out at 600s on the Visual Studio branch while
-        # staging passes. A generous budget here answers whether that is pure
-        # duration or a hang, and the CLI's own timestamped log says where it
-        # went. Nothing in product code is touched.
-        import time as _t
-        _t0 = _t.time()
-        result = self._run_cli(timeout=1800)
-        _wall = _t.time() - _t0
-        _err = result.stderr or ""
-        print("\nDIAG wall=%.0fs rc=%s posts=%d stderr_bytes=%d"
-              % (_wall, result.returncode, len(self.server.requests), len(_err)), flush=True)
-        for _m in ("Summary for tool:", "Sending", "Failed to send", "retry", "Visual Studio"):
-            print("DIAG count[%s]=%d" % (_m, _err.count(_m)), flush=True)
-        print("DIAG stderr_head:\n" + _err[:1500], flush=True)
-        print("DIAG stderr_tail:\n" + _err[-4000:], flush=True)
-        # ---- END TEMPORARY DIAGNOSTIC -------------------------------------
-
+        result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
         # Mock server should have received the queued report
@@ -311,24 +294,7 @@ class TestMainCLI(unittest.TestCase):
         ]
         self._queue_file.write_text(json.dumps(envelope))
 
-        # ---- TEMPORARY DIAGNOSTIC (revert before merge) -------------------
-        # Windows CI times this out at 600s on the Visual Studio branch while
-        # staging passes. A generous budget here answers whether that is pure
-        # duration or a hang, and the CLI's own timestamped log says where it
-        # went. Nothing in product code is touched.
-        import time as _t
-        _t0 = _t.time()
-        result = self._run_cli(timeout=1800)
-        _wall = _t.time() - _t0
-        _err = result.stderr or ""
-        print("\nDIAG wall=%.0fs rc=%s posts=%d stderr_bytes=%d"
-              % (_wall, result.returncode, len(self.server.requests), len(_err)), flush=True)
-        for _m in ("Summary for tool:", "Sending", "Failed to send", "retry", "Visual Studio"):
-            print("DIAG count[%s]=%d" % (_m, _err.count(_m)), flush=True)
-        print("DIAG stderr_head:\n" + _err[:1500], flush=True)
-        print("DIAG stderr_tail:\n" + _err[-4000:], flush=True)
-        # ---- END TEMPORARY DIAGNOSTIC -------------------------------------
-
+        result = self._run_cli()
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
 
         # Queue file should be re-created with failed reports

@@ -13,16 +13,18 @@ can never carry the component. Build Tools instances are skipped — no IDE, no 
 ``vswhere.exe`` answers the same question and is the documented API, but it is a
 subprocess; it runs only when ``_Instances`` itself is unreadable.
 
-Never raises. A denied path is recorded as a probe and falls through: one raising
-detector marks the whole scan incomplete and disables pruning for every tool on the
-device (tests/test_scan_completed_manifest.py:682).
+A denied read is never reported as an absence: a clean absence is what lets the
+backend prune a live install. Denials go through ``fail_if_anomalous``, which raises
+only when the scan had any business reading the path (privileged, or the scanner's
+own home) — raising unconditionally would mark every scan on every multi-user box
+incomplete and nothing would ever be pruned.
 """
 
 import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ...coding_tool_base import BaseToolDetector
 from ...utils import (
@@ -85,22 +87,23 @@ def _version_tuple(version: str) -> tuple:
         return ()
 
 
-def _read_state(state_file: Path) -> Optional[Dict]:
-    """Parse one ``state.json``. Returns None for absent, denied or malformed."""
+def _read_state(state_file: Path) -> Tuple[Optional[Dict], bool]:
+    """``(state, denied)`` for one ``state.json``. Denied is distinct from malformed
+    and from absent: only a denial leaves presence unknown."""
     try:
         with open(state_file, "r", encoding="utf-8-sig") as handle:
             state = json.load(handle)
-        return state if isinstance(state, dict) else None
+        return (state if isinstance(state, dict) else None), False
     except (FileNotFoundError, NotADirectoryError):
-        return None
+        return None, False
     except (PermissionError, OSError) as exc:
         logger.debug("Could not read %s: %s", state_file, exc)
         record_vs_probe("state_json", "unreadable")
-        return None
+        return None, True
     except (ValueError, UnicodeDecodeError) as exc:
         logger.debug("Malformed %s: %s", state_file, exc)
         record_vs_probe("state_json", "malformed")
-        return None
+        return None, False
 
 
 def _display_name(state: Dict) -> str:
@@ -122,8 +125,13 @@ def _display_name(state: Dict) -> str:
     return " ".join(part for part in (_FALLBACK_NAME, year, edition, channel) if part)
 
 
-def _copilot_version(state: Dict) -> Optional[str]:
-    """Version of the Copilot component in this instance, or None when absent."""
+def _copilot_package(state: Dict) -> Optional[Dict]:
+    """The Copilot component entry, or None when this instance has none.
+
+    Returns the entry rather than its version: the vswhere path can prove Copilot is
+    installed without being able to name a version, and ``None`` there must not read
+    as "no Copilot".
+    """
     packages = state.get("packages")
     if not isinstance(packages, list):
         return None
@@ -131,7 +139,7 @@ def _copilot_version(state: Dict) -> Optional[str]:
         if not isinstance(package, dict):
             continue
         if _COPILOT_PACKAGE_MARKER in str(package.get("id") or "").lower():
-            return _version_text(package.get("version"))
+            return package
     return None
 
 
@@ -210,36 +218,47 @@ class WindowsVisualStudioDetector(BaseToolDetector):
                 if entry.is_dir() and entry.name[:1].isdigit():
                     return entry
         except (PermissionError, OSError) as exc:
+            # `_listable_state` only pulled the first entry, so this is a second and
+            # independent read that can be denied on its own. Swallowing it here
+            # would report a clean absence while the probe above says "present".
             logger.debug("Could not list %s: %s", vs_dir, exc)
+            record_vs_probe("user_config", "unreadable")
+            fail_if_anomalous(self._user_home, f"Visual Studio user config dir unreadable: {vs_dir}")
         return None
 
-    def _instance_states(self) -> List[Dict]:
-        """Every parsed ``state.json``, via ``_Instances`` or the vswhere fallback."""
+    def _instance_states(self) -> Tuple[List[Dict], bool]:
+        """``(states, denied)``. ``denied`` is True when a read failed rather than
+        came back empty — the caller must not report a denial as "no Visual Studio"
+        for a user whose own config dir we just read successfully."""
         instances_dir = self._instances_dir()
         if instances_dir is None:
             record_vs_probe("program_data", "absent")
-            return self._vswhere_states()
+            return self._vswhere_states(), False
 
         state = _listable_state(instances_dir)
         record_vs_probe("instances", state)
         if state != "present":
-            return self._vswhere_states()
+            states = self._vswhere_states()
+            return states, (state == "unreadable" and not states)
 
         states = []
+        denied = False
         try:
             for instance_dir in instances_dir.iterdir():
                 if not instance_dir.is_dir():
                     continue
-                parsed = _read_state(instance_dir / "state.json")
+                parsed, unreadable = _read_state(instance_dir / "state.json")
                 if parsed:
                     states.append(parsed)
+                denied = denied or unreadable
         except (PermissionError, OSError) as exc:
             logger.debug("Could not enumerate %s: %s", instances_dir, exc)
             record_vs_probe("instances", "unreadable")
-            return self._vswhere_states()
+            states = self._vswhere_states()
+            return states, not states
         # Empty is a real answer here; only fall back when the registry could not
         # be read, so "probed cleanly, found nothing" stays distinct from "denied".
-        return states
+        return states, (denied and not states)
 
     def _vswhere_exe(self) -> Optional[Path]:
         """``vswhere.exe``, or None when the Installer is not on this machine.
@@ -301,8 +320,10 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         for item in rows:
             state = _from_vswhere(item)
             if item.get("installationPath") in copilot_paths:
-                state["packages"] = [{"id": _COPILOT_COMPONENT_ID,
-                                      "version": item.get("installationVersion")}]
+                # No version: vswhere reports the IDE's, not the component's, and
+                # stamping that would make the same machine answer differently
+                # depending on which path ran. "Installed, version unknown" is true.
+                state["packages"] = [{"id": _COPILOT_COMPONENT_ID, "version": None}]
             states.append(state)
         return states
 
@@ -313,10 +334,12 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         if user_instance_dir is None:
             return None
 
+        states, denied = self._instance_states()
         rows: List[Dict] = []
-        copilot_version = None
-        for state in self._instance_states():
+        copilot_package = None
+        for state in states:
             if not _is_reportable(state):
+                record_vs_probe("instances", "unknown_sku")
                 continue
             install_path = state.get("installationPath")
             if not isinstance(install_path, str) or not install_path:
@@ -331,13 +354,18 @@ class WindowsVisualStudioDetector(BaseToolDetector):
                 "install_path": install_path,
                 "plugins": [],
             })
-            copilot_version = copilot_version or _copilot_version(state)
+            copilot_package = copilot_package or _copilot_package(state)
 
         if not rows:
+            if denied:
+                # This user has a VS config dir, so "no instances" here is a denial,
+                # not an absence — reporting it cleanly would let the backend prune
+                # a live install.
+                fail_if_anomalous(self._user_home, "Visual Studio instance registry unreadable")
             record_vs_probe("instances", "no_reportable")
             return None
 
-        if copilot_version is not None:
+        if copilot_package is not None:
             for row in rows:
                 row["plugins"] = ["GitHub Copilot"]
             # Per-user install_path, not the machine-wide one: under a root scan the
@@ -345,7 +373,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
             # nothing to disown it.
             rows.append({
                 "name": COPILOT_TOOL_NAME,
-                "version": copilot_version,
+                "version": _version_text(copilot_package.get("version")),
                 "install_path": str(user_instance_dir),
             })
         return rows

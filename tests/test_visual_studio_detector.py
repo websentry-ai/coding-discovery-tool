@@ -18,7 +18,9 @@ from unittest.mock import patch
 
 import scripts.coding_discovery_tools.utils as utils_mod
 import scripts.coding_discovery_tools.windows_extraction_helpers as helpers
+import scripts.coding_discovery_tools.windows.visual_studio.visual_studio as vs_mod
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+from scripts.coding_discovery_tools.mcp_extraction_helpers import read_mcp_json
 from scripts.coding_discovery_tools.coding_tool_factory import (
     ToolDetectorFactory,
     VisualStudioMCPConfigExtractorFactory,
@@ -27,10 +29,11 @@ from scripts.coding_discovery_tools.coding_tool_factory import (
 from scripts.coding_discovery_tools.windows.visual_studio.visual_studio import (
     COPILOT_TOOL_NAME,
     WindowsVisualStudioDetector,
-    _copilot_version,
+    _copilot_package,
     _display_name,
     _from_vswhere,
     _is_reportable,
+    _version_text,
     _version_tuple,
 )
 
@@ -90,14 +93,14 @@ class RowNameTests(unittest.TestCase):
 
 class CopilotComponentTests(unittest.TestCase):
     def test_component_version_is_read_from_packages(self):
-        self.assertEqual(_copilot_version(state()), "17.14.1")
+        self.assertEqual(_version_text(_copilot_package(state())["version"]), "17.14.1")
 
     def test_absent_component_returns_none(self):
-        self.assertIsNone(_copilot_version(state(copilot=False)))
+        self.assertIsNone(_copilot_package(state(copilot=False)))
 
     def test_malformed_packages_do_not_raise(self):
-        self.assertIsNone(_copilot_version({"packages": "not-a-list"}))
-        self.assertIsNone(_copilot_version({"packages": [None, 3, {"id": None}]}))
+        self.assertIsNone(_copilot_package({"packages": "not-a-list"}))
+        self.assertIsNone(_copilot_package({"packages": [None, 3, {"id": None}]}))
 
 
 class DetectTests(unittest.TestCase):
@@ -171,15 +174,49 @@ class DetectTests(unittest.TestCase):
         self.give_user_a_vs_config()
         self.assertIsNone(self.detect())
 
-    def test_a_denied_instance_registry_falls_back_rather_than_raising(self):
-        """The user's own config dir read fine, so the denial is on the machine-wide
-        registry — that is not this user's anomaly, so it falls through to vswhere
-        instead of raising and marking the whole scan incomplete."""
+    def denied_instance_registry(self):
+        """Deny only the machine-wide registry; the user's own config dir reads fine.
+
+        Patching ``Path.iterdir`` wholesale would instead trip the per-user gate and
+        never reach this branch at all.
+        """
+        real = vs_mod._listable_state
+        return patch.object(
+            vs_mod, "_listable_state",
+            side_effect=lambda path: "unreadable" if "_Instances" in str(path) else real(path),
+        )
+
+    def test_a_denied_instance_registry_is_not_a_clean_absence(self):
+        """This user HAS a VS config dir, so an unreadable registry is a denial, not
+        an absence — and a clean absence is what lets the backend prune."""
         self.give_user_a_vs_config()
-        with patch.object(Path, "iterdir", side_effect=PermissionError("denied")), \
-                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[]):
+        with self.denied_instance_registry(), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[]), \
+                patch.object(utils_mod, "_is_root", return_value=True):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
-                self.assertIsNone(self.detector.detect())  # must not raise
+                with self.assertRaises(PermissionError):
+                    self.detector.detect()
+        self.assertIn("instances:unreadable", utils_mod.vs_probes())
+
+    def test_a_denied_registry_on_an_unprivileged_scan_still_does_not_raise(self):
+        """Raising there would mark every scan on every multi-user box incomplete."""
+        self.give_user_a_vs_config()
+        with self.denied_instance_registry(), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[]), \
+                patch.object(utils_mod, "_is_root", return_value=False), \
+                patch.object(utils_mod, "_is_scanning_users_own_home", return_value=False):
+            with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
+                self.assertIsNone(self.detector.detect())
+
+    def test_a_denied_registry_with_a_vswhere_answer_reports_normally(self):
+        """vswhere answered, so nothing is unknown — no raise, rows as usual."""
+        self.give_user_a_vs_config()
+        with self.denied_instance_registry(), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[state()]), \
+                patch.object(utils_mod, "_is_root", return_value=True):
+            with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
+                rows = self.detector.detect()
+        self.assertEqual(len(rows), 2)
 
     def test_an_instance_without_an_install_path_is_dropped(self):
         """A falsy install_path turns the ownership gate off rather than failing it."""
@@ -241,18 +278,18 @@ class DeniedUserConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
             return self.detector.detect()
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read a 0000 directory")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "root can read a 0000 directory")
     def test_denial_is_recorded_not_silently_absent(self):
         self.detect()
         self.assertIn("user_config:unreadable", utils_mod.vs_probes())
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read a 0000 directory")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "root can read a 0000 directory")
     def test_privileged_scan_raises_so_the_run_is_marked_incomplete(self):
         with patch.object(utils_mod, "_is_root", return_value=True):
             with self.assertRaises(PermissionError):
                 self.detect()
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read a 0000 directory")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "root can read a 0000 directory")
     def test_unprivileged_sibling_home_does_not_raise(self):
         """Raising there would mark every scan on every multi-user box incomplete."""
         with patch.object(utils_mod, "_is_root", return_value=False), \
@@ -294,13 +331,15 @@ class VswhereFallbackTests(unittest.TestCase):
     def test_copilot_comes_from_the_requires_probe_not_from_silence(self):
         with patch.object(self.detector, "_run_vswhere", side_effect=[[self.ROW], [self.ROW]]):
             states = self.detector._vswhere_states()
-        self.assertEqual(_copilot_version(states[0]), "17.14.3")
+        package = _copilot_package(states[0])
+        self.assertIsNotNone(package)          # present...
+        self.assertIsNone(package["version"])  # ...but vswhere cannot name the version
 
     def test_copilot_absence_is_not_asserted_when_the_probe_fails(self):
         """An unanswerable probe must not read as "Copilot is not installed"."""
         with patch.object(self.detector, "_run_vswhere", side_effect=[[self.ROW], None]):
             states = self.detector._vswhere_states()
-        self.assertIsNone(_copilot_version(states[0]))
+        self.assertIsNone(_copilot_package(states[0]))
         self.assertIn("vswhere_copilot:unknown", utils_mod.vs_probes())
 
 
@@ -323,12 +362,12 @@ class DefensiveParsingTests(unittest.TestCase):
     def test_a_nested_version_object_never_reaches_a_row(self):
         broken = state()
         broken["packages"][-1]["version"] = {"nested": "dict"}
-        self.assertIsNone(_copilot_version(broken))
+        self.assertIsNone(_version_text(_copilot_package(broken)["version"]))
 
     def test_version_is_bounded(self):
         broken = state()
         broken["packages"][-1]["version"] = "9" * 500
-        self.assertLessEqual(len(_copilot_version(broken)), 64)
+        self.assertLessEqual(len(_version_text(_copilot_package(broken)["version"])), 64)
 
 
 class SharedWalkTests(unittest.TestCase):
@@ -372,6 +411,41 @@ class SharedWalkTests(unittest.TestCase):
         repo.mkdir(parents=True)
         (repo / ".vs").symlink_to(outside, target_is_directory=True)
         self.assertEqual(self.walk(self.root / "Users")[".vs"], [])
+
+
+class SharedMcpReadTests(unittest.TestCase):
+    """`read_mcp_json` is shared with the GitHub Copilot extractor, so anything that
+    escapes it takes out every OTHER workspace and global config for that surface —
+    `_extract_workspace_configs` has no per-file guard, and the caller logs the
+    exception as a warning, so the device reports zero MCP servers with no
+    scan-incomplete signal."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, name, text):
+        path = self.root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_non_object_json_root_returns_none_rather_than_raising(self):
+        """`[]`, `null`, a bare string and a number are all valid JSON, so they reach
+        the caller with no exception and `.get` would AttributeError on them."""
+        for name, text in (("arr.json", "[]"), ("null.json", "null"),
+                           ("str.json", '"hi"'), ("num.json", "3")):
+            with self.subTest(body=text):
+                self.assertIsNone(read_mcp_json(self.write(name, text), "/p", "Test"))
+
+    def test_one_bad_file_does_not_take_out_the_good_ones(self):
+        good = self.write("good.json", json.dumps({"servers": {"s": {"command": "x"}}}))
+        bad = self.write("bad.json", "[]")
+        results = [read_mcp_json(p, "/p", "Test") for p in (bad, good)]
+        self.assertIsNone(results[0])
+        self.assertEqual([s["name"] for s in results[1]["mcpServers"]], ["s"])
 
 
 class DispatchTests(unittest.TestCase):

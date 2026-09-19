@@ -3443,8 +3443,9 @@ def main():
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
-        # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
+        # Detector errors this run; reported as scan_incomplete.
         incomplete_reasons = []
+        incomplete_users = set()  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
         # --- Drain pending reports from previous run ---
@@ -3560,6 +3561,7 @@ def main():
             # Detector error = presence unknown -> incomplete, no prune (tool_name is an umbrella label, not a row key).
             if user_detect_failures:
                 incomplete_reasons.append(f"detector error for user {user}")
+                incomplete_users.add(user)
 
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
@@ -4095,13 +4097,12 @@ def main():
 
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")
-        # Incomplete scan: send neither manifest nor covered scope, so the backend can't prune from partial data.
-        if incomplete_reasons:
-            manifest, covered = None, None
-        else:
-            manifest = [{"home_user": hu, "tool_name": tn}
-                        for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
-            covered = [u for u in all_users if u not in unreadable_users]
+        # A user whose presence is unknown is dropped from covered, which is what
+        # stops the backend pruning them; the rest of the machine still reconciles.
+        manifest = [{"home_user": hu, "tool_name": tn}
+                    for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
+        covered = [u for u in all_users
+                   if u not in unreadable_users and u not in incomplete_users]
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,

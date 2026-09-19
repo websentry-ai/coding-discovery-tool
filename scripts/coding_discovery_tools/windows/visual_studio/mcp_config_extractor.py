@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 MCP_FILENAME = "mcp.json"
 VS_DIR_NAME = ".vs"
+
+# Sentinel so a cached empty list still short-circuits.
+_UNSET = object()
 USER_MCP_FILENAME = ".mcp.json"
 
 
@@ -80,6 +83,15 @@ def _visual_studio_servers(mcp_json: Path) -> List[Dict]:
 class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Visual Studio MCP config on Windows systems."""
 
+    def __init__(self) -> None:
+        # Both searches sweep every user home, and the detector emits one Copilot
+        # row PER USER -- so without memoising, an N-profile box walks the homes N
+        # times over. The extractor is built once per scan, so instance state is
+        # per-scan state. UNSET, not None: a legitimate empty result must still
+        # short-circuit rather than re-walk.
+        self._solutions_cache = _UNSET
+        self._user_scope_cache = _UNSET
+
     def extract_mcp_config(self, tool_name: Optional[str] = None) -> Optional[Dict]:
         """Solution-scoped ``.vs\\mcp.json`` servers plus ``%USERPROFILE%\\.mcp.json``."""
         projects: List[Dict] = []
@@ -107,6 +119,9 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
         under the user's home, so it is the only one that survives
         ``filter_tool_projects_by_user`` on the conventional ``C:\src\...`` layout.
         """
+        if self._user_scope_cache is not _UNSET:
+            return self._user_scope_cache
+
         configs: List[Dict] = []
 
         def for_user(user_home: Path) -> None:
@@ -129,6 +144,7 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
             scan_windows_user_directories(for_user)
         except (PermissionError, OSError) as e:
             logger.debug(f"Error scanning user directories for Visual Studio MCP: {e}")
+        self._user_scope_cache = configs
         return configs
 
     def _solution_configs(self) -> List[Dict]:
@@ -141,6 +157,9 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
         before upload. Measured on a CI runner with Visual Studio installed: 101
         seconds, zero rows kept. The output is identical either way.
         """
+        if self._solutions_cache is not _UNSET:
+            return self._solutions_cache
+
         configs: List[Dict] = []
         system_dirs = get_windows_system_directories()
 
@@ -151,6 +170,7 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
             scan_windows_user_directories(for_user)
         except (PermissionError, OSError) as e:
             logger.debug(f"Error scanning user directories for .vs configs: {e}")
+        self._solutions_cache = configs
         return configs
 
     def _walk_for_solution_dirs(self, root: Path, current: Path, configs: List[Dict],

@@ -485,6 +485,22 @@ class SolutionSearchTests(unittest.TestCase):
             self.write_solution(f"src/Demo/{parent}/pkg", f"leak-{parent}")
         self.assertEqual(self.servers(), [])
 
+    def test_the_home_sweep_runs_once_per_scan(self):
+        """The detector emits one Copilot row per user and every row calls this,
+        so without memoising an N-profile box walks all homes N times over."""
+        self.write_solution("src/Demo", "solution-server")
+        calls = []
+
+        def counting(cb):
+            calls.append(1)
+            cb(self.home)
+
+        with patch.object(vs_mcp, "scan_windows_user_directories", side_effect=counting):
+            for _ in range(4):
+                self.extractor.extract_mcp_config()
+        # one sweep for .vs + one for the user-scope file, not four of each
+        self.assertEqual(sum(calls), 2)
+
     def test_a_symlinked_vs_dir_is_skipped(self):
         outside = Path(self._tmp.name) / "outside" / ".vs"
         outside.mkdir(parents=True)

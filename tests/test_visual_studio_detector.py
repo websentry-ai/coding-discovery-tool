@@ -4,9 +4,18 @@ Visual Studio installs machine-wide under `%ProgramData%\Microsoft\VisualStudio\
 Packages\_Instances\<id>\state.json` and ships Copilot as an Installer component
 rather than a marketplace extension, so both signals live in one JSON file.
 
-No real state.json has been read yet — these fixtures follow the documented schema
-(learn.microsoft.com/visualstudio/install/tools-for-managing-visual-studio-instances),
-which carries no `displayName`, so the row name must compose from `product.id`.
+Fixtures mirror a real file, captured from VS 2022 17.14.37710.0 (Community,
+channel `VisualStudio.17.Release`). Two things the published documentation gets
+wrong and only a live machine revealed:
+
+  * real `state.json` has **no** `packages` key — components live in
+    `selectedPackages`, while microsoft/vswhere's published sample has `packages`;
+  * the Copilot component id is `Component.VisualStudio.GitHub.Copilot`, not the
+    `Component.GitHub.Copilot` the enterprise-deploy doc passes to `--add`. That
+    id is absent from the catalog, so the installer accepts it, installs nothing,
+    and exits 0.
+
+`displayName` really is absent, so the row name still composes from `product.id`.
 """
 
 import json
@@ -49,11 +58,25 @@ COMMUNITY = "Microsoft.VisualStudio.Product.Community"
 BUILD_TOOLS = "Microsoft.VisualStudio.Product.BuildTools"
 
 
+COPILOT_COMPONENT = "Component.VisualStudio.GitHub.Copilot"
+
+
 def state(version="17.14.3", product=ENTERPRISE, copilot=True):
-    """A documented-shape instance state file."""
-    packages = [{"id": "Microsoft.VisualStudio.Workload.CoreEditor", "version": version}]
+    """An instance state file in the shape verified on VS 2022 17.14.37710.0.
+
+    `selectedPackages`, not `packages`: real state.json has no `packages` key at all,
+    though the published vswhere fixture does. Entry ids and shape are verbatim from
+    the live machine.
+    """
+    packages = [
+        {"id": "Microsoft.VisualStudio.Component.CoreEditor", "version": version,
+         "type": "Component", "selectedState": "IndividuallySelected"},
+        {"id": "Microsoft.VisualStudio.Workload.CoreEditor", "version": version,
+         "type": "Workload", "selectedState": "IndividuallySelected"},
+    ]
     if copilot:
-        packages.append({"id": "Component.GitHub.Copilot", "version": "17.14.1"})
+        packages.append({"id": COPILOT_COMPONENT, "version": "17.14.1",
+                         "type": "Component", "selectedState": "IndividuallySelected"})
     return {
         "channelId": "VisualStudio.17.Release",
         "installationName": f"VisualStudio/{version}",
@@ -61,7 +84,7 @@ def state(version="17.14.3", product=ENTERPRISE, copilot=True):
         "installationPath": r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise",
         "installDate": "2026-01-18T03:45:00Z",
         "product": {"id": product, "version": version, "type": "Product"},
-        "packages": packages,
+        "selectedPackages": packages,
     }
 
 
@@ -106,8 +129,21 @@ class CopilotComponentTests(unittest.TestCase):
         self.assertIsNone(_copilot_package(state(copilot=False)))
 
     def test_malformed_packages_do_not_raise(self):
-        self.assertIsNone(_copilot_package({"packages": "not-a-list"}))
-        self.assertIsNone(_copilot_package({"packages": [None, 3, {"id": None}]}))
+        self.assertIsNone(_copilot_package({"selectedPackages": "not-a-list"}))
+        self.assertIsNone(_copilot_package({"selectedPackages": [None, 3, {"id": None}]}))
+
+    def test_the_published_vswhere_fixture_shape_still_works(self):
+        """microsoft/vswhere's sample carries `packages`; real VS carries
+        `selectedPackages`. Both are read."""
+        legacy = {"packages": [{"id": COPILOT_COMPONENT, "version": "1.0"}]}
+        self.assertEqual(_copilot_package(legacy)["version"], "1.0")
+
+    def test_copilot_for_azure_is_not_mistaken_for_copilot(self):
+        """`Component.VisualStudio.GitHubCopilotForAzure.x64` is a different product
+        and has no dot, so the marker must not match it."""
+        other = {"selectedPackages": [
+            {"id": "Component.VisualStudio.GitHubCopilotForAzure.x64", "version": "1.0"}]}
+        self.assertIsNone(_copilot_package(other))
 
 
 class DetectTests(unittest.TestCase):
@@ -370,7 +406,7 @@ class DefensiveParsingTests(unittest.TestCase):
 
     def test_a_nested_version_object_never_reaches_a_row(self):
         broken = state()
-        broken["packages"][-1]["version"] = {"nested": "dict"}
+        broken["selectedPackages"][-1]["version"] = {"nested": "dict"}
         self.assertIsNone(_version_text(_copilot_package(broken)["version"]))
 
     def test_a_wrong_typed_product_does_not_crash_the_scan(self):
@@ -384,7 +420,7 @@ class DefensiveParsingTests(unittest.TestCase):
 
     def test_version_is_bounded(self):
         broken = state()
-        broken["packages"][-1]["version"] = "9" * 500
+        broken["selectedPackages"][-1]["version"] = "9" * 500
         self.assertLessEqual(len(_version_text(_copilot_package(broken)["version"])), 64)
 
 

@@ -49,13 +49,20 @@ _VSWHERE_TAIL = Path("Microsoft Visual Studio") / "Installer" / "vswhere.exe"
 # Copilot became a bundled Installer component in 17.10; nothing older can carry it.
 _MIN_VERSION = (17, 10)
 
-# Substring, not the exact id: the string as it appears in ``packages`` is
-# unverified until a real device is seen, and a miss here looks identical to
-# Copilot being absent.
+# Substring, not exact: the documented id and the catalog id differ, and a miss here
+# looks identical to Copilot being absent. Matches
+# ``Component.VisualStudio.GitHub.Copilot`` without matching the unrelated
+# ``Component.VisualStudio.GitHubCopilotForAzure.x64`` (no dot in that one).
 _COPILOT_PACKAGE_MARKER = "github.copilot"
 
-# What the deploy docs name for ``setup.exe --add`` and ``vswhere -requires``.
-_COPILOT_COMPONENT_ID = "Component.GitHub.Copilot"
+# Verified on VS 2022 17.14.37710.0. NOT ``Component.GitHub.Copilot``, which is what
+# the enterprise-deploy doc names for ``setup.exe --add`` -- that id is absent from
+# the catalog, so the installer accepts it, installs nothing, and exits 0.
+_COPILOT_COMPONENT_ID = "Component.VisualStudio.GitHub.Copilot"
+
+# Real state.json carries ``selectedPackages``; the published vswhere test fixture
+# carries ``packages``. Read whichever is present rather than betting on one.
+_COMPONENT_LIST_KEYS = ("selectedPackages", "packages")
 
 # A version string is capped before it becomes a row field: nothing in state.json
 # has been seen in the wild, and the value reaches the backend unmodified.
@@ -137,14 +144,15 @@ def _copilot_package(state: Dict) -> Optional[Dict]:
     installed without being able to name a version, and ``None`` there must not read
     as "no Copilot".
     """
-    packages = state.get("packages")
-    if not isinstance(packages, list):
-        return None
-    for package in packages:
-        if not isinstance(package, dict):
+    for key in _COMPONENT_LIST_KEYS:
+        packages = state.get(key)
+        if not isinstance(packages, list):
             continue
-        if _COPILOT_PACKAGE_MARKER in str(package.get("id") or "").lower():
-            return package
+        for package in packages:
+            if not isinstance(package, dict):
+                continue
+            if _COPILOT_PACKAGE_MARKER in str(package.get("id") or "").lower():
+                return package
     return None
 
 
@@ -359,7 +367,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
                 # No version: vswhere reports the IDE's, not the component's, and
                 # stamping that would make the same machine answer differently
                 # depending on which path ran. "Installed, version unknown" is true.
-                state["packages"] = [{"id": _COPILOT_COMPONENT_ID, "version": None}]
+                state["selectedPackages"] = [{"id": _COPILOT_COMPONENT_ID, "version": None}]
             states.append(state)
         return states, True
 

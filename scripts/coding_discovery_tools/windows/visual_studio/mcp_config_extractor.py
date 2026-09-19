@@ -30,7 +30,12 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...constants import is_symlink_or_junction
-from ...mcp_extraction_helpers import read_mcp_json, transform_mcp_servers_to_array
+from ...mcp_extraction_helpers import (
+    read_mcp_json,
+    transform_mcp_servers_to_array,
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
+)
 from ...windows_extraction_helpers import (
     collect_workspace_config_dirs,
     scan_windows_user_directories,
@@ -51,11 +56,17 @@ def _visual_studio_servers(mcp_json: Path) -> List[Dict]:
     Dropping it whole would lose every Visual Studio server on a mixed file;
     claiming it whole would double-count every Claude Code one.
 
+    JSONC, not JSON: Visual Studio writes this file through an editor that
+    tolerates comments, trailing commas and a BOM, and the shared reader strips
+    all three. Parsing it raw rejects a valid config as an empty server list and
+    silently drops it from discovery.
+
     Never raises: an unreadable or malformed file yields nothing, which
     under-reports rather than duplicating.
     """
     try:
-        data = json.loads(mcp_json.read_text(encoding="utf-8", errors="replace"))
+        content = mcp_json.read_text(encoding="utf-8-sig", errors="replace")
+        data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(content)))
     except (OSError, ValueError) as exc:
         logger.debug(f"Could not parse {mcp_json}: {exc}")
         return []

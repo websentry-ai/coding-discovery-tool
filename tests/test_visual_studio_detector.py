@@ -709,6 +709,16 @@ class UserScopeMcpTests(unittest.TestCase):
         self.assertEqual(names, ["vs-owned"])
         self.assertNotIn("claude-owned", names)
 
+    def test_jsonc_comments_trailing_commas_and_bom_are_tolerated(self):
+        """Visual Studio writes this file through an editor that allows all three;
+        parsing it as strict JSON rejects a valid config as empty."""
+        (self.home / ".mcp.json").write_bytes(
+            b"\xef\xbb\xbf{\n  // VS global MCP\n  \"servers\": {\n"
+            b"    \"jsonc-server\": { \"url\": \"https://example/mcp\" },\n  },\n}")
+        config = self.extract()
+        self.assertEqual([s["name"] for s in config["projects"][0]["mcpServers"]],
+                         ["jsonc-server"])
+
     def test_an_unreadable_user_scope_file_is_left_alone(self):
         """Under-report rather than risk duplicating what Claude Code already has."""
         (self.home / ".mcp.json").write_text("{not json", encoding="utf-8")

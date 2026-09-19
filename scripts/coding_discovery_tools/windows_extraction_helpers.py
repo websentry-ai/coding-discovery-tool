@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
 
-from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
+from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, is_symlink_or_junction
 
 logger = logging.getLogger(__name__)
 
@@ -851,3 +851,90 @@ def scan_user_directories_for_file(
                 continue
     
     return None
+
+# Editor config dirs that sit in the same project trees and are BOTH in SKIP_DIRS,
+# so a plain walk never reaches either. `.vs` is Visual Studio's solution folder;
+# `.vscode` is VS Code's. One pass finds both — a walk per consumer would traverse
+# the whole drive twice, and WEB-4755 was a 600s timeout on a single traversal.
+_WORKSPACE_CONFIG_LEAVES = frozenset({".vscode", ".vs"})
+_workspace_config_dirs: Optional[Dict[str, List[Path]]] = None
+
+
+def _walk_workspace_config_dirs(
+    root_path: Path,
+    current_dir: Path,
+    found: Dict[str, List[Path]],
+    system_dirs: set,
+    current_depth: int = 0,
+) -> None:
+    """Recurse for ``_WORKSPACE_CONFIG_LEAVES`` dirs. Never raises."""
+    if current_depth > MAX_SEARCH_DEPTH:
+        return
+    try:
+        for item in current_dir.iterdir():
+            try:
+                # Both leaves are in SKIP_DIRS; exempt them so the check below is reachable.
+                if item.name not in _WORKSPACE_CONFIG_LEAVES and should_skip_path(item, system_dirs):
+                    continue
+                try:
+                    if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    continue
+                if not item.is_dir() or is_symlink_or_junction(item):
+                    continue
+                if item.name in _WORKSPACE_CONFIG_LEAVES:
+                    found[item.name].append(item)
+                    continue
+                if item.name in SKIP_DIRS:
+                    continue
+                _walk_workspace_config_dirs(root_path, item, found, system_dirs, current_depth + 1)
+            except (PermissionError, OSError):
+                continue
+            except Exception as e:
+                logger.debug(f"Error processing {item}: {e}")
+                continue
+    except (PermissionError, OSError):
+        pass
+    except Exception as e:
+        logger.debug(f"Error walking {current_dir}: {e}")
+
+
+def collect_workspace_config_dirs() -> Dict[str, List[Path]]:
+    """Every ``.vscode`` and ``.vs`` dir under the home drive, keyed by leaf name.
+
+    Memoized: several extractors ask for this and the walk spans the whole drive.
+    ``reset_workspace_config_dirs()`` clears it between runs.
+    """
+    global _workspace_config_dirs
+    if _workspace_config_dirs is not None:
+        return _workspace_config_dirs
+
+    found: Dict[str, List[Path]] = {leaf: [] for leaf in _WORKSPACE_CONFIG_LEAVES}
+    root_path = Path(Path.home().anchor)
+    system_dirs = get_windows_system_directories()
+    try:
+        top_level_dirs = [
+            item for item in root_path.iterdir()
+            if item.is_dir() and not item.name.startswith('.')
+            and not should_skip_path(item, system_dirs)
+        ]
+    except (PermissionError, OSError) as e:
+        logger.debug(f"Error accessing root directory for workspace config scan: {e}")
+        top_level_dirs = []
+
+    for top_dir in top_level_dirs:
+        try:
+            _walk_workspace_config_dirs(root_path, top_dir, found, system_dirs, current_depth=1)
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Skipping {top_dir}: {e}")
+            continue
+
+    _workspace_config_dirs = found
+    return found
+
+
+def reset_workspace_config_dirs() -> None:
+    """Drop the memoized workspace-config-dir walk."""
+    global _workspace_config_dirs
+    _workspace_config_dirs = None

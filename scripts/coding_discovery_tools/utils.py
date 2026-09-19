@@ -2830,7 +2830,7 @@ _SENTRY_TAG_KEYS = (
     "scan_event", "config_dirs_present", "config_dirs", "wsl_distros",
     "rejected_count", "rejected_reasons", "rejected_tools", "config_dirs_age_days",
     "npm_prefix", "vscode_editors", "vscode_bundles", "vscode_registry", "cowork_probe",
-    "xcode_probe", "copilot_xcode_probe", "copilot_app_probe", "user_path_dirs",
+    "xcode_probe", "copilot_xcode_probe", "copilot_app_probe", "vs_probe", "user_path_dirs",
     # Scalars only: entry names are unbounded cardinality, so the listing stays in extra.
     "install_surfaces_total", "install_surfaces_truncated",
 )
@@ -2891,6 +2891,9 @@ _XCODE_PROBES_CAP = 8
 _xcode_probes = set()
 _copilot_xcode_probes = set()
 _copilot_app_probes = set()
+# Visual Studio is gated on a machine-wide instance registry AND a per-user config
+# dir, so a bare None cannot say which half was missing — or whether either was denied.
+_vs_probes = set()
 
 # Root scans skip the probe by design, so "not_probed" is expected there.
 _npm_prefix_state = "not_probed"
@@ -2980,6 +2983,20 @@ def copilot_app_probes() -> list:
     return sorted(_copilot_app_probes)
 
 
+def record_vs_probe(part: str, state: str) -> None:
+    """Note how one part of the Visual Studio gate resolved. Never raises."""
+    try:
+        if len(_vs_probes) < _XCODE_PROBES_CAP:
+            _vs_probes.add(f"{part}:{state}")
+    except Exception as e:
+        logger.debug("Could not record Visual Studio probe %r:%r: %s", part, state, e, exc_info=True)
+
+
+def vs_probes() -> list:
+    """This run's Visual Studio gate outcomes as ``<part>:<state>``."""
+    return sorted(_vs_probes)
+
+
 def record_vscode_bundle_probe(ext_root) -> None:
     """Note a VS Code-family app bundle whose extensions dir exists. Never raises."""
     try:
@@ -3022,6 +3039,10 @@ def reset_sentry_run_state() -> None:
     _cowork_probes.clear()
     _copilot_xcode_probes.clear()
     _copilot_app_probes.clear()
+    _vs_probes.clear()
+    # Local import: utils never imports the Windows helpers at module scope.
+    from .windows_extraction_helpers import reset_workspace_config_dirs
+    reset_workspace_config_dirs()
     _login_shell_cache.clear()
     _safe_helper_cache.clear()
     reset_vscode_registry_state()

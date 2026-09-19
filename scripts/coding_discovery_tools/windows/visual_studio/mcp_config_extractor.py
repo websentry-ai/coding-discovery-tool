@@ -5,7 +5,7 @@ Visual Studio reads MCP servers from five locations
 (learn.microsoft.com/visualstudio/ide/mcp-servers), but four of them are shared
 with editors this tool already inventories:
 
-    %USERPROFILE%\.mcp.json          -> here (Claude Code reads it but does not report it)
+    %USERPROFILE%\.mcp.json          -> split by key: Claude Code takes mcpServers, here takes servers
     <SOLUTIONDIR>\.mcp.json          -> Claude Code / Copilot CLI
     <SOLUTIONDIR>\.vscode\mcp.json   -> GitHub Copilot (VS Code)
     <SOLUTIONDIR>\.cursor\mcp.json   -> Cursor
@@ -14,14 +14,16 @@ with editors this tool already inventories:
 Visual Studio borrows the other editors' files on purpose, so claiming them would
 duplicate every server already attributed elsewhere rather than discover it.
 
-``.vs\mcp.json`` is Visual Studio's alone. ``%USERPROFILE%\.mcp.json`` is claimed
-because nothing else reports it — verified live against Claude Code's own
-extractor — and it is the one Visual Studio MCP location under the user's home, so it is the only one
-that survives ``filter_tool_projects_by_user`` on the conventional ``C:\src\...``
+``.vs\mcp.json`` is Visual Studio's alone. ``%USERPROFILE%\.mcp.json`` is shared
+with Claude Code, so ownership splits on the key each tool actually parses —
+Claude Code reads ``mcpServers``, Visual Studio writes ``servers``. It is also the
+one Visual Studio MCP location under the user's home, so it is the only one that
+survives ``filter_tool_projects_by_user`` on the conventional ``C:\src\...``
 solution layout. A Visual Studio row still reports fewer servers than the IDE
 actually loads: a deliberate under-report, not a miss.
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -38,6 +40,21 @@ logger = logging.getLogger(__name__)
 
 MCP_FILENAME = "mcp.json"
 USER_MCP_FILENAME = ".mcp.json"
+
+
+def _claude_code_claims(mcp_json: Path) -> bool:
+    """Whether Claude Code's project walk will report this file itself.
+
+    It reads ``mcpServers`` and nothing else, so a file carrying that key is
+    already attributed and must not be claimed again here. Never raises: an
+    unreadable or malformed file is left alone, which under-reports rather than
+    duplicating.
+    """
+    try:
+        data = json.loads(mcp_json.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return True
+    return isinstance(data, dict) and bool(data.get("mcpServers"))
 
 
 class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
@@ -62,10 +79,14 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
         r"""``%USERPROFILE%\.mcp.json`` — what Visual Studio calls its *global* MCP
         server configuration.
 
-        Claimed unconditionally. Claude Code reads this path too, but measured on a
-        live Windows box with Claude Code installed its extractor returns
-        ``~/.claude.json`` and not the home-rooted ``.mcp.json`` -- so gating on
-        Claude Code's presence left the file reported by nobody at all.
+        Claimed only when Claude Code's project walk will not report it itself.
+        Ownership splits on the key, because the two tools parse different ones:
+        Claude Code reads ``mcpServers`` only (mcp_extraction_helpers.py:2486)
+        while Visual Studio writes ``servers``. Measured on a live box with both
+        installed: a ``servers``-shaped file is claimed by Visual Studio alone, an
+        ``mcpServers``-shaped one was claimed by BOTH until this check existed.
+        Gating on Claude Code's mere presence is the wrong axis -- it leaves every
+        ``servers``-shaped file reported by nobody.
         This is also the only one of Visual Studio's five MCP locations that lives
         under the user's home, so it is the only one that survives
         ``filter_tool_projects_by_user`` on the conventional ``C:\src\...`` layout.
@@ -81,6 +102,9 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
                     return
             except (PermissionError, OSError) as e:
                 logger.debug(f"Could not stat {mcp_json}: {e}")
+                return
+            if _claude_code_claims(mcp_json):
+                logger.debug(f"Leaving {mcp_json} to Claude Code: it has mcpServers")
                 return
             config = read_mcp_json(mcp_json, str(user_home), "Visual Studio")
             if config:

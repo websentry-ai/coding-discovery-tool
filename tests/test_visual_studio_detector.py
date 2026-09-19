@@ -683,13 +683,24 @@ class UserScopeMcpTests(unittest.TestCase):
                              side_effect=lambda cb: cb(self.home)):
             return self.extractor.extract_mcp_config()
 
-    def test_the_user_scope_file_is_claimed(self):
-        """Measured live: with Claude Code installed, its extractor returns
-        ~/.claude.json and NOT the home-rooted .mcp.json, so gating on Claude
-        Code's presence left this file reported by nobody."""
+    def test_a_servers_shaped_file_is_claimed(self):
+        """Claude Code parses `mcpServers` only, so a `servers`-shaped file is
+        reported by nobody unless Visual Studio takes it. Measured live."""
         config = self.extract()
         self.assertEqual([p["path"] for p in config["projects"]], [str(self.home)])
         self.assertEqual([s["name"] for s in config["projects"][0]["mcpServers"]], ["github"])
+
+    def test_an_mcpservers_shaped_file_is_left_to_claude_code(self):
+        """Claude Code's project walk reports this one itself. Measured live: both
+        tools claimed it until ownership split on the key."""
+        (self.home / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"claude-owned": {"command": "npx"}}}), encoding="utf-8")
+        self.assertIsNone(self.extract())
+
+    def test_an_unreadable_user_scope_file_is_left_alone(self):
+        """Under-report rather than risk duplicating what Claude Code already has."""
+        (self.home / ".mcp.json").write_text("{not json", encoding="utf-8")
+        self.assertIsNone(self.extract())
 
     def test_a_symlinked_user_scope_file_is_refused(self):
         outside = Path(self._tmp.name) / "protected.json"

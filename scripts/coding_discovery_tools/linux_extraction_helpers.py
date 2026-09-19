@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .constants import MAX_SEARCH_DEPTH
+from .constants import MAX_SEARCH_DEPTH, scan_dir_entries
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,8 @@ def walk_for_tool_directories(
     if current_depth > MAX_SEARCH_DEPTH:
         return
     try:
-        for item in current_dir.iterdir():
+        for _entry in scan_dir_entries(current_dir):
+            item = Path(_entry.path)
             try:
                 if should_skip_path(item) or should_skip_system_path(item):
                     continue
@@ -156,11 +157,11 @@ def walk_for_tool_directories(
                         continue
                 except ValueError:
                     continue
-                if item.is_dir():
+                if _entry.is_dir():
                     if item.name == tool_dir_name:
                         extract_from_dir_func(item, projects_by_root)
                         continue
-                    if item.is_symlink():
+                    if _entry.is_symlink():
                         continue
                     walk_for_tool_directories(
                         root_path, item, tool_dir_name,

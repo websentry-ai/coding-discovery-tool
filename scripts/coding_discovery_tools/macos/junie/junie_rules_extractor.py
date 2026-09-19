@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseJunieRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -118,7 +118,8 @@ class MacOSJunieRulesExtractor(BaseJunieRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -131,7 +132,7 @@ class MacOSJunieRulesExtractor(BaseJunieRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Check if this is a .junie directory
                         if item.name == JUNIE_DIR_NAME:
                             if item.parent.name in ('~', '') or (str(item.parent).startswith('/Users/') and item.parent.parent == Path('/Users')):
@@ -140,7 +141,7 @@ class MacOSJunieRulesExtractor(BaseJunieRulesExtractor):
                             # Extract all .md files from this .junie directory
                             self._extract_junie_dir_rules(item, projects_by_root)
                         else:
-                            if item.is_symlink():
+                            if _entry.is_symlink():
                                 continue
                             self._walk_for_junie_dirs(root_path, item, projects_by_root, current_depth + 1)
 

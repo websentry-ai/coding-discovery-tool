@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseAntigravityRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -154,7 +154,8 @@ class WindowsAntigravityRulesExtractor(BaseAntigravityRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # Check if we should skip this path
                     system_dirs = self._get_system_directories()
@@ -169,7 +170,7 @@ class WindowsAntigravityRulesExtractor(BaseAntigravityRulesExtractor):
                     except ValueError:
                         continue
                     
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Found a .agent directory!
                         if item.name == ".agent":
                             # Extract rules from this .agent directory

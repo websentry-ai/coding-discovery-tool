@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from ...coding_tool_base import BaseCursorSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...macos_extraction_helpers import (
     extract_single_rule_file,
     get_top_level_directories,
@@ -139,7 +139,8 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if (should_skip_path(item) or should_skip_system_path(item)
                             or is_home_dotdir_descendant(item)):
@@ -153,7 +154,7 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Check if this is a .cursor or .agents directory
                         if item.name in CURSOR_PARENT_DIR_NAMES:
                             for config in CURSOR_ITEM_CONFIGS:
@@ -170,7 +171,7 @@ class MacOSCursorSkillsExtractor(BaseCursorSkillsExtractor):
                                         )
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
 
                         # Recurse into other directories

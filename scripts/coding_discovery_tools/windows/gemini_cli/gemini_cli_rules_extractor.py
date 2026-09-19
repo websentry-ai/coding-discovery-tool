@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseGeminiCliRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -146,7 +146,8 @@ class WindowsGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # Check if we should skip this path
                     system_dirs = self._get_system_directories()
@@ -161,7 +162,7 @@ class WindowsGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
                     except ValueError:
                         continue
                     
-                    if item.is_file() and item.name.upper() == "GEMINI.MD":
+                    if _entry.is_file() and item.name.upper() == "GEMINI.MD":
                         # Skip if in .gemini directory (we handle global rules separately)
                         if item.parent.name == ".gemini":
                             continue
@@ -169,7 +170,7 @@ class WindowsGeminiCliRulesExtractor(BaseGeminiCliRulesExtractor):
                         # Extract this GEMINI.md file
                         self._extract_gemini_md_file(item, projects_by_root)
                     
-                    elif item.is_dir():
+                    elif _entry.is_dir():
                         # Recurse into subdirectories
                         self._walk_for_gemini_md_files(root_path, item, projects_by_root, current_depth + 1)
                     

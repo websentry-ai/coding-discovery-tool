@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseJunieRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -100,7 +100,8 @@ class WindowsJunieRulesExtractor(BaseJunieRulesExtractor):
 
         try:
             system_dirs = get_windows_system_directories()
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item, system_dirs):
                         continue
@@ -112,7 +113,7 @@ class WindowsJunieRulesExtractor(BaseJunieRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == JUNIE_DIR_NAME:
                             # Skip user-level ~\.junie — handled by _extract_global_rules.
                             if is_user_level_tool_dir(item):

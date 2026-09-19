@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseClineSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
     get_windows_system_directories,
@@ -139,7 +139,8 @@ class WindowsClineSkillsExtractor(BaseClineSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item, get_windows_system_directories()):
                         continue
@@ -151,7 +152,7 @@ class WindowsClineSkillsExtractor(BaseClineSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name in CLINE_PARENT_DIR_NAMES:
                             for config in CLINE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name

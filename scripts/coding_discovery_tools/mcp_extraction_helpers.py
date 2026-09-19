@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction
+from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction, scan_dir_entries
 from .mcp_script_hash import augment_script_fields
 from .vscode_extension_helpers import (
     extensions_dir_for_editor,
@@ -1707,7 +1707,8 @@ def walk_for_mcp_configs_generic(
         return
     
     try:
-        for item in current_dir.iterdir():
+        for _entry in scan_dir_entries(current_dir):
+            item = Path(_entry.path)
             try:
                 # Check if we should skip this path
                 if should_skip_func(item) or is_home_dotdir_descendant(item):
@@ -1722,7 +1723,7 @@ def walk_for_mcp_configs_generic(
                     # Path not relative to root (different drive on Windows)
                     continue
                 
-                if item.is_dir():
+                if _entry.is_dir():
                     # Found the tool directory!
                     if item.name.lower() == tool_dir_name.lower():
                         extract_mcp_from_dir_generic(
@@ -1731,7 +1732,7 @@ def walk_for_mcp_configs_generic(
                         # Don't recurse into tool directory
                         continue
                     
-                    if item.is_symlink():
+                    if _entry.is_symlink():
                         continue
 
                     # Recurse into subdirectories
@@ -2476,41 +2477,45 @@ def walk_for_claude_project_mcp_configs(
         return
 
     try:
-        for entry in current_dir.iterdir():
-            try:
-                if entry.is_dir():
-                    if should_skip_func(entry) or is_home_dotdir_descendant(entry):
-                        continue
-                    if entry.is_symlink():
-                        continue
-                    walk_for_claude_project_mcp_configs(
-                        root_path, entry, projects,
-                        should_skip_func, current_depth + 1
-                    )
-                elif entry.is_file() and entry.name in MCP_CLAUDE_PROJECT_FILENAMES:
-                    try:
-                        depth = len(entry.relative_to(root_path).parts)
-                        if depth > MAX_SEARCH_DEPTH:
+        # scandir caches the dirent, so is_dir()/is_symlink()/is_file() cost no
+        # syscall; Path re-stats on every call and this walk runs per tool.
+        with os.scandir(current_dir) as it:
+            for de in it:
+                entry = Path(de.path)
+                try:
+                    if de.is_dir():
+                        if should_skip_func(entry) or is_home_dotdir_descendant(entry):
                             continue
-                    except ValueError:
-                        continue
+                        if de.is_symlink():
+                            continue
+                        walk_for_claude_project_mcp_configs(
+                            root_path, entry, projects,
+                            should_skip_func, current_depth + 1
+                        )
+                    elif de.is_file() and entry.name in MCP_CLAUDE_PROJECT_FILENAMES:
+                        try:
+                            depth = len(entry.relative_to(root_path).parts)
+                            if depth > MAX_SEARCH_DEPTH:
+                                continue
+                        except ValueError:
+                            continue
 
-                    # File branch: test the PARENT dir, not the file itself. A
-                    # home-rooted project config (``~/.mcp.json``, i.e. project
-                    # root == home) is valid and must be read; only skip it when
-                    # it lives *inside* a hidden home tool dir (e.g.
-                    # ``~/.cursor/.mcp.json``). Passing ``entry`` here would
-                    # misclassify the leaf dotfile as a hidden tool dir.
-                    if should_skip_func(entry) or is_home_dotdir_descendant(entry.parent):
-                        continue
+                        # File branch: test the PARENT dir, not the file itself. A
+                        # home-rooted project config (``~/.mcp.json``, i.e. project
+                        # root == home) is valid and must be read; only skip it when
+                        # it lives *inside* a hidden home tool dir (e.g.
+                        # ``~/.cursor/.mcp.json``). Passing ``entry`` here would
+                        # misclassify the leaf dotfile as a hidden tool dir.
+                        if should_skip_func(entry) or is_home_dotdir_descendant(entry.parent):
+                            continue
 
-                    extract_claude_project_mcp_from_file(entry, projects)
+                        extract_claude_project_mcp_from_file(entry, projects)
 
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {entry}: {e}")
-                continue
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {entry}: {e}")
+                    continue
 
     except (PermissionError, OSError):
         pass

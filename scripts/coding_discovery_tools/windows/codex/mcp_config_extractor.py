@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ...coding_tool_base import BaseMCPConfigExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...toml_mcp_helpers import (
     TOOL_NAME,
     PARENT_LEVELS,
@@ -140,7 +140,8 @@ class WindowsCodexMCPConfigExtractor(BaseMCPConfigExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item, system_dirs):
                         continue
@@ -152,13 +153,13 @@ class WindowsCodexMCPConfigExtractor(BaseMCPConfigExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == ".codex":
                             if item == global_codex_dir:
                                 continue
                             self._extract_config_from_codex_dir(item, configs)
                             continue
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
                         self._walk_for_codex_configs(
                             root_path, item, configs, system_dirs, global_codex_dir, current_depth + 1

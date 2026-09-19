@@ -4,7 +4,7 @@ from typing import List, Dict
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries
 from ...claude_code_skills_helpers import is_user_level_claude_subdir
 from ...macos_extraction_helpers import (
     add_rule_to_project,
@@ -244,7 +244,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -256,7 +257,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == ".github":
                             # Check copilot-instructions.md
                             copilot_instructions = item / "copilot-instructions.md"
@@ -294,7 +295,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                                 if project_root:
                                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
                         self._walk_for_github_directories(root_path, item, projects_by_root, current_depth + 1)
 

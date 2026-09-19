@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseClineSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...linux_extraction_helpers import (
     extract_single_rule_file,
     get_linux_user_homes,
@@ -70,7 +70,8 @@ class LinuxClineSkillsExtractor(BaseClineSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -82,7 +83,7 @@ class LinuxClineSkillsExtractor(BaseClineSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name in CLINE_PARENT_DIR_NAMES:
                             for config in CLINE_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
@@ -97,7 +98,7 @@ class LinuxClineSkillsExtractor(BaseClineSkillsExtractor):
                                         )
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
 
                         self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)

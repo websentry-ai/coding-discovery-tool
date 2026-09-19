@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...coding_tool_base import BaseCopilotCliRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -238,39 +238,43 @@ class MacOSCopilotCliRulesExtractor(BaseCopilotCliRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
-                try:
-                    if self._should_skip(item):
-                        continue
-
+            # scandir caches the dirent: is_dir()/is_symlink() cost no syscall,
+            # where Path re-stats on every call for every entry of every walk.
+            with os.scandir(current_dir) as it:
+                for de in it:
+                    item = Path(de.path)
                     try:
-                        depth = len(item.relative_to(root_path).parts)
-                        if depth > MAX_SEARCH_DEPTH:
+                        if self._should_skip(item):
                             continue
-                    except ValueError:
+
+                        try:
+                            depth = len(item.relative_to(root_path).parts)
+                            if depth > MAX_SEARCH_DEPTH:
+                                continue
+                        except ValueError:
+                            continue
+
+                        if not de.is_dir():
+                            continue
+
+                        if item.name == GITHUB_DIR_NAME:
+                            # P1 + P2 live under .github; handle here, don't recurse in.
+                            self._extract_github_dir_rules(item, projects_by_root)
+                            continue
+
+                        if de.is_symlink():
+                            continue
+
+                        # P3: repo-root agent files in this directory.
+                        self._extract_project_root_files(item, projects_by_root)
+
+                        self._walk_for_project_rules(root_path, item, projects_by_root, current_depth + 1)
+
+                    except (PermissionError, OSError):
                         continue
-
-                    if not item.is_dir():
+                    except Exception as e:
+                        logger.debug(f"Error processing {item}: {e}")
                         continue
-
-                    if item.name == GITHUB_DIR_NAME:
-                        # P1 + P2 live under .github; handle here, don't recurse in.
-                        self._extract_github_dir_rules(item, projects_by_root)
-                        continue
-
-                    if item.is_symlink():
-                        continue
-
-                    # P3: repo-root agent files in this directory.
-                    self._extract_project_root_files(item, projects_by_root)
-
-                    self._walk_for_project_rules(root_path, item, projects_by_root, current_depth + 1)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {item}: {e}")
-                    continue
         except (PermissionError, OSError):
             pass
         except Exception as e:
@@ -381,15 +385,16 @@ class MacOSCopilotCliRulesExtractor(BaseCopilotCliRulesExtractor):
         if current_depth > MAX_SEARCH_DEPTH:
             return
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
-                    if item.is_dir():
-                        if item.is_symlink():
+                    if _entry.is_dir():
+                        if _entry.is_symlink():
                             continue
                         self._walk_instructions_dir(
                             item, find_project_root_func, scope, projects_by_root, current_depth + 1
                         )
-                    elif item.is_file() and item.name.endswith(INSTRUCTIONS_FILE_SUFFIX):
+                    elif _entry.is_file() and item.name.endswith(INSTRUCTIONS_FILE_SUFFIX):
                         self._add_rule_file(item, find_project_root_func, scope, projects_by_root)
                 except (PermissionError, OSError):
                     continue

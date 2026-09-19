@@ -23,7 +23,7 @@ from ...claude_rules_helpers import (
     extract_rules_from_rules_directory,
 )
 from ...coding_tool_base import BaseClaudeRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -182,7 +182,8 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -195,7 +196,7 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Check if this is a .claude directory
                         if item.name == CLAUDE_DIR_NAME:
                             # Skip user-level .claude directories (already extracted)
@@ -206,13 +207,13 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                             # Don't recurse into .claude directory
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
 
                         # Recurse into other directories
                         self._walk_for_claude_files(root_path, item, projects_by_root, current_depth + 1)
 
-                    elif item.is_file():
+                    elif _entry.is_file():
                         # Check for .clauderules or CLAUDE.md files (case-insensitive for claude.md)
                         if item.name == ".clauderules" or is_claude_md_file(item.name):
                             if should_process_file(item, root_path):

@@ -17,7 +17,7 @@ from ...macos_extraction_helpers import (
     should_skip_path,
     should_skip_system_path,
 )
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,8 @@ class MacOSGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -124,7 +125,7 @@ class MacOSGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == ".gemini":
                             if item.parent == Path.home():
                                 continue
@@ -133,7 +134,7 @@ class MacOSGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
                                 configs.append(config)
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
                         self._walk_for_gemini_configs(root_path, item, configs, current_depth + 1)
 

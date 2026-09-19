@@ -3,7 +3,7 @@ pairs + the covered home users, so the backend can set-diff and prune what's gon
 
 Properties: the manifest is built from per-user DETECTION (not extraction success), so a read
 error keeps a detected tool; only users who detected a tool get an entry (no phantom ownership);
-a DETECTOR error sends no manifest (backend then skips pruning).
+a DETECTOR error drops that user from the covered scope (backend then skips pruning them).
 
 Seams: TestSendScanEventManifest (send_scan_event vs a localhost server), TestCompletedEventManifestCLI
 (main() via subprocess), TestManifestFromPresence (main() in-process with a mocked detector),
@@ -239,7 +239,7 @@ class TestCompletedEventManifestCLI(_ServerTestCase):
 
 class TestManifestFromPresence(unittest.TestCase):
     """Manifest is built from per-user DETECTION: a read error keeps a detected tool; only users who
-    detected a tool get an entry; a DETECTOR error sends no manifest. Driven via main() in-process
+    detected a tool get an entry; a DETECTOR error drops that user from covered. Driven via main() in-process
     with a mocked detector + captured send_scan_event."""
 
     def setUp(self):
@@ -259,7 +259,8 @@ class TestManifestFromPresence(unittest.TestCase):
         # Distinct install_path per tool so the (name:path) dedup keeps all three.
         return {"name": name, "version": "1.0", "install_path": f"/opt/{name}", "projects": []}
 
-    def _run_main_capture_manifest(self, send_report_result=(True, False), filter_error=None, detector_failure=None):
+    def _run_main_capture_manifest(self, send_report_result=(True, False), filter_error=None,
+                                   detector_failure=None, users=("alice",), failing_user=None):
         """Run main() with three detected tools for one user: ToolOK (send), ToolHashMatch (dedup
         skip), ToolErr (filter raises). detector_failure, if set, makes detect_all_tools report a
         detector error. Returns the captured (manifest, covered_home_users) from the completed event."""
@@ -275,7 +276,8 @@ class TestManifestFromPresence(unittest.TestCase):
         def _detect_all(user_home=None, failures=None):
             # A detector error surfaces via the `failures` set (-> scan marked incomplete).
             if detector_failure and failures is not None:
-                failures.add(detector_failure)
+                if failing_user is None or Path(str(user_home)).name == failing_user:
+                    failures.add(detector_failure)
             return [tool_ok, tool_hm, tool_err]
         detector.detect_all_tools.side_effect = _detect_all
         detector._set_canonical_vscode_copilot.return_value = None
@@ -326,7 +328,7 @@ class TestManifestFromPresence(unittest.TestCase):
         with patch.object(adm.platform, "system", return_value="Darwin"), \
              patch.object(adm, "AIToolsDetector", return_value=detector), \
              patch.object(adm, "discovery_cache", dc), \
-             patch.object(adm, "get_all_users_macos", return_value=["alice"]), \
+             patch.object(adm, "get_all_users_macos", return_value=list(users)), \
              patch.object(adm, "compute_payload_hash", side_effect=_hash), \
              patch.object(adm, "send_report_to_backend", return_value=send_report_result), \
              patch.object(adm, "send_scan_event", side_effect=_send_scan_event), \
@@ -390,12 +392,19 @@ class TestManifestFromPresence(unittest.TestCase):
         self.assertEqual(len(captured["manifest"]), 3)
         self.assertEqual(captured.get("covered_home_users"), ["alice"])
 
-    def test_detector_error_sends_no_manifest(self):
-        # A detector error means presence is unknown this run, so NO manifest AND no covered scope
-        # are sent — the backend then has no partial inventory/scope to prune from.
+    def test_detector_error_drops_that_user_from_covered(self):
+        # Presence is unknown for that user, so they leave the covered scope the
+        # backend prunes against. With no other user, covered is empty.
         captured = self._run_main_capture_manifest(detector_failure="ToolGhost")
-        self.assertIsNone(captured["manifest"], "detector error must send no manifest")
-        self.assertIsNone(captured.get("covered_home_users"), "no covered scope without an inventory")
+        self.assertEqual(captured.get("covered_home_users"), [])
+
+    def test_one_users_detector_error_does_not_block_the_others(self):
+        captured = self._run_main_capture_manifest(
+            detector_failure="ToolGhost", users=("alice", "bob"), failing_user="alice",
+        )
+        self.assertEqual(captured.get("covered_home_users"), ["bob"])
+        self.assertIn(("bob", "ToolOK"),
+                      {(e["home_user"], e["tool_name"]) for e in captured["manifest"]})
 
     def test_per_user_detection_no_phantom_ownership(self):
         # Phantom-ownership regression: all_tools is deduped globally, so a user-scoped tool one

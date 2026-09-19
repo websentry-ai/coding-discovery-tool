@@ -572,6 +572,26 @@ class ToolDetectorFactory:
         return None
 
     @staticmethod
+    def create_visual_studio_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the Visual Studio detector. Windows only — Visual Studio for Mac was
+        retired 2024-08-31 and Visual Studio has never shipped for Linux.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.visual_studio import WindowsVisualStudioDetector
+            return WindowsVisualStudioDetector()
+        return None
+
+    @staticmethod
     def create_augment_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate Augment Code detector for the OS.
@@ -731,6 +751,11 @@ class ToolDetectorFactory:
         copilot_app_detector = ToolDetectorFactory.create_copilot_app_detector(os_name)
         if copilot_app_detector is not None:
             detectors.append(copilot_app_detector)
+
+        # Visual Studio + its bundled Copilot component (Windows only)
+        visual_studio_detector = ToolDetectorFactory.create_visual_studio_detector(os_name)
+        if visual_studio_detector is not None:
+            detectors.append(visual_studio_detector)
 
         # Add Augment Code detector (macOS + Windows + Linux)
         augment_detector = ToolDetectorFactory.create_augment_detector(os_name)
@@ -2205,3 +2230,51 @@ class ClaudeCoworkSkillsExtractorFactory:
             return LinuxClaudeCoworkSkillsExtractor()
         else:
             return None
+
+
+class VisualStudioMCPConfigExtractorFactory:
+    """Factory for creating the Visual Studio MCP config extractor."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create the Visual Studio MCP config extractor. Windows only.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.visual_studio.mcp_config_extractor import WindowsVisualStudioMCPConfigExtractor
+            return WindowsVisualStudioMCPConfigExtractor()
+        return None
+
+
+class VisualStudioRulesExtractorFactory:
+    """Factory for creating the Visual Studio Copilot rules extractor."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None):
+        """
+        Create the Visual Studio Copilot rules extractor. Windows only.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            WindowsVisualStudioRulesExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.visual_studio.visual_studio_rules_extractor import (
+                WindowsVisualStudioRulesExtractor,
+            )
+            return WindowsVisualStudioRulesExtractor()
+        return None

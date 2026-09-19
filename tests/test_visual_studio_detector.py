@@ -19,6 +19,10 @@ from unittest.mock import patch
 import scripts.coding_discovery_tools.utils as utils_mod
 import scripts.coding_discovery_tools.windows_extraction_helpers as helpers
 import scripts.coding_discovery_tools.windows.visual_studio.visual_studio as vs_mod
+import scripts.coding_discovery_tools.windows.visual_studio.mcp_config_extractor as vs_mcp
+from scripts.coding_discovery_tools.windows.visual_studio.mcp_config_extractor import (
+    WindowsVisualStudioMCPConfigExtractor,
+)
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 from scripts.coding_discovery_tools.mcp_extraction_helpers import read_mcp_json
 from scripts.coding_discovery_tools.coding_tool_factory import (
@@ -455,6 +459,50 @@ class SharedMcpReadTests(unittest.TestCase):
         results = [read_mcp_json(p, "/p", "Test") for p in (bad, good)]
         self.assertIsNone(results[0])
         self.assertEqual([s["name"] for s in results[1]["mcpServers"]], ["s"])
+
+
+class UserScopeMcpTests(unittest.TestCase):
+    r"""`%USERPROFILE%\.mcp.json` is Visual Studio's global MCP config AND what
+    Claude Code reads as a home-rooted project config. Whoever claims it must be
+    exactly one tool, or every server is counted twice."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name) / "nanda"
+        self.home.mkdir(parents=True)
+        (self.home / ".mcp.json").write_text(
+            json.dumps({"servers": {"github": {"url": "https://api.githubcopilot.com/mcp/"}}}),
+            encoding="utf-8")
+        helpers.reset_workspace_config_dirs()
+        self.extractor = WindowsVisualStudioMCPConfigExtractor()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        helpers.reset_workspace_config_dirs()
+
+    def extract(self, claim_user_scope):
+        with patch.object(vs_mcp, "collect_workspace_config_dirs", return_value={".vs": []}), \
+                patch.object(vs_mcp, "scan_windows_user_directories",
+                             side_effect=lambda cb: cb(self.home)):
+            return self.extractor.extract_mcp_config(claim_user_scope=claim_user_scope)
+
+    def test_claimed_when_claude_code_is_absent(self):
+        config = self.extract(claim_user_scope=True)
+        self.assertEqual([p["path"] for p in config["projects"]], [str(self.home)])
+        self.assertEqual([s["name"] for s in config["projects"][0]["mcpServers"]], ["github"])
+
+    def test_left_alone_when_claude_code_would_report_it(self):
+        self.assertIsNone(self.extract(claim_user_scope=False))
+
+    def test_the_flag_defaults_to_not_claiming(self):
+        """The orchestrator starts the flag at "Claude Code present": a wrong True
+        costs a missing row, a wrong False double-counts every server."""
+        detector = object.__new__(AIToolsDetector)
+        self.assertNotIn("_claude_code_detected", vars(detector))
+        detector._set_claude_code_detected([{"name": "Claude Code"}])
+        self.assertTrue(detector._claude_code_detected)
+        detector._set_claude_code_detected([{"name": "Visual Studio 2022 Enterprise"}])
+        self.assertFalse(detector._claude_code_detected)
 
 
 class DispatchTests(unittest.TestCase):

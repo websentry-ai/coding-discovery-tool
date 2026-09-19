@@ -517,6 +517,9 @@ class AIToolsDetector:
             # computed once per scan from the full detected-tools list (prefer the
             # Chat row). None until set by the detection loop.
             self._canonical_vscode_copilot: Optional[str] = None
+            # Assume present until the detected list says otherwise: a wrong True
+            # costs a missing VS row, a wrong False double-counts every server.
+            self._claude_code_detected: bool = True
 
             # Augment Code MCP + rules + settings + skills extractors (all OSes).
             self._augment_mcp_extractor = AugmentMCPConfigExtractorFactory.create(self.system)
@@ -2081,7 +2084,9 @@ class AIToolsDetector:
         if self._visual_studio_mcp_extractor:
             logger.info(f"  Extracting {tool_name} MCP configs...")
             try:
-                mcp_config = self._visual_studio_mcp_extractor.extract_mcp_config()
+                mcp_config = self._visual_studio_mcp_extractor.extract_mcp_config(
+                    claim_user_scope=not self._claude_code_detected
+                )
                 if mcp_config and "projects" in mcp_config:
                     for project in mcp_config["projects"]:
                         project_path = project.get("path", "")
@@ -2279,6 +2284,21 @@ class AIToolsDetector:
         if permissions_payload:
             result["permissions"] = permissions_payload
         return result
+
+    def _set_claude_code_detected(self, tools: List[Dict]) -> None:
+        """Note whether Claude Code is on this device.
+
+        ``%USERPROFILE%\\.mcp.json`` is what Visual Studio calls its global MCP
+        config, and what Claude Code reads as a home-rooted project config. Only
+        a detected Claude Code row runs the extractor that reports it, so when
+        there is none the file goes unreported entirely unless Visual Studio
+        claims it. Device-scoped, not per-user, because Claude Code detection is
+        itself device-scoped (``windows/claude_code/claude_code.py:150`` probes
+        ``Path.home()``, not the scanned user's home).
+        """
+        self._claude_code_detected = any(
+            t.get("name", "").lower() == "claude code" for t in tools
+        )
 
     def _set_canonical_vscode_copilot(self, tools: List[Dict]) -> None:
         """Pick the single VS Code Copilot row that should carry the shared
@@ -3198,6 +3218,7 @@ class AIToolsDetector:
         user_info = get_user_info()
         tools = self.detect_all_tools()
         self._set_canonical_vscode_copilot(tools)
+        self._set_claude_code_detected(tools)
         self._set_canonical_augment_surface(tools)
         self._set_canonical_junie_surface(tools)
 
@@ -3662,6 +3683,7 @@ def main():
 
         # Pick the single VS Code Copilot row that should carry the shared skills.
         detector._set_canonical_vscode_copilot(tools)
+        detector._set_claude_code_detected(tools)
         # Pick the single Augment surface that should carry the shared config.
         detector._set_canonical_augment_surface(tools)
         # Pick the single Junie surface that should carry the shared config.

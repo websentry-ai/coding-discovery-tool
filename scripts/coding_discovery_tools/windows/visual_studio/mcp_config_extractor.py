@@ -84,11 +84,7 @@ class WindowsVisualStudioMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Visual Studio MCP config on Windows systems."""
 
     def __init__(self) -> None:
-        # Both searches sweep every user home, and the detector emits one Copilot
-        # row PER USER -- so without memoising, an N-profile box walks the homes N
-        # times over. The extractor is built once per scan, so instance state is
-        # per-scan state. UNSET, not None: a legitimate empty result must still
-        # short-circuit rather than re-walk.
+        # One Copilot row per user, so memoise: the extractor is built once per scan.
         self._solutions_cache = _UNSET
         self._user_scope_cache = _UNSET
 

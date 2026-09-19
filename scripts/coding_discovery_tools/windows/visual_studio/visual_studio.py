@@ -37,11 +37,10 @@ from ...utils import (
 
 logger = logging.getLogger(__name__)
 
-# Machine-wide instance registry. ProgramData is not in windows_program_files_roots().
+# ProgramData is not in windows_program_files_roots().
 _INSTANCES_TAIL = Path("Microsoft") / "VisualStudio" / "Packages" / "_Instances"
 
-# Per-user instance config dir. Its presence is what ties a machine-wide install to
-# a specific user, mirroring the VS Code gate in github_copilot/detect_copilot.py.
+# Ties a machine-wide install to a user, as the VS Code gate in detect_copilot.py does.
 _USER_INSTANCE_TAIL = Path("AppData") / "Local" / "Microsoft" / "VisualStudio"
 
 _VSWHERE_TAIL = Path("Microsoft Visual Studio") / "Installer" / "vswhere.exe"
@@ -49,23 +48,16 @@ _VSWHERE_TAIL = Path("Microsoft Visual Studio") / "Installer" / "vswhere.exe"
 # Copilot became a bundled Installer component in 17.10; nothing older can carry it.
 _MIN_VERSION = (17, 10)
 
-# Substring, not exact: the documented id and the catalog id differ, and a miss here
-# looks identical to Copilot being absent. Matches
-# ``Component.VisualStudio.GitHub.Copilot`` without matching the unrelated
-# ``Component.VisualStudio.GitHubCopilotForAzure.x64`` (no dot in that one).
+# Substring: the documented id and the catalog id differ. Excludes GitHubCopilotForAzure (no dot).
 _COPILOT_PACKAGE_MARKER = "github.copilot"
 
-# Verified on VS 2022 17.14.37710.0. NOT ``Component.GitHub.Copilot``, which is what
-# the enterprise-deploy doc names for ``setup.exe --add`` -- that id is absent from
-# the catalog, so the installer accepts it, installs nothing, and exits 0.
+# Verified on 17.14.37710.0. The deploy doc's Component.GitHub.Copilot is absent from the catalog.
 _COPILOT_COMPONENT_ID = "Component.VisualStudio.GitHub.Copilot"
 
-# Real state.json carries ``selectedPackages``; the published vswhere test fixture
-# carries ``packages``. Read whichever is present rather than betting on one.
+# Real state.json carries selectedPackages; the published vswhere fixture carries packages.
 _COMPONENT_LIST_KEYS = ("selectedPackages", "packages")
 
-# A version string is capped before it becomes a row field: nothing in state.json
-# has been seen in the wild, and the value reaches the backend unmodified.
+# Capped: the value reaches the backend unmodified.
 _MAX_VERSION_LEN = 64
 
 _EDITIONS = {
@@ -248,9 +240,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
                 if entry.is_dir() and entry.name[:1].isdigit():
                     return entry
         except (PermissionError, OSError) as exc:
-            # `_listable_state` only pulled the first entry, so this is a second and
-            # independent read that can be denied on its own. Swallowing it here
-            # would report a clean absence while the probe above says "present".
+            # A second, independent read that can be denied on its own.
             logger.debug("Could not list %s: %s", vs_dir, exc)
             record_vs_probe("user_config", "unreadable")
             fail_if_anomalous(self._user_home, f"Visual Studio user config dir unreadable: {vs_dir}")
@@ -276,9 +266,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         record_vs_probe("instances", state)
         if state != "present":
             states, copilot_known = self._vswhere_states()
-            # A denied registry stays unresolved even when vswhere lists the IDEs:
-            # vswhere has no flag that reports packages, so Copilot presence is
-            # unknown and its row would be pruned as a clean absence.
+            # vswhere has no flag that reports packages, so Copilot presence stays unknown.
             return states, (state == "unreadable" and not copilot_known)
 
         states = []
@@ -291,16 +279,13 @@ class WindowsVisualStudioDetector(BaseToolDetector):
                 if parsed:
                     states.append(parsed)
                 elif outcome in ("unreadable", "malformed"):
-                    # A dir with no state file is normal; one we could not read or
-                    # could not parse leaves that instance unknown.
                     unresolved = True
         except (PermissionError, OSError) as exc:
             logger.debug("Could not enumerate %s: %s", instances_dir, exc)
             record_vs_probe("instances", "unreadable")
             states, copilot_known = self._vswhere_states()
             return states, not copilot_known
-        # Empty is a real answer here; only fall back when the registry could not
-        # be read, so "probed cleanly, found nothing" stays distinct from "denied".
+        # Empty is a real answer; only a failed read falls back.
         return states, unresolved
 
     def _vswhere_exe(self) -> Optional[Path]:
@@ -364,9 +349,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         for item in rows:
             state = _from_vswhere(item)
             if item.get("installationPath") in copilot_paths:
-                # No version: vswhere reports the IDE's, not the component's, and
-                # stamping that would make the same machine answer differently
-                # depending on which path ran. "Installed, version unknown" is true.
+                # vswhere reports the IDE's version, not the component's.
                 state["selectedPackages"] = [{"id": _COPILOT_COMPONENT_ID, "version": None}]
             states.append(state)
         return states, True
@@ -383,22 +366,16 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         copilot_package = None
         for state in states:
             if not _is_reportable(state):
-                # Distinct from a known SKU that is simply too old: only the
-                # first means a product id we have never seen.
+                # Distinct from a known SKU that is merely too old.
                 record_vs_probe(
                     "instances", "below_min_version" if _sku_known(state) else "unknown_sku")
                 continue
             install_path = state.get("installationPath")
             if not isinstance(install_path, str) or not install_path:
-                # A falsy install_path turns the ownership gate off rather than
-                # failing it (_install_in_another_users_home returns False), so an
-                # unusable path must drop the row, not emit it with None.
+                # A falsy install_path turns the ownership gate off rather than failing it.
                 record_vs_probe("instances", "no_install_path")
                 continue
-            # Per instance, not per machine: Copilot is an optional component, so an
-            # Enterprise install carrying it says nothing about the Community one
-            # beside it, and the component version belongs to the instance that
-            # supplied it. Mirrors how the JetBrains detector scopes plugins.
+            # Per instance: Copilot is optional, so one edition says nothing about another.
             package = _copilot_package(state)
             rows.append({
                 "name": _display_name(state),
@@ -409,9 +386,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
             if package is not None and copilot_package is None:
                 copilot_package = package
 
-        # Not gated on `rows`: only returned rows enter the manifest, so a readable
-        # instance beside an unknown one would otherwise pass as a complete
-        # inventory and the missing live install would be pruned.
+        # Not gated on `rows`: only returned rows enter the manifest.
         if unresolved:
             fail_if_anomalous(
                 self._user_home, "Visual Studio instance state could not be resolved")
@@ -421,9 +396,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
             return None
 
         if copilot_package is not None:
-            # Per-user install_path, not the machine-wide one: under a root scan the
-            # Copilot row would otherwise fan out identically to every profile with
-            # nothing to disown it.
+            # Per-user install_path so a root scan can disown it.
             rows.append({
                 "name": COPILOT_TOOL_NAME,
                 "version": _version_text(copilot_package.get("version")),

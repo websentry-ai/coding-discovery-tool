@@ -222,6 +222,10 @@ class TestMainCLI(unittest.TestCase):
         # Send the CLI's ~/.unbound state + lock to the throwaway HOME from setUp.
         env["HOME"] = self._home_dir
         env["USERPROFILE"] = self._home_dir
+        # Forced-failure cases burn a 5-attempt jittered backoff per upload (548s of
+        # the 600s budget before any tool was added); these assert queueing, not sleeping.
+        env.setdefault("AI_DISCOVERY_BACKOFF_BASE_SECONDS", "0.01")
+        env.setdefault("AI_DISCOVERY_BACKOFF_CAP_SECONDS", "0.05")
         if extra_env:
             env.update(extra_env)
         return subprocess.run(

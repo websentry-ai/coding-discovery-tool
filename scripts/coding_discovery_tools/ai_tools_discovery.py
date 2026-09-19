@@ -2599,11 +2599,7 @@ class AIToolsDetector:
                 "projects": [],
             }
 
-        # Also exact-match, and for a sharper reason than the CLI above: in the
-        # substring branch an unrecognised "(...)" suffix does not fall through to
-        # nothing, it resolves to want_jetbrains (github_copilot/mcp_config_extractor
-        # .py:43-45), so without this guard the Visual Studio row would silently
-        # inherit JetBrains Copilot's intellij/mcp.json servers.
+        # Exact-match: an unrecognised "(...)" suffix resolves to want_jetbrains below.
         if tool_name == "github copilot (visual studio)":
             return self._process_visual_studio_copilot_tool(tool)
 
@@ -4133,8 +4129,7 @@ def main():
                     "xcode_probe": ",".join(xcode_probes()),
                     "copilot_xcode_probe": ",".join(copilot_xcode_probes()),
                     "copilot_app_probe": ",".join(copilot_app_probes()),
-                    # Which half of the Visual Studio gate came back empty: the
-                    # machine-wide instance registry or the per-user config dir.
+                    # Which half of the Visual Studio gate came back empty.
                     "vs_probe": ",".join(vs_probes()),
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),

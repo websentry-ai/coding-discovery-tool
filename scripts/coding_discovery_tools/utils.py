@@ -1665,9 +1665,20 @@ def _log_http_error_details(code: int, error_body: Optional[str]) -> None:
         logger.error(f"Backend response: {error_body}")
 
 
+def _backoff_seconds(name: str, default: float) -> float:
+    """Backoff tuning, for tests that must exercise the retry path without sleeping."""
+    try:
+        value = float(os.environ.get(name) or default)
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _backoff(attempt: int) -> None:
     """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed together from retrying together."""
-    ceiling = min(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), BACKOFF_CAP_SECONDS)
+    base = _backoff_seconds("AI_DISCOVERY_BACKOFF_BASE_SECONDS", BACKOFF_BASE_SECONDS)
+    cap = _backoff_seconds("AI_DISCOVERY_BACKOFF_CAP_SECONDS", BACKOFF_CAP_SECONDS)
+    ceiling = min(base * 2 ** (attempt - 1), cap)
     wait = random.uniform(ceiling / 2, ceiling)
     logger.info(f"  Retrying in {wait:.1f}s...")
     time.sleep(wait)
@@ -2891,10 +2902,7 @@ _XCODE_PROBES_CAP = 8
 _xcode_probes = set()
 _copilot_xcode_probes = set()
 _copilot_app_probes = set()
-# Visual Studio is gated on a machine-wide instance registry AND a per-user config
-# dir, so a bare None cannot say which half was missing — or whether either was denied.
-# Its own cap: the gate has more parts than Xcode's and runs once per user, so the
-# shared cap would silently drop the later, more interesting states on a shared box.
+# Two-part gate, so a bare None cannot say which half was missing. Own cap: runs per user.
 _VS_PROBES_CAP = 16
 _vs_probes = set()
 

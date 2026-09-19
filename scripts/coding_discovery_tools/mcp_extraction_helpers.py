@@ -1532,10 +1532,8 @@ def read_mcp_json(config_path, tool_path: str, tool_label: str) -> Optional[Dict
         logger.warning(f"Error reading {tool_label} MCP config {config_path}: {e}")
         return None
 
-    # A JSON root that is not an object is still valid JSON, so it reaches here with
-    # no exception. One such file would otherwise AttributeError out of the caller's
-    # whole extract_mcp_config, losing every OTHER workspace and global config for
-    # that surface — reported as zero MCP servers, with no scan-incomplete signal.
+    # A non-object root is valid JSON, so it arrives unraised and would AttributeError
+    # out of the caller's whole extract_mcp_config.
     if not isinstance(config_data, dict):
         logger.warning(f"{tool_label} MCP config {config_path} is not a JSON object")
         return None

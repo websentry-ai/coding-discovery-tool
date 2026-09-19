@@ -364,6 +364,15 @@ class DefensiveParsingTests(unittest.TestCase):
         broken["packages"][-1]["version"] = {"nested": "dict"}
         self.assertIsNone(_version_text(_copilot_package(broken)["version"]))
 
+    def test_a_wrong_typed_product_does_not_crash_the_scan(self):
+        """`or {}` covers null and missing but not a truthy non-dict. An
+        AttributeError out of detect() marks the run incomplete, which stops the
+        backend pruning anything at all on that device."""
+        for bogus in (["Microsoft.VisualStudio.Product.Enterprise"], "Enterprise", 3, None):
+            with self.subTest(product=bogus):
+                self.assertFalse(_is_reportable({**state(), "product": bogus}))
+                self.assertEqual(_display_name({**state(), "product": bogus}), "Visual Studio 2022")
+
     def test_version_is_bounded(self):
         broken = state()
         broken["packages"][-1]["version"] = "9" * 500

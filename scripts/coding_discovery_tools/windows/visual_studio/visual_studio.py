@@ -117,9 +117,7 @@ def _display_name(state: Dict) -> str:
     mainstream setup, and the upload cache is keyed on the name without the install
     path — two same-named rows would overwrite each other's hash every run.
     """
-    product = state.get("product") or {}
-    product_id = str(product.get("id") or "").lower()
-    edition = _EDITIONS.get(product_id)
+    edition = _EDITIONS.get(_product_id(state))
     year = _RELEASE_YEARS.get((_version_tuple(state.get("installationVersion")) or (0,))[0])
     channel = "Preview" if str(state.get("channelId") or "").endswith(".Preview") else None
     return " ".join(part for part in (_FALLBACK_NAME, year, edition, channel) if part)
@@ -162,10 +160,27 @@ def _is_reportable(state: Dict) -> bool:
     TestController, TeamExplorer and Server, all headless and none able to run
     Copilot. Keying on ``_EDITIONS`` also makes ``_display_name`` total.
     """
-    product = state.get("product") or {}
-    if str(product.get("id") or "").lower() not in _EDITIONS:
+    if not _sku_known(state):
         return False
     return _version_tuple(state.get("installationVersion")) >= _MIN_VERSION
+
+
+def _product_id(state: Dict) -> str:
+    """Lowercased ``product.id``, or "" when absent or the wrong shape.
+
+    ``or {}`` covers null and missing but not a truthy non-dict, and a list here
+    would AttributeError out of ``detect`` -- which marks the run incomplete and
+    stops the backend pruning anything on the device.
+    """
+    product = state.get("product")
+    if not isinstance(product, dict):
+        return ""
+    return str(product.get("id") or "").lower()
+
+
+def _sku_known(state: Dict) -> bool:
+    """Whether this is an IDE SKU we can name."""
+    return _product_id(state) in _EDITIONS
 
 
 def _from_vswhere(item: Dict) -> Dict:
@@ -258,7 +273,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
             return states, not states
         # Empty is a real answer here; only fall back when the registry could not
         # be read, so "probed cleanly, found nothing" stays distinct from "denied".
-        return states, (denied and not states)
+        return states, denied
 
     def _vswhere_exe(self) -> Optional[Path]:
         """``vswhere.exe``, or None when the Installer is not on this machine.
@@ -339,7 +354,10 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         copilot_package = None
         for state in states:
             if not _is_reportable(state):
-                record_vs_probe("instances", "unknown_sku")
+                # Distinct from a known SKU that is simply too old: only the
+                # first means a product id we have never seen.
+                record_vs_probe(
+                    "instances", "below_min_version" if _sku_known(state) else "unknown_sku")
                 continue
             install_path = state.get("installationPath")
             if not isinstance(install_path, str) or not install_path:

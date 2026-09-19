@@ -2893,6 +2893,9 @@ _copilot_xcode_probes = set()
 _copilot_app_probes = set()
 # Visual Studio is gated on a machine-wide instance registry AND a per-user config
 # dir, so a bare None cannot say which half was missing — or whether either was denied.
+# Its own cap: the gate has more parts than Xcode's and runs once per user, so the
+# shared cap would silently drop the later, more interesting states on a shared box.
+_VS_PROBES_CAP = 16
 _vs_probes = set()
 
 # Root scans skip the probe by design, so "not_probed" is expected there.
@@ -2986,7 +2989,7 @@ def copilot_app_probes() -> list:
 def record_vs_probe(part: str, state: str) -> None:
     """Note how one part of the Visual Studio gate resolved. Never raises."""
     try:
-        if len(_vs_probes) < _XCODE_PROBES_CAP:
+        if len(_vs_probes) < _VS_PROBES_CAP:
             _vs_probes.add(f"{part}:{state}")
     except Exception as e:
         logger.debug("Could not record Visual Studio probe %r:%r: %s", part, state, e, exc_info=True)

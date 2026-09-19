@@ -29,6 +29,7 @@ from scripts.coding_discovery_tools.windows.visual_studio.visual_studio import (
     WindowsVisualStudioDetector,
     _copilot_version,
     _display_name,
+    _from_vswhere,
     _is_reportable,
     _version_tuple,
 )
@@ -170,13 +171,26 @@ class DetectTests(unittest.TestCase):
         self.give_user_a_vs_config()
         self.assertIsNone(self.detect())
 
-    def test_unreadable_never_raises(self):
-        """A single raising detector marks the whole scan incomplete, which disables
-        pruning for every tool on the device (test_scan_completed_manifest.py:682)."""
+    def test_a_denied_instance_registry_falls_back_rather_than_raising(self):
+        """The user's own config dir read fine, so the denial is on the machine-wide
+        registry — that is not this user's anomaly, so it falls through to vswhere
+        instead of raising and marking the whole scan incomplete."""
         self.give_user_a_vs_config()
-        with patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
+        with patch.object(Path, "iterdir", side_effect=PermissionError("denied")), \
+                patch.object(WindowsVisualStudioDetector, "_vswhere_states", return_value=[]):
             with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
                 self.assertIsNone(self.detector.detect())  # must not raise
+
+    def test_an_instance_without_an_install_path_is_dropped(self):
+        """A falsy install_path turns the ownership gate off rather than failing it."""
+        instance = self.instances / "nopath"
+        instance.mkdir()
+        broken = state()
+        del broken["installationPath"]
+        (instance / "state.json").write_text(json.dumps(broken), encoding="utf-8")
+        self.give_user_a_vs_config()
+        self.assertIsNone(self.detect())
+        self.assertIn("instances:no_install_path", utils_mod.vs_probes())
 
     def test_malformed_state_json_is_skipped_not_fatal(self):
         instance = self.instances / "broken"
@@ -192,6 +206,129 @@ class DetectTests(unittest.TestCase):
         self.write_instance()
         self.detect()
         self.assertIn("user_config:absent", utils_mod.vs_probes())
+
+
+class DeniedUserConfigTests(unittest.TestCase):
+    """A denial must not read as "this user does not use Visual Studio".
+
+    A clean absence is what lets the backend prune a live install, so the three
+    states `_listable_state` returns have to stay three at the decision point.
+    `chmod 000` on the real directory, not a `Path.exists` patch: the detector
+    probes via `os.scandir`, so a patched `exists` never reaches this code.
+    """
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.program_data = root / "ProgramData"
+        instances = self.program_data / "Microsoft" / "VisualStudio" / "Packages" / "_Instances" / "a1"
+        instances.mkdir(parents=True)
+        (instances / "state.json").write_text(json.dumps(state()), encoding="utf-8")
+        self.home = root / "Users" / "nanda"
+        self.vs_dir = self.home / "AppData" / "Local" / "Microsoft" / "VisualStudio"
+        (self.vs_dir / "17.14_abc").mkdir(parents=True)
+        os.chmod(self.vs_dir, 0o000)
+        self.detector = WindowsVisualStudioDetector()
+        self.detector.user_home = self.home
+
+    def tearDown(self):
+        os.chmod(self.vs_dir, 0o755)
+        self._tmp.cleanup()
+        utils_mod.reset_sentry_run_state()
+
+    def detect(self):
+        with patch.dict(os.environ, {"ProgramData": str(self.program_data)}, clear=False):
+            return self.detector.detect()
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0000 directory")
+    def test_denial_is_recorded_not_silently_absent(self):
+        self.detect()
+        self.assertIn("user_config:unreadable", utils_mod.vs_probes())
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0000 directory")
+    def test_privileged_scan_raises_so_the_run_is_marked_incomplete(self):
+        with patch.object(utils_mod, "_is_root", return_value=True):
+            with self.assertRaises(PermissionError):
+                self.detect()
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read a 0000 directory")
+    def test_unprivileged_sibling_home_does_not_raise(self):
+        """Raising there would mark every scan on every multi-user box incomplete."""
+        with patch.object(utils_mod, "_is_root", return_value=False), \
+                patch.object(utils_mod, "_is_scanning_users_own_home", return_value=False):
+            self.assertIsNone(self.detect())  # must not raise
+
+
+class VswhereFallbackTests(unittest.TestCase):
+    """vswhere emits a flat `productId` and no `packages` array at all; the state.json
+    helpers expect a nested `product.id`. Unmapped, Build Tools passes the SKU filter,
+    the edition drops out of the row name, and the Copilot row silently vanishes."""
+
+    # Verbatim shape of a `vswhere -format json` row.
+    ROW = {
+        "instanceId": "a1b2c3",
+        "installationPath": r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise",
+        "installationVersion": "17.14.3",
+        "productId": ENTERPRISE,
+        "displayName": "Visual Studio Enterprise 2022",
+        "channelId": "VisualStudio.17.Release",
+    }
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+        self.detector = WindowsVisualStudioDetector()
+
+    def tearDown(self):
+        utils_mod.reset_sentry_run_state()
+
+    def test_flat_product_id_is_mapped_into_the_nested_shape(self):
+        mapped = _from_vswhere(self.ROW)
+        self.assertTrue(_is_reportable(mapped))
+        self.assertEqual(_display_name(mapped), "Visual Studio 2022 Enterprise")
+
+    def test_build_tools_from_vswhere_is_still_rejected(self):
+        mapped = _from_vswhere({**self.ROW, "productId": BUILD_TOOLS})
+        self.assertFalse(_is_reportable(mapped))
+
+    def test_copilot_comes_from_the_requires_probe_not_from_silence(self):
+        with patch.object(self.detector, "_run_vswhere", side_effect=[[self.ROW], [self.ROW]]):
+            states = self.detector._vswhere_states()
+        self.assertEqual(_copilot_version(states[0]), "17.14.3")
+
+    def test_copilot_absence_is_not_asserted_when_the_probe_fails(self):
+        """An unanswerable probe must not read as "Copilot is not installed"."""
+        with patch.object(self.detector, "_run_vswhere", side_effect=[[self.ROW], None]):
+            states = self.detector._vswhere_states()
+        self.assertIsNone(_copilot_version(states[0]))
+        self.assertIn("vswhere_copilot:unknown", utils_mod.vs_probes())
+
+
+class DefensiveParsingTests(unittest.TestCase):
+    """No real state.json has ever been read, so nothing out of it is trusted."""
+
+    def test_non_ide_skus_are_rejected(self):
+        for sku in ("Microsoft.VisualStudio.Product.TestAgent",
+                    "Microsoft.VisualStudio.Product.TeamExplorer",
+                    "Microsoft.VisualStudio.Product.Server"):
+            with self.subTest(sku=sku):
+                self.assertFalse(_is_reportable(state(product=sku)))
+
+    def test_preview_and_release_get_different_names(self):
+        release = state()
+        preview = {**state(), "channelId": "VisualStudio.17.Preview"}
+        self.assertNotEqual(_display_name(release), _display_name(preview))
+        self.assertEqual(_display_name(preview), "Visual Studio 2022 Enterprise Preview")
+
+    def test_a_nested_version_object_never_reaches_a_row(self):
+        broken = state()
+        broken["packages"][-1]["version"] = {"nested": "dict"}
+        self.assertIsNone(_copilot_version(broken))
+
+    def test_version_is_bounded(self):
+        broken = state()
+        broken["packages"][-1]["version"] = "9" * 500
+        self.assertLessEqual(len(_copilot_version(broken)), 64)
 
 
 class SharedWalkTests(unittest.TestCase):

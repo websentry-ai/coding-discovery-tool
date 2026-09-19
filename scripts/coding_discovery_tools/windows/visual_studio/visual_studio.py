@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 from ...coding_tool_base import BaseToolDetector
 from ...utils import (
     _listable_state,
-    dir_state,
+    fail_if_anomalous,
     record_vs_probe,
     run_command_status,
     windows_program_files_roots,
@@ -47,12 +47,17 @@ _VSWHERE_TAIL = Path("Microsoft Visual Studio") / "Installer" / "vswhere.exe"
 # Copilot became a bundled Installer component in 17.10; nothing older can carry it.
 _MIN_VERSION = (17, 10)
 
-_BUILD_TOOLS_PRODUCT = "microsoft.visualstudio.product.buildtools"
-
-# Substring, not the exact ``Component.GitHub.Copilot`` the deploy docs name for
-# ``setup.exe --add``: the id as it appears in ``packages`` is unverified until a
-# real device is seen, and a miss here looks identical to Copilot being absent.
+# Substring, not the exact id: the string as it appears in ``packages`` is
+# unverified until a real device is seen, and a miss here looks identical to
+# Copilot being absent.
 _COPILOT_PACKAGE_MARKER = "github.copilot"
+
+# What the deploy docs name for ``setup.exe --add`` and ``vswhere -requires``.
+_COPILOT_COMPONENT_ID = "Component.GitHub.Copilot"
+
+# A version string is capped before it becomes a row field: nothing in state.json
+# has been seen in the wild, and the value reaches the backend unmodified.
+_MAX_VERSION_LEN = 64
 
 _EDITIONS = {
     "microsoft.visualstudio.product.enterprise": "Enterprise",
@@ -104,12 +109,17 @@ def _display_name(state: Dict) -> str:
     The documented state.json sample carries no ``displayName``, so the name is
     composed from ``product.id`` + version major. It is half of the install key, so a
     name that varies between runs would produce duplicate rows and prune thrash.
+
+    ``Preview`` is part of the name because Release and Preview side by side is a
+    mainstream setup, and the upload cache is keyed on the name without the install
+    path — two same-named rows would overwrite each other's hash every run.
     """
     product = state.get("product") or {}
     product_id = str(product.get("id") or "").lower()
     edition = _EDITIONS.get(product_id)
     year = _RELEASE_YEARS.get((_version_tuple(state.get("installationVersion")) or (0,))[0])
-    return " ".join(part for part in (_FALLBACK_NAME, year, edition) if part)
+    channel = "Preview" if str(state.get("channelId") or "").endswith(".Preview") else None
+    return " ".join(part for part in (_FALLBACK_NAME, year, edition, channel) if part)
 
 
 def _copilot_version(state: Dict) -> Optional[str]:
@@ -121,16 +131,43 @@ def _copilot_version(state: Dict) -> Optional[str]:
         if not isinstance(package, dict):
             continue
         if _COPILOT_PACKAGE_MARKER in str(package.get("id") or "").lower():
-            return package.get("version") or None
+            return _version_text(package.get("version"))
     return None
 
 
+def _version_text(value) -> Optional[str]:
+    """A version safe to put on a row: a bounded string, or None.
+
+    No real state.json has been read, so a nested object or a pathological string
+    must not reach the backend verbatim.
+    """
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    text = str(value).strip()
+    return text[:_MAX_VERSION_LEN] or None
+
+
 def _is_reportable(state: Dict) -> bool:
-    """17.10+ and not Build Tools."""
+    """An IDE SKU at 17.10+.
+
+    Allow-list, not a Build Tools deny-list: 17.x also ships TestAgent,
+    TestController, TeamExplorer and Server, all headless and none able to run
+    Copilot. Keying on ``_EDITIONS`` also makes ``_display_name`` total.
+    """
     product = state.get("product") or {}
-    if str(product.get("id") or "").lower() == _BUILD_TOOLS_PRODUCT:
+    if str(product.get("id") or "").lower() not in _EDITIONS:
         return False
     return _version_tuple(state.get("installationVersion")) >= _MIN_VERSION
+
+
+def _from_vswhere(item: Dict) -> Dict:
+    """Reshape a vswhere row into the ``state.json`` shape the helpers expect.
+
+    The two schemas differ: vswhere emits a flat ``productId`` where state.json
+    nests ``product.id``. Left unmapped, every SKU check reads an empty id, so
+    Build Tools passes the filter and the edition drops out of the row name.
+    """
+    return {**item, "product": {"id": item.get("productId")}}
 
 
 class WindowsVisualStudioDetector(BaseToolDetector):
@@ -153,12 +190,19 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         """The user's own VS config dir, or None when they have never run VS.
 
         A machine-wide install would otherwise be attributed to every profile on a
-        shared box. ``dir_state``, not ``Path.exists()``: 3.14 reports a denied dir
-        as absent, which would disown a user whose config we simply cannot read.
+        shared box. ``_listable_state``, not ``Path.exists()``: 3.14 reports a denied
+        dir as absent, and a denial must not read as "this user does not use VS" —
+        that is a clean absence, and a clean absence is what lets the backend prune
+        a live install. ``fail_if_anomalous`` stops the scan only when the denial is
+        anomalous (privileged, or the scanner's own home), as JetBrains and Claude
+        Desktop already do for the same situation.
         """
         vs_dir = self._user_home / _USER_INSTANCE_TAIL
         state = _listable_state(vs_dir)
         record_vs_probe("user_config", state)
+        if state == "unreadable":
+            fail_if_anomalous(self._user_home, f"Visual Studio user config dir unreadable: {vs_dir}")
+            return None
         if state != "present":
             return None
         try:
@@ -192,32 +236,75 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         except (PermissionError, OSError) as exc:
             logger.debug("Could not enumerate %s: %s", instances_dir, exc)
             record_vs_probe("instances", "unreadable")
-        return states or self._vswhere_states()
+            return self._vswhere_states()
+        # Empty is a real answer here; only fall back when the registry could not
+        # be read, so "probed cleanly, found nothing" stays distinct from "denied".
+        return states
 
-    def _vswhere_states(self) -> List[Dict]:
-        """Documented fallback. Absolute path only — ``safe_exec_argv`` is a no-op on
-        Windows, so a bare ``vswhere`` would resolve through PATH and a user-writable
-        PATH entry is code execution as SYSTEM under an MDM scan."""
+    def _vswhere_exe(self) -> Optional[Path]:
+        """``vswhere.exe``, or None when the Installer is not on this machine.
+
+        Absolute path only — ``safe_exec_argv`` is a no-op on Windows, so a bare
+        ``vswhere`` would resolve through PATH, and a PATH entry writable by a
+        standard user is code execution as SYSTEM under an MDM scan.
+        """
         for root in windows_program_files_roots():
             vswhere = root / _VSWHERE_TAIL
-            if dir_state(vswhere.parent) != "present":
-                continue
-            output, ran = run_command_status(
-                [str(vswhere), "-products", "*", "-all", "-prerelease",
-                 "-format", "json", "-utf8", "-nologo"]
-            )
-            if not ran:
-                record_vs_probe("vswhere", "unreadable")
-                continue
-            try:
-                parsed = json.loads(output or "[]")
-            except ValueError:
-                record_vs_probe("vswhere", "malformed")
-                continue
-            record_vs_probe("vswhere", "present")
-            return [item for item in parsed if isinstance(item, dict)]
-        record_vs_probe("vswhere", "absent")
-        return []
+            if vswhere.is_file():
+                return vswhere
+        return None
+
+    def _run_vswhere(self, *extra_args: str) -> Optional[List[Dict]]:
+        """vswhere rows, or None when it could not answer. Never raises."""
+        vswhere = self._vswhere_exe()
+        if vswhere is None:
+            record_vs_probe("vswhere", "absent")
+            return None
+        output, ran = run_command_status(
+            [str(vswhere), "-products", "*", "-all", "-prerelease",
+             "-format", "json", "-utf8", "-nologo", *extra_args]
+        )
+        if not ran:
+            record_vs_probe("vswhere", "unreadable")
+            return None
+        try:
+            parsed = json.loads(output or "[]")
+        except ValueError:
+            record_vs_probe("vswhere", "malformed")
+            return None
+        return [item for item in parsed if isinstance(item, dict)]
+
+    def _vswhere_states(self) -> List[Dict]:
+        """Instances from the documented fallback API, in ``state.json`` shape.
+
+        vswhere reports no ``packages`` array and has no flag that produces one
+        (``-requires`` filters, it does not report), so the Copilot component is
+        asked for with a second, filtered call rather than inferred from silence.
+        """
+        rows = self._run_vswhere()
+        if rows is None:
+            return []
+        record_vs_probe("vswhere", "present")
+
+        with_copilot = self._run_vswhere("-requires", _COPILOT_COMPONENT_ID)
+        if with_copilot is None:
+            # Absence unproven: leave the marker off rather than assert "no Copilot".
+            record_vs_probe("vswhere_copilot", "unknown")
+            copilot_paths = set()
+        else:
+            copilot_paths = {
+                item.get("installationPath") for item in with_copilot if item.get("installationPath")
+            }
+            record_vs_probe("vswhere_copilot", "present" if copilot_paths else "absent")
+
+        states = []
+        for item in rows:
+            state = _from_vswhere(item)
+            if item.get("installationPath") in copilot_paths:
+                state["packages"] = [{"id": _COPILOT_COMPONENT_ID,
+                                      "version": item.get("installationVersion")}]
+            states.append(state)
+        return states
 
     def detect(self) -> Optional[List[Dict]]:
         """IDE row per reportable instance, plus one Copilot row when the component
@@ -231,10 +318,17 @@ class WindowsVisualStudioDetector(BaseToolDetector):
         for state in self._instance_states():
             if not _is_reportable(state):
                 continue
+            install_path = state.get("installationPath")
+            if not isinstance(install_path, str) or not install_path:
+                # A falsy install_path turns the ownership gate off rather than
+                # failing it (_install_in_another_users_home returns False), so an
+                # unusable path must drop the row, not emit it with None.
+                record_vs_probe("instances", "no_install_path")
+                continue
             rows.append({
                 "name": _display_name(state),
-                "version": state.get("installationVersion"),
-                "install_path": state.get("installationPath"),
+                "version": _version_text(state.get("installationVersion")),
+                "install_path": install_path,
                 "plugins": [],
             })
             copilot_version = copilot_version or _copilot_version(state)

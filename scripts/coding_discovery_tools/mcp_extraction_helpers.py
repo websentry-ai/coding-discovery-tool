@@ -1508,6 +1508,37 @@ def _strip_trailing_commas(raw: str) -> str:
     return _TRAILING_COMMA_PATTERN.sub(_replace, raw)
 
 
+def read_mcp_json(config_path, tool_path: str, tool_label: str) -> Optional[Dict]:
+    """Parse one JSONC MCP file into ``{"path", "mcpServers"}``, or None.
+
+    Editors disagree about the top-level key — VS Code and Visual Studio write
+    ``servers``, most others ``mcpServers`` — and all of them tolerate comments and
+    trailing commas, so both are handled here rather than per extractor.
+
+    ``tool_label`` only names the tool in log lines. Never raises.
+    """
+    try:
+        content = Path(config_path).read_text(encoding='utf-8', errors='replace')
+        content = _strip_jsonc_comments(content)
+        content = _strip_trailing_commas(content)
+        config_data = json.loads(content)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in {tool_label} MCP config {config_path}: {e}")
+        return None
+    except PermissionError as e:
+        logger.debug(f"Permission denied reading {tool_label} MCP config {config_path}: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"Error reading {tool_label} MCP config {config_path}: {e}")
+        return None
+
+    servers_obj = config_data.get("servers") or config_data.get("mcpServers", {})
+    servers = transform_mcp_servers_to_array(servers_obj)
+    if not servers:
+        return None
+    return {"path": tool_path, "mcpServers": servers}
+
+
 def transform_mcp_servers_to_array(
     mcp_servers: Dict,
     *,

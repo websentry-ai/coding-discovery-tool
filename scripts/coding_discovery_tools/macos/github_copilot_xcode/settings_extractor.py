@@ -30,6 +30,8 @@ sensitive-file rules ride the same fields the sibling Copilot surfaces already u
 This runs on customer machines: every read is best-effort and never raises.
 """
 
+import base64
+import datetime
 import json
 import logging
 import os
@@ -38,7 +40,12 @@ import stat
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ...macos_extraction_helpers import is_running_as_root, scan_user_directories
+from ...macos_extraction_helpers import (
+    _PLIST_OPEN_FLAGS,
+    is_running_as_root,
+    path_in_scope,
+    scan_user_directories,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +99,10 @@ class MacOSCopilotXcodeSettingsExtractor:
                 if rec:
                     records.append(rec)
             except Exception as e:
-                logger.debug(f"Error extracting Copilot-for-Xcode settings for {user_home}: {e}")
+                logger.error(
+                    f"Error extracting Copilot-for-Xcode settings for {user_home}: {e}",
+                    exc_info=True,
+                )
 
         self._scan_users(extract_for_user)
         records.sort(key=self._permissiveness, reverse=True)
@@ -130,8 +140,8 @@ class MacOSCopilotXcodeSettingsExtractor:
         if auto_path is None and prefs_path is None:
             return None
 
-        approvals = self._load_plist(auto_path) if auto_path else {}
-        toggles = self._load_plist(prefs_path) if prefs_path else {}
+        approvals = self._load_plist(auto_path, user_home) if auto_path else {}
+        toggles = self._load_plist(prefs_path, user_home) if prefs_path else {}
         # A present-but-unreadable/empty auto-approval suite with no toggles is
         # not a permission surface worth a row.
         if not approvals and not any(k in (toggles or {}) for k in _TOGGLE_KEYS):
@@ -142,15 +152,20 @@ class MacOSCopilotXcodeSettingsExtractor:
     def _resolve_suite_plist(self, user_home: Path, group: str, suffix: str) -> Optional[Path]:
         """Path to ``<group>.<suffix>.plist`` for this user: the group-container
         location first, the non-group ``~/Library/Preferences`` fallback only when
-        the group-container file is absent."""
+        the group-container file is absent.
+
+        A candidate is accepted only when every path component below the scanned
+        home is a real (non-symlink) file — the same ``path_in_scope`` boundary the
+        Copilot-for-Xcode detector uses, so under a root/MDM scan a symlinked
+        container cannot redirect the read onto another user's file. A rejected
+        group path falls through to the fallback rather than poisoning it."""
         basename = f"{group}.{suffix}.plist"
         group_path = (user_home / "Library" / "Group Containers" / group
                       / "Library" / "Preferences" / basename)
-        if self._is_regular_file(group_path):
-            return group_path
         fallback = user_home / "Library" / "Preferences" / basename
-        if self._is_regular_file(fallback):
-            return fallback
+        for candidate in (group_path, fallback):
+            if path_in_scope(candidate, user_home) and self._is_regular_file(candidate):
+                return candidate
         return None
 
     @staticmethod
@@ -175,13 +190,16 @@ class MacOSCopilotXcodeSettingsExtractor:
         allow_rules += [f"Edit({name})" for name in self._names(approvals.get(_SENSITIVE_FILES_KEY))]
         mcp_allowlist = self._names(approvals.get(_MCP_KEY))
 
+        # Plist values can be bytes (``<data>``) or datetime (``<date>``), which
+        # json.dumps cannot encode — coerced to JSON-safe forms here so the
+        # report's serialization (payload hashing/delivery) never breaks.
         raw_settings: Dict = {}
         for key in (_MCP_KEY, _TERMINAL_KEY, _SENSITIVE_FILES_KEY):
             if key in approvals:
-                raw_settings[key] = self._coerce(approvals[key])
+                raw_settings[key] = self._json_safe(self._coerce(approvals[key]))
         for key in _TOGGLE_KEYS:
             if key in toggles:
-                raw_settings[key] = toggles[key]
+                raw_settings[key] = self._json_safe(toggles[key])
 
         record: Dict = {
             "settings_source": "user",
@@ -215,6 +233,24 @@ class MacOSCopilotXcodeSettingsExtractor:
         return value
 
     @classmethod
+    def _json_safe(cls, value):
+        """Recursively coerce a plist value into a JSON-serializable form: bytes
+        (``<data>``) to a base64 string, datetime (``<date>``) to ISO-8601, and
+        anything else unrecognized to ``str``. Containers are walked so a nested
+        ``<data>``/``<date>`` cannot slip through and break ``json.dumps``."""
+        if isinstance(value, (str, bool, int, float)) or value is None:
+            return value
+        if isinstance(value, (bytes, bytearray)):
+            return base64.b64encode(bytes(value)).decode("ascii")
+        if isinstance(value, datetime.datetime):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {str(k): cls._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_safe(v) for v in value]
+        return str(value)
+
+    @classmethod
     def _names(cls, value) -> List[str]:
         """Best-effort list of approval identifiers from any of the shapes these
         values take: a JSON string, a list of names, a list of ``{"name": ...}``
@@ -223,6 +259,11 @@ class MacOSCopilotXcodeSettingsExtractor:
         out: List[str] = []
         if isinstance(value, list):
             for item in value:
+                # A list entry can carry its own verdict (``{"name": x,
+                # "approve": false}``); apply the SAME filter as the dict-keyed
+                # path so a withheld approval is never reported as active.
+                if isinstance(item, dict) and not cls._is_approved(item):
+                    continue
                 name = cls._name_of(item)
                 if name:
                     out.append(name)
@@ -266,19 +307,41 @@ class MacOSCopilotXcodeSettingsExtractor:
                 out.append(item)
         return out
 
-    def _load_plist(self, path: Path) -> Optional[Dict]:
+    def _load_plist(self, path: Path, user_home: Path) -> Optional[Dict]:
         """Parse a plist (binary or XML) into a dict, best-effort. None on any
         failure, on a non-dict root, or on an oversized/irregular file. Never
-        raises — a planted or corrupt plist must not break the scan."""
+        raises — a planted or corrupt plist must not break the scan.
+
+        Read through the same safe boundary the sibling readers use: refuse a path
+        that escapes the scanned home (``path_in_scope``), then open O_NOFOLLOW via
+        the shared ``_PLIST_OPEN_FLAGS`` and check the descriptor itself (regular
+        file, size cap) rather than a re-resolved path — so a symlink swap under a
+        privileged scan cannot redirect the read onto another user's file."""
+        if not path_in_scope(path, user_home):
+            logger.info(f"Refusing {path}: escapes {user_home}'s scope")
+            return None
+        fd = None
         try:
-            if not self._is_regular_file(path):
+            # O_NOFOLLOW: a symlink AT the final component raises here instead of
+            # being followed; O_NONBLOCK (from the shared flags) keeps a planted
+            # FIFO from blocking the scan.
+            fd = os.open(str(path), _PLIST_OPEN_FLAGS)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
                 return None
-            if os.lstat(path).st_size > _PLIST_MAX_BYTES:
+            if st.st_size > _PLIST_MAX_BYTES:
                 logger.info(f"Refusing {path}: exceeds the plist read cap")
                 return None
-            with open(path, "rb") as fh:
+            with os.fdopen(fd, "rb") as fh:
+                fd = None
                 data = plistlib.load(fh)
             return data if isinstance(data, dict) else None
         except Exception as e:
-            logger.debug(f"Could not parse Copilot-for-Xcode plist {path}: {e}")
+            logger.debug(f"Could not parse Copilot-for-Xcode plist {path}: {e}", exc_info=True)
             return None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass

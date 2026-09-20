@@ -6,6 +6,9 @@ plists), plus the discovery wiring that attaches the ``permissions`` block to th
 ``GitHub Copilot (Xcode)`` tool row.
 """
 
+import datetime
+import json
+import logging
 import os
 import plistlib
 import shutil
@@ -282,6 +285,80 @@ class TestDiscoveryWiring(unittest.TestCase):
             {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a", "projects": []})
         self.assertNotIn("permissions", row)
         self.assertEqual(row["name"], "GitHub Copilot (Xcode)")
+
+
+class TestGreptileRegressions(unittest.TestCase):
+    """Prove-fail regressions for the four PR #356 review findings. Each asserts
+    the fixed behaviour and fails on the pre-fix code."""
+
+    _LOGGER = "coding_discovery_tools.macos.github_copilot_xcode.settings_extractor"
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="copilot-xcode-reg-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    # Finding 1 — a withheld list-object approval must not become active.
+    def test_list_object_withheld_approval_is_excluded(self):
+        _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {
+            _MCP_KEY: [{"name": "x", "approve": False}, {"name": "y", "approve": True}],
+        })
+        rec = _extractor_over(self.home).extract_settings()
+        # Pre-fix: _name_of ignored the verdict, so "x" leaked into the allowlist.
+        self.assertEqual(rec["mcp_tool_allowlist"], ["y"])
+
+    # Finding 2 — a symlinked container must not redirect the read out of the home.
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_symlinked_container_escaping_home_is_refused(self):
+        # A parent component (the group container) is a symlink to an out-of-home
+        # tree that holds an attacker-owned plist. lstat follows parent symlinks,
+        # so the pre-fix reader would open and report it.
+        outside = Path(tempfile.mkdtemp(prefix="copilot-xcode-evil-"))
+        try:
+            evil_prefs = outside / "Library" / "Preferences"
+            evil_prefs.mkdir(parents=True)
+            with open(evil_prefs / f"{_PROD_GROUP}.{_AUTOAPPROVAL_SUFFIX}.plist", "wb") as fh:
+                plistlib.dump({_MCP_KEY: ["attacker-mcp"]}, fh)
+            containers = self.home / "Library" / "Group Containers"
+            containers.mkdir(parents=True)
+            os.symlink(outside, containers / _PROD_GROUP)  # <group> -> outside tree
+            rec = _extractor_over(self.home).extract_settings()
+            # Refused: no record, and certainly not the attacker's content.
+            self.assertIsNone(rec)
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    # Finding 3 — non-JSON-safe plist values must not break json.dumps(record).
+    def test_raw_settings_with_data_and_date_is_json_serializable(self):
+        _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {
+            _SENSITIVE_FILES_KEY: {
+                "~/.env": {
+                    "approve": True,
+                    "cert": b"\x00\x01\x02\xff",              # plist <data> -> bytes
+                    "approvedAt": datetime.datetime(2026, 1, 2, 3, 4, 5),  # <date>
+                },
+            },
+        })
+        rec = _extractor_over(self.home).extract_settings()
+        # Pre-fix: raw_settings held raw bytes/datetime and this raised TypeError.
+        json.dumps(rec)  # must not raise
+        self.assertIn("Edit(~/.env)", rec["allow_rules"])
+
+    # Finding 4 — per-user extraction failures must log a traceback (exc_info).
+    def test_per_user_failure_logs_traceback(self):
+        ex = CopilotXcodeSettingsExtractorFactory.create("Darwin")
+        ex._scan_users = lambda cb: cb(self.home)
+
+        def boom(_):
+            raise RuntimeError("kaboom")
+
+        ex._extract_for_user = boom
+        with self.assertLogs(self._LOGGER, level=logging.DEBUG) as cm:
+            self.assertEqual(ex.extract_settings_by_user(), [])
+        # Pre-fix: logged at debug with no stack trace (exc_info unset on every record).
+        self.assertTrue(any(r.exc_info for r in cm.records),
+                        "the failure must be logged with a traceback (exc_info=True)")
 
 
 if __name__ == "__main__":

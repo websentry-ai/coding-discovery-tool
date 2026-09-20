@@ -7,6 +7,7 @@ plists), plus the discovery wiring that attaches the ``permissions`` block to th
 """
 
 import datetime
+import importlib.util
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -394,6 +396,195 @@ class TestGreptileRegressions(unittest.TestCase):
             self.assertIsNone(ex.extract_settings())
         finally:
             os.fstat = real_fstat
+
+
+def _plant_xcode_install(home: Path, approvals: dict) -> None:
+    """A user-scope Copilot-for-Xcode install the real detector fires from: the
+    app bundle under ~/Applications plus the group-container marker + plist."""
+    bundle = home / "Applications" / "GitHub Copilot for Xcode.app" / "Contents"
+    bundle.mkdir(parents=True)
+    with open(bundle / "Info.plist", "wb") as fh:
+        plistlib.dump({"CFBundleShortVersionString": "1.2.3"}, fh)
+    _write_suite(home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, approvals)
+
+
+class TestRoutingRegression(unittest.TestCase):
+    """The new exact-match Xcode branch sits in front of the VS Code Copilot
+    substring branch; these guard that it captures only the Xcode row."""
+
+    def _detector(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        det._github_copilot_rules_extractor = None   # branch guards None -> skipped
+        det._github_copilot_mcp_extractor = None
+        det._get_copilot_cli_skills = lambda: {"user_skills": [], "project_skills": []}
+        return det
+
+    def _spy_xcode(self, det):
+        calls = []
+        original = det._process_copilot_xcode_tool
+
+        def spy(tool):
+            calls.append(tool)
+            return original(tool)
+
+        det._process_copilot_xcode_tool = spy
+        return calls
+
+    # A1 — VS Code Copilot still takes the VS Code settings path, not the Xcode one.
+    def test_a1_vscode_copilot_routes_to_vscode_handler(self):
+        det = self._detector()
+        det._canonical_vscode_copilot = "github copilot (vs code)"
+        vs_rec = {"permission_mode": "bypassPermissions", "settings_source": "user",
+                  "scope": "user", "settings_path": "/x", "raw_settings": {}}
+        det._github_copilot_settings_extractor.extract_settings_by_user = lambda: [vs_rec]
+        det._copilot_xcode_settings_extractor.extract_settings_by_user = lambda: [{
+            "permission_mode": "default", "settings_source": "user", "scope": "user",
+            "settings_path": "/y", "raw_settings": {}, "mcp_tool_allowlist": ["XCODE-ONLY"]}]
+        xcode_calls = self._spy_xcode(det)
+        row = det.process_single_tool(
+            {"name": "GitHub Copilot (VS Code)", "version": "1", "install_path": "/a", "projects": []})
+        self.assertEqual(xcode_calls, [], "VS Code Copilot must not hit the Xcode handler")
+        self.assertIn("permissions", row)
+        self.assertEqual(row["permissions"]["permission_mode"], "bypassPermissions")
+        self.assertNotIn("mcp_tool_allowlist", row["permissions"], "must be the VS Code record")
+
+    # A2 — sibling tools still route to their own handlers with the new branch present.
+    def test_a2_sibling_tools_route_to_their_handlers(self):
+        import coding_discovery_tools.ai_tools_discovery as aitd
+        det = self._detector()
+        xcode_calls = self._spy_xcode(det)
+        cli_calls, claude_calls, cursor_calls = [], [], []
+        det._process_copilot_cli_tool = lambda t: (cli_calls.append(t) or {"name": t["name"], "projects": []})
+        det._process_claude_code_tool = lambda t: (claude_calls.append(t) or {})
+        det._process_tool_with_rules_and_mcp = lambda tool, *a, **k: (cursor_calls.append(tool) or {})
+
+        r_cli = det.process_single_tool(
+            {"name": "GitHub Copilot CLI", "version": "1", "install_path": "/c", "projects": []})
+        r_claude = det.process_single_tool(
+            {"name": "Claude Code", "version": "1", "install_path": "/d", "projects": []})
+        home = Path(tempfile.mkdtemp(prefix="copilot-xcode-route-"))
+        try:
+            with patch.dict(os.environ, {"HOME": str(home)}), \
+                    patch.object(aitd, "get_all_users_macos", lambda: []):
+                r_cursor = det.process_single_tool(
+                    {"name": "Cursor", "version": "1", "install_path": "/e", "projects": []})
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+        self.assertEqual(xcode_calls, [], "no sibling tool may reach the Xcode handler")
+        self.assertEqual((len(cli_calls), len(claude_calls)), (1, 1))
+        self.assertTrue(cursor_calls, "Cursor must route to its rules/MCP handler")
+        self.assertEqual(r_cli["name"], "GitHub Copilot CLI")
+        self.assertEqual(r_cursor["name"], "Cursor")
+
+    # A3 — prove-fail guard: loosening the route to the substring re-hijacks VS Code.
+    def test_a3_vscode_copilot_never_gets_xcode_permissions(self):
+        det = self._detector()
+        det._canonical_vscode_copilot = "github copilot (vs code)"
+        det._github_copilot_settings_extractor.extract_settings_by_user = lambda: []  # VS Code path: none
+        det._copilot_xcode_settings_extractor.extract_settings_by_user = lambda: [{
+            "permission_mode": "default", "settings_source": "user", "scope": "user",
+            "settings_path": "/y", "raw_settings": {}, "mcp_tool_allowlist": ["XCODE-ONLY-SENTINEL"]}]
+        row = det.process_single_tool(
+            {"name": "GitHub Copilot (VS Code)", "version": "1", "install_path": "/a", "projects": []})
+        self.assertNotEqual(row.get("permissions", {}).get("mcp_tool_allowlist"),
+                            ["XCODE-ONLY-SENTINEL"],
+                            "VS Code Copilot must never receive Xcode auto-approval permissions")
+        self.assertNotIn("permissions", row)
+
+
+class TestRealEntrypointE2E(unittest.TestCase):
+    """Highest real assembly entrypoint: the real detector fires from a planted
+    user-scope install, then the real extractor + real plist flow through
+    process_single_tool with nothing about the extractor mocked.
+
+    Not the ``python -m …ai_tools_discovery --payload`` module run: a full scan
+    walks the whole real filesystem for every other tool (slow, non-hermetic),
+    and the detector's bundle probe is satisfied by a ~/Applications bundle, so
+    detect()+process_single_tool is driven directly against a controlled HOME."""
+
+    def test_b1_real_detect_and_assemble_carry_planted_permissions(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        from coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
+        home = Path(tempfile.mkdtemp(prefix="copilot-xcode-e2e-real-"))
+        try:
+            _plant_xcode_install(home, {
+                _MCP_KEY: ["github-mcp"],
+                _TERMINAL_KEY: ["git status"],
+            })
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                det = AIToolsDetector(os_name="Darwin")  # real xcode extractor inside
+                detector = ToolDetectorFactory.create_copilot_xcode_detector("Darwin")
+                detector.user_home = home  # scan the planted install, not the real machine
+                detected = detector.detect()
+                self.assertIsNotNone(detected, "the real detector must fire from the planted bundle")
+                self.assertEqual(detected["name"], "GitHub Copilot (Xcode)")
+                row = det.process_single_tool(detected)
+            self.assertIn("permissions", row)
+            self.assertEqual(row["permissions"]["mcp_tool_allowlist"], ["github-mcp"])
+            self.assertIn("Bash(git status *)", row["permissions"]["allow_rules"])
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+class TestAbuseAndStress(unittest.TestCase):
+    """Adversarial and outsized approval values stay bounded and well-formed."""
+
+    def setUp(self):
+        self.ex = MacOSCopilotXcodeSettingsExtractor()
+
+    def _rec(self, approvals):
+        return self.ex._build_record(approvals, {}, Path("/x/auto.plist"))
+
+    # C2 — a command with shell metacharacters/newline/quotes cannot break the record.
+    def test_c2_shell_metacharacters_stay_inside_one_allow_rule(self):
+        nasty = 'git commit -m "x"; rm -rf / & echo `whoami`\n$(id)'
+        rec = self._rec({_TERMINAL_KEY: [nasty]})
+        self.assertEqual(rec["allow_rules"], [f"Bash({nasty} *)"])
+        # The raw value is preserved verbatim and nothing leaked into another field.
+        self.assertEqual(rec["raw_settings"][_TERMINAL_KEY], [nasty])
+        self.assertNotIn("mcp_tool_allowlist", rec)
+        self.assertNotIn("deny_rules", rec)
+        json.dumps(rec)  # structure intact and serializable
+
+    # C3 — a bare-scalar approval value, and a very large list, degrade gracefully.
+    def test_c3_scalar_value_is_ignored_not_thrown(self):
+        rec = self._rec({_MCP_KEY: 42, _TERMINAL_KEY: "plainword-not-json"})
+        self.assertNotIn("mcp_tool_allowlist", rec)
+        self.assertNotIn("allow_rules", rec)
+        self.assertEqual(rec["raw_settings"][_MCP_KEY], 42)
+        json.dumps(rec)
+
+    def test_c3_large_approval_list_is_bounded_and_serializable(self):
+        cmds = [f"cmd{i}" for i in range(5000)]
+        rec = self._rec({_TERMINAL_KEY: cmds})
+        self.assertEqual(len(rec["allow_rules"]), 5000)
+        self.assertEqual(rec["allow_rules"][0], "Bash(cmd0 *)")
+        json.dumps(rec)
+
+
+class TestCrossRepoShapeParity(unittest.TestCase):
+    """gateway-data's AIToolPermissions ingest needs no change for this new tool:
+    the Xcode record's keys are a subset of the very set the VS Code parity test
+    pins. Reuses that existing fixture rather than a private copy."""
+
+    @classmethod
+    def setUpClass(cls):
+        vs_path = os.path.join(os.path.dirname(__file__), "test_copilot_vscode_permissions.py")
+        spec = importlib.util.spec_from_file_location("test_copilot_vscode_permissions", vs_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cls.PINNED_KEYS = module.TestBackendShapeParity.CURSOR_RECORD_KEYS
+
+    def test_d1_record_keys_subset_of_backend_accepted(self):
+        rec = MacOSCopilotXcodeSettingsExtractor()._build_record(
+            {_MCP_KEY: ["a"], _TERMINAL_KEY: ["ls"], _SENSITIVE_FILES_KEY: ["~/.env"]},
+            {"agentMode.autoApproval.enabled": True, "cveRemediatorAgent.enabled": True},
+            Path("/x/auto.plist"),
+        )
+        self.assertTrue(set(rec).issubset(self.PINNED_KEYS),
+                        f"keys outside the backend-accepted set: {set(rec) - self.PINNED_KEYS}")
 
 
 if __name__ == "__main__":

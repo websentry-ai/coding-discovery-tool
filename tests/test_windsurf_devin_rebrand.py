@@ -287,9 +287,6 @@ class HostedMcpSettingsFollowTheRenamedUserDataDir(unittest.TestCase):
         self.assertIn("Windsurf", configs[0]["path"])
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 
 class TheEditorIsNamedForItsRebrand(unittest.TestCase):
     """The tool reports its current name; rows written under the old one still resolve."""
@@ -321,3 +318,27 @@ class TheEditorIsNamedForItsRebrand(unittest.TestCase):
         self.assertEqual(["Windsurf"], vscode_family_editor_dirs("GitHub Copilot (Windsurf)"))
         self.assertEqual(["Windsurf"],
                          vscode_family_editor_dirs("GitHub Copilot (Devin Desktop)"))
+
+class ArtifactExtractionStillRoutes(unittest.TestCase):
+    """The rename must not cost the editor its rules, skills and MCP projects."""
+
+    def test_the_new_name_routes_to_the_same_extractors(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        self.assertEqual("windsurf", _routing_name({"name": "Devin Desktop"}))
+
+    def test_a_row_written_under_the_old_name_still_routes(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        self.assertEqual("windsurf", _routing_name({"name": "Windsurf"}))
+
+    def test_other_tools_route_by_their_own_name(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        for name in ("Cursor", "Claude Code", "Replit"):
+            self.assertEqual(name.lower(), _routing_name({"name": name}))
+
+    def test_a_missing_name_is_not_an_error(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        self.assertEqual("", _routing_name({}))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -35,7 +35,7 @@ class LinuxWindsurfDetector(BaseToolDetector):
 
     @property
     def tool_name(self) -> str:
-        return "Windsurf"
+        return "Devin Desktop"
 
     def detect(self) -> Optional[Dict]:
         for name in _BINARY_NAMES:

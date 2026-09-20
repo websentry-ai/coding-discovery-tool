@@ -44,7 +44,7 @@ class MacOSRooDetector(BaseToolDetector):
     SUPPORTED_IDES = {
         'Code': 'VS Code',
         'Cursor': 'Cursor',
-        'Windsurf': 'Windsurf',
+        'Windsurf': 'Devin Desktop',
         'VSCodium': 'VSCodium',
     }
 

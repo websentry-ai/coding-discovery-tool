@@ -57,7 +57,7 @@ class MacOSWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
         """Extract global MCP config from ~/.codeium/windsurf/mcp_config.json"""
         return extract_global_mcp_config_with_root_support(
             self.GLOBAL_MCP_CONFIG_PATH,
-            tool_name="Windsurf",
+            tool_name="Devin Desktop",
             parent_levels=3  # ~/.codeium/windsurf/mcp_config.json -> 3 levels up = ~
         )
 

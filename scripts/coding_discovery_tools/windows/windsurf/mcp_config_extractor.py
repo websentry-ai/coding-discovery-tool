@@ -55,7 +55,7 @@ class WindowsWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
         # and we want ~/.codeium/windsurf as the path
         return extract_global_mcp_config_with_root_support(
             self.GLOBAL_MCP_CONFIG_PATH,
-            tool_name="Windsurf",
+            tool_name="Devin Desktop",
             parent_levels=1  # ~/.codeium/windsurf/mcp_config.json -> 1 level up = ~/.codeium/windsurf
         )
 

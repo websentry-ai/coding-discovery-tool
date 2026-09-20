@@ -20,7 +20,7 @@ class WindowsWindsurfDetector(BaseToolDetector):
     @property
     def tool_name(self) -> str:
         """Return the name of the tool being detected."""
-        return "Windsurf"
+        return "Devin Desktop"
 
     def detect(self) -> Optional[Dict]:
         """

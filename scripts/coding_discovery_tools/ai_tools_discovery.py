@@ -75,6 +75,7 @@ try:
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
         GitHubCopilotSettingsExtractorFactory,
+        CopilotXcodeSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -148,6 +149,7 @@ except ImportError:
         GitHubCopilotMCPConfigExtractorFactory,
         GitHubCopilotRulesExtractorFactory,
         GitHubCopilotSettingsExtractorFactory,
+        CopilotXcodeSettingsExtractorFactory,
         CopilotCliMCPConfigExtractorFactory,
         CopilotCliRulesExtractorFactory,
         CopilotCliSettingsExtractorFactory,
@@ -501,6 +503,8 @@ class AIToolsDetector:
             self._github_copilot_mcp_extractor = GitHubCopilotMCPConfigExtractorFactory.create(self.system)
             self._github_copilot_rules_extractor = GitHubCopilotRulesExtractorFactory.create(self.system)
             self._github_copilot_settings_extractor = GitHubCopilotSettingsExtractorFactory.create(self.system)
+            # Copilot for Xcode auto-approval permissions (macOS only; None elsewhere)
+            self._copilot_xcode_settings_extractor = CopilotXcodeSettingsExtractorFactory.create(self.system)
 
             # GitHub Copilot CLI MCP + rules + settings + skills extractors (macOS/Windows; None elsewhere)
             self._copilot_cli_mcp_extractor = CopilotCliMCPConfigExtractorFactory.create(self.system)
@@ -2557,6 +2561,42 @@ class AIToolsDetector:
             _normalize_encoded_paths(result)
         return result
 
+    def _process_copilot_xcode_tool(self, tool: Dict) -> Dict:
+        """Copilot for Xcode: a detection row plus its auto-approval permissions.
+
+        Xcode-Copilot keeps no project rules/MCP config the way the VS Code
+        surface does; its only extractable posture is the app's auto-approval
+        model (auto-approved MCP servers / terminal commands / sensitive-file
+        rules), attached as ``permissions`` in the same shape the other Copilot
+        rows use so the backend/frontend need no change.
+        """
+        tool_dict = {
+            "name": tool.get("name"),
+            "version": tool.get("version"),
+            "install_path": tool.get("install_path"),
+            "projects": [],
+        }
+        for key in ("platform", "is_installed", "detection_method", "is_running", "is_service"):
+            if key in tool:
+                tool_dict[key] = tool[key]
+
+        if self._copilot_xcode_settings_extractor:
+            logger.info("  Extracting Copilot for Xcode permissions...")
+            try:
+                by_user = self._copilot_xcode_settings_extractor.extract_settings_by_user()
+                if by_user:
+                    # Riskiest first. The per-user filter narrows this to each
+                    # user's own record; the head is what an unscoped report shows.
+                    tool_dict["_permissions_by_user"] = by_user
+                    tool_dict["permissions"] = by_user[0]
+                    logger.info("  ✓ Added permissions to Copilot for Xcode report")
+                else:
+                    logger.info("  ℹ No Copilot for Xcode permissions found")
+            except Exception as e:
+                logger.error(f"Error extracting Copilot for Xcode permissions: {e}", exc_info=True)
+
+        return tool_dict
+
     def _process_single_tool_raw(self, tool: Dict) -> Dict:
         """
         Process a single tool: extract rules and MCP configs, then return tool data with projects.
@@ -2602,6 +2642,12 @@ class AIToolsDetector:
         # Exact-match: an unrecognised "(...)" suffix resolves to want_jetbrains below.
         if tool_name == "github copilot (visual studio)":
             return self._process_visual_studio_copilot_tool(tool)
+
+        # Exact-match BEFORE the "github copilot" substring branch: Copilot for
+        # Xcode has no VS Code settings.json — its permissions come from the
+        # sandboxed app's auto-approval UserDefaults suites, read on its own path.
+        if tool_name == "github copilot (xcode)":
+            return self._process_copilot_xcode_tool(tool)
 
         # Augment Code surfaces (Auggie CLI / Augment (VS Code) / Augment (<IDE>)).
         # MUST come before the generic JetBrains ``_config_path`` fallback below —

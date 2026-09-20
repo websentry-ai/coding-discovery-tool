@@ -30,6 +30,7 @@ from .utils import (
     run_command,
     user_login_shell_tool_path,
     windows_node_manager_shims,
+    windows_program_files_roots,
 )
 from .vscode_extension_helpers import (
     VSCODE_EDITOR_KEYS,
@@ -99,6 +100,10 @@ def detect_tool_for_user(detector: BaseToolDetector, user_home: Path) -> Optiona
     # Xcode coding intelligence detection
     elif tool_name == "xcode coding intelligence":
         return _detect_xcode(detector, user_home)
+
+    # GitHub Copilot for Xcode detection
+    elif tool_name == "github copilot (xcode)":
+        return _detect_copilot_xcode(detector, user_home)
 
     # Junie detection
     elif tool_name == "junie":
@@ -494,6 +499,19 @@ def _detect_xcode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
         return None
 
 
+def _detect_copilot_xcode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
+    """Detect GitHub Copilot for Xcode for a user.
+
+    The detector scopes every probe to ``detector.user_home``; this only turns a
+    denied read into the anomaly path instead of a prunable absence.
+    """
+    try:
+        return detector.detect()
+    except OSError as e:
+        fail_if_anomalous(user_home, str(e))
+        return None
+
+
 def junie_version_from_binary(binary_path: str) -> Optional[str]:
     """Read the Junie CLI version from its versioned install path.
 
@@ -779,6 +797,13 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
             *windows_node_manager_shims(user_home, "claude"),
             user_home / ".claude" / "local" / "claude.exe",
             user_home / ".claude" / "local" / "node_modules" / ".bin" / "claude.cmd",
+        ]
+        # The enterprise installer's root, already named by the managed rules,
+        # settings and MCP extractors. Probed after the per-user paths so a
+        # user's own install still wins. Not machine_global: every profile can
+        # run it, so it attributes to each scanned user.
+        candidates += [
+            root / "ClaudeCode" / "claude.exe" for root in windows_program_files_roots()
         ]
     else:
         user_relative = [

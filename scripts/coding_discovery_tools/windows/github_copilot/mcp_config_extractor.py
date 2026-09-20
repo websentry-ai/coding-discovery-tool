@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 from pathlib import Path
@@ -11,9 +10,7 @@ from ...mcp_extraction_helpers import (
     append_vscode_cached_mcp_servers,
     enumerate_vscode_mcp_files,
     extract_ide_global_configs_with_root_support,
-    transform_mcp_servers_to_array,
-    _strip_jsonc_comments,
-    _strip_trailing_commas,
+    read_mcp_json,
 )
 from ...windows_extraction_helpers import (
     should_skip_path,
@@ -225,9 +222,6 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         Read and parse an MCP config file, stripping JSONC comments and
         trailing commas before parsing.
 
-        Uses robust JSONC strippers to handle comments and trailing commas
-        without breaking URLs or quoted strings.
-
         Args:
             config_path: Path to the mcp.json file
             tool_path: Path to use as the project/tool path in output
@@ -235,27 +229,4 @@ class WindowsGitHubCopilotMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns:
             Dict with 'path' and 'mcpServers' keys, or None if parsing fails
         """
-        try:
-            content = config_path.read_text(encoding='utf-8', errors='replace')
-            content = _strip_jsonc_comments(content)
-            content = _strip_trailing_commas(content)
-
-            config_data = json.loads(content)
-
-            mcp_servers_obj = config_data.get("servers") or config_data.get("mcpServers", {})
-
-            mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
-
-            if mcp_servers_array:
-                return {
-                    "path": tool_path,
-                    "mcpServers": mcp_servers_array
-                }
-        except json.JSONDecodeError as e:
-            logger.warning(f"Invalid JSON in GitHub Copilot MCP config {config_path}: {e}")
-        except PermissionError as e:
-            logger.debug(f"Permission denied reading GitHub Copilot MCP config {config_path}: {e}")
-        except Exception as e:
-            logger.warning(f"Error reading GitHub Copilot MCP config {config_path}: {e}")
-
-        return None
+        return read_mcp_json(config_path, tool_path, "GitHub Copilot")

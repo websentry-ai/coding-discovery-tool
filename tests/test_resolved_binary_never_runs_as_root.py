@@ -12,6 +12,7 @@ nothing spawns.
 import os
 import subprocess
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -106,6 +107,7 @@ class TestResolvedBinaryNeverRunsAsRoot(unittest.TestCase):
             U.get_claude_subscription_type("alice", str(self.binary), user_home=self.home)
         return calls
 
+    @unittest.skipUnless(sys.platform == "darwin", "asserts the macOS helper path for launchctl")
     def test_root_execs_resolve_to_absolute_helpers(self):
         """launchctl and sudo run before any privilege drop, so PATH must not pick them."""
         calls = self._plan_probe_calls(lambda name: f"/sbin/{name}")

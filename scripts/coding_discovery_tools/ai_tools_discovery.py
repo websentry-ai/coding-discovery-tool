@@ -31,7 +31,7 @@ from typing import Dict, Iterator, List, Optional, Callable
 # 200 minutes. Pass --timeout <=0 to disable.
 DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.2.0"
 
 try:
     from .coding_tool_base import BaseMCPConfigExtractor
@@ -66,6 +66,7 @@ try:
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
         AntigravityMCPConfigExtractorFactory,
+        ClaudeDesktopMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
@@ -89,8 +90,10 @@ try:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
+        VisualStudioMCPConfigExtractorFactory,
+        VisualStudioRulesExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, windows_user_path_dirs, install_surface_listing
+    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
@@ -136,6 +139,7 @@ except ImportError:
         RooMCPConfigExtractorFactory,
         ClineMCPConfigExtractorFactory,
         AntigravityMCPConfigExtractorFactory,
+        ClaudeDesktopMCPConfigExtractorFactory,
         KiloCodeMCPConfigExtractorFactory,
         GeminiCliMCPConfigExtractorFactory,
         CodexMCPConfigExtractorFactory,
@@ -159,8 +163,10 @@ except ImportError:
         CursorCliRulesExtractorFactory,
         CursorSkillsExtractorFactory,
         ClineSkillsExtractorFactory,
+        VisualStudioMCPConfigExtractorFactory,
+        VisualStudioRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, windows_user_path_dirs, install_surface_listing
+    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
@@ -460,6 +466,9 @@ class AIToolsDetector:
             # Initialize Antigravity extractors (macOS and Windows)
             self._antigravity_rules_extractor = AntigravityRulesExtractorFactory.create(self.system)
             self._antigravity_mcp_extractor = AntigravityMCPConfigExtractorFactory.create(self.system)
+
+            # Claude Desktop: MCP config only — no rules or skills of its own
+            self._claude_desktop_mcp_extractor = ClaudeDesktopMCPConfigExtractorFactory.create(self.system)
             
             # Initialize Kilo Code extractors (macOS only, returns None for unsupported OS)
             self._kilocode_rules_extractor = KiloCodeRulesExtractorFactory.create(self.system)
@@ -535,6 +544,10 @@ class AIToolsDetector:
             # status from user B who only has VS Code).
             self._canonical_augment_surface_by_config: Dict[str, str] = {}
             self._canonical_junie_surface_by_config: Dict[str, str] = {}
+
+            # Visual Studio extractors (Windows only; None elsewhere)
+            self._visual_studio_mcp_extractor = VisualStudioMCPConfigExtractorFactory.create(self.system)
+            self._visual_studio_rules_extractor = VisualStudioRulesExtractorFactory.create(self.system)
 
             self._junie_mcp_extractor = JunieMCPConfigExtractorFactory.create(self.system)
             self._junie_rules_extractor = JunieRulesExtractorFactory.create(self.system)
@@ -2033,6 +2046,68 @@ class AIToolsDetector:
         except Exception:
             return None
 
+    def _process_visual_studio_copilot_tool(self, tool: Dict) -> Dict:
+        """Attach Visual Studio's own Copilot config to its row.
+
+        Only the surfaces Visual Studio does not share with an editor this tool
+        already inventories: solution ``.vs\\mcp.json`` and the user-profile
+        instruction / custom-agent files. The four MCP locations Visual Studio
+        borrows from VS Code, Cursor and Claude Code stay on those rows, so this
+        row under-reports what the IDE loads rather than duplicating it.
+        """
+        projects_dict: Dict[str, Dict] = {}
+
+        def project_entry(path: str) -> Dict:
+            if path not in projects_dict:
+                projects_dict[path] = {"mcpServers": [], "rules": [], "skills": []}
+            return projects_dict[path]
+
+        tool_name = tool.get("name", "")
+
+        if self._visual_studio_rules_extractor:
+            logger.info(f"  Extracting {tool_name} rules...")
+            try:
+                for rules_project in self._visual_studio_rules_extractor.extract_all_visual_studio_rules():
+                    project_root = rules_project.get("project_root", "")
+                    if project_root:
+                        project_entry(project_root)["rules"] = rules_project.get("rules", [])
+                if projects_dict:
+                    logger.info(f"  ✓ Found {len(projects_dict)} project(s) with {tool_name} rules")
+                else:
+                    logger.info(f"  No {tool_name} rules found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} rules: {e}")
+
+        if self._visual_studio_mcp_extractor:
+            logger.info(f"  Extracting {tool_name} MCP configs...")
+            try:
+                mcp_config = self._visual_studio_mcp_extractor.extract_mcp_config()
+                if mcp_config and "projects" in mcp_config:
+                    for project in mcp_config["projects"]:
+                        project_path = project.get("path", "")
+                        if project_path:
+                            project_entry(project_path)["mcpServers"] = project.get("mcpServers", [])
+                    log_mcp_details(projects_dict, tool_name)
+                else:
+                    logger.info(f"  No {tool_name} MCP configs found")
+            except Exception as e:
+                logger.warning(f"  Error extracting {tool_name} MCP config: {e}")
+
+        return {
+            "name": tool.get("name"),
+            "version": tool.get("version"),
+            "install_path": tool.get("install_path"),
+            "projects": [
+                {
+                    "path": path,
+                    "mcpServers": data.get("mcpServers", []),
+                    "rules": data.get("rules", []),
+                    "skills": data.get("skills", []),
+                }
+                for path, data in projects_dict.items()
+            ],
+        }
+
     def _process_copilot_cli_tool(self, tool: Dict) -> Dict:
         """
         Process the GitHub Copilot CLI: extract its MCP config + rules and return
@@ -2516,6 +2591,18 @@ class AIToolsDetector:
         if tool_name == "github copilot cli":
             return self._process_copilot_cli_tool(tool)
 
+        if tool_name == "github copilot app":
+            return {
+                "name": tool.get("name"),
+                "version": tool.get("version"),
+                "install_path": tool.get("install_path"),
+                "projects": [],
+            }
+
+        # Exact-match: an unrecognised "(...)" suffix resolves to want_jetbrains below.
+        if tool_name == "github copilot (visual studio)":
+            return self._process_visual_studio_copilot_tool(tool)
+
         # Augment Code surfaces (Auggie CLI / Augment (VS Code) / Augment (<IDE>)).
         # MUST come before the generic JetBrains ``_config_path`` fallback below —
         # Augment JetBrains rows carry ``_config_path`` and would otherwise route
@@ -2891,6 +2978,14 @@ class AIToolsDetector:
                     logger.error(f"Error extracting {tool_name} skills: {e}", exc_info=True)
             else:
                 logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
+
+        elif tool_name == "claude desktop":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                None,
+                self._claude_desktop_mcp_extractor,
+                list
+            )
 
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -3422,8 +3517,9 @@ def main():
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
-        # Detector errors this run; if non-empty, no manifest is sent so the backend won't prune.
+        # Detector errors this run; reported as scan_incomplete.
         incomplete_reasons = []
+        incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
         # --- Drain pending reports from previous run ---
@@ -3539,6 +3635,7 @@ def main():
             # Detector error = presence unknown -> incomplete, no prune (tool_name is an umbrella label, not a row key).
             if user_detect_failures:
                 incomplete_reasons.append(f"detector error for user {user}")
+                incomplete_users.append(user)
 
             if user_tools:
                 logger.info(f"    Found {len(user_tools)} tool(s) for {user}:")
@@ -4030,6 +4127,10 @@ def main():
                     "cowork_probe": ",".join(cowork_probes()),
                     # Same for Xcode, plus the agent subfolders a CodingAssistant tree holds.
                     "xcode_probe": ",".join(xcode_probes()),
+                    "copilot_xcode_probe": ",".join(copilot_xcode_probes()),
+                    "copilot_app_probe": ",".join(copilot_app_probes()),
+                    # Which half of the Visual Studio gate came back empty.
+                    "vs_probe": ",".join(vs_probes()),
                     "os": platform.system(),
                     "duration_ms": round((time.monotonic() - t_start) * 1000),
                     "in_container": in_container(),
@@ -4072,13 +4173,12 @@ def main():
 
         # Send scan completed event AFTER all scanning
         logger.info("Sending scan completed event...")
-        # Incomplete scan: send neither manifest nor covered scope, so the backend can't prune from partial data.
-        if incomplete_reasons:
-            manifest, covered = None, None
-        else:
-            manifest = [{"home_user": hu, "tool_name": tn}
-                        for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
-            covered = [u for u in all_users if u not in unreadable_users]
+        # A user whose presence is unknown is dropped from covered, which is what
+        # stops the backend pruning them; the rest of the machine still reconciles.
+        manifest = [{"home_user": hu, "tool_name": tn}
+                    for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
+        covered = [u for u in all_users
+                   if u not in unreadable_users and u not in incomplete_users]
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,

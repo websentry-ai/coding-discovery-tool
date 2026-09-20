@@ -7,13 +7,15 @@ on macOS to avoid code duplication.
 
 import logging
 import os
+import plistlib
 import stat
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS, scan_dir_entries
+from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
 from .mcp_extraction_helpers import is_home_dotdir_descendant
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,39 @@ def path_in_scope(candidate: Path, user_home: Path) -> bool:
     return True
 
 
+_PLIST_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+
+def read_bundle_version(app_bundle: Path) -> Optional[str]:
+    """CFBundleShortVersionString, read without following a redirected Info.plist.
+
+    The bundle can sit under a user-writable home, so the plist is opened
+    O_NOFOLLOW and must be a regular file: a symlink to a FIFO would otherwise
+    block the whole scan under root.
+    """
+    info_plist = app_bundle / "Contents" / "Info.plist"
+    try:
+        if not stat.S_ISREG(os.lstat(info_plist).st_mode):
+            return None
+        fd = os.open(info_plist, _PLIST_OPEN_FLAGS)
+    except OSError as e:
+        logger.debug(f"Could not open {info_plist}: {e}")
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            plist = plistlib.load(fh)
+    except Exception as e:
+        logger.debug(f"Could not parse {info_plist}: {e}")
+        return None
+    version = plist.get("CFBundleShortVersionString") if isinstance(plist, dict) else None
+    return version.strip() if isinstance(version, str) and version.strip() else None
+
+
 def macos_app_candidates(app_path: Path, user_home: Optional[Path] = None) -> List[Path]:
     """``app_path``, then the same bundle under the scanned user's ``~/Applications``,
     where a non-admin install lands. Only machine-wide paths gain the sibling."""
@@ -76,10 +111,8 @@ def is_running_as_root() -> bool:
     try:
         return os.getuid() == 0
     except AttributeError:
-        # Windows doesn't have os.getuid(), fallback to checking home directory
-        # On Windows, this would be a different check anyway
-        home = Path.home()
-        return str(home) in ["/root", "/var/root"]
+        # Windows has no uid, and Path.home() raises when the profile env is unset.
+        return False
 
 
 def add_rule_to_project(
@@ -134,21 +167,35 @@ def should_skip_path(path: Path) -> bool:
     Returns:
         True if path should be skipped, False otherwise
     """
-    return any(part in SKIP_DIRS for part in path.parts)
+    # Same result as ``any(part in SKIP_DIRS for part in path.parts)``, but the
+    # membership test runs as one C-level set intersection instead of a Python loop.
+    return not SKIP_DIRS.isdisjoint(path.parts)
+
+
+# Precomputed so the per-path check is a single C-level ``str.startswith`` over a
+# tuple rather than a Python generator that re-iterates every skip dir per path.
+_SKIP_SYSTEM_PREFIXES = tuple(SKIP_SYSTEM_DIRS)
+_SKIP_SYSTEM_SOURCE = SKIP_SYSTEM_DIRS
 
 
 def should_skip_system_path(path: Path) -> bool:
     """
     Check if path is in a system directory that should be skipped.
-    
+
     Args:
         path: Path to check
-        
+
     Returns:
         True if path should be skipped, False otherwise
     """
-    path_str = str(path)
-    return any(path_str.startswith(skip_dir) for skip_dir in SKIP_SYSTEM_DIRS)
+    global _SKIP_SYSTEM_PREFIXES, _SKIP_SYSTEM_SOURCE  # pylint: disable=global-statement
+    # SKIP_SYSTEM_DIRS stays authoritative: rebuild only when it is swapped, so
+    # the steady-state cost is one identity check.
+    if SKIP_SYSTEM_DIRS is not _SKIP_SYSTEM_SOURCE:
+        _SKIP_SYSTEM_SOURCE = SKIP_SYSTEM_DIRS
+        _SKIP_SYSTEM_PREFIXES = tuple(SKIP_SYSTEM_DIRS)
+    # Same result as ``any(path_str.startswith(d) for d in SKIP_SYSTEM_DIRS)``.
+    return str(path).startswith(_SKIP_SYSTEM_PREFIXES)
 
 
 def extract_and_add_rule(
@@ -606,6 +653,16 @@ def extract_project_level_rules_with_fallback(
                 continue
 
 
+# macOS project-walk prune (skip dirs + system dirs + hidden home-level tool
+# dirs). The id keys the index cache; keep it unique per prune policy.
+def _macos_project_skip(item: Path) -> bool:
+    return (should_skip_path(item) or should_skip_system_path(item)
+            or is_home_dotdir_descendant(item))
+
+
+_MACOS_PROJECT_SKIP_ID = "macos_project"
+
+
 def walk_for_tool_directories(
     root_path: Path,
     current_dir: Path,
@@ -615,67 +672,34 @@ def walk_for_tool_directories(
     current_depth: int = 0
 ) -> None:
     """
-    Recursively walk directory tree looking for tool-specific directories.
-    
-    This is a generic helper that can be used by any tool's rules extractor.
-    
+    Find each tool-specific dir under ``current_dir`` and extract from it.
+
+    Routes through the shared directory index, falling back to an independent
+    walk if the index faults. ``current_depth`` is unused (retained for call-site
+    compatibility).
+
     Args:
         root_path: Root search path (for depth calculation)
         current_dir: Current directory being processed
-        tool_dir_name: Name of the tool directory to look for (e.g., ".cursor", ".windsurf")
-        extract_from_dir_func: Function to extract rules from a found tool directory
-                              Signature: func(tool_dir: Path, projects_by_root: Dict)
+        tool_dir_name: Name of the tool directory to look for (e.g., ".cursor")
+        extract_from_dir_func: func(tool_dir: Path, projects_by_root: Dict)
         projects_by_root: Dictionary to populate with rules
-        current_depth: Current recursion depth
     """
-    # Check depth limit
-    if current_depth > MAX_SEARCH_DEPTH:
-        return
+    def on_match(tool_dir: Path) -> None:
+        try:
+            extract_from_dir_func(tool_dir, projects_by_root)
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error processing {tool_dir}: {e}")
 
-    try:
-        for _entry in scan_dir_entries(current_dir):
-            item = Path(_entry.path)
-            try:
-                # Check if we should skip this path
-                if (should_skip_path(item) or should_skip_system_path(item)
-                        or is_home_dotdir_descendant(item)):
-                    continue
-
-                # Check depth for this item
-                try:
-                    depth = len(item.relative_to(root_path).parts)
-                    if depth > MAX_SEARCH_DEPTH:
-                        continue
-                except ValueError:
-                    continue
-
-                if _entry.is_dir():
-                    # Found the tool directory!
-                    if item.name == tool_dir_name:
-                        # Extract rules from this tool directory
-                        extract_from_dir_func(item, projects_by_root)
-                        # Don't recurse into tool directory
-                        continue
-
-                    if _entry.is_symlink():
-                        continue
-
-                    # Recurse into subdirectories
-                    walk_for_tool_directories(
-                        root_path, item, tool_dir_name, extract_from_dir_func,
-                        projects_by_root, current_depth + 1
-                    )
-                
-            except (PermissionError, OSError):
-                continue
-            except Exception as e:
-                logger.debug(f"Error processing {item}: {e}")
-                continue
-                
-    except (PermissionError, OSError):
-        pass
-    except Exception as e:
-        logger.debug(f"Error walking {current_dir}: {e}")
+    dispatch_matches(
+        root_path, current_dir, _macos_project_skip, _MACOS_PROJECT_SKIP_ID,
+        lambda name: name == tool_dir_name, on_match,
+        # The shared index stores only hidden dirs; a non-hidden marker must use
+        # the direct walk or it would silently never match.
+        markers_all_hidden=tool_dir_name.startswith("."),
+    )
 
 
 def extract_project_level_mcp_configs_with_fallback(

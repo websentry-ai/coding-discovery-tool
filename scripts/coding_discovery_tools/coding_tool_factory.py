@@ -170,6 +170,28 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_claude_desktop_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Claude Desktop detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos import MacOSClaudeDesktopDetector
+            return MacOSClaudeDesktopDetector()
+        elif os_name == "Windows":
+            from .windows import WindowsClaudeDesktopDetector
+            return WindowsClaudeDesktopDetector()
+        return None
+
+    @staticmethod
     def create_xcode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create the Xcode coding intelligence detector. macOS only — Xcode does
@@ -187,6 +209,25 @@ class ToolDetectorFactory:
         if os_name == "Darwin":
             from .macos import MacOSXcodeDetector
             return MacOSXcodeDetector()
+        return None
+
+    @staticmethod
+    def create_copilot_xcode_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the GitHub Copilot for Xcode detector. macOS only.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos import MacOSGitHubCopilotXcodeDetector
+            return MacOSGitHubCopilotXcodeDetector()
         return None
 
     @staticmethod
@@ -511,6 +552,46 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_copilot_app_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the GitHub Copilot app detector. Windows only for now — the app
+        also ships for macOS and Linux, which are not covered yet.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.github_copilot_app import WindowsGitHubCopilotAppDetector
+            return WindowsGitHubCopilotAppDetector()
+        return None
+
+    @staticmethod
+    def create_visual_studio_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the Visual Studio detector. Windows only — Visual Studio for Mac was
+        retired 2024-08-31 and Visual Studio has never shipped for Linux.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.visual_studio import WindowsVisualStudioDetector
+            return WindowsVisualStudioDetector()
+        return None
+
+    @staticmethod
     def create_augment_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate Augment Code detector for the OS.
@@ -600,11 +681,20 @@ class ToolDetectorFactory:
         claude_cowork_detector = ToolDetectorFactory.create_claude_cowork_detector(os_name)
         if claude_cowork_detector is not None:
             detectors.append(claude_cowork_detector)
+
+        # Add Claude Desktop detector for macOS and Windows
+        claude_desktop_detector = ToolDetectorFactory.create_claude_desktop_detector(os_name)
+        if claude_desktop_detector is not None:
+            detectors.append(claude_desktop_detector)
         
         # Add Xcode coding intelligence detector for macOS
         xcode_detector = ToolDetectorFactory.create_xcode_detector(os_name)
         if xcode_detector is not None:
             detectors.append(xcode_detector)
+
+        copilot_xcode_detector = ToolDetectorFactory.create_copilot_xcode_detector(os_name)
+        if copilot_xcode_detector is not None:
+            detectors.append(copilot_xcode_detector)
 
         # Add Cline detector for macOS and Windows
         cline_detector = ToolDetectorFactory.create_cline_detector(os_name)
@@ -657,6 +747,15 @@ class ToolDetectorFactory:
         copilot_cli_detector = ToolDetectorFactory.create_copilot_cli_detector(os_name)
         if copilot_cli_detector is not None:
             detectors.append(copilot_cli_detector)
+
+        copilot_app_detector = ToolDetectorFactory.create_copilot_app_detector(os_name)
+        if copilot_app_detector is not None:
+            detectors.append(copilot_app_detector)
+
+        # Visual Studio + its bundled Copilot component (Windows only)
+        visual_studio_detector = ToolDetectorFactory.create_visual_studio_detector(os_name)
+        if visual_studio_detector is not None:
+            detectors.append(visual_studio_detector)
 
         # Add Augment Code detector (macOS + Windows + Linux)
         augment_detector = ToolDetectorFactory.create_augment_detector(os_name)
@@ -1103,6 +1202,32 @@ class AntigravityMCPConfigExtractorFactory:
             return LinuxAntigravityMCPConfigExtractor()
         else:
             return None
+
+
+class ClaudeDesktopMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Claude Desktop MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create appropriate Claude Desktop MCP config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.claude_desktop.mcp_config_extractor import MacOSClaudeDesktopMCPConfigExtractor
+            return MacOSClaudeDesktopMCPConfigExtractor()
+        elif os_name == "Windows":
+            from .windows.claude_desktop.mcp_config_extractor import WindowsClaudeDesktopMCPConfigExtractor
+            return WindowsClaudeDesktopMCPConfigExtractor()
+        return None
 
 
 class KiloCodeRulesExtractorFactory:
@@ -2105,3 +2230,51 @@ class ClaudeCoworkSkillsExtractorFactory:
             return LinuxClaudeCoworkSkillsExtractor()
         else:
             return None
+
+
+class VisualStudioMCPConfigExtractorFactory:
+    """Factory for creating the Visual Studio MCP config extractor."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """
+        Create the Visual Studio MCP config extractor. Windows only.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseMCPConfigExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.visual_studio.mcp_config_extractor import WindowsVisualStudioMCPConfigExtractor
+            return WindowsVisualStudioMCPConfigExtractor()
+        return None
+
+
+class VisualStudioRulesExtractorFactory:
+    """Factory for creating the Visual Studio Copilot rules extractor."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None):
+        """
+        Create the Visual Studio Copilot rules extractor. Windows only.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            WindowsVisualStudioRulesExtractor instance or None if OS is not supported
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Windows":
+            from .windows.visual_studio.visual_studio_rules_extractor import (
+                WindowsVisualStudioRulesExtractor,
+            )
+            return WindowsVisualStudioRulesExtractor()
+        return None

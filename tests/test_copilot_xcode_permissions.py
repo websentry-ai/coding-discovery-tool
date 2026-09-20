@@ -494,10 +494,15 @@ class TestRoutingRegression(unittest.TestCase):
         self.assertNotIn("permissions", row)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "Copilot for Xcode is macOS-only")
 class TestRealEntrypointE2E(unittest.TestCase):
     """Highest real assembly entrypoint: the real detector fires from a planted
     user-scope install, then the real extractor + real plist flow through
     process_single_tool with nothing about the extractor mocked.
+
+    macOS-only: it drives the real ``MacOSGitHubCopilotXcodeDetector`` over
+    macOS-shaped paths (``~/Applications/…app``, the group container, ``os.link``),
+    so it is skipped off Darwin exactly like the sibling POSIX/macOS e2e tests.
 
     Not the ``python -m …ai_tools_discovery --payload`` module run: a full scan
     walks the whole real filesystem for every other tool (slow, non-hermetic),
@@ -505,6 +510,7 @@ class TestRealEntrypointE2E(unittest.TestCase):
     detect()+process_single_tool is driven directly against a controlled HOME."""
 
     def test_b1_real_detect_and_assemble_carry_planted_permissions(self):
+        import coding_discovery_tools.macos.github_copilot_xcode.settings_extractor as sx
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         from coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
         home = Path(tempfile.mkdtemp(prefix="copilot-xcode-e2e-real-"))
@@ -513,7 +519,14 @@ class TestRealEntrypointE2E(unittest.TestCase):
                 _MCP_KEY: ["github-mcp"],
                 _TERMINAL_KEY: ["git status"],
             })
-            with patch.dict(os.environ, {"HOME": str(home)}):
+            # Deterministic regardless of privilege: under root the extractor's
+            # privileged path would enumerate the host's real /Users and skip the
+            # fixture, so pin the scan to the planted HOME (force non-root, and make
+            # the all-users enumerator yield only the fixture). The extractor's own
+            # plist read/parse/map stays real — nothing about it is mocked.
+            with patch.dict(os.environ, {"HOME": str(home)}), \
+                    patch.object(sx, "is_running_as_root", lambda: False), \
+                    patch.object(sx, "scan_user_directories", lambda cb: cb(home)):
                 det = AIToolsDetector(os_name="Darwin")  # real xcode extractor inside
                 detector = ToolDetectorFactory.create_copilot_xcode_detector("Darwin")
                 detector.user_home = home  # scan the planted install, not the real machine

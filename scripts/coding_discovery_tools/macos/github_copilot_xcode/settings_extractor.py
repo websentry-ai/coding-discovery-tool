@@ -180,22 +180,23 @@ class MacOSCopilotXcodeSettingsExtractor:
         return {"path": str(user_home), "mcpServers": array}
 
     def _read_mcp_servers(self, user_home: Path) -> Optional[Dict]:
-        """The configured servers map, from the canonical ``mcp.json`` when present,
-        else the ``GitHubCopilotMCPConfig`` mirror in the ``.prefs`` suite."""
+        """The configured servers map: the canonical, group-independent ``mcp.json``
+        when present, else the ``GitHubCopilotMCPConfig`` mirror in the active group's
+        ``.prefs`` suite (never the other group's, so prod and dev never mix)."""
         data = self._load_json(user_home.joinpath(*_MCP_JSON_RELATIVE), user_home)
         servers = self._servers_from(data)
         if servers:
             return servers
-        for group in (_PROD_GROUP, _DEV_GROUP):
-            prefs_path = self._resolve_suite_plist(user_home, group, _GENERAL_SUFFIX)
-            if prefs_path is None:
-                continue
-            prefs = self._load_plist(prefs_path, user_home) or {}
-            raw = prefs.get(_MCP_PREF_KEY)
-            if isinstance(raw, str) and raw.strip():
-                servers = self._servers_from(self._coerce(raw))
-                if servers:
-                    return servers
+        group = self._active_group(user_home)
+        if group is None:
+            return None
+        prefs_path = self._resolve_suite_plist(user_home, group, _GENERAL_SUFFIX)
+        if prefs_path is None:
+            return None
+        prefs = self._load_plist(prefs_path, user_home) or {}
+        raw = prefs.get(_MCP_PREF_KEY)
+        if isinstance(raw, str) and raw.strip():
+            return self._servers_from(self._coerce(raw))
         return None
 
     @staticmethod
@@ -241,24 +242,26 @@ class MacOSCopilotXcodeSettingsExtractor:
         return projects
 
     def _global_rule_for_user(self, user_home: Path) -> Optional[Dict]:
-        for group in (_PROD_GROUP, _DEV_GROUP):
-            prefs_path = self._resolve_suite_plist(user_home, group, _GENERAL_SUFFIX)
-            if prefs_path is None:
-                continue
-            prefs = self._load_plist(prefs_path, user_home) or {}
-            text = prefs.get(_GLOBAL_INSTRUCTIONS_KEY)
-            if isinstance(text, str) and text.strip():
-                rule = {
-                    "file_path": str(prefs_path),
-                    "file_name": _GLOBAL_INSTRUCTIONS_KEY,
-                    "project_root": str(user_home),
-                    "content": text,
-                    "size": len(text.encode("utf-8")),
-                    "last_modified": None,
-                    "truncated": False,
-                    "scope": "user",
-                }
-                return {"path": str(user_home), "rules": [rule]}
+        group = self._active_group(user_home)
+        if group is None:
+            return None
+        prefs_path = self._resolve_suite_plist(user_home, group, _GENERAL_SUFFIX)
+        if prefs_path is None:
+            return None
+        prefs = self._load_plist(prefs_path, user_home) or {}
+        text = prefs.get(_GLOBAL_INSTRUCTIONS_KEY)
+        if isinstance(text, str) and text.strip():
+            rule = {
+                "file_path": str(prefs_path),
+                "file_name": _GLOBAL_INSTRUCTIONS_KEY,
+                "project_root": str(user_home),
+                "content": text,
+                "size": len(text.encode("utf-8")),
+                "last_modified": None,
+                "truncated": False,
+                "scope": "user",
+            }
+            return {"path": str(user_home), "rules": [rule]}
         return None
 
     @staticmethod
@@ -269,17 +272,40 @@ class MacOSCopilotXcodeSettingsExtractor:
         return (1 if armed else 0,
                 len(record.get("allow_rules", [])) + len(record.get("mcp_tool_allowlist", [])))
 
+    # -- per-user group selection --------------------------------------------
+
+    def _group_present(self, user_home: Path, group: str) -> bool:
+        """True when this user has ANY suite for ``group`` — the autoApproval suite
+        or the general ``.prefs`` suite. Presence of either marks the group's
+        install as real for this user."""
+        return (self._resolve_suite_plist(user_home, group, _AUTOAPPROVAL_SUFFIX) is not None
+                or self._resolve_suite_plist(user_home, group, _GENERAL_SUFFIX) is not None)
+
+    def _active_group(self, user_home: Path) -> Optional[str]:
+        """The ONE group whose data represents this user's install: prod when any
+        prod suite exists, else dev when any dev suite exists, else None.
+
+        Chosen once and used consistently for every group-scoped surface —
+        permissions (autoApproval suite), the MCP-pref fallback and the global
+        instruction (both in the general ``.prefs`` suite) — so a user who has both
+        groups never gets prod permissions mixed with stale dev MCP/instructions.
+        The non-group-scoped ``~/.config/github-copilot/xcode/mcp.json`` belongs to
+        the install and is read regardless of the chosen group."""
+        for group in (_PROD_GROUP, _DEV_GROUP):
+            if self._group_present(user_home, group):
+                return group
+        return None
+
     # -- per-user assembly ---------------------------------------------------
 
     def _extract_for_user(self, user_home: Path) -> Optional[Dict]:
-        """One record for this user, from the prod suites if present, else dev.
-        Prod is preferred so a real install is never reported through a dev build's
-        stale approvals. None when neither group holds a permission surface."""
-        for group in (_PROD_GROUP, _DEV_GROUP):
-            record = self._extract_for_group(user_home, group)
-            if record:
-                return record
-        return None
+        """The permission record for this user's active group, or None. Only the
+        active group is consulted — a real prod install is never reported through a
+        dev build's stale approvals, and vice versa."""
+        group = self._active_group(user_home)
+        if group is None:
+            return None
+        return self._extract_for_group(user_home, group)
 
     def _extract_for_group(self, user_home: Path, group: str) -> Optional[Dict]:
         auto_path = self._resolve_suite_plist(user_home, group, _AUTOAPPROVAL_SUFFIX)

@@ -803,5 +803,45 @@ class TestExpandedWiring(unittest.TestCase):
         self.assertEqual(row["projects"][0]["rules"][0]["file_name"], "g")
 
 
+class TestGroupConsistency(unittest.TestCase):
+    """A user with BOTH prod and dev groups must have every surface resolve to the
+    same (prod-preferred) group — no prod permissions mixed with stale dev data."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="copilot-xcode-group-"))
+        self._transform = sx.transform_mcp_servers_to_array
+        sx.transform_mcp_servers_to_array = _fake_transform
+
+    def tearDown(self):
+        sx.transform_mcp_servers_to_array = self._transform
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_prod_active_group_never_mixes_dev_artifacts(self):
+        # Prod is the real install: it has the autoApproval permission surface.
+        _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["prod-approved"]})
+        # Dev has a STALE .prefs with a different MCP-pref + instruction, and no
+        # prod .prefs / mcp.json exist — so a per-surface prod->dev fallthrough
+        # would pull these dev values into the prod row.
+        _write_general_prefs(self.home, {
+            _MCP_PREF_KEY: json.dumps({"servers": {"dev-mcp": {"command": "x"}}}),
+            _GLOBAL_INSTRUCTIONS_KEY: "DEV-ONLY INSTRUCTION",
+        }, group=_DEV_GROUP)
+
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        det._copilot_xcode_settings_extractor._scan_users = lambda cb: cb(self.home)
+        row = det.process_single_tool(
+            {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a", "projects": []})
+
+        # Prod permissions are present…
+        self.assertIn("permissions", row)
+        self.assertEqual(row["permissions"]["mcp_tool_allowlist"], ["prod-approved"])
+        # …and NO dev-group artifact leaks into any surface of the same row.
+        blob = json.dumps(row)
+        self.assertNotIn("dev-mcp", blob, "dev MCP pref must not leak into the prod row")
+        self.assertNotIn("DEV-ONLY INSTRUCTION", blob, "dev instruction must not leak into the prod row")
+        self.assertEqual(row["projects"], [], "prod has no MCP/instructions, so no projects")
+
+
 if __name__ == "__main__":
     unittest.main()

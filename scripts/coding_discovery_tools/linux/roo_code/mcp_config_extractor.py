@@ -46,11 +46,12 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
                 / self.ROO_EXTENSION_ID / "settings" / "mcp_settings.json"
             )
             if config_path.exists():
+                by_ide.setdefault(ide_name, [])   # this dir answered
                 config = read_ide_global_mcp_config(
                     config_path, tool_name="Roo Code", use_full_path=True
                 )
                 if config:
-                    by_ide.setdefault(ide_name, []).append(config)
+                    by_ide[ide_name].append(config)
         return drop_pre_rename_duplicates(by_ide)
 
     def _extract_project_level_configs(self) -> List[Dict]:

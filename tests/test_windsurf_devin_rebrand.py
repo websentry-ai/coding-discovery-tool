@@ -219,55 +219,49 @@ class HostedMcpSettingsFollowTheRenamedUserDataDir(unittest.TestCase):
             self.assertIn("Windsurf", cls.IDE_NAMES, cls.__name__)
             self.assertIn("Devin", cls.IDE_NAMES, cls.__name__)
 
-    def test_cline_servers_configured_in_devin_are_extracted(self):
-        from scripts.coding_discovery_tools.macos.cline.mcp_config_extractor import (
-            MacOSClineMCPConfigExtractor,
-        )
-        home = Path(tempfile.mkdtemp())
-        settings = (home / "Library" / "Application Support" / "Devin" / "User"
+    def _write_cline_settings(self, home, ide_name, servers):
+        settings = (home / "Library" / "Application Support" / ide_name / "User"
                     / "globalStorage" / CLINE_EXT_ID / "settings"
                     / "cline_mcp_settings.json")
         settings.parent.mkdir(parents=True)
-        settings.write_text(json.dumps(
-            {"mcpServers": {"ripgrep": {"command": "rg", "args": ["--json"]}}}
-        ), encoding="utf-8")
-        configs = MacOSClineMCPConfigExtractor()._extract_global_configs_for_user(home)
+        settings.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+    def _cline_configs(self, home):
+        from scripts.coding_discovery_tools.macos.cline.mcp_config_extractor import (
+            MacOSClineMCPConfigExtractor,
+        )
+        return MacOSClineMCPConfigExtractor()._extract_global_configs_for_user(home)
+
+    def test_cline_servers_configured_in_devin_are_extracted(self):
+        home = Path(tempfile.mkdtemp())
+        self._write_cline_settings(home, "Devin", {"ripgrep": {"command": "rg"}})
+        configs = self._cline_configs(home)
         self.assertEqual(1, len(configs), configs)
         self.assertIn("ripgrep", json.dumps(configs))
 
     def test_a_migrated_machine_reports_its_servers_once(self):
-        """Both user-data dirs survive the upgrade; only the live one is scanned."""
-        from scripts.coding_discovery_tools.macos.cline.mcp_config_extractor import (
-            MacOSClineMCPConfigExtractor,
-        )
+        """Both user-data dirs survive the upgrade; only the live one answers."""
         home = Path(tempfile.mkdtemp())
-        base = home / "Library" / "Application Support"
         for ide in ("Windsurf", "Devin"):
-            settings = (base / ide / "User" / "globalStorage" / CLINE_EXT_ID
-                        / "settings" / "cline_mcp_settings.json")
-            settings.parent.mkdir(parents=True)
-            settings.write_text(json.dumps(
-                {"mcpServers": {"ripgrep": {"command": "rg"}}}
-            ), encoding="utf-8")
-        configs = MacOSClineMCPConfigExtractor()._extract_global_configs_for_user(home)
+            self._write_cline_settings(home, ide, {"ripgrep": {"command": "rg"}})
+        configs = self._cline_configs(home)
         self.assertEqual(1, len(configs), configs)
         self.assertIn("Devin", configs[0]["path"])
 
+    def test_servers_removed_after_migrating_do_not_come_back(self):
+        """An emptied settings file still answers; the leftover must not refill it."""
+        home = Path(tempfile.mkdtemp())
+        self._write_cline_settings(home, "Windsurf", {"ripgrep": {"command": "rg"}})
+        self._write_cline_settings(home, "Devin", {})
+        self.assertEqual([], self._cline_configs(home))
+
     def test_a_half_migrated_machine_keeps_its_old_servers(self):
         """The new user-data dir can exist before the extension writes settings in it."""
-        from scripts.coding_discovery_tools.macos.cline.mcp_config_extractor import (
-            MacOSClineMCPConfigExtractor,
-        )
         home = Path(tempfile.mkdtemp())
         base = home / "Library" / "Application Support"
         (base / "Devin" / "User" / "globalStorage").mkdir(parents=True)
-        settings = (base / "Windsurf" / "User" / "globalStorage" / CLINE_EXT_ID
-                    / "settings" / "cline_mcp_settings.json")
-        settings.parent.mkdir(parents=True)
-        settings.write_text(json.dumps(
-            {"mcpServers": {"ripgrep": {"command": "rg"}}}
-        ), encoding="utf-8")
-        configs = MacOSClineMCPConfigExtractor()._extract_global_configs_for_user(home)
+        self._write_cline_settings(home, "Windsurf", {"ripgrep": {"command": "rg"}})
+        configs = self._cline_configs(home)
         self.assertEqual(1, len(configs), configs)
         self.assertIn("Windsurf", configs[0]["path"])
 

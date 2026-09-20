@@ -38,9 +38,10 @@ class LinuxClineMCPConfigExtractor(BaseMCPConfigExtractor):
                 / self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"
             )
             if config_path.exists():
+                by_ide.setdefault(ide_name, [])   # this dir answered
                 config = read_ide_global_mcp_config(
                     config_path, tool_name="Cline", use_full_path=True
                 )
                 if config:
-                    by_ide.setdefault(ide_name, []).append(config)
+                    by_ide[ide_name].append(config)
         return drop_pre_rename_duplicates(by_ide)

@@ -128,9 +128,10 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
                 self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"
             )
             if config_path.exists():
+                by_ide.setdefault(ide_name, [])   # this dir answered
                 config = self._read_global_config(config_path, ide_name)
                 if config:
-                    by_ide.setdefault(ide_name, []).append(config)
+                    by_ide[ide_name].append(config)
         
         return drop_pre_rename_duplicates(by_ide)
     

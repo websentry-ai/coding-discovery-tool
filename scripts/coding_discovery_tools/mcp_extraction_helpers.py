@@ -2237,13 +2237,14 @@ _RENAMED_IDE_DIRS = {"Windsurf": "Devin"}
 def drop_pre_rename_duplicates(configs_by_ide: dict) -> list:
     """Flatten per-editor configs, keeping one side of a rebranded pair.
 
-    The renamed dir wins where it holds the settings; the pre-rename dir is still
-    read while it is the only place they are, so a half-migrated machine keeps
-    reporting what it reports today. Never raises.
+    A readable settings file answers for its editor whether or not it still lists a
+    server, so emptying the renamed one does not refill it from the dir the editor
+    abandoned. Absent entirely, the pre-rename dir still answers and a half-migrated
+    machine reports what it reports today. Never raises.
     """
     kept = dict(configs_by_ide)
     for legacy, renamed in _RENAMED_IDE_DIRS.items():
-        if kept.get(renamed) and kept.get(legacy):
+        if renamed in kept and legacy in kept:
             kept.pop(legacy)
     return [config for configs in kept.values() for config in configs]
 

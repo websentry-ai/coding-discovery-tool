@@ -31,9 +31,8 @@ _EXTENSIONS_DIR_BY_EDITOR = {
     "Antigravity": ".antigravity/extensions",
 }
 
-# A rebrand can move an editor's data folder without making it a new editor:
-# Windsurf ships as Devin and writes ~/.devin. Kept out of the map above so the
-# editor keeps one key, one display name and one row.
+# A renamed data folder is the same editor, not a new one -- kept out of the map
+# above so it keeps one key, one display name and one row.
 _EXTENSIONS_DIR_ALTERNATES = {
     "Windsurf": (".devin/extensions",),
 }

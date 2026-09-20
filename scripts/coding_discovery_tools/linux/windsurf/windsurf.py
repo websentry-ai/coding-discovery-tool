@@ -11,14 +11,20 @@ from ...linux_extraction_helpers import get_linux_user_homes
 
 logger = logging.getLogger(__name__)
 
+# The rebrand renamed the binary to "devin"; both names ship in the wild.
 _SYSTEM_PATHS = [
     Path("/usr/bin/windsurf"),
     Path("/usr/local/bin/windsurf"),
     Path("/opt/windsurf/windsurf"),
+    Path("/usr/bin/devin"),
+    Path("/usr/local/bin/devin"),
+    Path("/opt/devin/devin"),
 ]
 _USER_RELATIVE_PATHS = [
     Path(".local/bin/windsurf"),
     Path(".local/share/windsurf/windsurf"),
+    Path(".local/bin/devin"),
+    Path(".local/share/devin/devin"),
 ]
 
 

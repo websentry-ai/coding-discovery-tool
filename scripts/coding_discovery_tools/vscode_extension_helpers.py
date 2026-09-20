@@ -31,6 +31,13 @@ _EXTENSIONS_DIR_BY_EDITOR = {
     "Antigravity": ".antigravity/extensions",
 }
 
+# A rebrand can move an editor's data folder without making it a new editor:
+# Windsurf ships as Devin and writes ~/.devin. Kept out of the map above so the
+# editor keeps one key, one display name and one row.
+_EXTENSIONS_DIR_ALTERNATES = {
+    "Windsurf": (".devin/extensions",),
+}
+
 # For callers that scan every editor rather than a fixed SUPPORTED_IDES subset.
 VSCODE_EDITOR_KEYS = tuple(_EXTENSIONS_DIR_BY_EDITOR)
 
@@ -119,7 +126,15 @@ def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     rel = _EXTENSIONS_DIR_BY_EDITOR.get(ide_key)
     if rel is None:
         return None
-    return user_home / rel
+    primary = user_home / rel
+    for alt in _EXTENSIONS_DIR_ALTERNATES.get(ide_key, ()):
+        candidate = user_home / alt
+        try:                            # an unreadable home must not hide the primary
+            if not primary.exists() and candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return primary
 
 
 def find_extension_in_editor(

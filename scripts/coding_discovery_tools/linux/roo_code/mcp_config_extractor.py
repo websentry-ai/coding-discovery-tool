@@ -11,7 +11,7 @@ from ...linux_extraction_helpers import (
     should_skip_system_path,
 )
 from ...mcp_extraction_helpers import (
-    live_ide_user_data_dirs,
+    drop_pre_rename_duplicates,
     extract_roo_mcp_from_dir,
     walk_for_roo_mcp_configs,
     read_ide_global_mcp_config,
@@ -39,8 +39,8 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
         return configs
 
     def _extract_global_configs_for_user(self, user_home: Path) -> List[Dict]:
-        configs = []
-        for ide_name in live_ide_user_data_dirs(user_home / ".config", self.IDE_NAMES):
+        by_ide = {}
+        for ide_name in self.IDE_NAMES:
             config_path = (
                 user_home / ".config" / ide_name / "User" / "globalStorage"
                 / self.ROO_EXTENSION_ID / "settings" / "mcp_settings.json"
@@ -50,8 +50,8 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
                     config_path, tool_name="Roo Code", use_full_path=True
                 )
                 if config:
-                    configs.append(config)
-        return configs
+                    by_ide.setdefault(ide_name, []).append(config)
+        return drop_pre_rename_duplicates(by_ide)
 
     def _extract_project_level_configs(self) -> List[Dict]:
         configs = []

@@ -253,6 +253,24 @@ class HostedMcpSettingsFollowTheRenamedUserDataDir(unittest.TestCase):
         self.assertEqual(1, len(configs), configs)
         self.assertIn("Devin", configs[0]["path"])
 
+    def test_a_half_migrated_machine_keeps_its_old_servers(self):
+        """The new user-data dir can exist before the extension writes settings in it."""
+        from scripts.coding_discovery_tools.macos.cline.mcp_config_extractor import (
+            MacOSClineMCPConfigExtractor,
+        )
+        home = Path(tempfile.mkdtemp())
+        base = home / "Library" / "Application Support"
+        (base / "Devin" / "User" / "globalStorage").mkdir(parents=True)
+        settings = (base / "Windsurf" / "User" / "globalStorage" / CLINE_EXT_ID
+                    / "settings" / "cline_mcp_settings.json")
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps(
+            {"mcpServers": {"ripgrep": {"command": "rg"}}}
+        ), encoding="utf-8")
+        configs = MacOSClineMCPConfigExtractor()._extract_global_configs_for_user(home)
+        self.assertEqual(1, len(configs), configs)
+        self.assertIn("Windsurf", configs[0]["path"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

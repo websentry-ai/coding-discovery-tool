@@ -8,7 +8,7 @@ from ...coding_tool_base import BaseMCPConfigExtractor
 from ...linux_extraction_helpers import get_linux_user_homes
 from ...mcp_extraction_helpers import (
     read_ide_global_mcp_config,
-    live_ide_user_data_dirs,
+    drop_pre_rename_duplicates,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ class LinuxClineMCPConfigExtractor(BaseMCPConfigExtractor):
         return configs
 
     def _extract_global_configs_for_user(self, user_home: Path) -> List[Dict]:
-        configs = []
-        for ide_name in live_ide_user_data_dirs(user_home / ".config", self.IDE_NAMES):
+        by_ide = {}
+        for ide_name in self.IDE_NAMES:
             config_path = (
                 user_home / ".config" / ide_name / "User" / "globalStorage"
                 / self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"
@@ -42,5 +42,5 @@ class LinuxClineMCPConfigExtractor(BaseMCPConfigExtractor):
                     config_path, tool_name="Cline", use_full_path=True
                 )
                 if config:
-                    configs.append(config)
-        return configs
+                    by_ide.setdefault(ide_name, []).append(config)
+        return drop_pre_rename_duplicates(by_ide)

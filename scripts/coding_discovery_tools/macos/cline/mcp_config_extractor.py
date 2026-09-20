@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
-    live_ide_user_data_dirs,
+    drop_pre_rename_duplicates,
     extract_ide_global_configs_with_root_support,
     read_ide_global_mcp_config,
 )
@@ -118,11 +118,11 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns:
             List of global config dicts
         """
-        configs = []
+        by_ide = {}
         code_base = user_home / "Library" / "Application Support"
         
         # Check each IDE
-        for ide_name in live_ide_user_data_dirs(code_base, self.IDE_NAMES):
+        for ide_name in self.IDE_NAMES:
             config_path = (
                 code_base / ide_name / "User" / "globalStorage" /
                 self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"
@@ -130,9 +130,9 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
             if config_path.exists():
                 config = self._read_global_config(config_path, ide_name)
                 if config:
-                    configs.append(config)
+                    by_ide.setdefault(ide_name, []).append(config)
         
-        return configs
+        return drop_pre_rename_duplicates(by_ide)
     
     def _read_global_config(self, config_path: Path, ide_name: str) -> Optional[Dict]:
         """

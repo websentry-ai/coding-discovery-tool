@@ -2234,21 +2234,18 @@ def extract_global_mcp_config_with_root_support(
 _RENAMED_IDE_DIRS = {"Windsurf": "Devin"}
 
 
-def live_ide_user_data_dirs(code_base: Path, ide_names) -> list:
-    """``ide_names`` with a rebranded pair collapsed to the dir the build reads.
+def drop_pre_rename_duplicates(configs_by_ide: dict) -> list:
+    """Flatten per-editor configs, keeping one side of a rebranded pair.
 
-    Scanning both would report a migrated machine's MCP servers twice -- once from
-    the directory the editor abandoned, once from the live one. Never raises.
+    The renamed dir wins where it holds the settings; the pre-rename dir is still
+    read while it is the only place they are, so a half-migrated machine keeps
+    reporting what it reports today. Never raises.
     """
-    names = list(ide_names)
+    kept = dict(configs_by_ide)
     for legacy, renamed in _RENAMED_IDE_DIRS.items():
-        if legacy not in names or renamed not in names:
-            continue
-        try:
-            names.remove(legacy if (code_base / renamed).is_dir() else renamed)
-        except OSError:
-            names.remove(renamed)
-    return names
+        if kept.get(renamed) and kept.get(legacy):
+            kept.pop(legacy)
+    return [config for configs in kept.values() for config in configs]
 
 
 def extract_ide_global_configs_with_root_support(

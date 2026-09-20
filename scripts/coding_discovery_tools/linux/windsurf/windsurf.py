@@ -11,20 +11,22 @@ from ...linux_extraction_helpers import get_linux_user_homes
 
 logger = logging.getLogger(__name__)
 
-# The rebrand renamed the binary to "devin"; both names ship in the wild.
+# The rebrand renamed the binary (``applicationName: devin-desktop``, dir ``Devin``);
+# both ship in the wild. Not plain "devin" -- that is the agent CLI Devin bundles.
+_BINARY_NAMES = ("windsurf", "devin-desktop")
 _SYSTEM_PATHS = [
     Path("/usr/bin/windsurf"),
     Path("/usr/local/bin/windsurf"),
     Path("/opt/windsurf/windsurf"),
-    Path("/usr/bin/devin"),
-    Path("/usr/local/bin/devin"),
-    Path("/opt/devin/devin"),
+    Path("/usr/bin/devin-desktop"),
+    Path("/usr/local/bin/devin-desktop"),
+    Path("/opt/Devin/devin-desktop"),
 ]
 _USER_RELATIVE_PATHS = [
     Path(".local/bin/windsurf"),
     Path(".local/share/windsurf/windsurf"),
-    Path(".local/bin/devin"),
-    Path(".local/share/devin/devin"),
+    Path(".local/bin/devin-desktop"),
+    Path(".local/share/Devin/devin-desktop"),
 ]
 
 
@@ -36,13 +38,14 @@ class LinuxWindsurfDetector(BaseToolDetector):
         return "Windsurf"
 
     def detect(self) -> Optional[Dict]:
-        which_out = run_command(["which", "windsurf"], VERSION_TIMEOUT)
-        if which_out:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(),
-                "install_path": which_out.strip(),
-            }
+        for name in _BINARY_NAMES:
+            which_out = run_command(["which", name], VERSION_TIMEOUT)
+            if which_out:
+                return {
+                    "name": self.tool_name,
+                    "version": self.get_version(),
+                    "install_path": which_out.strip(),
+                }
 
         for p in _SYSTEM_PATHS:
             if p.exists() and p.is_file():
@@ -87,8 +90,11 @@ class LinuxWindsurfDetector(BaseToolDetector):
                             return extract_version_number(out)
                 except Exception:
                     continue
-        try:
-            out = run_command(["windsurf", "--version"], VERSION_TIMEOUT)
-            return extract_version_number(out) if out else None
-        except Exception:
-            return None
+        for name in _BINARY_NAMES:
+            try:
+                out = run_command([name, "--version"], VERSION_TIMEOUT)
+                if out:
+                    return extract_version_number(out)
+            except Exception:
+                continue
+        return None

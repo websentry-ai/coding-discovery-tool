@@ -112,6 +112,15 @@ def vscode_family_editor_dirs(tool_name: str) -> list:
     return [key] if key else []
 
 
+def _extension_dir_candidates(user_home: Path, ide_key: str) -> list:
+    """Every extensions dir this editor may use, canonical first; [] if unknown."""
+    rel = _EXTENSIONS_DIR_BY_EDITOR.get(ide_key)
+    if rel is None:
+        return []
+    alternates = _EXTENSIONS_DIR_ALTERNATES.get(ide_key, ())
+    return [user_home / rel] + [user_home / alt for alt in alternates]
+
+
 def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     """Return the extensions registry directory for ``ide_key`` under ``user_home``.
 
@@ -122,12 +131,11 @@ def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     Returns:
         The ``<user_home>/<rel>/extensions`` Path, or None for an unknown editor.
     """
-    rel = _EXTENSIONS_DIR_BY_EDITOR.get(ide_key)
-    if rel is None:
+    candidates = _extension_dir_candidates(user_home, ide_key)
+    if not candidates:
         return None
-    primary = user_home / rel
-    for alt in _EXTENSIONS_DIR_ALTERNATES.get(ide_key, ()):
-        candidate = user_home / alt
+    primary = candidates[0]
+    for candidate in candidates[1:]:
         try:                            # an unreadable home must not hide the primary
             if not primary.exists() and candidate.exists():
                 return candidate
@@ -136,14 +144,20 @@ def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     return primary
 
 
+# Ranked least to most informative: when an editor's two dirs end differently, the
+# run reports the outcome that explains the scan rather than the one read last.
+_OUTCOME_RANK = ("missing", "unreadable", "present", "listed")
+
+
 def find_extension_in_editor(
     user_home: Path, ide_key: str, ext_id: str
 ) -> Optional[Tuple[str, Optional[str]]]:
-    """Return ``(matched_location, version)`` if ``ext_id`` is a live entry in the
-    editor's ``extensions.json``, else None.
+    """Return ``(matched_location, version)`` if ``ext_id`` is a live entry in any of
+    the editor's ``extensions.json`` registries, else None.
 
     Matches case-insensitively on ``identifier.id`` (constants and registry entries
-    disagree on casing, e.g. ``kilocode.Kilo-Code`` vs ``kilocode.kilo-code``).
+    disagree on casing, e.g. ``kilocode.Kilo-Code`` vs ``kilocode.kilo-code``). A
+    migrated machine keeps the old data folder beside the new one, so both are read.
     Never raises — returns None for an unknown editor or a missing/corrupt registry.
 
     Args:
@@ -154,53 +168,63 @@ def find_extension_in_editor(
     Returns:
         ``(matched_location, version)`` tuple, or None.
     """
-    extensions_dir = extensions_dir_for_editor(user_home, ide_key)
-    if extensions_dir is None:
-        return None
+    best = -1
+    for extensions_dir in _extension_dir_candidates(user_home, ide_key):
+        outcome, match = _lookup_in_registry(extensions_dir, ext_id)
+        best = max(best, _OUTCOME_RANK.index(outcome))
+        if match is not None:
+            _record_registry_outcome(ide_key, outcome)
+            return match
+    if best >= 0:
+        _record_registry_outcome(ide_key, _OUTCOME_RANK[best])
+    return None
 
+
+def _lookup_in_registry(
+    extensions_dir: Path, ext_id: str
+) -> Tuple[str, Optional[Tuple[str, Optional[str]]]]:
+    """Look ``ext_id`` up in one extensions dir: ``(outcome, match or None)``."""
     registry = extensions_dir / "extensions.json"
-    target = ext_id.lower()
 
     # os.stat, not is_file(): 3.14 returns False for an unreadable path, which would
     # report a registry we were denied as one that is not there.
     try:
         mode = os.stat(registry).st_mode
     except (FileNotFoundError, NotADirectoryError):
-        _record_registry_outcome(ide_key, "missing")
-        return None
+        return "missing", None
     except OSError as exc:
         logger.debug(f"Could not stat extensions registry {registry}: {exc}")
-        _record_registry_outcome(ide_key, "unreadable")
-        return None
+        return "unreadable", None
     if not stat.S_ISREG(mode):
-        _record_registry_outcome(ide_key, "missing")
-        return None
+        return "missing", None
 
     try:
         entries = json.loads(registry.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError) as exc:
         logger.debug(f"Could not read extensions registry {registry}: {exc}")
-        _record_registry_outcome(ide_key, "unreadable")
-        return None
+        return "unreadable", None
 
     if not isinstance(entries, list):
-        _record_registry_outcome(ide_key, "unreadable")
-        return None
+        return "unreadable", None
 
+    entry = _matching_entry(entries, ext_id.lower())
+    if entry is None:
+        return "present", None
+
+    version = entry.get("version")
+    version = version if isinstance(version, str) else None
+    return "listed", (_resolve_entry_location(entry, extensions_dir), version)
+
+
+def _matching_entry(entries: list, target: str) -> Optional[dict]:
+    """The first entry whose ``identifier.id`` equals ``target``, or None."""
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         identifier = entry.get("identifier")
         entry_id = identifier.get("id") if isinstance(identifier, dict) else None
-        if not isinstance(entry_id, str) or entry_id.lower() != target:
-            continue
-
-        version = entry.get("version")
-        version = version if isinstance(version, str) else None
-        _record_registry_outcome(ide_key, "listed")
-        return _resolve_entry_location(entry, extensions_dir), version
-
-    _record_registry_outcome(ide_key, "present")
+        if isinstance(entry_id, str) and entry_id.lower() == target:
+            return entry
     return None
 
 

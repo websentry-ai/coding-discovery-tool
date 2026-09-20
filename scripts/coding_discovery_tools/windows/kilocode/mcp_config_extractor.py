@@ -24,7 +24,7 @@ class WindowsKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
 
     # Code base global storage paths for different IDEs
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
-    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Antigravity']
+    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Devin', 'Antigravity']
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """

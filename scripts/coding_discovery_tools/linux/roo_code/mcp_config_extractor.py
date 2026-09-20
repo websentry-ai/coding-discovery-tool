@@ -23,7 +23,7 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Roo Code MCP config on Linux systems."""
 
     ROO_EXTENSION_ID = "rooveterinaryinc.roo-cline"
-    IDE_NAMES = ["Code", "Cursor", "Windsurf"]
+    IDE_NAMES = ["Code", "Cursor", "Windsurf", "Devin"]
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects = []

@@ -23,7 +23,7 @@ class LinuxKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Kilo Code MCP config on Linux systems."""
 
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
-    IDE_NAMES = ["Code", "Cursor", "Windsurf"]
+    IDE_NAMES = ["Code", "Cursor", "Windsurf", "Devin"]
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects = []

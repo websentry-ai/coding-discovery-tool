@@ -30,7 +30,7 @@ class MacOSKiloCodeDetector(BaseToolDetector):
     """
 
     # Supported IDEs that can host the Kilo Code extension
-    SUPPORTED_IDES = ['Code', 'Cursor']
+    SUPPORTED_IDES = ['Code', 'Cursor', 'Windsurf']
 
     # Kilo Code extension identifier
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"

@@ -20,7 +20,7 @@ class WindowsClineMCPConfigExtractor(BaseMCPConfigExtractor):
 
     # Cline extension identifier
     CLINE_EXTENSION_ID = "saoudrizwan.claude-dev"
-    IDE_NAMES = ['Code', 'Cursor', 'Windsurf']
+    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Devin']
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """

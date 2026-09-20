@@ -15,7 +15,7 @@ class LinuxClineMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Cline MCP config on Linux systems."""
 
     CLINE_EXTENSION_ID = "saoudrizwan.claude-dev"
-    IDE_NAMES = ["Code", "Cursor", "Windsurf"]
+    IDE_NAMES = ["Code", "Cursor", "Windsurf", "Devin"]
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects = self._extract_global_configs()

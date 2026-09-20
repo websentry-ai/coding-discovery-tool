@@ -29,7 +29,7 @@ class MacOSRooMCPConfigExtractor(BaseMCPConfigExtractor):
 
     # Code base global storage paths for different IDEs
     ROO_EXTENSION_ID = "rooveterinaryinc.roo-cline"
-    IDE_NAMES = ['Code', 'Cursor', 'Windsurf']
+    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Devin']
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """

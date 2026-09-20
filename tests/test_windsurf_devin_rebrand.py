@@ -5,6 +5,7 @@ folder were all renamed. Existing installs keep the old names, so every check
 has to accept either without turning one editor into two.
 """
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -254,6 +255,24 @@ class HostedMcpSettingsFollowTheRenamedUserDataDir(unittest.TestCase):
         self._write_cline_settings(home, "Windsurf", {"ripgrep": {"command": "rg"}})
         self._write_cline_settings(home, "Devin", {})
         self.assertEqual([], self._cline_configs(home))
+
+    def test_an_unreadable_live_config_falls_back_to_the_old_one(self):
+        """Being denied the file tells us nothing, so the old copy is still the answer."""
+        home = Path(tempfile.mkdtemp())
+        self._write_cline_settings(home, "Windsurf", {"ripgrep": {"command": "rg"}})
+        self._write_cline_settings(home, "Devin", {"ripgrep": {"command": "rg"}})
+        devin = (home / "Library" / "Application Support" / "Devin" / "User"
+                 / "globalStorage" / CLINE_EXT_ID / "settings"
+                 / "cline_mcp_settings.json")
+        os.chmod(devin, 0)
+        try:                        # Windows and root ignore the mode bits
+            with open(devin, "rb"):
+                self.skipTest("this platform cannot make a file unreadable")
+        except OSError:
+            pass
+        configs = self._cline_configs(home)
+        self.assertEqual(1, len(configs), configs)
+        self.assertIn("Windsurf", configs[0]["path"])
 
     def test_a_half_migrated_machine_keeps_its_old_servers(self):
         """The new user-data dir can exist before the extension writes settings in it."""

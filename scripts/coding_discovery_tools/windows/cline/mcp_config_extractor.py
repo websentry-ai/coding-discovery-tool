@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
     drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_ide_global_configs_with_root_support,
     read_ide_global_mcp_config,
 )
@@ -80,8 +81,8 @@ class WindowsClineMCPConfigExtractor(BaseMCPConfigExtractor):
                 code_base / ide_name / "User" / "globalStorage" /
                 self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"
             )
-            if config_path.exists():
-                by_ide.setdefault(ide_name, [])   # this dir answered
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = self._read_global_config(config_path, ide_name)
                 if config:
                     by_ide[ide_name].append(config)

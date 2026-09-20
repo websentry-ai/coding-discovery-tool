@@ -11,6 +11,7 @@ from ...coding_tool_base import BaseMCPConfigExtractor
 from ...windows_extraction_helpers import should_skip_path
 from ...mcp_extraction_helpers import (
     drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_kilocode_mcp_from_dir,
     walk_for_kilocode_mcp_configs,
     extract_ide_global_configs_with_root_support,
@@ -90,8 +91,8 @@ class WindowsKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
                 # Fallback to direct path (for compatibility)
                 config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
             
-            if config_path.exists():
-                by_ide.setdefault(ide_name, [])   # this dir answered
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = self._read_global_config(config_path, ide_name)
                 if config:
                     by_ide[ide_name].append(config)

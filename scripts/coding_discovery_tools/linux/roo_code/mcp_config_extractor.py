@@ -12,6 +12,7 @@ from ...linux_extraction_helpers import (
 )
 from ...mcp_extraction_helpers import (
     drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_roo_mcp_from_dir,
     walk_for_roo_mcp_configs,
     read_ide_global_mcp_config,
@@ -45,8 +46,8 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
                 user_home / ".config" / ide_name / "User" / "globalStorage"
                 / self.ROO_EXTENSION_ID / "settings" / "mcp_settings.json"
             )
-            if config_path.exists():
-                by_ide.setdefault(ide_name, [])   # this dir answered
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = read_ide_global_mcp_config(
                     config_path, tool_name="Roo Code", use_full_path=True
                 )

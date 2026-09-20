@@ -12,6 +12,7 @@ from ...linux_extraction_helpers import (
 )
 from ...mcp_extraction_helpers import (
     drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_kilocode_mcp_from_dir,
     walk_for_kilocode_mcp_configs,
     read_ide_global_mcp_config,
@@ -50,8 +51,8 @@ class LinuxKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
                     user_home / ".config" / ide_name / "User" / "globalStorage"
                     / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
                 )
-            if config_path.exists():
-                by_ide.setdefault(ide_name, [])   # this dir answered
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = read_ide_global_mcp_config(
                     config_path, tool_name="Kilo Code", use_full_path=True
                 )

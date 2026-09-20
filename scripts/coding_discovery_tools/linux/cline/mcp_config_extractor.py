@@ -9,6 +9,7 @@ from ...linux_extraction_helpers import get_linux_user_homes
 from ...mcp_extraction_helpers import (
     read_ide_global_mcp_config,
     drop_pre_rename_duplicates,
+    settings_file_readable,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,8 @@ class LinuxClineMCPConfigExtractor(BaseMCPConfigExtractor):
                 user_home / ".config" / ide_name / "User" / "globalStorage"
                 / self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"
             )
-            if config_path.exists():
-                by_ide.setdefault(ide_name, [])   # this dir answered
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = read_ide_global_mcp_config(
                     config_path, tool_name="Cline", use_full_path=True
                 )

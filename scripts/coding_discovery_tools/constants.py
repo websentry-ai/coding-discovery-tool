@@ -82,12 +82,13 @@ SKIP_DIRS = frozenset[str]({
     '.git', 'node_modules', 'venv', '__pycache__', '.venv', 'vendor', '.idea', '.vscode', 'Library', '.Trash', '.cache', 
     'Photos', 'Music', 'Movies', 'Pictures', 'Videos'
 })
-# System directories to skip when searching from root (macOS/Unix)
-SKIP_SYSTEM_DIRS = {
+# System directories to skip when searching from root (macOS/Unix). Helpers
+# derive a startswith-prefix tuple from this and rebuild it when it is swapped.
+SKIP_SYSTEM_DIRS = frozenset({
     '/System', '/Library', '/private', '/usr', '/bin', '/sbin', '/opt',
     '/var', '/etc', '/tmp', '/cores', '/dev', '/home', '/net', '/Volumes',
     '/.fseventsd', '/.Spotlight-V100', '/.Trashes', '/.vol'
-}
+})
 
 # Per-user AI-tool config directories (``~/.<tool>``). A project-rules/skills
 # walk must not descend into a DIFFERENT tool's config dir: its contents —

@@ -843,5 +843,167 @@ class TestGroupConsistency(unittest.TestCase):
         self.assertEqual(row["projects"], [], "prod has no MCP/instructions, so no projects")
 
 
+class TestGroupHardening(unittest.TestCase):
+    """Hardening battery for the single-active-group fix (581087e)."""
+
+    def setUp(self):
+        self._transform = sx.transform_mcp_servers_to_array
+        sx.transform_mcp_servers_to_array = _fake_transform
+        self._homes = []
+
+    def tearDown(self):
+        sx.transform_mcp_servers_to_array = self._transform
+        for h in self._homes:
+            shutil.rmtree(h, ignore_errors=True)
+
+    def _home(self, prefix):
+        h = Path(tempfile.mkdtemp(prefix=prefix))
+        self._homes.append(h)
+        return h
+
+    @staticmethod
+    def _mcp_names(projects, home):
+        for p in projects:
+            if p["path"] == str(home):
+                return [s["name"] for s in p["mcpServers"]]
+        return []
+
+    @staticmethod
+    def _rule_contents(projects, home):
+        for p in projects:
+            if p["path"] == str(home):
+                return [r["content"] for r in p["rules"]]
+        return []
+
+    # G1 — multi-user scan: each user's surfaces resolve to that user's own active
+    # group; a stray other-group suite in one user's home never leaks into their
+    # row, and no user borrows another user's group. User A is a prod install with
+    # a stray dev suite (the leak the fix closes; prod is preferred so dev is inert);
+    # user B is a clean dev-only install.
+    def test_g1_multi_user_mixed_group_isolation(self):
+        # User A: PROD install (prod autoApproval permissions), plus a stray dev
+        # .prefs whose values the pre-fix prod->dev fallthrough would surface.
+        a = self._home("copilot-xcode-g1a-")
+        _write_suite(a, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["A-prod-approved"]})
+        _write_general_prefs(a, {
+            _MCP_PREF_KEY: json.dumps({"servers": {"A-dev-mcp": {"command": "y"}}}),
+            _GLOBAL_INSTRUCTIONS_KEY: "A DEV INSTRUCTION",
+        }, group=_DEV_GROUP)
+
+        # User B: a clean DEV-only install (dev autoApproval + dev .prefs).
+        b = self._home("copilot-xcode-g1b-")
+        _write_suite(b, _DEV_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["B-dev-approved"]})
+        _write_general_prefs(b, {
+            _MCP_PREF_KEY: json.dumps({"servers": {"B-dev-mcp": {"command": "x"}}}),
+            _GLOBAL_INSTRUCTIONS_KEY: "B DEV INSTRUCTION",
+        }, group=_DEV_GROUP)
+
+        ex = MacOSCopilotXcodeSettingsExtractor()
+        ex._scan_users = lambda cb: [cb(a), cb(b)]
+        mcp = ex.extract_mcp_projects()
+        rules = ex.extract_rule_projects()
+
+        # A is prod-active: the stray dev suite is inert, so A has no MCP/instruction.
+        self.assertEqual(self._mcp_names(mcp, a), [])
+        self.assertEqual(self._rule_contents(rules, a), [])
+        # B resolves entirely to its own dev install.
+        self.assertEqual(self._mcp_names(mcp, b), ["B-dev-mcp"])
+        self.assertEqual(self._rule_contents(rules, b), ["B DEV INSTRUCTION"])
+        # A's inert dev-suite values never appear anywhere in the assembled surfaces.
+        blob = json.dumps({"mcp": mcp, "rules": rules})
+        self.assertNotIn("A-dev-mcp", blob)
+        self.assertNotIn("A DEV INSTRUCTION", blob)
+        # Permissions stay per-user (each record's settings_path is its own home).
+        perms = {r["settings_path"]: r for r in ex.extract_settings_by_user()}
+        a_perm = next(v for k, v in perms.items() if str(a) in k)
+        b_perm = next(v for k, v in perms.items() if str(b) in k)
+        self.assertEqual(a_perm["mcp_tool_allowlist"], ["A-prod-approved"])
+        self.assertEqual(b_perm["mcp_tool_allowlist"], ["B-dev-approved"])
+
+    # G2 — behavior-pinning (NOT prove-fail). Contract read from _read_mcp_servers:
+    # ~/.config/github-copilot/xcode/mcp.json is group-INDEPENDENT (it belongs to the
+    # install), so it is surfaced even when _active_group() is None (no group suite
+    # at all). No exception is raised.
+    def test_g2_stray_mcp_json_without_any_group_is_surfaced(self):
+        home = self._home("copilot-xcode-g2-")
+        _write_mcp_json(home, {"servers": {"stray-file-mcp": {"command": "x"}}})
+        ex = MacOSCopilotXcodeSettingsExtractor()
+        ex._scan_users = lambda cb: cb(home)
+        # No group container exists, so _active_group is None.
+        self.assertIsNone(ex._active_group(home))
+        # …yet the shared file's servers are still surfaced, and nothing throws.
+        self.assertEqual(self._mcp_names(ex.extract_mcp_projects(), home), ["stray-file-mcp"])
+        # With no group and no file, instructions/permissions are simply empty.
+        self.assertEqual(ex.extract_rule_projects(), [])
+        self.assertEqual(ex.extract_settings_by_user(), [])
+
+    # G4 — dev-active mirror: a dev-only install resolves every surface from dev, and
+    # a stray prod artifact that is NOT a recognized suite (so _group_present(prod) is
+    # False) never makes prod the active group nor appears in the row.
+    def test_g4_dev_active_ignores_unrecognized_prod_artifact(self):
+        home = self._home("copilot-xcode-g4-")
+        _write_suite(home, _DEV_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["dev-approved"]})
+        _write_general_prefs(home, {
+            _MCP_PREF_KEY: json.dumps({"servers": {"dev-mcp": {"command": "x"}}}),
+            _GLOBAL_INSTRUCTIONS_KEY: "DEV INSTRUCTION",
+        }, group=_DEV_GROUP)
+        # A stray prod file in the prod group container that is NOT one of the two
+        # recognized suites (wrong basename), so it must not mark prod as present.
+        stray = (home / "Library" / "Group Containers" / _PROD_GROUP
+                 / "Library" / "Preferences")
+        stray.mkdir(parents=True)
+        with open(stray / f"{_PROD_GROUP}.unrelated.plist", "wb") as fh:
+            plistlib.dump({_MCP_PREF_KEY: json.dumps({"servers": {"PROD-STRAY-MCP": {}}}),
+                           _GLOBAL_INSTRUCTIONS_KEY: "PROD STRAY INSTRUCTION"}, fh)
+
+        ex = MacOSCopilotXcodeSettingsExtractor()
+        ex._scan_users = lambda cb: cb(home)
+        self.assertEqual(ex._active_group(home), _DEV_GROUP)
+        self.assertEqual(self._mcp_names(ex.extract_mcp_projects(), home), ["dev-mcp"])
+        self.assertEqual(self._rule_contents(ex.extract_rule_projects(), home), ["DEV INSTRUCTION"])
+        blob = json.dumps({
+            "mcp": ex.extract_mcp_projects(),
+            "rules": ex.extract_rule_projects(),
+            "perms": ex.extract_settings_by_user(),
+        })
+        self.assertNotIn("PROD-STRAY-MCP", blob)
+        self.assertNotIn("PROD STRAY INSTRUCTION", blob)
+
+
+@unittest.skipUnless(sys.platform == "darwin", "Copilot for Xcode is macOS-only")
+class TestGroupConsistencyE2E(unittest.TestCase):
+    """G3: the prod-permissions + stray-dev-prefs fixture driven through the REAL
+    tool-assembly function _process_copilot_xcode_tool, root-safe like B1."""
+
+    def test_g3_assembly_row_never_mixes_dev_into_prod(self):
+        import coding_discovery_tools.macos.github_copilot_xcode.settings_extractor as sxmod
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        home = Path(tempfile.mkdtemp(prefix="copilot-xcode-g3-"))
+        transform = sxmod.transform_mcp_servers_to_array
+        sxmod.transform_mcp_servers_to_array = _fake_transform
+        try:
+            _write_suite(home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["prod-approved"]})
+            _write_general_prefs(home, {
+                _MCP_PREF_KEY: json.dumps({"servers": {"dev-mcp": {"command": "x"}}}),
+                _GLOBAL_INSTRUCTIONS_KEY: "DEV-ONLY INSTRUCTION",
+            }, group=_DEV_GROUP)
+            # Root-safe (B1 pattern): force non-root and pin the scan to the fixture,
+            # so the REAL extractor reads only this home regardless of privilege.
+            with patch.dict(os.environ, {"HOME": str(home)}), \
+                    patch.object(sxmod, "is_running_as_root", lambda: False), \
+                    patch.object(sxmod, "scan_user_directories", lambda cb: cb(home)):
+                det = AIToolsDetector(os_name="Darwin")
+                row = det._process_copilot_xcode_tool(
+                    {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a"})
+            self.assertEqual(row["permissions"]["mcp_tool_allowlist"], ["prod-approved"])
+            blob = json.dumps(row)
+            self.assertNotIn("dev-mcp", blob, "dev MCP must not leak into the assembled prod row")
+            self.assertNotIn("DEV-ONLY INSTRUCTION", blob, "dev instruction must not leak")
+            self.assertEqual(row["projects"], [])
+        finally:
+            sxmod.transform_mcp_servers_to_array = transform
+            shutil.rmtree(home, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

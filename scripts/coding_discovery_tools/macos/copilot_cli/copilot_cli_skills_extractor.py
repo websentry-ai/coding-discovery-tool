@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCopilotCliSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir, scan_dir_entries
 from ...macos_extraction_helpers import (
     extract_single_rule_file,
     get_top_level_directories,
@@ -117,7 +117,8 @@ class MacOSCopilotCliSkillsExtractor(BaseCopilotCliSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # Skip other-tool config dirs (e.g. ~/.antigravity/extensions/<pkg>)
                     # but still allow the shared .claude/.agents skill dirs a real repo
@@ -136,7 +137,7 @@ class MacOSCopilotCliSkillsExtractor(BaseCopilotCliSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name in COPILOT_CLI_PARENT_DIR_NAMES:
                             for config in COPILOT_CLI_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name
@@ -153,7 +154,7 @@ class MacOSCopilotCliSkillsExtractor(BaseCopilotCliSkillsExtractor):
                                         )
                             continue
 
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
 
                         self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)

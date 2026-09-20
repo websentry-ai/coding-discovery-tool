@@ -24,7 +24,7 @@ from ...claude_rules_helpers import (
     extract_rules_from_rules_directory,
 )
 from ...coding_tool_base import BaseClaudeRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -183,7 +183,8 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     system_dirs = get_windows_system_directories()
                     if should_skip_path(item, system_dirs):
@@ -197,7 +198,7 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         # Check if this is a .claude directory
                         if item.name == CLAUDE_DIR_NAME:
                             # Skip user-level .claude directories (already extracted)
@@ -211,7 +212,7 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                         # Recurse into other directories
                         self._walk_for_claude_files(root_path, item, projects_by_root, current_depth + 1)
 
-                    elif item.is_file():
+                    elif _entry.is_file():
                         # Check for .clauderules or CLAUDE.md files (case-insensitive for claude.md)
                         if item.name == ".clauderules" or is_claude_md_file(item.name):
                             extract_and_add_rule(

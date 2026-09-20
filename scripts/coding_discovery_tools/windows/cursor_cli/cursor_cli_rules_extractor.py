@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorCliRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -124,7 +124,8 @@ class WindowsCursorCliRulesExtractor(BaseCursorCliRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     system_dirs = self._get_system_directories()
                     if should_skip_path(item, system_dirs):
@@ -137,7 +138,7 @@ class WindowsCursorCliRulesExtractor(BaseCursorCliRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == ".cursor":
                             self._extract_rules_from_cursor_directory(item, projects_by_root)
                             continue

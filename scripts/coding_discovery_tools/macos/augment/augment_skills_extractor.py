@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...coding_tool_base import BaseAugmentSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries
 from ...macos_extraction_helpers import (
     extract_single_rule_file,
     get_top_level_directories,
@@ -105,7 +105,8 @@ class MacOSAugmentSkillsExtractor(BaseAugmentSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if self._should_skip_walk_item(item):
                         continue
@@ -120,7 +121,7 @@ class MacOSAugmentSkillsExtractor(BaseAugmentSkillsExtractor):
                     # Skip non-dirs and symlinked dirs BEFORE the .augment
                     # handling / recursion (mirrors the rules + mcp + settings
                     # walk ordering) so a symlinked .augment can't be followed.
-                    if not item.is_dir() or item.is_symlink():
+                    if not _entry.is_dir() or _entry.is_symlink():
                         continue
 
                     if item.name in AUGMENT_PARENT_DIR_NAMES:

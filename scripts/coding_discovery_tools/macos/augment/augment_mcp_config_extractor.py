@@ -26,6 +26,7 @@ from ...mcp_extraction_helpers import (
     _strip_trailing_commas,
 )
 from .augment import _resolve_augment_dir
+from ...constants import scan_dir_entries
 
 logger = logging.getLogger(__name__)
 
@@ -156,11 +157,12 @@ class MacOSAugmentMCPConfigExtractor(BaseMCPConfigExtractor):
         if current_depth > MAX_SEARCH_DEPTH:
             return
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if self._should_skip_workspace_path(item):
                         continue
-                    if not item.is_dir() or item.is_symlink():
+                    if not _entry.is_dir() or _entry.is_symlink():
                         continue
                     if item.name == _AUGMENT_DIR_NAME:
                         # Skip a user-home ~/.augment already collected as USER

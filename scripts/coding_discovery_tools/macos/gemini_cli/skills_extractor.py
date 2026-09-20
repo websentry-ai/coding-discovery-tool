@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseGeminiCliSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir, is_symlink_or_junction
+from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir, is_symlink_or_junction, scan_dir_entries
 from ...macos_extraction_helpers import (
     extract_single_rule_file,
     get_top_level_directories,
@@ -102,7 +102,8 @@ class MacOSGeminiCliSkillsExtractor(BaseGeminiCliSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if (
                         should_skip_path(item)
@@ -120,7 +121,7 @@ class MacOSGeminiCliSkillsExtractor(BaseGeminiCliSkillsExtractor):
 
                     if is_symlink_or_junction(item):
                         continue
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name in GEMINI_CLI_PARENT_DIR_NAMES:
                             for config in GEMINI_CLI_ITEM_CONFIGS:
                                 type_dir = item / config.dir_name

@@ -1792,6 +1792,25 @@ class GitHubCopilotSettingsExtractorFactory:
             return None
 
 
+class CopilotXcodeSettingsExtractorFactory:
+    """Factory for the GitHub Copilot for Xcode auto-approval permission extractor.
+
+    Copilot for Xcode is macOS-only (it plugs into Xcode), so this returns an
+    extractor on Darwin and None everywhere else.
+    """
+
+    @staticmethod
+    def create(os_name: Optional[str] = None):
+        """Create the Copilot-for-Xcode settings/permission extractor, or None."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.github_copilot_xcode.settings_extractor import MacOSCopilotXcodeSettingsExtractor
+            return MacOSCopilotXcodeSettingsExtractor()
+        return None
+
+
 class JunieMCPConfigExtractorFactory:
     """Factory for creating OS-specific Junie MCP config extractors."""
 

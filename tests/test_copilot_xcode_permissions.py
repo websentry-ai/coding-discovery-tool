@@ -139,10 +139,10 @@ class TestMapping(unittest.TestCase):
     def test_toggles_kept_in_raw_settings(self):
         rec = self._rec(
             {_MCP_KEY: ["x"]},
-            {"agentMode.autoApproval.enabled": True, "cveRemediatorAgent.enabled": False},
+            {"EnableAutoApproval": True, "TrustToolAnnotations": False},
         )
-        self.assertIs(rec["raw_settings"]["agentMode.autoApproval.enabled"], True)
-        self.assertIs(rec["raw_settings"]["cveRemediatorAgent.enabled"], False)
+        self.assertIs(rec["raw_settings"]["EnableAutoApproval"], True)
+        self.assertIs(rec["raw_settings"]["TrustToolAnnotations"], False)
 
     def test_raw_approval_values_kept_for_audit(self):
         rec = self._rec({_TERMINAL_KEY: ["git status"]})
@@ -158,7 +158,7 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(rec["allow_rules"].count("Bash(ls *)"), 1)
 
     def test_empty_approvals_have_no_rule_fields(self):
-        rec = self._rec({}, {"agentMode.autoApproval.enabled": True})
+        rec = self._rec({}, {"EnableAutoApproval": True})
         self.assertNotIn("allow_rules", rec)
         self.assertNotIn("mcp_tool_allowlist", rec)
 
@@ -178,7 +178,7 @@ class TestBackendShapeParity(unittest.TestCase):
     def test_record_shape_within_backend_vocabulary(self):
         rec = MacOSCopilotXcodeSettingsExtractor()._build_record(
             {_MCP_KEY: ["a"], _TERMINAL_KEY: ["ls"], _SENSITIVE_FILES_KEY: ["~/.env"]},
-            {"agentMode.autoApproval.enabled": True},
+            {"EnableAutoApproval": True},
             Path("/x/auto.plist"),
         )
         extra = set(rec) - self.CURSOR_RECORD_KEYS
@@ -202,16 +202,16 @@ class TestExtractorOverFixture(unittest.TestCase):
             _SENSITIVE_FILES_KEY: ["~/.aws/credentials"],
         })
         _write_suite(self.home, _PROD_GROUP, _GENERAL_SUFFIX, {
-            "agentMode.autoApproval.enabled": True,
-            "cveRemediatorAgent.enabled": True,
+            "EnableAutoApproval": True,
+            "TrustToolAnnotations": True,
         })
         rec = _extractor_over(self.home).extract_settings()
         self.assertIsNotNone(rec)
         self.assertEqual(rec["mcp_tool_allowlist"], ["github-mcp"])
         self.assertIn("Bash(git status *)", rec["allow_rules"])
         self.assertIn("Edit(~/.aws/credentials)", rec["allow_rules"])
-        self.assertIs(rec["raw_settings"]["agentMode.autoApproval.enabled"], True)
-        self.assertIs(rec["raw_settings"]["cveRemediatorAgent.enabled"], True)
+        self.assertIs(rec["raw_settings"]["EnableAutoApproval"], True)
+        self.assertIs(rec["raw_settings"]["TrustToolAnnotations"], True)
         self.assertIn(_PROD_GROUP, rec["settings_path"])
 
     def test_binary_plist_is_read(self):
@@ -265,10 +265,10 @@ class TestExtractorOverFixture(unittest.TestCase):
         # An armed master toggle with no global approvals is still a posture worth
         # reporting (auto-approval is on, even if nothing is pre-approved yet).
         _write_suite(self.home, _PROD_GROUP, _GENERAL_SUFFIX,
-                     {"agentMode.autoApproval.enabled": True})
+                     {"EnableAutoApproval": True})
         rec = _extractor_over(self.home).extract_settings()
         self.assertIsNotNone(rec)
-        self.assertIs(rec["raw_settings"]["agentMode.autoApproval.enabled"], True)
+        self.assertIs(rec["raw_settings"]["EnableAutoApproval"], True)
 
     def test_multi_user_scan_surfaces_riskiest_user(self):
         homes = []
@@ -277,12 +277,12 @@ class TestExtractorOverFixture(unittest.TestCase):
                 h = Path(tempfile.mkdtemp(prefix=f"copilot-xcode-{name}-"))
                 _write_suite(h, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: mcp})
                 _write_suite(h, _PROD_GROUP, _GENERAL_SUFFIX,
-                             {"agentMode.autoApproval.enabled": armed})
+                             {"EnableAutoApproval": armed})
                 homes.append(h)
             ex = CopilotXcodeSettingsExtractorFactory.create("Darwin")
             ex._scan_users = lambda cb: [cb(h) for h in homes]
             rec = ex.extract_settings()
-            self.assertIs(rec["raw_settings"]["agentMode.autoApproval.enabled"], True)
+            self.assertIs(rec["raw_settings"]["EnableAutoApproval"], True)
             self.assertIn("armed", rec["settings_path"])
         finally:
             for h in homes:
@@ -295,7 +295,12 @@ class TestDiscoveryWiring(unittest.TestCase):
     def _detector(self, by_user):
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         det = AIToolsDetector(os_name="Darwin")
-        det._copilot_xcode_settings_extractor.extract_settings_by_user = lambda: by_user
+        ex = det._copilot_xcode_settings_extractor
+        ex.extract_settings_by_user = lambda: by_user
+        # This test isolates the permissions wiring; keep the other surfaces empty so
+        # it never reads (or live-scans) a real Copilot-for-Xcode install on the host.
+        ex.extract_mcp_projects = lambda: []
+        ex.extract_rule_projects = lambda: []
         return det
 
     def test_xcode_row_gets_permissions(self):
@@ -621,7 +626,7 @@ class TestCrossRepoShapeParity(unittest.TestCase):
     def test_d1_record_keys_subset_of_backend_accepted(self):
         rec = MacOSCopilotXcodeSettingsExtractor()._build_record(
             {_MCP_KEY: ["a"], _TERMINAL_KEY: ["ls"], _SENSITIVE_FILES_KEY: ["~/.env"]},
-            {"agentMode.autoApproval.enabled": True, "cveRemediatorAgent.enabled": True},
+            {"EnableAutoApproval": True, "TrustToolAnnotations": True},
             Path("/x/auto.plist"),
         )
         self.assertTrue(set(rec).issubset(self.PINNED_KEYS),
@@ -968,6 +973,45 @@ class TestGroupHardening(unittest.TestCase):
         })
         self.assertNotIn("PROD-STRAY-MCP", blob)
         self.assertNotIn("PROD STRAY INSTRUCTION", blob)
+
+
+class TestToggleKeys(unittest.TestCase):
+    """The local auto-approval master switch in the ``.prefs`` suite is
+    ``EnableAutoApproval`` (a PreferenceKey), not the enterprise ``CopilotPolicy``
+    keys — so it must be captured and it must drive the riskiest-user ranking."""
+
+    def setUp(self):
+        self._homes = []
+
+    def tearDown(self):
+        for h in self._homes:
+            shutil.rmtree(h, ignore_errors=True)
+
+    def _home(self, prefix):
+        h = Path(tempfile.mkdtemp(prefix=prefix))
+        self._homes.append(h)
+        return h
+
+    def test_enable_auto_approval_captured_and_ranks_riskiest_user_first(self):
+        # Armed user: one approval + the master switch on.
+        armed = self._home("copilot-xcode-armed-")
+        _write_suite(armed, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["srv"]})
+        _write_general_prefs(armed, {"EnableAutoApproval": True, "TrustToolAnnotations": False})
+        # Unarmed user: the SAME single approval (equal rule count), switch off.
+        unarmed = self._home("copilot-xcode-unarmed-")
+        _write_suite(unarmed, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["srv"]})
+        _write_general_prefs(unarmed, {"EnableAutoApproval": False})
+
+        ex = MacOSCopilotXcodeSettingsExtractor()
+        ex._scan_users = lambda cb: [cb(unarmed), cb(armed)]  # unarmed first on purpose
+        records = ex.extract_settings_by_user()
+
+        # The master switch is captured verbatim in the armed user's record…
+        armed_rec = next(r for r in records if str(armed) in r["settings_path"])
+        self.assertIs(armed_rec["raw_settings"].get("EnableAutoApproval"), True)
+        # …and the armed user outranks the equal-rule-count unarmed user.
+        self.assertIn(str(armed), records[0]["settings_path"],
+                      "EnableAutoApproval=True must rank the riskiest user first")
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Copilot for Xcode is macOS-only")

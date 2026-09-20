@@ -12,9 +12,13 @@ Two suites carry the permission surface:
       - ``AutoApproval_MCP_GlobalApprovals``          auto-approved MCP servers
       - ``AutoApproval_Terminal_GlobalApprovals``     auto-approved terminal commands
       - ``AutoApproval_SensitiveFiles_GlobalApprovals`` sensitive-file approval rules
-  * ``<group>.prefs`` — the policy toggles that gate the model:
-      - ``agentMode.autoApproval.enabled``
-      - ``cveRemediatorAgent.enabled``
+  * ``<group>.prefs`` — the local auto-approval toggles that gate the model:
+      - ``EnableAutoApproval``   the master switch (default off)
+      - ``TrustToolAnnotations`` (default off)
+    (These are the prefs-suite toggles the app persists on disk. They are distinct
+    from the enterprise ``CopilotPolicy`` keys — ``agentMode.autoApproval.enabled`` /
+    ``cveRemediatorAgent.enabled`` — which are pushed at runtime through a policy
+    subsystem and are not written to this UserDefaults suite.)
 
 Dev builds write to a parallel ``VEKTX9H2N7.group.dev.com.github.CopilotForXcode``
 group; both prod and dev are read, prod preferred. macOS occasionally writes a
@@ -81,8 +85,13 @@ _MCP_KEY = "AutoApproval_MCP_GlobalApprovals"
 _TERMINAL_KEY = "AutoApproval_Terminal_GlobalApprovals"
 _SENSITIVE_FILES_KEY = "AutoApproval_SensitiveFiles_GlobalApprovals"
 
-# Policy toggles inside the general suite that gate the model.
-_TOGGLE_KEYS = ("agentMode.autoApproval.enabled", "cveRemediatorAgent.enabled")
+# Local auto-approval toggles in the general ``.prefs`` suite (PreferenceKeys in
+# CopilotForXcode ``Keys.swift``): ``EnableAutoApproval`` is the master switch.
+# The enterprise ``CopilotPolicy`` keys are a separate runtime-pushed subsystem and
+# are deliberately not read here — they are not stored in this on-disk suite.
+_TOGGLE_KEYS = ("EnableAutoApproval", "TrustToolAnnotations")
+# The master switch: a truthy value means auto-approval is armed for this user.
+_MASTER_SWITCH_KEY = "EnableAutoApproval"
 
 # Configured (not just approved) MCP servers. The canonical source is the JSON
 # file the app reads/writes; ``configDirectory`` and ``mcp.json`` are verified from
@@ -266,9 +275,9 @@ class MacOSCopilotXcodeSettingsExtractor:
 
     @staticmethod
     def _permissiveness(record: Dict) -> tuple:
-        """Rank a record so the riskiest posture wins: an armed master toggle
-        first, then more auto-approved rules and servers."""
-        armed = record.get("raw_settings", {}).get("agentMode.autoApproval.enabled") is True
+        """Rank a record so the riskiest posture wins: the armed master switch
+        (``EnableAutoApproval``) first, then more auto-approved rules and servers."""
+        armed = record.get("raw_settings", {}).get(_MASTER_SWITCH_KEY) is True
         return (1 if armed else 0,
                 len(record.get("allow_rules", [])) + len(record.get("mcp_tool_allowlist", [])))
 
@@ -356,7 +365,8 @@ class MacOSCopilotXcodeSettingsExtractor:
         Terminal + sensitive-file approvals become ``allow_rules`` (Bash / Edit
         rule strings, the same mixed-verb list Claude and Cursor emit); MCP
         approvals become ``mcp_tool_allowlist``; the raw approval values and the
-        two policy toggles are kept verbatim in ``raw_settings`` for audit.
+        local auto-approval toggles (``EnableAutoApproval`` / ``TrustToolAnnotations``)
+        are kept verbatim in ``raw_settings`` for audit.
         """
         allow_rules: List[str] = []
         allow_rules += [f"Bash({name} *)" for name in self._names(approvals.get(_TERMINAL_KEY))]

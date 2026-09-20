@@ -318,8 +318,8 @@ class TestDiscoveryWiring(unittest.TestCase):
 
 
 class TestGreptileRegressions(unittest.TestCase):
-    """Prove-fail regressions for the four PR #356 review findings. Each asserts
-    the fixed behaviour and fails on the pre-fix code."""
+    """Prove-fail regressions for the four auto-approval review findings. Each
+    asserts the fixed behaviour and fails on the pre-fix code."""
 
     _LOGGER = "coding_discovery_tools.macos.github_copilot_xcode.settings_extractor"
 

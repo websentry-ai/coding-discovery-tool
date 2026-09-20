@@ -312,11 +312,15 @@ class MacOSCopilotXcodeSettingsExtractor:
         failure, on a non-dict root, or on an oversized/irregular file. Never
         raises — a planted or corrupt plist must not break the scan.
 
-        Read through the same safe boundary the sibling readers use: refuse a path
-        that escapes the scanned home (``path_in_scope``), then open O_NOFOLLOW via
-        the shared ``_PLIST_OPEN_FLAGS`` and check the descriptor itself (regular
-        file, size cap) rather than a re-resolved path — so a symlink swap under a
-        privileged scan cannot redirect the read onto another user's file."""
+        Read through the same safe boundary ``_read_contained`` applies: refuse a
+        path that escapes the scanned home (``path_in_scope``), open O_NOFOLLOW via
+        the shared ``_PLIST_OPEN_FLAGS``, then judge the descriptor itself — regular
+        file, size cap, single hard link, and owned by the home's user — rather than
+        a re-resolved path. A hard link to another user's plist is a regular file
+        that clears containment, and a differently-owned file inside the home is
+        still not this user's, so under a root/MDM all-users scan both would
+        otherwise be read and misattributed. The ``finally`` closes ``fd`` on every
+        refuse path."""
         if not path_in_scope(path, user_home):
             logger.info(f"Refusing {path}: escapes {user_home}'s scope")
             return None
@@ -331,6 +335,15 @@ class MacOSCopilotXcodeSettingsExtractor:
                 return None
             if st.st_size > _PLIST_MAX_BYTES:
                 logger.info(f"Refusing {path}: exceeds the plist read cap")
+                return None
+            # A hard link keeps its target's owner while its path stays inside the
+            # home, so containment alone cannot see through one; st_nlink catches it.
+            if st.st_nlink > 1:
+                logger.info(f"Refusing {path}: multiply-linked (nlink={st.st_nlink})")
+                return None
+            # A file owned by a different uid is not this user's, even in their tree.
+            if st.st_uid != os.stat(user_home).st_uid:
+                logger.info(f"Refusing {path}: owned by uid {st.st_uid}, home owner differs")
                 return None
             with os.fdopen(fd, "rb") as fh:
                 fd = None

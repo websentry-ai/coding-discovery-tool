@@ -360,6 +360,41 @@ class TestGreptileRegressions(unittest.TestCase):
         self.assertTrue(any(r.exc_info for r in cm.records),
                         "the failure must be logged with a traceback (exc_info=True)")
 
+    # Finding 2 (round 2) — a hard link to another user's plist must be refused.
+    @unittest.skipUnless(os.name == "posix", "hard-link semantics are POSIX-specific")
+    def test_multiply_linked_plist_is_refused(self):
+        path = _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["x"]})
+        # A second name for the same inode: st_nlink becomes 2, so the plist is a
+        # regular file that clears containment yet may point at another user's data.
+        os.link(path, path.parent / "second-name.plist")
+        self.assertEqual(os.stat(path).st_nlink, 2)
+        # Pre-fix: no nlink check, so the multiply-linked plist was read.
+        self.assertIsNone(_extractor_over(self.home).extract_settings())
+
+    # Finding 2 (round 2) — a plist owned by a different uid must be refused.
+    def test_foreign_owned_plist_is_refused(self):
+        _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["x"]})
+        ex = _extractor_over(self.home)
+
+        # Same-owner control: an unpatched read of this user's own plist succeeds.
+        self.assertEqual(ex.extract_settings()["mcp_tool_allowlist"], ["x"])
+
+        # A real chown needs root, so forge a foreign st_uid on the descriptor.
+        real_fstat = os.fstat
+        home_uid = os.stat(self.home).st_uid
+
+        def foreign_fstat(fd):
+            vals = list(real_fstat(fd))
+            vals[4] = home_uid + 1  # st_uid index -> a uid the home does not own
+            return os.stat_result(vals)
+
+        os.fstat = foreign_fstat
+        try:
+            # Pre-fix: no ownership check, so the foreign-owned plist was read.
+            self.assertIsNone(ex.extract_settings())
+        finally:
+            os.fstat = real_fstat
+
 
 if __name__ == "__main__":
     unittest.main()

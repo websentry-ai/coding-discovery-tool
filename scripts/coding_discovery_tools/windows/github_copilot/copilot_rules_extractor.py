@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import List, Dict
 from ...vscode_extension_helpers import vscode_family_editor_dirs
@@ -264,7 +265,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     continue
 
                 copilot_instructions = github_dir / "copilot-instructions.md"
-                if copilot_instructions.exists() and copilot_instructions.is_file():
+                if copilot_instructions.is_file():
                     rule_info = self._extract_rule_with_scope(
                         copilot_instructions,
                         find_github_copilot_project_root,
@@ -292,25 +293,53 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
-                try:
-                    if should_skip_path(item, WINDOWS_SYSTEM_DIRS):
-                        continue
-
+            # scandir caches the dirent, so is_dir()/is_symlink() cost no syscall.
+            # Windows stat is ~63us and this walk made 318k of them.
+            with os.scandir(current_dir) as entries:
+                for entry in entries:
+                    item = Path(entry.path)
                     try:
-                        depth = len(item.relative_to(root_path).parts)
-                        if depth > MAX_SEARCH_DEPTH:
+                        if should_skip_path(item, WINDOWS_SYSTEM_DIRS):
                             continue
-                    except ValueError:
-                        continue
 
-                    if item.is_dir():
-                        if item.name == ".github":
-                            # Check copilot-instructions.md
-                            copilot_instructions = item / "copilot-instructions.md"
-                            if copilot_instructions.exists() and copilot_instructions.is_file():
+                        try:
+                            depth = len(item.relative_to(root_path).parts)
+                            if depth > MAX_SEARCH_DEPTH:
+                                continue
+                        except ValueError:
+                            continue
+
+                        if entry.is_dir():
+                            if item.name == ".github":
+                                # Check copilot-instructions.md
+                                copilot_instructions = item / "copilot-instructions.md"
+                                if copilot_instructions.is_file():
+                                    rule_info = self._extract_rule_with_scope(
+                                        copilot_instructions,
+                                        find_github_copilot_project_root,
+                                        scope="project"
+                                    )
+                                    if rule_info:
+                                        project_root = rule_info.get('project_root')
+                                        if project_root:
+                                            add_rule_to_project(rule_info, project_root, projects_by_root)
+                                            logger.debug(f"Found workspace rule: {copilot_instructions}")
+                                # Check path-specific instructions in .github/instructions/
+                                self._extract_path_specific_instructions(item, projects_by_root)
+                                # Check reusable prompt files in .github/prompts/
+                                self._extract_prompt_files(item, projects_by_root)
+                                continue
+
+                            if item.name == ".claude":
+                                # Workspace (Claude format) instructions: .claude/rules/**/*.md
+                                self._extract_claude_rules(item, projects_by_root)
+                                continue
+
+                            # Check AGENTS.md at project root level
+                            agents_md = item / "AGENTS.md"
+                            if agents_md.is_file():
                                 rule_info = self._extract_rule_with_scope(
-                                    copilot_instructions,
+                                    agents_md,
                                     find_github_copilot_project_root,
                                     scope="project"
                                 )
@@ -318,40 +347,16 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                                     project_root = rule_info.get('project_root')
                                     if project_root:
                                         add_rule_to_project(rule_info, project_root, projects_by_root)
-                                        logger.debug(f"Found workspace rule: {copilot_instructions}")
-                            # Check path-specific instructions in .github/instructions/
-                            self._extract_path_specific_instructions(item, projects_by_root)
-                            # Check reusable prompt files in .github/prompts/
-                            self._extract_prompt_files(item, projects_by_root)
-                            continue
 
-                        if item.name == ".claude":
-                            # Workspace (Claude format) instructions: .claude/rules/**/*.md
-                            self._extract_claude_rules(item, projects_by_root)
-                            continue
+                            if entry.is_symlink():
+                                continue
+                            self._walk_for_github_directories(root_path, item, projects_by_root, current_depth + 1)
 
-                        # Check AGENTS.md at project root level
-                        agents_md = item / "AGENTS.md"
-                        if agents_md.exists() and agents_md.is_file():
-                            rule_info = self._extract_rule_with_scope(
-                                agents_md,
-                                find_github_copilot_project_root,
-                                scope="project"
-                            )
-                            if rule_info:
-                                project_root = rule_info.get('project_root')
-                                if project_root:
-                                    add_rule_to_project(rule_info, project_root, projects_by_root)
-
-                        if item.is_symlink():
-                            continue
-                        self._walk_for_github_directories(root_path, item, projects_by_root, current_depth + 1)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {item}: {e}")
-                    continue
+                    except (PermissionError, OSError):
+                        continue
+                    except Exception as e:
+                        logger.debug(f"Error processing {item}: {e}")
+                        continue
 
         except (PermissionError, OSError):
             pass

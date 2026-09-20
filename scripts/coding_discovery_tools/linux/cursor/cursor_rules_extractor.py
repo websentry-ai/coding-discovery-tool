@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...coding_tool_base import BaseCursorRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...cursor_rules_helpers import extract_cursor_rules_from_dir
 from ...linux_extraction_helpers import (
     add_rule_to_project,
@@ -79,7 +79,8 @@ class LinuxCursorRulesExtractor(BaseCursorRulesExtractor):
         if current_depth > MAX_SEARCH_DEPTH:
             return
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item) or should_skip_system_path(item):
                         continue
@@ -90,7 +91,7 @@ class LinuxCursorRulesExtractor(BaseCursorRulesExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == CURSOR_DIR_NAME:
                             if is_user_level_tool_dir(item):
                                 continue
@@ -103,12 +104,12 @@ class LinuxCursorRulesExtractor(BaseCursorRulesExtractor):
                             except Exception as e:
                                 logger.debug(f"Error extracting from {item}: {e}")
                             continue
-                        if item.is_symlink():
+                        if _entry.is_symlink():
                             continue
                         self._walk_for_cursor_files(
                             root_path, item, projects_by_root, current_depth + 1
                         )
-                    elif item.is_file() and item.name == ".cursorrules":
+                    elif _entry.is_file() and item.name == ".cursorrules":
                         if should_process_file(item, root_path):
                             extract_and_add_rule(
                                 item, find_cursor_project_root, add_rule_to_project,

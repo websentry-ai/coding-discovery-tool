@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCodexRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -178,7 +178,8 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     # Check if we should skip this path
                     system_dirs = get_windows_system_directories()
@@ -193,7 +194,7 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
                     except ValueError:
                         continue
                     
-                    if item.is_file():
+                    if _entry.is_file():
                         # Look for AGENTS.md or AGENTS.override.md
                         if item.name == AGENTS_MD or item.name == AGENTS_OVERRIDE_MD:
                             # Skip if in .codex directory (we handle global rules separately)
@@ -203,7 +204,7 @@ class WindowsCodexRulesExtractor(BaseCodexRulesExtractor):
                             # Extract this AGENTS.md file
                             self._extract_agents_file(item, projects_by_root)
                     
-                    elif item.is_dir():
+                    elif _entry.is_dir():
                         # Recurse into subdirectories
                         self._walk_for_agents_files(root_path, item, projects_by_root, current_depth + 1)
                     

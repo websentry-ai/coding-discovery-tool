@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from ...coding_tool_base import BaseClaudeSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
     get_windows_system_directories,
@@ -152,7 +152,8 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
             return
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     if should_skip_path(item, get_windows_system_directories()):
                         continue
@@ -164,7 +165,7 @@ class WindowsClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == CLAUDE_DIR_NAME:
                             users_root = str(self._get_users_directory())
                             for config in CLAUDE_ITEM_CONFIGS:

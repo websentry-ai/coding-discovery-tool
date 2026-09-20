@@ -82,12 +82,13 @@ SKIP_DIRS = frozenset[str]({
     '.git', 'node_modules', 'venv', '__pycache__', '.venv', 'vendor', '.idea', '.vscode', 'Library', '.Trash', '.cache', 
     'Photos', 'Music', 'Movies', 'Pictures', 'Videos'
 })
-# System directories to skip when searching from root (macOS/Unix)
-SKIP_SYSTEM_DIRS = {
+# System directories to skip when searching from root (macOS/Unix). Helpers
+# derive a startswith-prefix tuple from this and rebuild it when it is swapped.
+SKIP_SYSTEM_DIRS = frozenset({
     '/System', '/Library', '/private', '/usr', '/bin', '/sbin', '/opt',
     '/var', '/etc', '/tmp', '/cores', '/dev', '/home', '/net', '/Volumes',
     '/.fseventsd', '/.Spotlight-V100', '/.Trashes', '/.vol'
-}
+})
 
 # Per-user AI-tool config directories (``~/.<tool>``). A project-rules/skills
 # walk must not descend into a DIFFERENT tool's config dir: its contents —
@@ -157,3 +158,15 @@ def is_skipped_windows_user_dir(name: str) -> bool:
     """
     return name.lower() in _WINDOWS_SKIP_USER_DIRS_LOWER
 
+
+def scan_dir_entries(directory):
+    """``os.scandir`` as a drop-in for ``Path.iterdir()`` in the scan walks.
+
+    Yields ``DirEntry``, whose ``is_dir()``/``is_file()``/``is_symlink()`` read
+    the dirent instead of re-stat-ing -- the same predicates on a ``Path`` cost a
+    syscall each, and Windows ``stat`` is ~63us. Raises exactly where
+    ``iterdir()`` did, so callers keep their existing error handling.
+    """
+    with os.scandir(directory) as it:
+        for entry in it:
+            yield entry

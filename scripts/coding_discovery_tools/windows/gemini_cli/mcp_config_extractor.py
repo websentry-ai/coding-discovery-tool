@@ -14,7 +14,7 @@ from ...mcp_extraction_helpers import (
     transform_mcp_servers_to_array,
 )
 from ...windows_extraction_helpers import should_skip_path
-from ...constants import MAX_SEARCH_DEPTH
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,8 @@ class WindowsGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
             return configs
 
         try:
-            for item in current_dir.iterdir():
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
                 try:
                     system_dirs = self._get_system_directories()
                     if should_skip_path(item, system_dirs):
@@ -134,7 +135,7 @@ class WindowsGeminiCliMCPConfigExtractor(BaseMCPConfigExtractor):
                     except ValueError:
                         continue
 
-                    if item.is_dir():
+                    if _entry.is_dir():
                         if item.name == ".gemini":
                             if item.parent == Path.home():
                                 continue

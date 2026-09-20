@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
+    live_ide_user_data_dirs,
     extract_ide_global_configs_with_root_support,
     read_ide_global_mcp_config,
 )
@@ -121,7 +122,7 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
         code_base = user_home / "Library" / "Application Support"
         
         # Check each IDE
-        for ide_name in self.IDE_NAMES:
+        for ide_name in live_ide_user_data_dirs(code_base, self.IDE_NAMES):
             config_path = (
                 code_base / ide_name / "User" / "globalStorage" /
                 self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"

@@ -2229,6 +2229,28 @@ def extract_global_mcp_config_with_root_support(
     )
 
 
+# One editor under two user-data dir names after a rebrand: a migrated machine keeps
+# the old dir beside the new one, but the build only ever reads the new one.
+_RENAMED_IDE_DIRS = {"Windsurf": "Devin"}
+
+
+def live_ide_user_data_dirs(code_base: Path, ide_names) -> list:
+    """``ide_names`` with a rebranded pair collapsed to the dir the build reads.
+
+    Scanning both would report a migrated machine's MCP servers twice -- once from
+    the directory the editor abandoned, once from the live one. Never raises.
+    """
+    names = list(ide_names)
+    for legacy, renamed in _RENAMED_IDE_DIRS.items():
+        if legacy not in names or renamed not in names:
+            continue
+        try:
+            names.remove(legacy if (code_base / renamed).is_dir() else renamed)
+        except OSError:
+            names.remove(renamed)
+    return names
+
+
 def extract_ide_global_configs_with_root_support(
     extract_configs_for_user_func,
     tool_name: str = "MCP"

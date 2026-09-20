@@ -37,11 +37,12 @@ class ExtensionsDirSurvivesTheRename(unittest.TestCase):
         devin.mkdir(parents=True)
         self.assertEqual(extensions_dir_for_editor(self.home, "Windsurf"), devin)
 
-    def test_legacy_wins_when_both_exist(self):
-        legacy = self.home / ".windsurf" / "extensions"
-        legacy.mkdir(parents=True)
-        (self.home / ".devin" / "extensions").mkdir(parents=True)
-        self.assertEqual(extensions_dir_for_editor(self.home, "Windsurf"), legacy)
+    def test_the_renamed_dir_wins_when_both_exist(self):
+        """A migrated machine reports the dir the installed build actually reads."""
+        (self.home / ".windsurf" / "extensions").mkdir(parents=True)
+        devin = self.home / ".devin" / "extensions"
+        devin.mkdir(parents=True)
+        self.assertEqual(extensions_dir_for_editor(self.home, "Windsurf"), devin)
 
     def test_absent_both_falls_back_to_the_legacy_path(self):
         self.assertEqual(extensions_dir_for_editor(self.home, "Windsurf"),
@@ -121,9 +122,23 @@ class HostedExtensionsSurviveTheMigration(unittest.TestCase):
         self.assertEqual(version, "3.7.0")
         self.assertEqual(location, str(devin / f"{CLINE_EXT_ID}-3.7.0"))
 
-    def test_the_legacy_registry_still_answers_first(self):
+    def test_the_live_registry_answers_when_both_list_it(self):
+        self._write_registry(".windsurf/extensions", CLINE_EXT_ID, "3.6.0")
+        devin = self._write_registry(".devin/extensions", CLINE_EXT_ID, "3.7.0")
+        location, version = find_extension_in_editor(self.home, "Windsurf", CLINE_EXT_ID)
+        self.assertEqual(version, "3.7.0")
+        self.assertEqual(location, str(devin / f"{CLINE_EXT_ID}-3.7.0"))
+
+    def test_an_extension_uninstalled_after_migrating_is_not_reported(self):
+        """The leftover registry is frozen at migration; it must not resurrect a tool."""
+        self._write_registry(".windsurf/extensions", CLINE_EXT_ID, "3.6.0")
+        self._write_registry(".devin/extensions", "some.other-extension", "1.0.0")
+        self.assertIsNone(find_extension_in_editor(self.home, "Windsurf", CLINE_EXT_ID))
+
+    def test_a_half_migrated_machine_still_reads_the_old_registry(self):
+        """The new dir exists but the build has not written a registry into it yet."""
         legacy = self._write_registry(".windsurf/extensions", CLINE_EXT_ID, "3.6.0")
-        self._write_registry(".devin/extensions", CLINE_EXT_ID, "3.7.0")
+        (self.home / ".devin" / "extensions").mkdir(parents=True)
         location, version = find_extension_in_editor(self.home, "Windsurf", CLINE_EXT_ID)
         self.assertEqual(version, "3.6.0")
         self.assertEqual(location, str(legacy / f"{CLINE_EXT_ID}-3.6.0"))
@@ -219,6 +234,24 @@ class HostedMcpSettingsFollowTheRenamedUserDataDir(unittest.TestCase):
         configs = MacOSClineMCPConfigExtractor()._extract_global_configs_for_user(home)
         self.assertEqual(1, len(configs), configs)
         self.assertIn("ripgrep", json.dumps(configs))
+
+    def test_a_migrated_machine_reports_its_servers_once(self):
+        """Both user-data dirs survive the upgrade; only the live one is scanned."""
+        from scripts.coding_discovery_tools.macos.cline.mcp_config_extractor import (
+            MacOSClineMCPConfigExtractor,
+        )
+        home = Path(tempfile.mkdtemp())
+        base = home / "Library" / "Application Support"
+        for ide in ("Windsurf", "Devin"):
+            settings = (base / ide / "User" / "globalStorage" / CLINE_EXT_ID
+                        / "settings" / "cline_mcp_settings.json")
+            settings.parent.mkdir(parents=True)
+            settings.write_text(json.dumps(
+                {"mcpServers": {"ripgrep": {"command": "rg"}}}
+            ), encoding="utf-8")
+        configs = MacOSClineMCPConfigExtractor()._extract_global_configs_for_user(home)
+        self.assertEqual(1, len(configs), configs)
+        self.assertIn("Devin", configs[0]["path"])
 
 
 if __name__ == "__main__":

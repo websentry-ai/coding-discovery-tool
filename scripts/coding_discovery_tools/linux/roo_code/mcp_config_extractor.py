@@ -11,6 +11,7 @@ from ...linux_extraction_helpers import (
     should_skip_system_path,
 )
 from ...mcp_extraction_helpers import (
+    live_ide_user_data_dirs,
     extract_roo_mcp_from_dir,
     walk_for_roo_mcp_configs,
     read_ide_global_mcp_config,
@@ -39,7 +40,7 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_global_configs_for_user(self, user_home: Path) -> List[Dict]:
         configs = []
-        for ide_name in self.IDE_NAMES:
+        for ide_name in live_ide_user_data_dirs(user_home / ".config", self.IDE_NAMES):
             config_path = (
                 user_home / ".config" / ide_name / "User" / "globalStorage"
                 / self.ROO_EXTENSION_ID / "settings" / "mcp_settings.json"

@@ -6,7 +6,10 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...linux_extraction_helpers import get_linux_user_homes
-from ...mcp_extraction_helpers import read_ide_global_mcp_config
+from ...mcp_extraction_helpers import (
+    read_ide_global_mcp_config,
+    live_ide_user_data_dirs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,7 @@ class LinuxClineMCPConfigExtractor(BaseMCPConfigExtractor):
 
     def _extract_global_configs_for_user(self, user_home: Path) -> List[Dict]:
         configs = []
-        for ide_name in self.IDE_NAMES:
+        for ide_name in live_ide_user_data_dirs(user_home / ".config", self.IDE_NAMES):
             config_path = (
                 user_home / ".config" / ide_name / "User" / "globalStorage"
                 / self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"

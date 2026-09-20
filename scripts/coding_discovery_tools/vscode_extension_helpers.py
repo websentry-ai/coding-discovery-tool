@@ -32,7 +32,8 @@ _EXTENSIONS_DIR_BY_EDITOR = {
 }
 
 # A renamed data folder is the same editor, not a new one -- kept out of the map
-# above so it keeps one key, one display name and one row.
+# above so it keeps one key, one display name and one row. The renamed dir is the
+# one the current build reads; the one in the map above is the fallback.
 _EXTENSIONS_DIR_ALTERNATES = {
     "Windsurf": (".devin/extensions",),
 }
@@ -113,16 +114,27 @@ def vscode_family_editor_dirs(tool_name: str) -> list:
 
 
 def _extension_dir_candidates(user_home: Path, ide_key: str) -> list:
-    """Every extensions dir this editor may use, canonical first; [] if unknown."""
+    """This editor's extensions dirs, live one first; [] for an unknown editor."""
     rel = _EXTENSIONS_DIR_BY_EDITOR.get(ide_key)
     if rel is None:
         return []
-    alternates = _EXTENSIONS_DIR_ALTERNATES.get(ide_key, ())
-    return [user_home / rel] + [user_home / alt for alt in alternates]
+    renamed = _EXTENSIONS_DIR_ALTERNATES.get(ide_key, ())
+    return [user_home / alt for alt in renamed] + [user_home / rel]
+
+
+def _holds_registry(extensions_dir: Path) -> bool:
+    """Whether this dir holds an ``extensions.json`` file. Never raises."""
+    try:
+        return stat.S_ISREG(os.stat(extensions_dir / "extensions.json").st_mode)
+    except OSError:
+        return False
 
 
 def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     """Return the extensions registry directory for ``ide_key`` under ``user_home``.
+
+    A migrated machine keeps the editor's pre-rename dir beside the current one, and
+    the dir holding a registry is the one the installed build reads.
 
     Args:
         user_home: The user's home directory.
@@ -134,19 +146,21 @@ def extensions_dir_for_editor(user_home: Path, ide_key: str) -> Optional[Path]:
     candidates = _extension_dir_candidates(user_home, ide_key)
     if not candidates:
         return None
-    primary = candidates[0]
-    for candidate in candidates[1:]:
-        try:                            # an unreadable home must not hide the primary
-            if not primary.exists() and candidate.exists():
+    for candidate in candidates:
+        if _holds_registry(candidate):
+            return candidate
+    for candidate in candidates:
+        try:                            # an unreadable home must not hide the rest
+            if candidate.exists():
                 return candidate
         except OSError:
             continue
-    return primary
+    return candidates[-1]
 
 
-# Ranked least to most informative: when an editor's two dirs end differently, the
-# run reports the outcome that explains the scan rather than the one read last.
-_OUTCOME_RANK = ("missing", "unreadable", "present", "listed")
+# A dir with a readable registry has answered for its editor, hit or miss; the other
+# is the pre-rename leftover and must not answer in its place.
+_ANSWERED = ("listed", "present")
 
 
 def find_extension_in_editor(
@@ -157,7 +171,8 @@ def find_extension_in_editor(
 
     Matches case-insensitively on ``identifier.id`` (constants and registry entries
     disagree on casing, e.g. ``kilocode.Kilo-Code`` vs ``kilocode.kilo-code``). A
-    migrated machine keeps the old data folder beside the new one, so both are read.
+    migrated machine keeps the old data folder beside the new one, so the first
+    registry that can be read answers and the leftover is only a fallback.
     Never raises — returns None for an unknown editor or a missing/corrupt registry.
 
     Args:
@@ -168,16 +183,17 @@ def find_extension_in_editor(
     Returns:
         ``(matched_location, version)`` tuple, or None.
     """
-    best = -1
+    outcome, result = None, None
     for extensions_dir in _extension_dir_candidates(user_home, ide_key):
-        outcome, match = _lookup_in_registry(extensions_dir, ext_id)
-        best = max(best, _OUTCOME_RANK.index(outcome))
-        if match is not None:
-            _record_registry_outcome(ide_key, outcome)
-            return match
-    if best >= 0:
-        _record_registry_outcome(ide_key, _OUTCOME_RANK[best])
-    return None
+        read, match = _lookup_in_registry(extensions_dir, ext_id)
+        if read in _ANSWERED:
+            outcome, result = read, match
+            break
+        if outcome != "unreadable":     # a denied dir is more telling than an absent one
+            outcome = read
+    if outcome is not None:
+        _record_registry_outcome(ide_key, outcome)
+    return result
 
 
 def _lookup_in_registry(

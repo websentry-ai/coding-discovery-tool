@@ -8,6 +8,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
+    live_ide_user_data_dirs,
     extract_roo_mcp_from_dir,
     walk_for_roo_mcp_configs,
     extract_ide_global_configs_with_root_support,
@@ -82,7 +83,7 @@ class WindowsRooMCPConfigExtractor(BaseMCPConfigExtractor):
         code_base = user_home / "AppData" / "Roaming"
         
         # Check each IDE
-        for ide_name in self.IDE_NAMES:
+        for ide_name in live_ide_user_data_dirs(code_base, self.IDE_NAMES):
             config_path = (
                 code_base / ide_name / "User" / "globalStorage" /
                 self.ROO_EXTENSION_ID / "settings" / "mcp_settings.json"

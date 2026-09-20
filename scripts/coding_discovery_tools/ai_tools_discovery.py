@@ -2562,13 +2562,13 @@ class AIToolsDetector:
         return result
 
     def _process_copilot_xcode_tool(self, tool: Dict) -> Dict:
-        """Copilot for Xcode: a detection row plus its auto-approval permissions.
+        """Copilot for Xcode: a detection row plus its three extractable surfaces —
+        auto-approval ``permissions``, configured MCP servers, and the global custom
+        instruction — each attached in the same shape the other Copilot rows use so
+        the backend/frontend need no change.
 
-        Xcode-Copilot keeps no project rules/MCP config the way the VS Code
-        surface does; its only extractable posture is the app's auto-approval
-        model (auto-approved MCP servers / terminal commands / sensitive-file
-        rules), attached as ``permissions`` in the same shape the other Copilot
-        rows use so the backend/frontend need no change.
+        Every surface is best-effort/try-except with ``exc_info=True``, so one
+        failing never drops the others or the detection row itself.
         """
         tool_dict = {
             "name": tool.get("name"),
@@ -2580,20 +2580,51 @@ class AIToolsDetector:
             if key in tool:
                 tool_dict[key] = tool[key]
 
-        if self._copilot_xcode_settings_extractor:
-            logger.info("  Extracting Copilot for Xcode permissions...")
-            try:
-                by_user = self._copilot_xcode_settings_extractor.extract_settings_by_user()
-                if by_user:
-                    # Riskiest first. The per-user filter narrows this to each
-                    # user's own record; the head is what an unscoped report shows.
-                    tool_dict["_permissions_by_user"] = by_user
-                    tool_dict["permissions"] = by_user[0]
-                    logger.info("  ✓ Added permissions to Copilot for Xcode report")
-                else:
-                    logger.info("  ℹ No Copilot for Xcode permissions found")
-            except Exception as e:
-                logger.error(f"Error extracting Copilot for Xcode permissions: {e}", exc_info=True)
+        extractor = self._copilot_xcode_settings_extractor
+        if not extractor:
+            return tool_dict
+
+        logger.info("  Extracting Copilot for Xcode permissions...")
+        try:
+            by_user = extractor.extract_settings_by_user()
+            if by_user:
+                # Riskiest first. The per-user filter narrows this to each user's
+                # own record; the head is what an unscoped report shows.
+                tool_dict["_permissions_by_user"] = by_user
+                tool_dict["permissions"] = by_user[0]
+                logger.info("  ✓ Added permissions to Copilot for Xcode report")
+            else:
+                logger.info("  ℹ No Copilot for Xcode permissions found")
+        except Exception as e:
+            logger.error(f"Error extracting Copilot for Xcode permissions: {e}", exc_info=True)
+
+        # MCP servers + global instructions ride projects[] keyed by owning user's
+        # home, so filter_tool_projects_by_user attributes each user's own surface.
+        projects_dict: Dict[str, Dict] = {}
+
+        def _slot(path: str) -> Dict:
+            return projects_dict.setdefault(path, {"mcpServers": [], "rules": [], "skills": []})
+
+        logger.info("  Extracting Copilot for Xcode MCP servers...")
+        try:
+            for proj in extractor.extract_mcp_projects():
+                _slot(proj["path"])["mcpServers"] = proj.get("mcpServers", [])
+        except Exception as e:
+            logger.error(f"Error extracting Copilot for Xcode MCP servers: {e}", exc_info=True)
+
+        logger.info("  Extracting Copilot for Xcode instructions...")
+        try:
+            for proj in extractor.extract_rule_projects():
+                _slot(proj["path"])["rules"].extend(proj.get("rules", []))
+        except Exception as e:
+            logger.error(f"Error extracting Copilot for Xcode instructions: {e}", exc_info=True)
+
+        if projects_dict:
+            tool_dict["projects"] = [
+                {"path": path, "mcpServers": data["mcpServers"],
+                 "rules": data["rules"], "skills": data["skills"]}
+                for path, data in projects_dict.items()
+            ]
 
         return tool_dict
 

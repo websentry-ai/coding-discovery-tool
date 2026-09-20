@@ -21,11 +21,25 @@ group; both prod and dev are read, prod preferred. macOS occasionally writes a
 suite to the non-group ``~/Library/Preferences/<suite>.plist`` instead, so that
 location is used as a fallback only when the group-container file is absent.
 
-The emitted record stays inside the Cursor/VS-Code-Copilot permission vocabulary
-(``permission_mode`` / ``allow_rules`` / ``mcp_tool_allowlist`` / ``raw_settings``)
-so gateway-data's AIToolPermissions ingest and the frontend accept it with no
-backend change — the auto-approved MCP servers, terminal commands and
-sensitive-file rules ride the same fields the sibling Copilot surfaces already use.
+The emitted permission record stays inside the Cursor/VS-Code-Copilot permission
+vocabulary (``permission_mode`` / ``allow_rules`` / ``mcp_tool_allowlist`` /
+``raw_settings``) so gateway-data's AIToolPermissions ingest and the frontend
+accept it with no backend change — the auto-approved MCP servers, terminal
+commands and sensitive-file rules ride the same fields the sibling Copilot
+surfaces already use.
+
+Beyond that auto-approval posture, the extractor also reports the two other
+surfaces the sibling Copilot extractors capture, so the tool is described in full:
+
+  * Configured MCP servers — ``~/.config/github-copilot/xcode/mcp.json`` (top-level
+    ``servers`` map), with the ``GitHubCopilotMCPConfig`` ``.prefs`` mirror as a
+    fallback. Emitted as ``projects[].mcpServers`` via the same
+    ``transform_mcp_servers_to_array`` normalization the VS Code Copilot MCP
+    extractor uses.
+  * Global custom instructions — the ``GlobalCopilotInstructions`` string in the
+    ``.prefs`` suite, emitted as a user-scope ``projects[].rules`` entry in the
+    sibling rules shape. Project ``.github/copilot-instructions.md`` is left to the
+    shared Copilot rules extractor, which already reads it, to avoid double-counting.
 
 This runs on customer machines: every read is best-effort and never raises.
 """
@@ -46,6 +60,11 @@ from ...macos_extraction_helpers import (
     path_in_scope,
     scan_user_directories,
 )
+from ...mcp_extraction_helpers import (
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
+    transform_mcp_servers_to_array,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +84,22 @@ _SENSITIVE_FILES_KEY = "AutoApproval_SensitiveFiles_GlobalApprovals"
 # Policy toggles inside the general suite that gate the model.
 _TOGGLE_KEYS = ("agentMode.autoApproval.enabled", "cveRemediatorAgent.enabled")
 
-# A sandboxed app's plist is small; refuse a pathological one rather than load it.
+# Configured (not just approved) MCP servers. The canonical source is the JSON
+# file the app reads/writes; ``configDirectory`` and ``mcp.json`` are verified from
+# CopilotForXcode ``Core/Sources/HostApp/ToolsSettings/MCPConfigConstants.swift``,
+# and its top-level key is ``"servers"`` (``ToolsConfigView.swift``).
+_MCP_JSON_RELATIVE = (".config", "github-copilot", "xcode", "mcp.json")
+# Fallback: the same JSON mirrored into the general ``.prefs`` suite. Both keys are
+# from ``Tool/Sources/Preferences/Keys.swift`` (suite = ``…group.<base>.prefs``).
+_MCP_PREF_KEY = "GitHubCopilotMCPConfig"
+# The Xcode-specific GLOBAL custom instruction, a string in the ``.prefs`` suite
+# (``GitHubCopilotRequest.swift`` reads ``UserDefaults.shared.globalCopilotInstructions``).
+# Project ``.github/copilot-instructions.md`` is deliberately NOT read here — the
+# shared macOS GitHub Copilot rules extractor already covers it, so reading it
+# again would double-count the same file under a second tool row.
+_GLOBAL_INSTRUCTIONS_KEY = "GlobalCopilotInstructions"
+
+# A sandboxed app's config is small; refuse a pathological file rather than load it.
 _PLIST_MAX_BYTES = 5 * 1024 * 1024
 
 
@@ -113,6 +147,119 @@ class MacOSCopilotXcodeSettingsExtractor:
         scoped to one user. None when no auto-approval surface is present."""
         records = self.extract_settings_by_user()
         return records[0] if records else None
+
+    # -- configured MCP servers ---------------------------------------------
+
+    def extract_mcp_projects(self) -> List[Dict]:
+        """One ``{"path": <user home>, "mcpServers": [...]}`` per scanned user that
+        configures MCP servers for Copilot-for-Xcode. Keyed at the owning user's
+        home so the per-user project filter attributes each user's servers to that
+        user under a root/MDM scan. Same array shape the sibling Copilot MCP
+        extractor emits (``transform_mcp_servers_to_array``)."""
+        projects: List[Dict] = []
+
+        def per_user(user_home) -> None:
+            try:
+                proj = self._mcp_project_for_user(Path(user_home))
+                if proj:
+                    projects.append(proj)
+            except Exception as e:
+                logger.error(f"Error extracting Copilot-for-Xcode MCP for {user_home}: {e}",
+                             exc_info=True)
+
+        self._scan_users(per_user)
+        return projects
+
+    def _mcp_project_for_user(self, user_home: Path) -> Optional[Dict]:
+        servers = self._read_mcp_servers(user_home)
+        if not servers:
+            return None
+        array = transform_mcp_servers_to_array(servers)
+        if not array:
+            return None
+        return {"path": str(user_home), "mcpServers": array}
+
+    def _read_mcp_servers(self, user_home: Path) -> Optional[Dict]:
+        """The configured servers map, from the canonical ``mcp.json`` when present,
+        else the ``GitHubCopilotMCPConfig`` mirror in the ``.prefs`` suite."""
+        data = self._load_json(user_home.joinpath(*_MCP_JSON_RELATIVE), user_home)
+        servers = self._servers_from(data)
+        if servers:
+            return servers
+        for group in (_PROD_GROUP, _DEV_GROUP):
+            prefs_path = self._resolve_suite_plist(user_home, group, _GENERAL_SUFFIX)
+            if prefs_path is None:
+                continue
+            prefs = self._load_plist(prefs_path, user_home) or {}
+            raw = prefs.get(_MCP_PREF_KEY)
+            if isinstance(raw, str) and raw.strip():
+                servers = self._servers_from(self._coerce(raw))
+                if servers:
+                    return servers
+        return None
+
+    @staticmethod
+    def _servers_from(obj) -> Optional[Dict]:
+        """The ``name -> config`` servers map from a parsed config: the ``servers``
+        wrapper the file uses (``mcpServers`` also honoured), or a bare map (the
+        pref stores just the servers object). None when nothing server-shaped."""
+        if not isinstance(obj, dict):
+            return None
+        # A wrapper explicitly names the map; when present it is authoritative, so an
+        # empty ``{"servers": {}}`` yields no servers rather than falling through to
+        # the bare-map heuristic below (which would read "servers" as a server name).
+        if "servers" in obj or "mcpServers" in obj:
+            inner = obj.get("servers")
+            if not isinstance(inner, dict):
+                inner = obj.get("mcpServers")
+            return inner if isinstance(inner, dict) and inner else None
+        # No wrapper: the pref fallback holds the bare servers map. Only treat it as
+        # one when every value is a config object (a server config is a dict).
+        if obj and all(isinstance(v, dict) for v in obj.values()):
+            return obj
+        return None
+
+    # -- global custom instructions (rules) ---------------------------------
+
+    def extract_rule_projects(self) -> List[Dict]:
+        """One ``{"path": <user home>, "rules": [rule]}`` per scanned user that set a
+        global Copilot instruction. Only the Xcode-specific GLOBAL instruction is
+        captured; project ``.github/copilot-instructions.md`` is left to the shared
+        Copilot rules extractor to avoid double-counting the same file."""
+        projects: List[Dict] = []
+
+        def per_user(user_home) -> None:
+            try:
+                proj = self._global_rule_for_user(Path(user_home))
+                if proj:
+                    projects.append(proj)
+            except Exception as e:
+                logger.error(f"Error extracting Copilot-for-Xcode rules for {user_home}: {e}",
+                             exc_info=True)
+
+        self._scan_users(per_user)
+        return projects
+
+    def _global_rule_for_user(self, user_home: Path) -> Optional[Dict]:
+        for group in (_PROD_GROUP, _DEV_GROUP):
+            prefs_path = self._resolve_suite_plist(user_home, group, _GENERAL_SUFFIX)
+            if prefs_path is None:
+                continue
+            prefs = self._load_plist(prefs_path, user_home) or {}
+            text = prefs.get(_GLOBAL_INSTRUCTIONS_KEY)
+            if isinstance(text, str) and text.strip():
+                rule = {
+                    "file_path": str(prefs_path),
+                    "file_name": _GLOBAL_INSTRUCTIONS_KEY,
+                    "project_root": str(user_home),
+                    "content": text,
+                    "size": len(text.encode("utf-8")),
+                    "last_modified": None,
+                    "truncated": False,
+                    "scope": "user",
+                }
+                return {"path": str(user_home), "rules": [rule]}
+        return None
 
     @staticmethod
     def _permissiveness(record: Dict) -> tuple:
@@ -307,22 +454,35 @@ class MacOSCopilotXcodeSettingsExtractor:
                 out.append(item)
         return out
 
-    def _load_plist(self, path: Path, user_home: Path) -> Optional[Dict]:
-        """Parse a plist (binary or XML) into a dict, best-effort. None on any
-        failure, on a non-dict root, or on an oversized/irregular file. Never
-        raises — a planted or corrupt plist must not break the scan.
+    @staticmethod
+    def _within_home(path: Path, user_home: Path) -> bool:
+        """True when ``path`` resolves inside ``user_home``. Realpath containment (the
+        ``_read_contained`` model), NOT ``path_in_scope``: this reads
+        ``~/.config/github-copilot/xcode/mcp.json``, and ``path_in_scope`` rejects
+        every dot-directory, so it would refuse the legitimate hidden ``.config``
+        parent and lose the canonical MCP source. Realpath still refuses an
+        out-of-home symlink target (the group-container escape) while allowing hidden
+        home dirs and in-home symlinks."""
+        try:
+            real = os.path.realpath(str(path))
+            base = os.path.realpath(str(user_home))
+        except OSError:
+            return False
+        return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
 
-        Read through the same safe boundary ``_read_contained`` applies: refuse a
-        path that escapes the scanned home (``path_in_scope``), open O_NOFOLLOW via
-        the shared ``_PLIST_OPEN_FLAGS``, then judge the descriptor itself — regular
-        file, size cap, single hard link, and owned by the home's user — rather than
-        a re-resolved path. A hard link to another user's plist is a regular file
-        that clears containment, and a differently-owned file inside the home is
-        still not this user's, so under a root/MDM all-users scan both would
-        otherwise be read and misattributed. The ``finally`` closes ``fd`` on every
-        refuse path."""
-        if not path_in_scope(path, user_home):
-            logger.info(f"Refusing {path}: escapes {user_home}'s scope")
+    def _safe_read_bytes(self, path: Path, user_home: Path) -> Optional[bytes]:
+        """Read a user-writable config file's bytes through the same safe boundary
+        ``_read_contained`` applies, or None. Refuse a path that resolves outside the
+        scanned home (realpath containment), open O_NOFOLLOW via the shared
+        ``_PLIST_OPEN_FLAGS``, then judge the descriptor itself — regular file, size
+        cap, single hard link, and owned by the home's user — rather than a
+        re-resolved path. A hard link to another user's file is a regular file that
+        clears containment, and a differently-owned file inside the home is still not
+        this user's, so under a root/MDM all-users scan both would otherwise be read
+        and misattributed. The ``finally`` closes ``fd`` on every refuse path. Never
+        raises."""
+        if not self._within_home(path, user_home):
+            logger.info(f"Refusing {path}: resolves outside {user_home}")
             return None
         fd = None
         try:
@@ -334,7 +494,7 @@ class MacOSCopilotXcodeSettingsExtractor:
             if not stat.S_ISREG(st.st_mode):
                 return None
             if st.st_size > _PLIST_MAX_BYTES:
-                logger.info(f"Refusing {path}: exceeds the plist read cap")
+                logger.info(f"Refusing {path}: exceeds the read cap")
                 return None
             # A hard link keeps its target's owner while its path stays inside the
             # home, so containment alone cannot see through one; st_nlink catches it.
@@ -347,10 +507,9 @@ class MacOSCopilotXcodeSettingsExtractor:
                 return None
             with os.fdopen(fd, "rb") as fh:
                 fd = None
-                data = plistlib.load(fh)
-            return data if isinstance(data, dict) else None
+                return fh.read()
         except Exception as e:
-            logger.debug(f"Could not parse Copilot-for-Xcode plist {path}: {e}", exc_info=True)
+            logger.debug(f"Could not read Copilot-for-Xcode file {path}: {e}", exc_info=True)
             return None
         finally:
             if fd is not None:
@@ -358,3 +517,32 @@ class MacOSCopilotXcodeSettingsExtractor:
                     os.close(fd)
                 except OSError:
                     pass
+
+    def _load_plist(self, path: Path, user_home: Path) -> Optional[Dict]:
+        """Parse a plist (binary or XML) into a dict, best-effort, through the safe
+        boundary. None on any failure, on a non-dict root, or on a refused file."""
+        data = self._safe_read_bytes(path, user_home)
+        if data is None:
+            return None
+        try:
+            obj = plistlib.loads(data)
+            return obj if isinstance(obj, dict) else None
+        except Exception as e:
+            logger.debug(f"Could not parse Copilot-for-Xcode plist {path}: {e}", exc_info=True)
+            return None
+
+    def _load_json(self, path: Path, user_home: Path) -> Optional[Dict]:
+        """Parse a JSON(-C) config file into a dict, best-effort, through the safe
+        boundary. JSONC comments and trailing commas are tolerated the same way the
+        sibling Copilot MCP extractor tolerates them. None on any failure or a
+        non-dict root."""
+        data = self._safe_read_bytes(path, user_home)
+        if data is None:
+            return None
+        try:
+            text = _strip_trailing_commas(_strip_jsonc_comments(data.decode("utf-8", errors="replace")))
+            obj = json.loads(text)
+            return obj if isinstance(obj, dict) else None
+        except Exception as e:
+            logger.debug(f"Could not parse Copilot-for-Xcode JSON {path}: {e}", exc_info=True)
+            return None

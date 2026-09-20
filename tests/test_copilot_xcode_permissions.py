@@ -24,16 +24,44 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from coding_discovery_tools.coding_tool_factory import (  # noqa: E402
     CopilotXcodeSettingsExtractorFactory,
 )
+import coding_discovery_tools.macos.github_copilot_xcode.settings_extractor as sx  # noqa: E402
 from coding_discovery_tools.macos.github_copilot_xcode.settings_extractor import (  # noqa: E402
     MacOSCopilotXcodeSettingsExtractor,
     _AUTOAPPROVAL_SUFFIX,
     _DEV_GROUP,
     _GENERAL_SUFFIX,
+    _GLOBAL_INSTRUCTIONS_KEY,
+    _MCP_JSON_RELATIVE,
     _MCP_KEY,
+    _MCP_PREF_KEY,
     _PROD_GROUP,
     _SENSITIVE_FILES_KEY,
     _TERMINAL_KEY,
 )
+
+
+def _write_mcp_json(home: Path, obj) -> Path:
+    """Write ~/.config/github-copilot/xcode/mcp.json for a home (raw text if str)."""
+    path = home.joinpath(*_MCP_JSON_RELATIVE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(obj if isinstance(obj, str) else json.dumps(obj), encoding="utf-8")
+    return path
+
+
+def _write_general_prefs(home: Path, data: dict, *, group: str = _PROD_GROUP) -> Path:
+    """Write the general <group>.prefs.plist suite for a home."""
+    return _write_suite(home, group, _GENERAL_SUFFIX, data)
+
+
+def _fake_transform(obj, **kwargs):
+    """Deterministic stand-in for transform_mcp_servers_to_array: preserves the
+    name-keyed -> array shape (name added, env/headers dropped) without the live
+    network scan the real helper performs."""
+    out = []
+    for name, cfg in (obj or {}).items():
+        cfg = cfg if isinstance(cfg, dict) else {}
+        out.append({"name": name, **{k: v for k, v in cfg.items() if k not in ("env", "headers")}})
+    return out
 
 
 def _prefs_dir(home: Path, group: str) -> Path:
@@ -598,6 +626,181 @@ class TestCrossRepoShapeParity(unittest.TestCase):
         )
         self.assertTrue(set(rec).issubset(self.PINNED_KEYS),
                         f"keys outside the backend-accepted set: {set(rec) - self.PINNED_KEYS}")
+
+
+class TestMcpServers(unittest.TestCase):
+    """Configured MCP servers from ~/.config/github-copilot/xcode/mcp.json (with the
+    GitHubCopilotMCPConfig .prefs mirror as fallback)."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="copilot-xcode-mcp-"))
+        self._transform = sx.transform_mcp_servers_to_array
+        sx.transform_mcp_servers_to_array = _fake_transform  # avoid the live scan
+        self.ex = MacOSCopilotXcodeSettingsExtractor()
+        self.ex._scan_users = lambda cb: cb(self.home)
+
+    def tearDown(self):
+        sx.transform_mcp_servers_to_array = self._transform
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_happy_servers_from_mcp_json(self):
+        _write_mcp_json(self.home, {"servers": {"github-mcp": {"command": "npx", "args": ["-y", "x"]}}})
+        projects = self.ex.extract_mcp_projects()
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["path"], str(self.home))
+        self.assertEqual([s["name"] for s in projects[0]["mcpServers"]], ["github-mcp"])
+
+    def test_mcpServers_key_also_accepted(self):
+        _write_mcp_json(self.home, {"mcpServers": {"srv": {"url": "https://x"}}})
+        projects = self.ex.extract_mcp_projects()
+        self.assertEqual([s["name"] for s in projects[0]["mcpServers"]], ["srv"])
+
+    def test_pref_fallback_when_file_absent(self):
+        _write_general_prefs(self.home, {_MCP_PREF_KEY: json.dumps({"servers": {"pref-mcp": {"url": "https://y"}}})})
+        projects = self.ex.extract_mcp_projects()
+        self.assertEqual([s["name"] for s in projects[0]["mcpServers"]], ["pref-mcp"])
+
+    def test_pref_fallback_bare_servers_map(self):
+        # The pref can store the bare servers object (no "servers" wrapper).
+        _write_general_prefs(self.home, {_MCP_PREF_KEY: json.dumps({"bare-mcp": {"command": "run"}})})
+        projects = self.ex.extract_mcp_projects()
+        self.assertEqual([s["name"] for s in projects[0]["mcpServers"]], ["bare-mcp"])
+
+    def test_file_wins_over_pref(self):
+        _write_mcp_json(self.home, {"servers": {"file-mcp": {"command": "a"}}})
+        _write_general_prefs(self.home, {_MCP_PREF_KEY: json.dumps({"servers": {"pref-mcp": {"command": "b"}}})})
+        projects = self.ex.extract_mcp_projects()
+        self.assertEqual([s["name"] for s in projects[0]["mcpServers"]], ["file-mcp"])
+
+    def test_missing_everything_omitted(self):
+        self.assertEqual(self.ex.extract_mcp_projects(), [])
+
+    def test_empty_servers_map_omitted(self):
+        _write_mcp_json(self.home, {"servers": {}})
+        self.assertEqual(self.ex.extract_mcp_projects(), [])
+
+    def test_malformed_json_is_graceful(self):
+        _write_mcp_json(self.home, "{ this is : not json ]")
+        self.assertEqual(self.ex.extract_mcp_projects(), [])  # no throw
+
+    def test_non_dict_json_is_graceful(self):
+        _write_mcp_json(self.home, "[1, 2, 3]")
+        self.assertEqual(self.ex.extract_mcp_projects(), [])
+
+    def test_delegates_to_sibling_transform_for_shape_parity(self):
+        # Shape parity with the VS Code Copilot / Cursor MCP extractors is by
+        # construction: the same transform_mcp_servers_to_array normalizer is used.
+        seen = {}
+        sx.transform_mcp_servers_to_array = lambda obj, **k: seen.update(obj) or [{"name": n} for n in obj]
+        try:
+            _write_mcp_json(self.home, {"servers": {"github-mcp": {"command": "npx"}}})
+            projects = self.ex.extract_mcp_projects()
+        finally:
+            sx.transform_mcp_servers_to_array = _fake_transform
+        self.assertEqual(seen, {"github-mcp": {"command": "npx"}})
+        self.assertEqual(set(projects[0].keys()), {"path", "mcpServers"})
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
+    def test_safe_read_symlinked_config_escaping_home_refused(self):
+        outside = Path(tempfile.mkdtemp(prefix="copilot-xcode-mcp-evil-"))
+        try:
+            evil = outside / "github-copilot" / "xcode"
+            evil.mkdir(parents=True)
+            (evil / "mcp.json").write_text(json.dumps({"servers": {"attacker": {"command": "x"}}}))
+            dotconfig = self.home / ".config"
+            os.symlink(outside, dotconfig)  # ~/.config -> out-of-home tree
+            self.assertEqual(self.ex.extract_mcp_projects(), [], "out-of-home config must be refused")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+class TestGlobalInstructions(unittest.TestCase):
+    """Global custom instruction (GlobalCopilotInstructions in the .prefs suite)."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="copilot-xcode-rules-"))
+        self.ex = MacOSCopilotXcodeSettingsExtractor()
+        self.ex._scan_users = lambda cb: cb(self.home)
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    RULE_KEYS = {"file_path", "file_name", "project_root", "content",
+                 "size", "last_modified", "truncated", "scope"}
+
+    def test_happy_global_instruction(self):
+        _write_general_prefs(self.home, {_GLOBAL_INSTRUCTIONS_KEY: "Always write tests first."})
+        projects = self.ex.extract_rule_projects()
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["path"], str(self.home))
+        rule = projects[0]["rules"][0]
+        self.assertEqual(rule["content"], "Always write tests first.")
+        self.assertEqual(rule["scope"], "user")
+        self.assertEqual(rule["file_name"], _GLOBAL_INSTRUCTIONS_KEY)
+
+    def test_rule_shape_matches_sibling_vocabulary(self):
+        _write_general_prefs(self.home, {_GLOBAL_INSTRUCTIONS_KEY: "x"})
+        rule = self.ex.extract_rule_projects()[0]["rules"][0]
+        self.assertEqual(set(rule.keys()), self.RULE_KEYS)
+
+    def test_empty_instruction_omitted(self):
+        _write_general_prefs(self.home, {_GLOBAL_INSTRUCTIONS_KEY: "   "})
+        self.assertEqual(self.ex.extract_rule_projects(), [])
+
+    def test_missing_prefs_omitted(self):
+        self.assertEqual(self.ex.extract_rule_projects(), [])
+
+    def test_non_string_instruction_is_graceful(self):
+        _write_general_prefs(self.home, {_GLOBAL_INSTRUCTIONS_KEY: {"unexpected": "dict"}})
+        self.assertEqual(self.ex.extract_rule_projects(), [])
+
+    def test_dev_suite_fallback(self):
+        _write_general_prefs(self.home, {_GLOBAL_INSTRUCTIONS_KEY: "dev instruction"}, group=_DEV_GROUP)
+        projects = self.ex.extract_rule_projects()
+        self.assertEqual(projects[0]["rules"][0]["content"], "dev instruction")
+
+
+class TestExpandedWiring(unittest.TestCase):
+    """_process_copilot_xcode_tool attaches permissions + mcp servers + rules, each
+    best-effort so one surface failing never drops the others or the row."""
+
+    def _detector(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        return AIToolsDetector(os_name="Darwin")
+
+    def test_all_three_surfaces_attached(self):
+        det = self._detector()
+        ex = det._copilot_xcode_settings_extractor
+        ex.extract_settings_by_user = lambda: [{
+            "permission_mode": "default", "settings_source": "user", "scope": "user",
+            "settings_path": "/h", "raw_settings": {}, "mcp_tool_allowlist": ["appr"]}]
+        ex.extract_mcp_projects = lambda: [{"path": "/h", "mcpServers": [{"name": "github-mcp"}]}]
+        ex.extract_rule_projects = lambda: [{"path": "/h", "rules": [{"file_name": "GlobalCopilotInstructions", "scope": "user"}]}]
+        row = det.process_single_tool(
+            {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a", "projects": []})
+        self.assertEqual(row["permissions"]["mcp_tool_allowlist"], ["appr"])
+        self.assertEqual(len(row["projects"]), 1)
+        proj = row["projects"][0]
+        self.assertEqual(proj["path"], "/h")
+        self.assertEqual([s["name"] for s in proj["mcpServers"]], ["github-mcp"])
+        self.assertEqual(proj["rules"][0]["file_name"], "GlobalCopilotInstructions")
+
+    def test_one_surface_failing_does_not_drop_the_others(self):
+        det = self._detector()
+        ex = det._copilot_xcode_settings_extractor
+
+        def boom():
+            raise RuntimeError("mcp exploded")
+
+        ex.extract_settings_by_user = lambda: []
+        ex.extract_mcp_projects = boom  # this surface throws
+        ex.extract_rule_projects = lambda: [{"path": "/h", "rules": [{"file_name": "g", "scope": "user"}]}]
+        row = det.process_single_tool(
+            {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a", "projects": []})
+        # The detection row survives, and the rules surface still lands.
+        self.assertEqual(row["name"], "GitHub Copilot (Xcode)")
+        self.assertEqual(len(row["projects"]), 1)
+        self.assertEqual(row["projects"][0]["rules"][0]["file_name"], "g")
 
 
 if __name__ == "__main__":

@@ -170,6 +170,24 @@ class GitHubCopilotAppTests(unittest.TestCase):
         with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertIsNone(self._detector().detect())
 
+    def test_a_symlinked_binary_still_counts_as_an_install(self):
+        install = self.program_files / "GitHubCopilot"
+        install.mkdir()
+        target = self.program_files / "real.exe"
+        target.write_text("")
+        try:
+            (install / "copilot.exe").symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertEqual(self._detector().detect()["install_path"], str(install))
+
+    def test_a_directory_named_like_a_binary_is_not_an_install(self):
+        install = self.program_files / "GitHubCopilot"
+        (install / "copilot.exe").mkdir(parents=True)
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertIsNone(self._detector().detect())
+
     def test_an_empty_directory_is_distinguished_from_a_missing_one(self):
         (self.program_files / "GitHubCopilot").mkdir()
         utils_mod.reset_sentry_run_state()
@@ -187,7 +205,8 @@ class GitHubCopilotAppTests(unittest.TestCase):
             (install / name).write_text("")
         with patch(f"{_APP_MODULE}._MAX_ENTRIES", 1):
             with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
-                with self.assertRaises(PermissionError):
+                # Not PermissionError: that is the type the caller keeps out of Sentry.
+                with self.assertRaises(RuntimeError):
                     self._detector().detect()
 
     def test_unreadable_directory_raises_instead_of_reporting_absence(self):

@@ -42,7 +42,7 @@ def _find_exe(root: Path) -> str:
                     seen += 1
                     if seen > _MAX_ENTRIES:
                         return "truncated"
-                    if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".exe"):
+                    if entry.name.lower().endswith(".exe") and entry.is_file():
                         return "present"
                     if entry.is_dir(follow_symlinks=False) and depth < _MAX_DEPTH:
                         stack.append((Path(entry.path), depth + 1))
@@ -91,7 +91,10 @@ class WindowsGitHubCopilotAppDetector(BaseToolDetector):
             if state in ("unreadable", "truncated"):
                 unresolved = state
         if unresolved:
-            raise PermissionError(f"GitHub Copilot app install dir {unresolved}")
+            # A denial is routine on a multi-user box; exhausting the budget is not,
+            # and only a non-PermissionError reaches Sentry.
+            error = PermissionError if unresolved == "unreadable" else RuntimeError
+            raise error(f"GitHub Copilot app install dir {unresolved}")
         return None
 
     def get_version(self, binary: Optional[str] = None) -> Optional[str]:

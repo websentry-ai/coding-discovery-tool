@@ -1545,6 +1545,17 @@ def read_mcp_json(config_path, tool_path: str, tool_label: str) -> Optional[Dict
     return {"path": tool_path, "mcpServers": servers}
 
 
+def _redact_reported_url(url: str) -> str:
+    """Strip any embedded credential from a reported MCP server url, keeping the
+    scheme, host and path so the inventory still names the destination.
+
+    Reuses the shared redactor, which drops userinfo (``user:pass@``) and the
+    whole query (``?token=``/``?api_key=``). Imported lazily because the base
+    module imports this one at load time."""
+    from .coding_tool_base import BaseGitHubCopilotSettingsExtractor
+    return BaseGitHubCopilotSettingsExtractor._strip_url_secrets(url)
+
+
 def transform_mcp_servers_to_array(
     mcp_servers: Dict,
     *,
@@ -1640,6 +1651,12 @@ def transform_mcp_servers_to_array(
                 **{field_name: field_value for field_name, field_value in server_config.items()
                     if field_name not in excluded_fields}
             }
+            # A remote server's url can itself carry the credential — userinfo in
+            # the authority, or a token in the query — so redact it the same way
+            # env and headers are dropped, keeping scheme, host and path.
+            url = server_obj.get("url")
+            if isinstance(url, str) and url:
+                server_obj["url"] = _redact_reported_url(url)
             if (
                 not _skip_script_augmentation
                 and server_name not in protected_targets

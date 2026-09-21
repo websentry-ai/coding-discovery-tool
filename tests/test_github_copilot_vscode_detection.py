@@ -208,7 +208,6 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
         self.assertEqual(self._detect(), [])
 
     def test_bundle_is_probed_even_when_the_user_does_not_use_vscode(self):
-        """A zero-tool scan must still record what the machine-wide install holds."""
         utils_mod.reset_sentry_run_state()
         self.assertEqual(self._detect(), [])
         self.assertEqual(utils_mod.vscode_bundles_probed(), ["Microsoft VS Code"])

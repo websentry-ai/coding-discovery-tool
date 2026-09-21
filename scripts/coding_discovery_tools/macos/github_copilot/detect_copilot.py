@@ -190,8 +190,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         servers — unlike the marketplace path, where ``github.copilot`` and
         ``github.copilot-chat`` are genuinely separate installs.
 
-        The probe runs before that check so a zero-tool scan still records what the
-        machine-wide app holds; the check decides only whether a row is emitted.
+        The probe runs first so a zero-tool scan records what was there either way.
         """
         row = self._bundled_copilot_row(user_home)
         if not self._uses_vscode(user_home):
@@ -205,8 +204,7 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
     def _uses_vscode(self, user_home: Path) -> bool:
         """Whether this user has a VS Code data dir, so a machine-wide app is theirs.
 
-        os.stat, not Path.exists: 3.14 returns False there for an unreadable path,
-        and an unreadable home must not look like an absent tool.
+        os.stat, not Path.exists: 3.14 returns False there for an unreadable path.
         """
         for rel in _VSCODE_USER_DATA_DIRS:
             try:

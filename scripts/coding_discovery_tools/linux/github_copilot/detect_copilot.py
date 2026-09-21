@@ -143,8 +143,7 @@ class LinuxCopilotDetector(BaseCopilotDetectorBase):
         bundles chat inside the same ``copilot`` extension, so a second row would
         only duplicate the same MCP servers.
 
-        The probe runs before that check so a zero-tool scan still records what the
-        machine-wide install holds; the check decides only whether a row is emitted.
+        The probe runs first so a zero-tool scan records what was there either way.
         """
         row = self._bundled_copilot_row(user_home)
         if not self._uses_vscode(user_home):

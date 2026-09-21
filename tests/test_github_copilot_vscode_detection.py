@@ -66,6 +66,11 @@ class TestVscodeBuiltinCopilotDetection(unittest.TestCase):
         # No Code/User dir -> a machine-wide app install isn't this user's.
         self.assertEqual(self._detect(), [])
 
+    def test_bundle_is_probed_even_when_the_user_does_not_use_vscode(self):
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual(self._detect(), [])
+        self.assertEqual(utils_mod.vscode_bundles_probed(), ["VSCode.app"])
+
     def test_marketplace_extension_takes_precedence(self):
         self._make_code_user_dir()
         self._make_marketplace_ext("github.copilot", "1.250.0")
@@ -150,6 +155,11 @@ class TestLinuxVscodeBuiltinCopilotDetection(unittest.TestCase):
     def test_builtin_not_attributed_when_user_does_not_use_vscode(self):
         self.assertEqual(self._detect(), [])
 
+    def test_bundle_is_probed_even_when_the_user_does_not_use_vscode(self):
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual(self._detect(), [])
+        self.assertEqual(utils_mod.vscode_bundles_probed(), ["code"])
+
     def test_marketplace_present_does_not_invoke_builtin_fallback(self):
         """Existing behavior unchanged: marketplace extension wins, fallback skipped."""
         self._make_code_user_dir()
@@ -206,6 +216,11 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
 
     def test_builtin_not_attributed_when_user_does_not_use_vscode(self):
         self.assertEqual(self._detect(), [])
+
+    def test_bundle_is_probed_even_when_the_user_does_not_use_vscode(self):
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual(self._detect(), [])
+        self.assertEqual(utils_mod.vscode_bundles_probed(), ["Microsoft VS Code"])
 
     def test_marketplace_present_does_not_invoke_builtin_fallback(self):
         """Windows now reads the LIVE extensions.json registry (matching

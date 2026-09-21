@@ -8,9 +8,12 @@ lands in a dedicated directory machine-wide or under the user's Programs dir.
 The directory alone is not the signal: an interrupted uninstall can leave it
 behind, so a live install must also hold a binary. The executable name is not
 documented, so the directory is listed but nothing inside it is run.
+A self-updating installer keeps that binary in a versioned subdirectory, so the
+search descends a few levels.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -22,17 +25,41 @@ logger = logging.getLogger(__name__)
 INSTALL_DIR_NAME = "GitHubCopilot"
 USER_INSTALL_DIR = Path("AppData") / "Local" / "Programs" / "GitHub Copilot"
 
+_MAX_DEPTH = 3
+# Run-away guard only: the largest real install tree measured holds ~12k entries.
+_MAX_ENTRIES = 50000
+
+
+def _find_exe(root: Path) -> str:
+    """``present``, ``no_exe``, ``truncated`` or ``unreadable``. Never raises."""
+    seen = 0
+    stack = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _MAX_ENTRIES:
+                        return "truncated"
+                    if entry.name.lower().endswith(".exe") and entry.is_file():
+                        return "present"
+                    if entry.is_dir(follow_symlinks=False) and depth < _MAX_DEPTH:
+                        stack.append((Path(entry.path), depth + 1))
+        except (PermissionError, OSError) as exc:
+            logger.debug(f"Could not list {current}: {exc}")
+            return "unreadable"
+    return "no_exe"
+
 
 def _install_state(install_dir: Path) -> str:
-    """``present`` only when the directory holds a binary, else ``absent``/``unreadable``."""
+    """``present`` only when the directory holds a binary; see ``_find_exe``."""
     state = dir_state(install_dir)
+    if state == "absent":
+        return "missing"
     if state != "present":
         return state
-    try:
-        return "present" if any(install_dir.glob("*.exe")) else "absent"
-    except (PermissionError, OSError) as exc:
-        logger.debug(f"Could not list {install_dir}: {exc}")
-        return "unreadable"
+    return _find_exe(install_dir)
 
 
 class WindowsGitHubCopilotAppDetector(BaseToolDetector):
@@ -48,10 +75,10 @@ class WindowsGitHubCopilotAppDetector(BaseToolDetector):
         yield user_home / USER_INSTALL_DIR
 
     def detect(self) -> Optional[Dict]:
-        """Raises when a candidate was unreadable: a clean absence lets the backend
-        prune a live install (incident 326)."""
+        """Raises when a candidate could not be resolved — denied or out of budget:
+        a clean absence lets the backend prune a live install (incident 326)."""
         user_home = Path(getattr(self, "user_home", None) or Path.home())
-        outcome = "absent"
+        unresolved = None
         for install_dir in self._install_dirs(user_home):
             state = _install_state(install_dir)
             record_copilot_app_probe(install_dir.name, state)
@@ -61,10 +88,13 @@ class WindowsGitHubCopilotAppDetector(BaseToolDetector):
                     "version": None,
                     "install_path": str(install_dir),
                 }
-            if state == "unreadable":
-                outcome = "unreadable"
-        if outcome == "unreadable":
-            raise PermissionError("GitHub Copilot app install dir unreadable")
+            if state in ("unreadable", "truncated"):
+                unresolved = state
+        if unresolved:
+            # A denial is routine on a multi-user box; exhausting the budget is not,
+            # and only a non-PermissionError reaches Sentry.
+            error = PermissionError if unresolved == "unreadable" else RuntimeError
+            raise error(f"GitHub Copilot app install dir {unresolved}")
         return None
 
     def get_version(self, binary: Optional[str] = None) -> Optional[str]:

@@ -71,8 +71,11 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
                     if not any(pattern in folder for pattern in self.IDE_PATTERNS):
                         continue
 
-                    # Extract projects from this IDE's configuration
-                    ide_projects = self._extract_ide_projects(folder_path, folder)
+                    # Extract projects from this IDE's configuration. This legacy
+                    # single-user path scans the scanner's own config dirs, so its
+                    # profile home is Path.home(); the per-user discovery path calls
+                    # _extract_ide_projects directly with the scanned user's home.
+                    ide_projects = self._extract_ide_projects(folder_path, folder, Path.home())
                     all_projects.extend(ide_projects)
 
             except Exception as e:
@@ -86,9 +89,14 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
             "projects": all_projects
         }
 
-    def _extract_ide_projects(self, config_path: Path, ide_name: str) -> List[Dict]:
+    def _extract_ide_projects(self, config_path: Path, ide_name: str, user_home: Path) -> List[Dict]:
         """
         Extract recent projects from a specific JetBrains IDE configuration.
+
+        ``user_home`` is the profile home whose ``$USER_HOME$``/``~`` project-path
+        variables resolve against it — the scanned user's home under a root/MDM run,
+        not the scanner's. Matches the macOS and Linux siblings' signature (the
+        discovery caller passes 3 args, so omitting it raised TypeError on Windows).
         """
         projects = []
 
@@ -121,8 +129,9 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
 
         # Check each project for MCP config and rules
         for project_path_str in project_paths:
-            # Normalize path for Windows
-            project_path_str = self._normalize_path(project_path_str)
+            # Normalize path for Windows, resolving $USER_HOME$/~ against the
+            # scanned user's home (not the scanner's).
+            project_path_str = self._normalize_path(project_path_str, user_home)
             project_path = Path(project_path_str)
 
             if not project_path.exists() or not project_path.is_dir():
@@ -317,9 +326,13 @@ class WindowsJetBrainsMCPConfigExtractor(BaseMCPConfigExtractor):
         indicators = ["$USER_HOME$", "C:\\", "D:\\", "E:\\", "F:\\", "/Users/", "/home/", "~/"]
         return any(ind in val for ind in indicators) or val.startswith("/") or (len(val) > 1 and val[1] == ":")
 
-    def _normalize_path(self, path: str) -> str:
-        """Normalize JetBrains path variables to actual paths for Windows."""
-        home = str(Path.home())
+    def _normalize_path(self, path: str, user_home: Path) -> str:
+        """Normalize JetBrains path variables to actual paths for Windows.
+
+        ``$USER_HOME$``/``$HOME$``/``~`` resolve against the passed ``user_home`` (the
+        scanned user's profile), not ``Path.home()`` — under a root/SYSTEM scan the
+        scanner's home is the wrong profile. Matches the Linux sibling."""
+        home = str(user_home)
         path = path.replace("$USER_HOME$", home)
         path = path.replace("$HOME$", home)
         path = path.replace("~", home)

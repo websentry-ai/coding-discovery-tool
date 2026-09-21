@@ -63,6 +63,37 @@ class TestMcpUrlCredentialRedaction(unittest.TestCase):
         })
         self.assertEqual(reported["plain"]["url"], "https://mcp.plain.com/v1/sse")
 
+    def test_secret_in_path_segment_is_redacted(self):
+        # A token embedded as a path segment (webhook-style) is a credential
+        # just as much as one in the query, and must not be collected.
+        token = "Xk9mP2qR7wL4tN8vB3cY6dF1gH5jS0dQ2aW"
+        reported = self._report({
+            "pathed": {
+                "type": "http",
+                "url": f"https://mcp.pathed.com/mcp/{token}",
+            }
+        })
+        url = reported["pathed"]["url"]
+        self.assertNotIn(token, url)
+        # The route leading to the secret survives so the destination is named.
+        self.assertEqual(url, "https://mcp.pathed.com/mcp/<redacted>")
+
+    def test_short_route_segments_are_kept(self):
+        # Ordinary route segments are not secrets and must survive untouched.
+        for route in ("https://mcp.route.com/v1/sse",
+                      "https://mcp.route.com/mcp",
+                      "https://mcp.route.com/sse",
+                      "https://mcp.route.com/mcp/messages"):
+            reported = self._report({"r": {"type": "http", "url": route}})
+            self.assertEqual(reported["r"]["url"], route)
+
+    def test_multi_tenant_path_is_preserved(self):
+        # A multi-tenant proxy path disambiguates on the full path; its human
+        # segments are not high-entropy secrets and must be kept.
+        url = "https://proxy.corp.com/tenant-acme/us-east-1/mcp"
+        reported = self._report({"t": {"type": "http", "url": url}})
+        self.assertEqual(reported["t"]["url"], url)
+
 
 if __name__ == "__main__":
     unittest.main()

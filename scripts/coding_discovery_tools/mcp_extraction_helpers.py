@@ -1550,10 +1550,13 @@ def _redact_reported_url(url: str) -> str:
     scheme, host and path so the inventory still names the destination.
 
     Reuses the shared redactor, which drops userinfo (``user:pass@``) and the
-    whole query (``?token=``/``?api_key=``). Imported lazily because the base
-    module imports this one at load time."""
+    whole query (``?token=``/``?api_key=``), then redacts any path segment that
+    reads like a secret (``/mcp/<token>``) while keeping normal routes
+    (``/v1/sse``). Imported lazily because the base module imports this one at
+    load time."""
     from .coding_tool_base import BaseGitHubCopilotSettingsExtractor
-    return BaseGitHubCopilotSettingsExtractor._strip_url_secrets(url)
+    cleaned = BaseGitHubCopilotSettingsExtractor._strip_url_secrets(url)
+    return BaseGitHubCopilotSettingsExtractor._strip_secret_path_segments(cleaned)
 
 
 def transform_mcp_servers_to_array(

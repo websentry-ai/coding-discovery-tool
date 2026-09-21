@@ -1599,6 +1599,55 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
             rest = authority + slash + path.split("/", 1)[0]
         return f"{scheme}://{rest}" if sep else rest
 
+    # A path segment is treated as a secret only when its longest run between
+    # separators is both long and high-entropy: real tokens are one continuous
+    # random run, while a route or a slug (``v1``, ``sse``, ``my-workspace``)
+    # stays short or breaks into short words. This keeps legit multi-tenant
+    # paths whole instead of collapsing everything past the first segment.
+    _SECRET_SEGMENT_MIN_LEN = 20
+    _SECRET_SEGMENT_MIN_ENTROPY = 3.5
+
+    @staticmethod
+    def _shannon_entropy(text: str) -> float:
+        """Bits of entropy per character — high for random tokens, low for words."""
+        import math
+        from collections import Counter
+        if not text:
+            return 0.0
+        n = len(text)
+        return -sum((c / n) * math.log2(c / n) for c in Counter(text).values())
+
+    @classmethod
+    def _segment_looks_secret(cls, segment: str) -> bool:
+        """A path segment that reads like an embedded credential rather than a
+        route: its longest separator-free run is long and high-entropy."""
+        import re
+        runs = re.split(r"[-_.]", segment)
+        longest = max(runs, key=len) if runs else segment
+        return (
+            len(longest) >= cls._SECRET_SEGMENT_MIN_LEN
+            and cls._shannon_entropy(longest) >= cls._SECRET_SEGMENT_MIN_ENTROPY
+        )
+
+    @classmethod
+    def _strip_secret_path_segments(cls, value):
+        """Redact only the path segments that look like secrets (webhook-style
+        ``/mcp/<token>``), leaving normal route segments (``/v1/sse``) intact."""
+        if not isinstance(value, str) or "/" not in value:
+            return value
+        scheme, sep, rest = value.partition("://")
+        if not sep:
+            scheme, rest = "", value
+        authority, slash, path = rest.partition("/")
+        if not slash:
+            return value
+        redacted = "/".join(
+            "<redacted>" if seg and cls._segment_looks_secret(seg) else seg
+            for seg in path.split("/")
+        )
+        rest = authority + slash + redacted
+        return f"{scheme}://{rest}" if sep else rest
+
     @classmethod
     def _without_secrets(cls, key: str, value):
         if key in cls._PROFILE_KEYS:

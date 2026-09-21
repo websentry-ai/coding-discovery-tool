@@ -20,6 +20,8 @@ from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFacto
 from scripts.coding_discovery_tools.windows.copilot_cli.copilot_cli import WindowsCopilotCliDetector
 from scripts.coding_discovery_tools.windows.github_copilot_app import WindowsGitHubCopilotAppDetector
 
+_APP_MODULE = "scripts.coding_discovery_tools.windows.github_copilot_app.github_copilot_app"
+
 
 class WindowsProgramFilesRootsTests(unittest.TestCase):
     def test_roots_resolve_from_the_environment(self):
@@ -153,10 +155,64 @@ class GitHubCopilotAppTests(unittest.TestCase):
         with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
             self.assertIsNone(self._detector().detect())
 
+    def test_binary_in_a_versioned_subdirectory_is_detected(self):
+        install = self.program_files / "GitHubCopilot"
+        (install / "app-1.4.2").mkdir(parents=True)
+        (install / "app-1.4.2" / "copilot-desktop.exe").write_text("")
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertEqual(self._detector().detect()["install_path"], str(install))
+
+    def test_a_binary_below_the_search_depth_is_not_claimed(self):
+        install = self.program_files / "GitHubCopilot"
+        deep = install / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        (deep / "copilot-desktop.exe").write_text("")
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertIsNone(self._detector().detect())
+
+    def test_a_symlinked_binary_still_counts_as_an_install(self):
+        install = self.program_files / "GitHubCopilot"
+        install.mkdir()
+        target = self.program_files / "real.exe"
+        target.write_text("")
+        try:
+            (install / "copilot.exe").symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertEqual(self._detector().detect()["install_path"], str(install))
+
+    def test_a_directory_named_like_a_binary_is_not_an_install(self):
+        install = self.program_files / "GitHubCopilot"
+        (install / "copilot.exe").mkdir(parents=True)
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertIsNone(self._detector().detect())
+
+    def test_an_empty_directory_is_distinguished_from_a_missing_one(self):
+        (self.program_files / "GitHubCopilot").mkdir()
+        utils_mod.reset_sentry_run_state()
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self._detector().detect()
+        self.assertEqual(
+            utils_mod.copilot_app_probes(),
+            ["GitHub Copilot:missing", "GitHubCopilot:no_exe"],
+        )
+
+    def test_exhausting_the_entry_budget_raises_instead_of_reporting_absence(self):
+        install = self.program_files / "GitHubCopilot"
+        install.mkdir()
+        for name in ("a", "b"):
+            (install / name).write_text("")
+        with patch(f"{_APP_MODULE}._MAX_ENTRIES", 1):
+            with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+                # Not PermissionError: that is the type the caller keeps out of Sentry.
+                with self.assertRaises(RuntimeError):
+                    self._detector().detect()
+
     def test_unreadable_directory_raises_instead_of_reporting_absence(self):
         install = self.program_files / "GitHubCopilot"
         install.mkdir()
-        with patch.object(Path, "glob", side_effect=PermissionError("denied")):
+        with patch(f"{_APP_MODULE}.os.scandir", side_effect=PermissionError("denied")):
             with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
                 with self.assertRaises(PermissionError):
                     self._detector().detect()

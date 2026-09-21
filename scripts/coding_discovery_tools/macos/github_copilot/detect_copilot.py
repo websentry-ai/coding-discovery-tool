@@ -189,21 +189,35 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
         ``copilot-chat`` row would only double-process and duplicate the same MCP
         servers — unlike the marketplace path, where ``github.copilot`` and
         ``github.copilot-chat`` are genuinely separate installs.
+
+        The probe runs before that check so a zero-tool scan still records what the
+        machine-wide app holds; the check decides only whether a row is emitted.
         """
-        # os.stat, not Path.exists: 3.14 returns False there for an unreadable path,
-        # and an unreadable home must not look like an absent tool.
-        uses_vscode = False
+        row = self._bundled_copilot_row(user_home)
+        if not self._uses_vscode(user_home):
+            logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
+            return []
+        if row is not None:
+            return [row]
+        logger.debug("VS Code in use under %s but no built-in Copilot extension found", user_home)
+        return copilot_chat_evidence_row(user_home)
+
+    def _uses_vscode(self, user_home: Path) -> bool:
+        """Whether this user has a VS Code data dir, so a machine-wide app is theirs.
+
+        os.stat, not Path.exists: 3.14 returns False there for an unreadable path,
+        and an unreadable home must not look like an absent tool.
+        """
         for rel in _VSCODE_USER_DATA_DIRS:
             try:
                 os.stat(user_home / rel)
             except (FileNotFoundError, NotADirectoryError):
                 continue
-            uses_vscode = True
-            break
-        if not uses_vscode:
-            logger.debug("No VS Code user data dir under %s; skipping built-in Copilot", user_home)
-            return []
+            return True
+        return False
 
+    def _bundled_copilot_row(self, user_home: Path) -> Optional[Dict]:
+        """The built-in Copilot extension in any VS Code app root, or None."""
         for ext_root in _app_extension_roots(user_home):
             record_vscode_bundle_probe(ext_root)
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
@@ -215,14 +229,13 @@ class MacOSCopilotDetector(BaseCopilotDetectorBase):
                     continue
                 name_label, version = _read_builtin_copilot_identity(copilot_dir)
                 logger.debug("Detected built-in VS Code %s %s at %s", name_label, version, copilot_dir)
-                return [{
+                return {
                     "name": name_label,
                     "version": version,
                     "publisher": "GitHub",
                     "install_path": str(copilot_dir),
-                }]
-        logger.debug("VS Code in use under %s but no built-in Copilot extension found", user_home)
-        return copilot_chat_evidence_row(user_home)
+                }
+        return None
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """

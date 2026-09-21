@@ -207,6 +207,12 @@ class TestWindowsVscodeBuiltinCopilotDetection(unittest.TestCase):
     def test_builtin_not_attributed_when_user_does_not_use_vscode(self):
         self.assertEqual(self._detect(), [])
 
+    def test_bundle_is_probed_even_when_the_user_does_not_use_vscode(self):
+        """A zero-tool scan must still record what the machine-wide install holds."""
+        utils_mod.reset_sentry_run_state()
+        self.assertEqual(self._detect(), [])
+        self.assertEqual(utils_mod.vscode_bundles_probed(), ["Microsoft VS Code"])
+
     def test_marketplace_present_does_not_invoke_builtin_fallback(self):
         """Windows now reads the LIVE extensions.json registry (matching
         macOS/Linux): a registered github.copilot entry is detected and the

@@ -240,6 +240,16 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                     roots.append(versioned_root)
         return roots
 
+    def _uses_vscode(self, user_home: Path) -> bool:
+        """Whether this user has a VS Code data dir, so a machine-wide install is theirs."""
+        for rel in _VSCODE_USER_DATA_DIRS:
+            try:
+                if (user_home / rel).exists():
+                    return True
+            except OSError:
+                continue
+        return False
+
     def _detect_vscode_builtin_copilot(self, user_home: Path) -> List[Dict]:
         """Detect Copilot shipped built-in with the VS Code install on Windows.
 
@@ -248,19 +258,21 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
         enough to trigger downstream rules/MCP extraction, and built-in Copilot
         bundles chat inside the same ``copilot`` extension, so a second row would
         only duplicate the same MCP servers.
+
+        The probe runs before that check so a zero-tool scan still records what the
+        machine-wide install holds; the check decides only whether a row is emitted.
         """
-        uses_vscode = False
-        for rel in _VSCODE_USER_DATA_DIRS:
-            try:
-                if (user_home / rel).exists():
-                    uses_vscode = True
-                    break
-            except OSError:
-                continue
-        if not uses_vscode:
+        row = self._bundled_copilot_row(user_home)
+        if not self._uses_vscode(user_home):
             logger.debug(f"No VS Code user data dir under {user_home}; skipping built-in Copilot")
             return []
+        if row is not None:
+            return [row]
+        logger.debug(f"VS Code in use under {user_home} but no built-in Copilot extension found")
+        return copilot_chat_evidence_row(user_home)
 
+    def _bundled_copilot_row(self, user_home: Path) -> Optional[Dict]:
+        """The built-in Copilot extension in any VS Code install root, or None."""
         for ext_root in self._vscode_app_extension_roots(user_home):
             record_vscode_bundle_probe(ext_root)
             for dir_name in _VSCODE_BUILTIN_COPILOT_DIRS:
@@ -285,14 +297,13 @@ class WindowsGitHubCopilotDetector(BaseCopilotDetector):
                     if "copilot-chat" in ext_name or "copilot chat" in display:
                         name_label = "GitHub Copilot Chat (VS Code)"
                 logger.debug(f"Detected built-in VS Code {name_label} {version} at {copilot_dir}")
-                return [{
+                return {
                     "name": name_label,
                     "version": version,
                     "publisher": "GitHub",
                     "install_path": str(copilot_dir),
-                }]
-        logger.debug(f"VS Code in use under {user_home} but no built-in Copilot extension found")
-        return copilot_chat_evidence_row(user_home)
+                }
+        return None
 
     def _detect_jetbrains_all_users(self) -> List[Dict]:
         """

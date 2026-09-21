@@ -180,6 +180,18 @@ class GitHubCopilotAppTests(unittest.TestCase):
             ["GitHub Copilot:missing", "GitHubCopilot:no_exe"],
         )
 
+    def test_exhausting_the_entry_budget_raises_instead_of_reporting_absence(self):
+        """A search that ran out of budget never established an absence, and an
+        absence is what lets the backend prune a live install."""
+        install = self.program_files / "GitHubCopilot"
+        install.mkdir()
+        for name in ("a", "b"):
+            (install / name).write_text("")
+        with patch(f"{_APP_MODULE}._MAX_ENTRIES", 1):
+            with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+                with self.assertRaises(PermissionError):
+                    self._detector().detect()
+
     def test_unreadable_directory_raises_instead_of_reporting_absence(self):
         install = self.program_files / "GitHubCopilot"
         install.mkdir()

@@ -12,7 +12,8 @@ documented, so the directory is listed but nothing inside it is run.
 A self-updating installer keeps the binary in a versioned subdirectory so the
 updater can swap releases, so the search descends a few levels. An empty
 directory is reported as ``no_exe`` rather than as a missing one: only the
-latter is evidence the app was never installed.
+latter is evidence the app was never installed. A search that ran out of budget
+is neither, and must not reach the backend as an absence.
 """
 
 import logging
@@ -29,7 +30,9 @@ INSTALL_DIR_NAME = "GitHubCopilot"
 USER_INSTALL_DIR = Path("AppData") / "Local" / "Programs" / "GitHub Copilot"
 
 _MAX_DEPTH = 3
-_MAX_ENTRIES = 20000
+# Headroom over the largest real install tree measured (~12k entries at this depth),
+# so a run-away guard does not fire on an ordinary machine.
+_MAX_ENTRIES = 50000
 
 
 def _find_exe(root: Path) -> str:
@@ -77,10 +80,11 @@ class WindowsGitHubCopilotAppDetector(BaseToolDetector):
         yield user_home / USER_INSTALL_DIR
 
     def detect(self) -> Optional[Dict]:
-        """Raises when a candidate was unreadable: a clean absence lets the backend
-        prune a live install (incident 326)."""
+        """Raises when a candidate could not be resolved: a clean absence lets the
+        backend prune a live install (incident 326). A search that was denied and one
+        that hit the entry cap both end without an answer, so neither may return None."""
         user_home = Path(getattr(self, "user_home", None) or Path.home())
-        unreadable = False
+        unresolved = None
         for install_dir in self._install_dirs(user_home):
             state = _install_state(install_dir)
             record_copilot_app_probe(install_dir.name, state)
@@ -90,10 +94,10 @@ class WindowsGitHubCopilotAppDetector(BaseToolDetector):
                     "version": None,
                     "install_path": str(install_dir),
                 }
-            if state == "unreadable":
-                unreadable = True
-        if unreadable:
-            raise PermissionError("GitHub Copilot app install dir unreadable")
+            if state in ("unreadable", "truncated"):
+                unresolved = state
+        if unresolved:
+            raise PermissionError(f"GitHub Copilot app install dir {unresolved}")
         return None
 
     def get_version(self, binary: Optional[str] = None) -> Optional[str]:

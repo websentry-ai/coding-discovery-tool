@@ -181,8 +181,6 @@ class GitHubCopilotAppTests(unittest.TestCase):
         )
 
     def test_exhausting_the_entry_budget_raises_instead_of_reporting_absence(self):
-        """A search that ran out of budget never established an absence, and an
-        absence is what lets the backend prune a live install."""
         install = self.program_files / "GitHubCopilot"
         install.mkdir()
         for name in ("a", "b"):

@@ -8,12 +8,8 @@ lands in a dedicated directory machine-wide or under the user's Programs dir.
 The directory alone is not the signal: an interrupted uninstall can leave it
 behind, so a live install must also hold a binary. The executable name is not
 documented, so the directory is listed but nothing inside it is run.
-
-A self-updating installer keeps the binary in a versioned subdirectory so the
-updater can swap releases, so the search descends a few levels. An empty
-directory is reported as ``no_exe`` rather than as a missing one: only the
-latter is evidence the app was never installed. A search that ran out of budget
-is neither, and must not reach the backend as an absence.
+A self-updating installer keeps that binary in a versioned subdirectory, so the
+search descends a few levels.
 """
 
 import logging
@@ -30,8 +26,7 @@ INSTALL_DIR_NAME = "GitHubCopilot"
 USER_INSTALL_DIR = Path("AppData") / "Local" / "Programs" / "GitHub Copilot"
 
 _MAX_DEPTH = 3
-# Headroom over the largest real install tree measured (~12k entries at this depth),
-# so a run-away guard does not fire on an ordinary machine.
+# Run-away guard only: the largest real install tree measured holds ~12k entries.
 _MAX_ENTRIES = 50000
 
 
@@ -80,9 +75,8 @@ class WindowsGitHubCopilotAppDetector(BaseToolDetector):
         yield user_home / USER_INSTALL_DIR
 
     def detect(self) -> Optional[Dict]:
-        """Raises when a candidate could not be resolved: a clean absence lets the
-        backend prune a live install (incident 326). A search that was denied and one
-        that hit the entry cap both end without an answer, so neither may return None."""
+        """Raises when a candidate could not be resolved — denied or out of budget:
+        a clean absence lets the backend prune a live install (incident 326)."""
         user_home = Path(getattr(self, "user_home", None) or Path.home())
         unresolved = None
         for install_dir in self._install_dirs(user_home):

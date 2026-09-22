@@ -1606,6 +1606,11 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     # paths whole instead of collapsing everything past the first segment.
     _SECRET_SEGMENT_MIN_LEN = 20
     _SECRET_SEGMENT_MIN_ENTROPY = 3.5
+    # A single-alphabet run is judged on length alone once this long: a numeric
+    # token can never clear the entropy floor (a 10-symbol alphabet caps at
+    # 3.32 bits/char), and a UUID splits on its own hyphens into 12-char runs.
+    _SECRET_SEGMENT_NARROW_LEN = 24
+    _UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
     @staticmethod
     def _shannon_entropy(text: str) -> float:
@@ -1620,10 +1625,18 @@ class BaseGitHubCopilotSettingsExtractor(ABC):
     @classmethod
     def _segment_looks_secret(cls, segment: str) -> bool:
         """A path segment that reads like an embedded credential rather than a
-        route: its longest separator-free run is long and high-entropy."""
+        route: a canonical UUID (the common hosted-endpoint shape), a long
+        all-hex/all-digit token, or a long high-entropy run. Routes and slugs
+        (``v1``, ``sse``, ``my-workspace``) stay short or break into short words."""
         import re
+        if re.fullmatch(cls._UUID_RE, segment, re.IGNORECASE):
+            return True
         runs = re.split(r"[-_.]", segment)
         longest = max(runs, key=len) if runs else segment
+        if len(longest) >= cls._SECRET_SEGMENT_NARROW_LEN and re.fullmatch(
+            r"[0-9]+|[0-9a-fA-F]+", longest
+        ):
+            return True
         return (
             len(longest) >= cls._SECRET_SEGMENT_MIN_LEN
             and cls._shannon_entropy(longest) >= cls._SECRET_SEGMENT_MIN_ENTROPY

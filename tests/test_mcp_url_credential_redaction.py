@@ -78,6 +78,28 @@ class TestMcpUrlCredentialRedaction(unittest.TestCase):
         # The route leading to the secret survives so the destination is named.
         self.assertEqual(url, "https://mcp.pathed.com/mcp/<redacted>")
 
+    def test_uuid_path_segment_is_redacted(self):
+        # A UUID session token is the common shape for hosted MCP endpoints; its
+        # hyphens split it into 12-char runs, so it must be matched by shape.
+        uuid = "550e8400-e29b-41d4-a716-446655440000"
+        reported = self._report({
+            "n8n": {"type": "http", "url": f"https://mcp.host.com/mcp/{uuid}"},
+        })
+        url = reported["n8n"]["url"]
+        self.assertNotIn(uuid, url)
+        self.assertEqual(url, "https://mcp.host.com/mcp/<redacted>")
+
+    def test_numeric_token_path_segment_is_redacted(self):
+        # A digits-only token can never clear the entropy floor, so it is judged
+        # on length once long enough.
+        token = "019283746501928374650192"
+        reported = self._report({
+            "num": {"type": "http", "url": f"https://mcp.host.com/mcp/{token}"},
+        })
+        url = reported["num"]["url"]
+        self.assertNotIn(token, url)
+        self.assertEqual(url, "https://mcp.host.com/mcp/<redacted>")
+
     def test_short_route_segments_are_kept(self):
         # Ordinary route segments are not secrets and must survive untouched.
         for route in ("https://mcp.route.com/v1/sse",

@@ -295,6 +295,7 @@ class TestDiscoveryWiring(unittest.TestCase):
     def _detector(self, by_user):
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         det = AIToolsDetector(os_name="Darwin")
+        det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
         ex = det._copilot_xcode_settings_extractor
         ex.extract_settings_by_user = lambda: by_user
         # This test isolates the permissions wiring; keep the other surfaces empty so
@@ -561,6 +562,7 @@ class TestRealEntrypointE2E(unittest.TestCase):
                     patch.object(sx, "is_running_as_root", lambda: False), \
                     patch.object(sx, "scan_user_directories", lambda cb: cb(home)):
                 det = AIToolsDetector(os_name="Darwin")  # real xcode extractor inside
+                det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
                 detector = ToolDetectorFactory.create_copilot_xcode_detector("Darwin")
                 detector.user_home = home  # scan the planted install, not the real machine
                 detected = detector.detect()
@@ -771,7 +773,9 @@ class TestExpandedWiring(unittest.TestCase):
 
     def _detector(self):
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
-        return AIToolsDetector(os_name="Darwin")
+        det = AIToolsDetector(os_name="Darwin")
+        det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
+        return det
 
     def test_all_three_surfaces_attached(self):
         det = self._detector()
@@ -834,6 +838,7 @@ class TestGroupConsistency(unittest.TestCase):
 
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         det = AIToolsDetector(os_name="Darwin")
+        det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
         det._copilot_xcode_settings_extractor._scan_users = lambda cb: cb(self.home)
         row = det.process_single_tool(
             {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a", "projects": []})
@@ -1014,6 +1019,70 @@ class TestToggleKeys(unittest.TestCase):
                       "EnableAutoApproval=True must rank the riskiest user first")
 
 
+@unittest.skipUnless(sys.platform == "darwin", "drives the real macOS Copilot rules walk")
+class TestWorkspaceRulesAndSkills(unittest.TestCase):
+    """_process_copilot_xcode_tool also captures the per-project ``.github`` config
+    Copilot for Xcode reads: copilot-instructions.md + .github/instructions/* as
+    rules, and .github/prompts/*.prompt.md as skills. Root-safe: the settings
+    extractor is stubbed empty and the .github walk is rooted at a fixture."""
+
+    def setUp(self):
+        # Under the real home so the extractor's system-path skip (rejects /tmp)
+        # does not drop the walk.
+        self.root = Path(tempfile.mkdtemp(prefix="cx-ws-", dir=str(Path.home())))
+        self.repo = self.root / "myrepo"
+        gh = self.repo / ".github"
+        gh.mkdir(parents=True)
+        (gh / "copilot-instructions.md").write_text("# be kind", encoding="utf-8")
+        (gh / "instructions").mkdir()
+        (gh / "instructions" / "style.instructions.md").write_text("# style", encoding="utf-8")
+        (gh / "prompts").mkdir()
+        (gh / "prompts" / "refactor.prompt.md").write_text("# refactor", encoding="utf-8")
+        # Surfaces Xcode does NOT read — must not appear on the row.
+        (self.repo / "AGENTS.md").write_text("# agents", encoding="utf-8")
+        (self.repo / ".claude" / "rules").mkdir(parents=True)
+        (self.repo / ".claude" / "rules" / "c.md").write_text("# claude", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _row(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        ex = det._copilot_xcode_settings_extractor
+        ex.extract_settings_by_user = lambda: []   # keep the row hermetic:
+        ex.extract_mcp_projects = lambda: []        # no real host permissions/MCP/
+        ex.extract_rule_projects = lambda: []       # global-instruction reads
+        # Root the shared ".github" walk at the fixture instead of "/".
+        rx = det._github_copilot_rules_extractor
+        rx._extract_workspace_rules = (
+            lambda root_path, pbr: rx._walk_for_github_directories(self.root, self.root, pbr, 0)
+        )
+        return det._process_copilot_xcode_tool(
+            {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a"})
+
+    def test_project_rules_and_prompt_skills_are_captured(self):
+        row = self._row()
+        proj = [p for p in row["projects"] if p["path"] == str(self.repo)]
+        self.assertEqual(len(proj), 1, "the workspace project must appear on the Xcode row")
+        rule_names = {r["file_name"] for r in proj[0]["rules"]}
+        skill_names = {s["file_name"] for s in proj[0]["skills"]}
+        # rules: copilot-instructions.md + path-specific instructions
+        self.assertIn("copilot-instructions.md", rule_names)
+        self.assertIn("style.instructions.md", rule_names)
+        # skills: the prompt file (NOT lumped into rules)
+        self.assertEqual(skill_names, {"refactor.prompt.md"})
+        self.assertNotIn("refactor.prompt.md", rule_names)
+
+    def test_non_xcode_github_surfaces_are_dropped(self):
+        row = self._row()
+        blob = json.dumps(row)
+        # AGENTS.md and .claude/rules are collected by the shared walk but are not
+        # Xcode surfaces, so they must not ride the Xcode row.
+        self.assertNotIn("AGENTS.md", blob)
+        self.assertNotIn("c.md", blob)
+
+
 @unittest.skipUnless(sys.platform == "darwin", "Copilot for Xcode is macOS-only")
 class TestGroupConsistencyE2E(unittest.TestCase):
     """G3: the prod-permissions + stray-dev-prefs fixture driven through the REAL
@@ -1037,6 +1106,7 @@ class TestGroupConsistencyE2E(unittest.TestCase):
                     patch.object(sxmod, "is_running_as_root", lambda: False), \
                     patch.object(sxmod, "scan_user_directories", lambda cb: cb(home)):
                 det = AIToolsDetector(os_name="Darwin")
+                det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
                 row = det._process_copilot_xcode_tool(
                     {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a"})
             self.assertEqual(row["permissions"]["mcp_tool_allowlist"], ["prod-approved"])

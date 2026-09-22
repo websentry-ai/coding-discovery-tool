@@ -2561,11 +2561,40 @@ class AIToolsDetector:
             _normalize_encoded_paths(result)
         return result
 
+    def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:
+        """Workspace ``.github`` config Copilot for Xcode reads, per project root:
+        ``.github/copilot-instructions.md`` + ``.github/instructions/*.instructions.md``
+        as ``rules``, and ``.github/prompts/*.prompt.md`` as ``skills`` (so the UI
+        Skills section fills — the shared extractor otherwise lumps prompts into
+        rules).
+
+        Reuses the VS Code Copilot rules extractor's ``.github`` walk rather than
+        reimplementing it, then keeps only ``.github`` surfaces — dropping the
+        ``.claude/rules`` and ``AGENTS.md`` files that walk also collects but Xcode
+        does not read. Returns ``{project_root: {"rules": [...], "skills": [...]}}``.
+        """
+        result: Dict[str, Dict[str, List]] = {}
+        extractor = self._github_copilot_rules_extractor
+        if not extractor or not hasattr(extractor, "_extract_workspace_rules"):
+            return result
+
+        projects_by_root: Dict[str, List[Dict]] = {}
+        extractor._extract_workspace_rules(Path("/"), projects_by_root)
+        for project_root, entries in projects_by_root.items():
+            for entry in entries:
+                # Xcode reads only the per-project .github/** surfaces.
+                if "/.github/" not in entry.get("file_path", ""):
+                    continue
+                bucket = "skills" if entry.get("file_name", "").endswith(".prompt.md") else "rules"
+                result.setdefault(project_root, {"rules": [], "skills": []})[bucket].append(entry)
+        return result
+
     def _process_copilot_xcode_tool(self, tool: Dict) -> Dict:
-        """Copilot for Xcode: a detection row plus its three extractable surfaces —
-        auto-approval ``permissions``, configured MCP servers, and the global custom
-        instruction — each attached in the same shape the other Copilot rows use so
-        the backend/frontend need no change.
+        """Copilot for Xcode: a detection row plus its extractable surfaces —
+        auto-approval ``permissions``, configured MCP servers, the global custom
+        instruction, and per-project workspace rules + prompt skills — each attached
+        in the same shape the other Copilot rows use so the backend/frontend need no
+        change.
 
         Every surface is best-effort/try-except with ``exc_info=True``, so one
         failing never drops the others or the detection row itself.
@@ -2618,6 +2647,15 @@ class AIToolsDetector:
                 _slot(proj["path"])["rules"].extend(proj.get("rules", []))
         except Exception as e:
             logger.error(f"Error extracting Copilot for Xcode instructions: {e}", exc_info=True)
+
+        logger.info("  Extracting Copilot for Xcode workspace rules and skills...")
+        try:
+            for project_root, surfaces in self._copilot_xcode_workspace_surfaces().items():
+                slot = _slot(project_root)
+                slot["rules"].extend(surfaces["rules"])
+                slot["skills"].extend(surfaces["skills"])
+        except Exception as e:
+            logger.error(f"Error extracting Copilot for Xcode workspace rules/skills: {e}", exc_info=True)
 
         if projects_dict:
             tool_dict["projects"] = [

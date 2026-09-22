@@ -2229,6 +2229,39 @@ def extract_global_mcp_config_with_root_support(
     )
 
 
+# One editor under two user-data dir names after a rebrand: a migrated machine keeps
+# the old dir beside the new one, but the build only ever reads the new one.
+_RENAMED_IDE_DIRS = {"Windsurf": "Devin"}
+
+
+def settings_file_readable(config_path: Path) -> bool:
+    """Whether the file opens, not merely that it is there. Never raises.
+
+    A file we were denied has told us nothing, so the editor's pre-rename copy is
+    still the best answer; one that opens has answered even if it parses to nothing.
+    """
+    try:
+        with open(config_path, "rb"):
+            return True
+    except OSError:
+        return False
+
+
+def drop_pre_rename_duplicates(configs_by_ide: dict) -> list:
+    """Flatten per-editor configs, keeping one side of a rebranded pair.
+
+    A settings file that opens answers for its editor whether or not it still lists a
+    server, so emptying the renamed one does not refill it from the dir the editor
+    abandoned. Missing, or there but unreadable, it has not answered: the pre-rename
+    dir does, and a half-migrated machine reports what it reports today. Never raises.
+    """
+    kept = dict(configs_by_ide)
+    for legacy, renamed in _RENAMED_IDE_DIRS.items():
+        if renamed in kept and legacy in kept:
+            kept.pop(legacy)
+    return [config for configs in kept.values() for config in configs]
+
+
 def extract_ide_global_configs_with_root_support(
     extract_configs_for_user_func,
     tool_name: str = "MCP"

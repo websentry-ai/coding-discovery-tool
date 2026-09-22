@@ -11,6 +11,8 @@ from ...linux_extraction_helpers import (
     should_skip_system_path,
 )
 from ...mcp_extraction_helpers import (
+    drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_roo_mcp_from_dir,
     walk_for_roo_mcp_configs,
     read_ide_global_mcp_config,
@@ -23,7 +25,7 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Roo Code MCP config on Linux systems."""
 
     ROO_EXTENSION_ID = "rooveterinaryinc.roo-cline"
-    IDE_NAMES = ["Code", "Cursor", "Windsurf"]
+    IDE_NAMES = ["Code", "Cursor", "Windsurf", "Devin"]
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects = []
@@ -38,19 +40,20 @@ class LinuxRooMCPConfigExtractor(BaseMCPConfigExtractor):
         return configs
 
     def _extract_global_configs_for_user(self, user_home: Path) -> List[Dict]:
-        configs = []
+        by_ide = {}
         for ide_name in self.IDE_NAMES:
             config_path = (
                 user_home / ".config" / ide_name / "User" / "globalStorage"
                 / self.ROO_EXTENSION_ID / "settings" / "mcp_settings.json"
             )
-            if config_path.exists():
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = read_ide_global_mcp_config(
                     config_path, tool_name="Roo Code", use_full_path=True
                 )
                 if config:
-                    configs.append(config)
-        return configs
+                    by_ide[ide_name].append(config)
+        return drop_pre_rename_duplicates(by_ide)
 
     def _extract_project_level_configs(self) -> List[Dict]:
         configs = []

@@ -11,6 +11,8 @@ from ...linux_extraction_helpers import (
     should_skip_system_path,
 )
 from ...mcp_extraction_helpers import (
+    drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_kilocode_mcp_from_dir,
     walk_for_kilocode_mcp_configs,
     read_ide_global_mcp_config,
@@ -23,7 +25,7 @@ class LinuxKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
     """Extractor for Kilo Code MCP config on Linux systems."""
 
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
-    IDE_NAMES = ["Code", "Cursor", "Windsurf"]
+    IDE_NAMES = ["Code", "Cursor", "Windsurf", "Devin"]
 
     def extract_mcp_config(self) -> Optional[Dict]:
         projects = []
@@ -38,7 +40,7 @@ class LinuxKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
         return configs
 
     def _extract_global_configs_for_user(self, user_home: Path) -> List[Dict]:
-        configs = []
+        by_ide = {}
         for ide_name in self.IDE_NAMES:
             config_path = (
                 user_home / ".config" / ide_name / "User" / "globalStorage"
@@ -49,13 +51,14 @@ class LinuxKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
                     user_home / ".config" / ide_name / "User" / "globalStorage"
                     / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
                 )
-            if config_path.exists():
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = read_ide_global_mcp_config(
                     config_path, tool_name="Kilo Code", use_full_path=True
                 )
                 if config:
-                    configs.append(config)
-        return configs
+                    by_ide[ide_name].append(config)
+        return drop_pre_rename_duplicates(by_ide)
 
     def _extract_project_level_configs(self) -> List[Dict]:
         configs = []

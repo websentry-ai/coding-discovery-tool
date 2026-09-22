@@ -26,12 +26,12 @@ class WindowsKiloCodeDetector(BaseToolDetector):
     Detector for Kilo Code installations on Windows systems.
 
     Kilo Code operates as a VS Code extension, so detection involves:
-    - Checking for compatible IDE installations (VS Code, Cursor)
+    - Checking for compatible IDE installations (VS Code, Cursor, Windsurf)
     - Verifying Kilo Code extension settings exist in IDE global storage
     """
 
     # Supported IDEs that can host the Kilo Code extension
-    SUPPORTED_IDES = ['Code', 'Cursor']
+    SUPPORTED_IDES = ['Code', 'Cursor', 'Windsurf']
 
     # Kilo Code extension identifier
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"

@@ -9,6 +9,8 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...mcp_extraction_helpers import (
+    drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_ide_global_configs_with_root_support,
     read_ide_global_mcp_config,
 )
@@ -69,7 +71,7 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
 
     # Cline extension identifier
     CLINE_EXTENSION_ID = "saoudrizwan.claude-dev"
-    IDE_NAMES = ['Code', 'Cursor', 'Windsurf']
+    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Devin']
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
@@ -117,7 +119,7 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns:
             List of global config dicts
         """
-        configs = []
+        by_ide = {}
         code_base = user_home / "Library" / "Application Support"
         
         # Check each IDE
@@ -126,12 +128,13 @@ class MacOSClineMCPConfigExtractor(BaseMCPConfigExtractor):
                 code_base / ide_name / "User" / "globalStorage" /
                 self.CLINE_EXTENSION_ID / "settings" / "cline_mcp_settings.json"
             )
-            if config_path.exists():
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = self._read_global_config(config_path, ide_name)
                 if config:
-                    configs.append(config)
+                    by_ide[ide_name].append(config)
         
-        return configs
+        return drop_pre_rename_duplicates(by_ide)
     
     def _read_global_config(self, config_path: Path, ide_name: str) -> Optional[Dict]:
         """

@@ -53,7 +53,7 @@ class MacOSClineDetector(BaseToolDetector):
     IDE_APP_NAMES = {
         "Code": ["Code.app", "Visual Studio Code.app"],
         "Cursor": ["Cursor.app"],
-        "Windsurf": ["Windsurf.app"],
+        "Windsurf": ["Windsurf.app", "Devin.app"],
         "Antigravity": ["Antigravity.app"],
     }
 

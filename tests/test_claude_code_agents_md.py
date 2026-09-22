@@ -107,8 +107,14 @@ class TestClaudeCodeAgentsMdCapture(unittest.TestCase):
         roots = {root for root, _r in rules}
         self.assertNotIn("AGENTS.local.md", names)
         self.assertNotIn("AGENTS.override.md", names)
-        # Nothing from under .agents/ (neither its AGENTS.md nor CLAUDE.md).
-        self.assertNotIn("repoD", roots, ".agents/ contents must be ignored")
+        # Nothing from under .agents/ (neither its AGENTS.md nor CLAUDE.md). Assert on
+        # the file paths, not the project-root basename: a file inside .agents/ resolves
+        # to a ".agents" root, so a root-name check never sees the leak.
+        paths = [r["file_path"] for _root, r in rules]
+        self.assertFalse(
+            any(".agents" in Path(p).parts for p in paths),
+            f".agents/ contents must be ignored, got {paths}",
+        )
 
     # -- capture, per native OS ------------------------------------------------
     @unittest.skipUnless(_IS_MACOS, "macOS extractor runs on macOS")

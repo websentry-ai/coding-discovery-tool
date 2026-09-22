@@ -15,6 +15,7 @@ from .augment import LinuxAugmentDetector, LinuxAugmentMCPConfigExtractor, Linux
 from .codex import LinuxCodexDetector, LinuxCodexRulesExtractor, LinuxCodexMCPConfigExtractor, LinuxCodexSkillsExtractor
 from .opencode import LinuxOpenCodeDetector, LinuxOpenCodeRulesExtractor, LinuxOpenCodeMCPConfigExtractor, LinuxOpenCodeSkillsExtractor
 from .pi import LinuxPiDetector, LinuxPiRulesExtractor
+from .zed import LinuxZedDetector, LinuxZedRulesExtractor
 from .openclaw import LinuxOpenClawDetector
 from .replit import LinuxReplitDetector, LinuxReplitSkillsExtractor
 from .jetbrains import LinuxJetBrainsDetector, LinuxJetBrainsMCPConfigExtractor
@@ -75,6 +76,8 @@ __all__ = [
     "LinuxOpenCodeSkillsExtractor",
     "LinuxPiDetector",
     "LinuxPiRulesExtractor",
+    "LinuxZedDetector",
+    "LinuxZedRulesExtractor",
     "LinuxOpenClawDetector",
     "LinuxReplitDetector",
     "LinuxReplitSkillsExtractor",

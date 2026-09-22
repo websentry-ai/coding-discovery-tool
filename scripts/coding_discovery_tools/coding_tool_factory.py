@@ -23,6 +23,7 @@ from .coding_tool_base import (
     BaseCodexRulesExtractor,
     BaseOpenCodeRulesExtractor,
     BasePiRulesExtractor,
+    BaseZedRulesExtractor,
     BaseCursorCliRulesExtractor,
     BaseCopilotCliRulesExtractor,
     BaseCopilotCliSettingsExtractor,
@@ -519,6 +520,30 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_zed_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Zed detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance, or None on Windows / unsupported OS
+            (Zed ships macOS + Linux builds only).
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.zed.zed import MacOSZedDetector
+            return MacOSZedDetector()
+        elif os_name == "Linux":
+            from .linux import LinuxZedDetector
+            return LinuxZedDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_openclaw_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate OpenClaw detector for the OS.
@@ -764,6 +789,11 @@ class ToolDetectorFactory:
         pi_detector = ToolDetectorFactory.create_pi_detector(os_name)
         if pi_detector is not None:
             detectors.append(pi_detector)
+
+        # Add Zed detector (macOS + Linux)
+        zed_detector = ToolDetectorFactory.create_zed_detector(os_name)
+        if zed_detector is not None:
+            detectors.append(zed_detector)
 
         openclaw_detector = ToolDetectorFactory.create_openclaw_detector(os_name)
         if openclaw_detector is not None:
@@ -1495,6 +1525,33 @@ class PiRulesExtractorFactory:
         elif os_name == "Linux":
             from .linux import LinuxPiRulesExtractor
             return LinuxPiRulesExtractor()
+        else:
+            return None
+
+
+class ZedRulesExtractorFactory:
+    """Factory for creating OS-specific Zed config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseZedRulesExtractor]:
+        """
+        Create appropriate Zed config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseZedRulesExtractor instance, or None on Windows / unsupported OS.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.zed.zed_rules_extractor import MacOSZedRulesExtractor
+            return MacOSZedRulesExtractor()
+        elif os_name == "Linux":
+            from .linux import LinuxZedRulesExtractor
+            return LinuxZedRulesExtractor()
         else:
             return None
 

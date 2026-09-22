@@ -198,6 +198,22 @@ class GitHubCopilotAppTests(unittest.TestCase):
             ["GitHub Copilot:missing", "GitHubCopilot:no_exe"],
         )
 
+    def test_a_shim_launcher_counts_as_an_install(self):
+        install = self.program_files / "GitHubCopilot"
+        install.mkdir()
+        (install / "copilot.cmd").write_text("")
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertEqual(self._detector().detect()["install_path"], str(install))
+
+    def test_a_directory_without_a_launcher_reports_what_it_holds(self):
+        install = self.program_files / "GitHubCopilot"
+        (install / "policies").mkdir(parents=True)
+        (install / "README.md").write_text("")
+        utils_mod.reset_sentry_run_state()
+        with patch.dict(os.environ, self._env(ProgramW6432=str(self.program_files)), clear=True):
+            self.assertIsNone(self._detector().detect())
+        self.assertIn("GitHubCopilot:no_exe[README.md,policies]", utils_mod.copilot_app_probes())
+
     def test_exhausting_the_entry_budget_raises_instead_of_reporting_absence(self):
         install = self.program_files / "GitHubCopilot"
         install.mkdir()

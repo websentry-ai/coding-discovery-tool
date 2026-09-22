@@ -2252,6 +2252,15 @@ class TestRejectedBinaryDiagnostics(unittest.TestCase):
         self.assertEqual("claude,codex", field)
         self.assertNotIn("someone", field)
 
+    def test_config_dir_age_follows_activity_in_a_subdir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        (home / ".copilot" / "session-state").mkdir(parents=True)
+        stale = time.time() - (30 * 86400)
+        os.utime(home / ".copilot", (stale, stale))
+        self.assertEqual(0, utils_mod.newest_tool_config_dir_age_days([home]))
+
     def test_config_dir_age_is_none_without_any_config_dir(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

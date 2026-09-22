@@ -632,14 +632,28 @@ def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
 
     Separates uninstall residue (old) from a tool in active use whose binary we
     failed to resolve (recent). None when no config dir is readable.
+
+    The immediate children count too: a directory mtime only moves when a direct
+    entry is added or removed, so a tool writing into ``projects/`` or
+    ``session-state/`` leaves the config dir itself frozen at install time.
     """
     newest = None
     for user_home in user_homes:
         for name in _TOOL_CONFIG_DIRS:
+            config_dir = Path(user_home) / name
             try:
-                mtime = (Path(user_home) / name).stat().st_mtime
+                mtime = config_dir.stat().st_mtime
             except (PermissionError, OSError):
                 continue
+            try:
+                with os.scandir(config_dir) as entries:
+                    for entry in entries:
+                        try:
+                            mtime = max(mtime, entry.stat(follow_symlinks=False).st_mtime)
+                        except OSError:
+                            continue
+            except (PermissionError, OSError):
+                pass
             if newest is None or mtime > newest:
                 newest = mtime
     if newest is None:

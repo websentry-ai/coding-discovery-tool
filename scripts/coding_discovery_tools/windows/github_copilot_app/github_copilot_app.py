@@ -6,9 +6,9 @@ Copilot CLI and from the VS Code extension. It ships as an NSIS installer, so it
 lands in a dedicated directory machine-wide or under the user's Programs dir.
 
 The directory alone is not the signal: an interrupted uninstall can leave it
-behind, so a live install must also hold a binary. The executable name is not
+behind, so a live install must also hold a launcher. The executable name is not
 documented, so the directory is listed but nothing inside it is run.
-A self-updating installer keeps that binary in a versioned subdirectory, so the
+A self-updating installer keeps that launcher in a versioned subdirectory, so the
 search descends a few levels.
 """
 
@@ -28,11 +28,19 @@ USER_INSTALL_DIR = Path("AppData") / "Local" / "Programs" / "GitHub Copilot"
 _MAX_DEPTH = 3
 # Run-away guard only: the largest real install tree measured holds ~12k entries.
 _MAX_ENTRIES = 50000
+# A Windows launcher is not always a PE: npm and MSI installers ship shims.
+_LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1", ".com")
+_MAX_NAMES = 8
 
 
 def _find_exe(root: Path) -> str:
-    """``present``, ``no_exe``, ``truncated`` or ``unreadable``. Never raises."""
+    """``present``, ``no_exe``, ``truncated`` or ``unreadable``. Never raises.
+
+    ``no_exe`` carries the root's top-level names: the verdict alone cannot tell an
+    uninstall leftover from a launcher shape we do not recognise.
+    """
     seen = 0
+    names = []
     stack = [(root, 0)]
     while stack:
         current, depth = stack.pop()
@@ -42,14 +50,16 @@ def _find_exe(root: Path) -> str:
                     seen += 1
                     if seen > _MAX_ENTRIES:
                         return "truncated"
-                    if entry.name.lower().endswith(".exe") and entry.is_file():
+                    if depth == 0 and len(names) < _MAX_NAMES:
+                        names.append(entry.name)
+                    if entry.name.lower().endswith(_LAUNCHER_SUFFIXES) and entry.is_file():
                         return "present"
                     if entry.is_dir(follow_symlinks=False) and depth < _MAX_DEPTH:
                         stack.append((Path(entry.path), depth + 1))
         except (PermissionError, OSError) as exc:
             logger.debug(f"Could not list {current}: {exc}")
             return "unreadable"
-    return "no_exe"
+    return f"no_exe[{','.join(sorted(names))}]" if names else "no_exe"
 
 
 def _install_state(install_dir: Path) -> str:

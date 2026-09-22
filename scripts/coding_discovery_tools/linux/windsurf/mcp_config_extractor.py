@@ -29,7 +29,7 @@ class LinuxWindsurfMCPConfigExtractor(BaseMCPConfigExtractor):
         for user_home in get_linux_user_homes():
             user_global_path = user_home / self._GLOBAL_MCP_RELATIVE
             if user_global_path.exists():
-                global_config = read_global_mcp_config(user_global_path, tool_name="Windsurf", parent_levels=3)
+                global_config = read_global_mcp_config(user_global_path, tool_name="Devin Desktop", parent_levels=3)
                 if global_config:
                     projects.append(global_config)
 

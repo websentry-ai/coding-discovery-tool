@@ -196,6 +196,18 @@ _AUGMENT_CACHE_UNSET = object()
 _METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
 
 
+# Artifact extraction routes on the reported name. The editor ships as Devin
+# Desktop since the rebrand, but its rules, skills and MCP still key on the
+# original name, so route the new one to it.
+_ROUTING_ALIASES = {"devin desktop": "windsurf"}
+
+
+def _routing_name(tool) -> str:
+    """The lowercased name the artifact branches switch on."""
+    name = (tool.get("name") or "").lower()
+    return _ROUTING_ALIASES.get(name, name)
+
+
 def _metric_safe_name(name: str) -> str:
     """Lowercase a tool name into a valid Sentry metric-key suffix.
 
@@ -2441,7 +2453,7 @@ class AIToolsDetector:
         Returns a tool dict with ``name``, ``version``, ``install_path``,
         ``_config_path`` and ``projects``.
         """
-        tool_name = tool.get("name", "").lower()
+        tool_name = _routing_name(tool)
         cfg = tool.get("_config_path") or ""
 
         result = {
@@ -2638,7 +2650,7 @@ class AIToolsDetector:
         Returns:
             Tool dict with projects populated
         """
-        tool_name = tool.get("name", "").lower()
+        tool_name = _routing_name(tool)
         projects_dict = {}
 
         if tool_name == "openclaw":

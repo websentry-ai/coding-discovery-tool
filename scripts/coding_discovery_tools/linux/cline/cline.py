@@ -28,7 +28,7 @@ class LinuxClineDetector(BaseToolDetector):
     SUPPORTED_IDES = {
         "Code": "VS Code",
         "Cursor": "Cursor",
-        "Windsurf": "Windsurf",
+        "Windsurf": "Devin Desktop",
     }
 
     CLINE_EXTENSION_ID = "saoudrizwan.claude-dev"

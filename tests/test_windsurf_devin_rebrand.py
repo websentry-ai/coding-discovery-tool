@@ -50,9 +50,11 @@ class ExtensionsDirSurvivesTheRename(unittest.TestCase):
                          self.home / ".windsurf" / "extensions")
 
     def test_the_rename_did_not_create_a_second_editor(self):
+        """One key and one row; only the name shown to a human changed."""
         self.assertNotIn("Devin", VSCODE_EDITOR_KEYS)
-        self.assertNotIn("Devin", VSCODE_EDITOR_DISPLAY_NAMES.values())
-        self.assertEqual(VSCODE_EDITOR_DISPLAY_NAMES["Windsurf"], "Windsurf")
+        self.assertEqual(VSCODE_EDITOR_DISPLAY_NAMES["Windsurf"], "Devin Desktop")
+        self.assertEqual(1, sum(1 for name in VSCODE_EDITOR_DISPLAY_NAMES.values()
+                                if "Devin" in name))
 
 
 class DetectorsAcceptBothNames(unittest.TestCase):
@@ -84,7 +86,7 @@ class DetectorsAcceptBothNames(unittest.TestCase):
         with mock.patch.object(lw, "run_command", fake_run), \
                 mock.patch.object(lw, "get_linux_user_homes", lambda: []):
             result = lw.LinuxWindsurfDetector().detect()
-        self.assertEqual("Windsurf", result["name"])
+        self.assertEqual("Devin Desktop", result["name"])
         self.assertEqual("/home/dev/bin/devin-desktop", result["install_path"])
         self.assertEqual("1.126.0", result["version"])
 
@@ -283,6 +285,59 @@ class HostedMcpSettingsFollowTheRenamedUserDataDir(unittest.TestCase):
         configs = self._cline_configs(home)
         self.assertEqual(1, len(configs), configs)
         self.assertIn("Windsurf", configs[0]["path"])
+
+
+
+class TheEditorIsNamedForItsRebrand(unittest.TestCase):
+    """The tool reports its current name; rows written under the old one still resolve."""
+
+    def test_every_platform_detector_reports_the_new_name(self):
+        from scripts.coding_discovery_tools.linux.windsurf.windsurf import (
+            LinuxWindsurfDetector,
+        )
+        from scripts.coding_discovery_tools.macos.windsurf.windsurf import (
+            MacOSWindsurfDetector,
+        )
+        from scripts.coding_discovery_tools.windows.windsurf.windsurf import (
+            WindowsWindsurfDetector,
+        )
+        for cls in (LinuxWindsurfDetector, MacOSWindsurfDetector, WindowsWindsurfDetector):
+            self.assertEqual("Devin Desktop", cls.tool_name.fget(cls), cls.__name__)
+
+    def test_a_hosted_row_names_the_editor_by_its_new_name(self):
+        from scripts.coding_discovery_tools.macos.cline.cline import MacOSClineDetector
+        from scripts.coding_discovery_tools.macos.roo_code.roo_code import MacOSRooDetector
+        for cls in (MacOSClineDetector, MacOSRooDetector):
+            self.assertEqual("Devin Desktop", cls.SUPPORTED_IDES["Windsurf"], cls.__name__)
+
+    def test_a_row_written_before_the_rename_still_resolves(self):
+        """Stored rows read "(Windsurf)"; they must map to the same editor."""
+        from scripts.coding_discovery_tools.vscode_extension_helpers import (
+            vscode_family_editor_dirs,
+        )
+        self.assertEqual(["Windsurf"], vscode_family_editor_dirs("GitHub Copilot (Windsurf)"))
+        self.assertEqual(["Windsurf"],
+                         vscode_family_editor_dirs("GitHub Copilot (Devin Desktop)"))
+
+class ArtifactExtractionStillRoutes(unittest.TestCase):
+    """The rename must not cost the editor its rules, skills and MCP projects."""
+
+    def test_the_new_name_routes_to_the_same_extractors(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        self.assertEqual("windsurf", _routing_name({"name": "Devin Desktop"}))
+
+    def test_a_row_written_under_the_old_name_still_routes(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        self.assertEqual("windsurf", _routing_name({"name": "Windsurf"}))
+
+    def test_other_tools_route_by_their_own_name(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        for name in ("Cursor", "Claude Code", "Replit"):
+            self.assertEqual(name.lower(), _routing_name({"name": name}))
+
+    def test_a_missing_name_is_not_an_error(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import _routing_name
+        self.assertEqual("", _routing_name({}))
 
 
 if __name__ == "__main__":

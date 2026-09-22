@@ -45,13 +45,19 @@ VSCODE_EDITOR_KEYS = tuple(_EXTENSIONS_DIR_BY_EDITOR)
 VSCODE_EDITOR_DISPLAY_NAMES = {
     "Code": "VS Code",
     "Cursor": "Cursor",
-    "Windsurf": "Windsurf",
+    "Windsurf": "Devin Desktop",
     "VSCodium": "VSCodium",
     "Antigravity": "Antigravity",
 }
 
+# Names an editor used to ship under. A row written before the rename still reads
+# "(Windsurf)", and it has to resolve to the same editor as one written after it.
+_FORMER_DISPLAY_NAMES = {"Windsurf": "Windsurf"}
+
 _EDITOR_KEY_BY_DISPLAY = {
-    display.lower(): key for key, display in VSCODE_EDITOR_DISPLAY_NAMES.items()
+    display.lower(): key
+    for mapping in (VSCODE_EDITOR_DISPLAY_NAMES, _FORMER_DISPLAY_NAMES)
+    for key, display in mapping.items()
 }
 _ROW_EDITOR_SUFFIX = re.compile(r"\(([^)]+)\)\s*$")
 

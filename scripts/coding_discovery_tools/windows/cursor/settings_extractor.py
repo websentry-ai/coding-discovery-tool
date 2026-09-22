@@ -63,7 +63,10 @@ class WindowsCursorSettingsExtractor(BaseCursorSettingsExtractor):
 
         self._walk_for_permissions(user_home, global_cursor, system_dirs, found)
 
-        return found
+        # Sort so the report is deterministic: the walk order is not stable across
+        # environments, and it decides the merge order of per-workspace MCP/terminal
+        # allowlists downstream. Lexicographic path order is stable.
+        return sorted(found)
 
     def _walk_for_permissions(
         self,

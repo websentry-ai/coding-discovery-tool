@@ -64,4 +64,7 @@ class MacOSCursorSettingsExtractor(BaseCursorSettingsExtractor):
         except (PermissionError, OSError):
             pass
 
-        return found
+        # Sort so the report is deterministic: the walk order is not stable across
+        # environments, and it decides the merge order of per-workspace MCP/terminal
+        # allowlists downstream. Lexicographic path order is stable.
+        return sorted(found)

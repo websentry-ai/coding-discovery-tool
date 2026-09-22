@@ -49,6 +49,7 @@ try:
         CodexRulesExtractorFactory,
         OpenCodeRulesExtractorFactory,
         PiRulesExtractorFactory,
+        ZedRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -124,6 +125,7 @@ except ImportError:
         CodexRulesExtractorFactory,
         OpenCodeRulesExtractorFactory,
         PiRulesExtractorFactory,
+        ZedRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -513,6 +515,9 @@ class AIToolsDetector:
 
             # Initialize pi coding agent extractor (macOS + Linux; None elsewhere)
             self._pi_rules_extractor = PiRulesExtractorFactory.create(self.system)
+
+            # Initialize Zed extractor (macOS + Linux; None elsewhere)
+            self._zed_rules_extractor = ZedRulesExtractorFactory.create(self.system)
 
             # Initialize JetBrains extractors (macOS only, returns None for unsupported OS)
             self._jetbrains_mcp_extractor = JetBrainsMCPConfigExtractorFactory.create(self.system)
@@ -996,6 +1001,24 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting Pi rules: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": "Pi rules"}, level="warning")
+            return []
+
+    def extract_all_zed_rules(self) -> List[Dict]:
+        """
+        Extract all Zed config from all projects.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._zed_rules_extractor:
+                return self._zed_rules_extractor.extract_all_zed_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Zed rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Zed rules"}, level="warning")
             return []
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
@@ -3188,6 +3211,14 @@ class AIToolsDetector:
                 self._pi_rules_extractor,
                 None,
                 self.extract_all_pi_rules,
+            )
+
+        elif tool_name == "zed":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._zed_rules_extractor,
+                None,
+                self.extract_all_zed_rules,
             )
 
         elif tool_name.lower().startswith("junie"):

@@ -16,6 +16,7 @@ from .codex import MacOSCodexDetector
 from .replit import MacOSReplitDetector
 from .opencode import MacOSOpenCodeDetector
 from .pi import MacOSPiDetector
+from .zed import MacOSZedDetector
 from .junie import MacOSJunieDetector
 from .github_copilot_xcode import MacOSGitHubCopilotXcodeDetector
 from .xcode import MacOSXcodeDetector
@@ -37,6 +38,7 @@ __all__ = [
     'MacOSReplitDetector',
     'MacOSOpenCodeDetector',
     'MacOSPiDetector',
+    'MacOSZedDetector',
     'MacOSJunieDetector',
     'MacOSGitHubCopilotXcodeDetector',
     'MacOSXcodeDetector',

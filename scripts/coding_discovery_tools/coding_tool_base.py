@@ -310,6 +310,29 @@ class BasePiRulesExtractor(ABC):
         pass
 
 
+class BaseZedRulesExtractor(ABC):
+    """Abstract base class for extracting Zed config from all projects."""
+
+    @abstractmethod
+    def extract_all_zed_rules(self) -> List[Dict]:
+        """
+        Extract all Zed config files from all projects on the machine.
+
+        Searches for:
+        - Global config: ~/.config/zed/settings.json (plus global_settings.json,
+          keymap.json, AGENTS.md) — the same path on macOS and Linux
+        - Project-level config: **/.zed/{settings.json,tasks.json,debug.json}
+          plus the project-root ``.rules`` instructions file
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseGitHubCopilotRulesExtractor(ABC):
     """Abstract base class for extracting GitHub Copilot rules from all projects."""
 

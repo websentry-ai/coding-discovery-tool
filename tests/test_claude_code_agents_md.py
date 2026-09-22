@@ -30,11 +30,12 @@ from coding_discovery_tools.windows.claude_code.claude_rules_extractor import ( 
     WindowsClaudeRulesExtractor,
 )
 
-_EXTRACTORS = (
-    ("macos", MacOSClaudeRulesExtractor),
-    ("linux", LinuxClaudeRulesExtractor),
-    ("windows", WindowsClaudeRulesExtractor),
-)
+# Each extractor is OS-specific and, in production, only ever runs on its own OS
+# (its home/system-path logic assumes that host). So each is asserted only on its
+# native platform; the CI matrix (macos + ubuntu + windows) covers all three.
+_IS_MACOS = sys.platform == "darwin"
+_IS_LINUX = sys.platform.startswith("linux")
+_IS_WINDOWS = sys.platform == "win32"
 
 
 class TestIsAgentsMdFile(unittest.TestCase):
@@ -89,31 +90,51 @@ class TestClaudeCodeAgentsMdCapture(unittest.TestCase):
         return [(Path(root).name, rule)
                 for root, rules in projects_by_root.items() for rule in rules]
 
-    def test_agents_md_and_claude_dir_agents_are_captured(self):
-        for name, cls in _EXTRACTORS:
-            with self.subTest(os=name):
-                by = {(root, r["file_name"]): r for root, r in self._walk(cls)}
-                self.assertIn(("repoA", "AGENTS.md"), by, "top-level AGENTS.md must be captured")
-                self.assertEqual(by[("repoA", "AGENTS.md")]["scope"], "project")
-                self.assertIn(("repoB", "AGENTS.md"), by, ".claude/AGENTS.md must be captured")
-                self.assertEqual(by[("repoB", "AGENTS.md")]["scope"], "project")
-                # Unconditional: CLAUDE.md is still listed alongside AGENTS.md.
-                self.assertIn(("repoA", "CLAUDE.md"), by)
-                # Shape parity: AGENTS.md carries the same keys as CLAUDE.md.
-                self.assertEqual(
-                    set(by[("repoA", "AGENTS.md")]), set(by[("repoA", "CLAUDE.md")])
-                )
+    def _assert_captured(self, cls):
+        by = {(root, r["file_name"]): r for root, r in self._walk(cls)}
+        self.assertIn(("repoA", "AGENTS.md"), by, "top-level AGENTS.md must be captured")
+        self.assertEqual(by[("repoA", "AGENTS.md")]["scope"], "project")
+        self.assertIn(("repoB", "AGENTS.md"), by, ".claude/AGENTS.md must be captured")
+        self.assertEqual(by[("repoB", "AGENTS.md")]["scope"], "project")
+        # Unconditional: CLAUDE.md is still listed alongside AGENTS.md.
+        self.assertIn(("repoA", "CLAUDE.md"), by)
+        # Shape parity: AGENTS.md carries the same keys as CLAUDE.md.
+        self.assertEqual(set(by[("repoA", "AGENTS.md")]), set(by[("repoA", "CLAUDE.md")]))
 
-    def test_excluded_variants_and_agents_dir_not_captured(self):
-        for name, cls in _EXTRACTORS:
-            with self.subTest(os=name):
-                rules = self._walk(cls)
-                names = {r["file_name"] for _root, r in rules}
-                roots = {root for root, _r in rules}
-                self.assertNotIn("AGENTS.local.md", names)
-                self.assertNotIn("AGENTS.override.md", names)
-                # Nothing from under .agents/ (neither its AGENTS.md nor CLAUDE.md).
-                self.assertNotIn("repoD", roots, ".agents/ contents must be ignored")
+    def _assert_excluded(self, cls):
+        rules = self._walk(cls)
+        names = {r["file_name"] for _root, r in rules}
+        roots = {root for root, _r in rules}
+        self.assertNotIn("AGENTS.local.md", names)
+        self.assertNotIn("AGENTS.override.md", names)
+        # Nothing from under .agents/ (neither its AGENTS.md nor CLAUDE.md).
+        self.assertNotIn("repoD", roots, ".agents/ contents must be ignored")
+
+    # -- capture, per native OS ------------------------------------------------
+    @unittest.skipUnless(_IS_MACOS, "macOS extractor runs on macOS")
+    def test_macos_agents_md_captured(self):
+        self._assert_captured(MacOSClaudeRulesExtractor)
+
+    @unittest.skipUnless(_IS_LINUX, "Linux extractor runs on Linux")
+    def test_linux_agents_md_captured(self):
+        self._assert_captured(LinuxClaudeRulesExtractor)
+
+    @unittest.skipUnless(_IS_WINDOWS, "Windows extractor runs on Windows")
+    def test_windows_agents_md_captured(self):
+        self._assert_captured(WindowsClaudeRulesExtractor)
+
+    # -- exclusions, per native OS ---------------------------------------------
+    @unittest.skipUnless(_IS_MACOS, "macOS extractor runs on macOS")
+    def test_macos_excluded_variants_not_captured(self):
+        self._assert_excluded(MacOSClaudeRulesExtractor)
+
+    @unittest.skipUnless(_IS_LINUX, "Linux extractor runs on Linux")
+    def test_linux_excluded_variants_not_captured(self):
+        self._assert_excluded(LinuxClaudeRulesExtractor)
+
+    @unittest.skipUnless(_IS_WINDOWS, "Windows extractor runs on Windows")
+    def test_windows_excluded_variants_not_captured(self):
+        self._assert_excluded(WindowsClaudeRulesExtractor)
 
 
 if __name__ == "__main__":

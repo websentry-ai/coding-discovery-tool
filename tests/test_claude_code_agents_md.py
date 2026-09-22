@@ -104,7 +104,6 @@ class TestClaudeCodeAgentsMdCapture(unittest.TestCase):
     def _assert_excluded(self, cls):
         rules = self._walk(cls)
         names = {r["file_name"] for _root, r in rules}
-        roots = {root for root, _r in rules}
         self.assertNotIn("AGENTS.local.md", names)
         self.assertNotIn("AGENTS.override.md", names)
         # Nothing from under .agents/ (neither its AGENTS.md nor CLAUDE.md). Assert on

@@ -2253,8 +2253,6 @@ class TestRejectedBinaryDiagnostics(unittest.TestCase):
         self.assertNotIn("someone", field)
 
     def test_config_dir_age_follows_activity_below_the_config_dir(self):
-        """A transcript in a long-lived project moves neither ``.claude`` nor
-        ``projects/``; only the slug dir above it."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         home = Path(tmp.name)

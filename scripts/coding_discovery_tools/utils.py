@@ -628,9 +628,11 @@ def wsl_distros_present(user_home: Path) -> List[str]:
 
 
 def _newest_mtime_within(config_dir: Path) -> Optional[float]:
-    """Newest mtime of ``config_dir``, its children and its grandchildren, or None
-    when it is unreadable. Subdirectories come from ``_newest_dirs_first``, so the
-    walk is capped and skips links out of the tree. Never raises."""
+    """Newest mtime of ``config_dir``, its children and its grandchildren. Never raises.
+
+    A directory mtime only moves when a direct entry is added or removed, so activity
+    under ``projects/<slug>/`` never reaches the config dir itself.
+    """
     try:
         newest = config_dir.stat().st_mtime
     except (PermissionError, OSError):
@@ -653,10 +655,6 @@ def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
 
     Separates uninstall residue (old) from a tool in active use whose binary we
     failed to resolve (recent). None when no config dir is readable.
-
-    What is inside counts too: a directory mtime only moves when a direct entry is
-    added or removed, so a tool writing into ``projects/<slug>/`` or
-    ``session-state/<id>/`` leaves the config dir frozen at install time.
     """
     newest = None
     for user_home in user_homes:

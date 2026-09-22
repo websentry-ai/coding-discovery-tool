@@ -6,9 +6,9 @@ Copilot CLI and from the VS Code extension. It ships as an NSIS installer, so it
 lands in a dedicated directory machine-wide or under the user's Programs dir.
 
 The directory alone is not the signal: an interrupted uninstall can leave it
-behind, so a live install must also hold a launcher. The executable name is not
+behind, so a live install must also hold a binary. The executable name is not
 documented, so the directory is listed but nothing inside it is run.
-A self-updating installer keeps that launcher in a versioned subdirectory, so the
+A self-updating installer keeps that binary in a versioned subdirectory, so the
 search descends a few levels.
 """
 
@@ -28,10 +28,9 @@ USER_INSTALL_DIR = Path("AppData") / "Local" / "Programs" / "GitHub Copilot"
 _MAX_DEPTH = 3
 # Run-away guard only: the largest real install tree measured holds ~12k entries.
 _MAX_ENTRIES = 50000
-# A Windows launcher is not always a PE: npm and MSI installers ship shims.
+# npm and MSI installers ship shims, so a launcher is not always a PE.
 _LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1", ".com")
-# The per-user install root is writable by its owner, so the names below are
-# attacker-controlled: budget them to fit a Sentry tag and drop the delimiters.
+# The per-user install root is owner-writable, so these names are untrusted.
 _MAX_NAMES = 6
 _MAX_NAME_CHARS = 16
 _TAG_DELIMITERS = str.maketrans({",": "_", "[": "_", "]": "_"})
@@ -44,11 +43,7 @@ def _tag_name(name: str) -> str:
 
 
 def _find_exe(root: Path) -> str:
-    """``present``, ``no_exe``, ``truncated`` or ``unreadable``. Never raises.
-
-    ``no_exe`` carries the root's top-level names: the verdict alone cannot tell an
-    uninstall leftover from a launcher shape we do not recognise.
-    """
+    """``present``, ``no_exe[<names>]``, ``truncated`` or ``unreadable``. Never raises."""
     seen = 0
     names = []
     stack = [(root, 0)]

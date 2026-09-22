@@ -1,4 +1,4 @@
-"""Claude Code AGENTS.md discovery (WEB-5938).
+"""Claude Code AGENTS.md discovery.
 
 Claude Code v2.1.277+ reads AGENTS.md and .claude/AGENTS.md as project
 instructions. The rules extractor captured every CLAUDE.md flavour but not

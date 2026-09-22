@@ -2252,13 +2252,18 @@ class TestRejectedBinaryDiagnostics(unittest.TestCase):
         self.assertEqual("claude,codex", field)
         self.assertNotIn("someone", field)
 
-    def test_config_dir_age_follows_activity_in_a_subdir(self):
+    def test_config_dir_age_follows_activity_below_the_config_dir(self):
+        """A transcript in a long-lived project moves neither ``.claude`` nor
+        ``projects/``; only the slug dir above it."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         home = Path(tmp.name)
-        (home / ".copilot" / "session-state").mkdir(parents=True)
+        slug = home / ".claude" / "projects" / "-repo"
+        slug.mkdir(parents=True)
+        (slug / "session.jsonl").write_text("")
         stale = time.time() - (30 * 86400)
-        os.utime(home / ".copilot", (stale, stale))
+        for frozen in (home / ".claude", home / ".claude" / "projects"):
+            os.utime(frozen, (stale, stale))
         self.assertEqual(0, utils_mod.newest_tool_config_dir_age_days([home]))
 
     def test_config_dir_age_is_none_without_any_config_dir(self):

@@ -30,7 +30,17 @@ _MAX_DEPTH = 3
 _MAX_ENTRIES = 50000
 # A Windows launcher is not always a PE: npm and MSI installers ship shims.
 _LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1", ".com")
-_MAX_NAMES = 8
+# The per-user install root is writable by its owner, so the names below are
+# attacker-controlled: budget them to fit a Sentry tag and drop the delimiters.
+_MAX_NAMES = 6
+_MAX_NAME_CHARS = 16
+_TAG_DELIMITERS = str.maketrans({",": "_", "[": "_", "]": "_"})
+
+
+def _tag_name(name: str) -> str:
+    """One entry name, safe to embed in a probe tag."""
+    printable = "".join(char for char in name if char.isprintable())
+    return printable.translate(_TAG_DELIMITERS)[:_MAX_NAME_CHARS]
 
 
 def _find_exe(root: Path) -> str:
@@ -51,7 +61,7 @@ def _find_exe(root: Path) -> str:
                     if seen > _MAX_ENTRIES:
                         return "truncated"
                     if depth == 0 and len(names) < _MAX_NAMES:
-                        names.append(entry.name)
+                        names.append(_tag_name(entry.name))
                     if entry.name.lower().endswith(_LAUNCHER_SUFFIXES) and entry.is_file():
                         return "present"
                     if entry.is_dir(follow_symlinks=False) and depth < _MAX_DEPTH:

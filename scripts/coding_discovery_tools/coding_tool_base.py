@@ -286,6 +286,30 @@ class BaseOpenCodeRulesExtractor(ABC):
         pass
 
 
+class BasePiRulesExtractor(ABC):
+    """Abstract base class for extracting pi coding agent config from all projects."""
+
+    @abstractmethod
+    def extract_all_pi_rules(self) -> List[Dict]:
+        """
+        Extract all pi coding agent config files from all projects on the machine.
+
+        Searches for:
+        - Global config: ~/.pi/agent/settings.json (plus models.json, AGENTS.md)
+        - Project-level config: **/.pi/settings.json (plus SYSTEM.md,
+          APPEND_SYSTEM.md)
+
+        ``~/.pi/agent/auth.json`` is NEVER read — it holds OAuth/API credentials.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseGitHubCopilotRulesExtractor(ABC):
     """Abstract base class for extracting GitHub Copilot rules from all projects."""
 

@@ -48,6 +48,7 @@ try:
         GeminiCliRulesExtractorFactory,
         CodexRulesExtractorFactory,
         OpenCodeRulesExtractorFactory,
+        PiRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -122,6 +123,7 @@ except ImportError:
         GeminiCliRulesExtractorFactory,
         CodexRulesExtractorFactory,
         OpenCodeRulesExtractorFactory,
+        PiRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -496,6 +498,9 @@ class AIToolsDetector:
             # Initialize OpenCode extractors (macOS only, returns None for unsupported OS)
             self._opencode_rules_extractor = OpenCodeRulesExtractorFactory.create(self.system)
             self._opencode_mcp_extractor = OpenCodeMCPConfigExtractorFactory.create(self.system)
+
+            # Initialize pi coding agent extractor (macOS + Linux; None elsewhere)
+            self._pi_rules_extractor = PiRulesExtractorFactory.create(self.system)
 
             # Initialize JetBrains extractors (macOS only, returns None for unsupported OS)
             self._jetbrains_mcp_extractor = JetBrainsMCPConfigExtractorFactory.create(self.system)
@@ -961,6 +966,24 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting OpenCode rules: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": "OpenCode rules"}, level="warning")
+            return []
+
+    def extract_all_pi_rules(self) -> List[Dict]:
+        """
+        Extract all pi coding agent config from all projects.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._pi_rules_extractor:
+                return self._pi_rules_extractor.extract_all_pi_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Pi rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Pi rules"}, level="warning")
             return []
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
@@ -3110,6 +3133,14 @@ class AIToolsDetector:
                 self.extract_all_opencode_rules,
                 skills_extractor=self._opencode_skills_extractor,
                 extract_skills_func=self.extract_all_opencode_skills,
+            )
+
+        elif tool_name.replace(" ", "").lower() == "picodingagent":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._pi_rules_extractor,
+                None,
+                self.extract_all_pi_rules,
             )
 
         elif tool_name.lower().startswith("junie"):

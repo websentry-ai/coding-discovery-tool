@@ -15,6 +15,7 @@ from .gemini_cli import MacOSGeminiCliDetector
 from .codex import MacOSCodexDetector
 from .replit import MacOSReplitDetector
 from .opencode import MacOSOpenCodeDetector
+from .pi import MacOSPiDetector
 from .junie import MacOSJunieDetector
 from .github_copilot_xcode import MacOSGitHubCopilotXcodeDetector
 from .xcode import MacOSXcodeDetector
@@ -35,6 +36,7 @@ __all__ = [
     'MacOSCodexDetector',
     'MacOSReplitDetector',
     'MacOSOpenCodeDetector',
+    'MacOSPiDetector',
     'MacOSJunieDetector',
     'MacOSGitHubCopilotXcodeDetector',
     'MacOSXcodeDetector',

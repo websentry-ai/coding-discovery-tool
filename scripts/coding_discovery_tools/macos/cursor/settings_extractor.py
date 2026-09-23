@@ -44,7 +44,10 @@ class MacOSCursorSettingsExtractor(BaseCursorSettingsExtractor):
         return user_home / CURSOR_DIR_NAME / PERMISSIONS_FILENAME
 
     def _iter_workspace_permissions_files(self, user_home: Path) -> Iterable[Path]:
-        """Yield <workspace>/.cursor/permissions.json paths, skipping the global one."""
+        """Yield <workspace>/.cursor/permissions.json paths, skipping the global one.
+
+        Sorted: the walk returns filesystem order, and the caller dedupes first-seen-wins.
+        """
         global_cursor = user_home / CURSOR_DIR_NAME
         found = []
 
@@ -64,4 +67,4 @@ class MacOSCursorSettingsExtractor(BaseCursorSettingsExtractor):
         except (PermissionError, OSError):
             pass
 
-        return found
+        return sorted(found)

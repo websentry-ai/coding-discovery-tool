@@ -4,7 +4,7 @@ from typing import List, Dict
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries, is_symlink_or_junction
 from ...claude_code_skills_helpers import is_user_level_claude_subdir
 from ...rule_read_helpers import read_rule_file_contained
 from ...macos_extraction_helpers import (
@@ -257,9 +257,10 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         continue
 
                     if _entry.is_dir():
-                        # A symlinked directory (e.g. .github -> elsewhere) is never
-                        # entered; the walk would otherwise follow the link.
-                        if _entry.is_symlink():
+                        # A symlinked directory OR Windows junction (e.g. .github ->
+                        # elsewhere) is never entered; the walk would otherwise follow
+                        # the redirect. is_symlink() misses NTFS junctions.
+                        if is_symlink_or_junction(item):
                             continue
                         if item.name == ".github":
                             # Check copilot-instructions.md
@@ -329,7 +330,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         instructions_dir = github_dir / "instructions"
-        if not instructions_dir.exists() or not instructions_dir.is_dir() or instructions_dir.is_symlink():
+        if not instructions_dir.exists() or not instructions_dir.is_dir() or is_symlink_or_junction(instructions_dir):
             return
 
         try:
@@ -368,7 +369,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         prompts_dir = github_dir / "prompts"
-        if not prompts_dir.exists() or not prompts_dir.is_dir() or prompts_dir.is_symlink():
+        if not prompts_dir.exists() or not prompts_dir.is_dir() or is_symlink_or_junction(prompts_dir):
             return
 
         try:

@@ -1,14 +1,24 @@
 """Symlink-safe, containment-checked reading of workspace rule files.
 
 Shared by the GitHub Copilot rules extractors (macOS/Windows/Linux). The .github
-walk follows symlinks, so under a root/MDM scan a user who controls their own
+walk followed redirects, so under a root/MDM scan a user who controls their own
 project could point ``.github/copilot-instructions.md`` (or the ``.github`` /
 ``instructions`` / ``prompts`` directory) at another user's file and have the walk
 read the target as their project rule. This applies the same boundary the
-Copilot-for-Xcode settings reader uses: realpath containment within the project
-root plus an O_NOFOLLOW descriptor check (regular file, single hard link, owned by
-the project owner), so an in-repo symlink to an in-repo file is still read but a
-link pointing outside the repo — or to another user's file — is refused.
+Copilot-for-Xcode settings reader uses:
+
+  * realpath containment — the file's realpath must stay inside the project root,
+    so a link (symlink, or a Windows junction on an ancestor) whose target escapes
+    the repo, or points at another user's file, is refused. This is the cross-OS
+    guard, and the ONLY one that helps on Windows, where ``O_NOFOLLOW`` is a no-op
+    and every file's ``st_uid`` is 0.
+  * an ``O_NOFOLLOW`` descriptor check (POSIX) — a symlinked rule file is refused
+    outright, plus non-regular files, multiply-linked files (cross-user hard link),
+    and files not owned by the project owner.
+
+So a symlinked rule file is refused (not read); only a real regular file inside the
+project root is read. The walks separately refuse to descend a symlinked or
+junctioned directory (``is_symlink_or_junction``) before reaching this reader.
 """
 
 import logging
@@ -33,8 +43,10 @@ _OPEN_FLAGS = (
 def realpath_contained(path, root) -> bool:
     """True when ``path`` resolves inside ``root``. Realpath containment (not
     ``path_in_scope``, which rejects every dot-component and so could not accept a
-    ``.github`` path): an in-repo symlink whose target stays inside the repo is
-    allowed, one pointing outside is refused."""
+    ``.github`` path): resolves symlinks and Windows junctions, so a path whose
+    target escapes ``root`` — even through a junctioned ancestor — is refused. The
+    final rule file is additionally opened O_NOFOLLOW below, so a symlinked file is
+    refused rather than read."""
     try:
         real = os.path.realpath(str(path))
         base = os.path.realpath(str(root))

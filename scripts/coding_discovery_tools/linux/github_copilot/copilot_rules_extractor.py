@@ -6,7 +6,7 @@ from typing import List, Dict
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries, is_symlink_or_junction
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -154,9 +154,10 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         continue
 
                     if _entry.is_dir():
-                        # A symlinked directory (e.g. .github -> elsewhere) is never
-                        # entered; the walk would otherwise follow the link.
-                        if _entry.is_symlink():
+                        # A symlinked directory OR Windows junction (e.g. .github ->
+                        # elsewhere) is never entered; the walk would otherwise follow
+                        # the redirect. is_symlink() misses NTFS junctions.
+                        if is_symlink_or_junction(item):
                             continue
                         if item.name == ".github":
                             copilot_instructions = item / "copilot-instructions.md"
@@ -198,7 +199,7 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
 
     def _extract_path_specific_instructions(self, github_dir: Path, projects_by_root: Dict) -> None:
         copilot_dir = github_dir / "copilot"
-        if not copilot_dir.exists() or not copilot_dir.is_dir() or copilot_dir.is_symlink():
+        if not copilot_dir.exists() or not copilot_dir.is_dir() or is_symlink_or_junction(copilot_dir):
             return
         try:
             for md_file in copilot_dir.glob("*.md"):

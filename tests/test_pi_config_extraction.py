@@ -12,6 +12,7 @@ The extractors are driven at ``_extract_rules_from_pi_directory`` /
 """
 
 import contextlib
+import os
 import json
 import tempfile
 import unittest
@@ -130,6 +131,43 @@ class _PiConfigMixin:
         )
         self.assertEqual(settings["scope"], "user")
         self.assertIn("models.json", [r["file_name"] for r in projects[0]["rules"]])
+
+    def test_global_override_dir_inside_home_attributed_to_home(self):
+        """PI_CODING_AGENT_DIR nested in the home: config still lands under the
+        home root, not under the override's parent."""
+        override = self.root / "dotfiles" / "pi-agent"
+        override.mkdir(parents=True)
+        (override / "settings.json").write_text('{"model": "m"}', encoding="utf-8")
+        with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(override)}), \
+             patch("scripts.coding_discovery_tools.macos.pi.pi._is_scanning_users_own_home",
+                   return_value=True):
+            projects = self._global_rules()
+        self.assertEqual(len(projects), 1, projects)
+        self.assertEqual(projects[0]["project_root"], str(self.root))
+        self.assertEqual([r["file_name"] for r in projects[0]["rules"]], ["settings.json"])
+
+    def test_global_override_dir_outside_home_still_collected(self):
+        with tempfile.TemporaryDirectory() as other:
+            override = Path(other) / "pi-agent"
+            override.mkdir()
+            (override / "settings.json").write_text('{"model": "m"}', encoding="utf-8")
+            with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(override)}), \
+                 patch("scripts.coding_discovery_tools.macos.pi.pi._is_scanning_users_own_home",
+                       return_value=True):
+                projects = self._global_rules()
+            self.assertEqual(len(projects), 1, projects)
+            self.assertEqual(projects[0]["project_root"], str(self.root))
+
+    def test_global_override_ignored_for_other_users_home(self):
+        with tempfile.TemporaryDirectory() as other:
+            override = Path(other) / "pi-agent"
+            override.mkdir()
+            (override / "settings.json").write_text('{"model": "m"}', encoding="utf-8")
+            with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(override)}), \
+                 patch("scripts.coding_discovery_tools.macos.pi.pi._is_scanning_users_own_home",
+                       return_value=False):
+                projects = self._global_rules()
+        self.assertEqual(projects, [])
 
     def test_global_bare_agent_dir_not_reported(self):
         agent = self.root / ".pi" / "agent"

@@ -28,107 +28,173 @@ from .constants import MAX_CONFIG_FILE_SIZE
 
 logger = logging.getLogger(__name__)
 
-# JSON/JSONC config files (opencode.json, pi models.json, Zed settings.json) can
-# carry provider API keys or MCP header tokens inline. String values of keys that
-# look like credentials are replaced before the content leaves the machine.
-# Only string values match, so `"max_tokens": 4096` is untouched.
-_SECRET_KEY_VALUE_RE = re.compile(
-    r'("[^"\n]*(?:api[_-]?key|apikey|access[_-]?key|secret|token|password|passwd|'
-    r'authorization|bearer|credential)[^"\n]*"\s*:\s*")((?:[^"\\\n]|\\.)*)(")',
-    re.IGNORECASE,
-)
+# ---------------------------------------------------------------------------
+# Credential redaction for JSON/JSONC config text
+#
+# opencode.json[c], pi settings/models.json and Zed settings.json can carry
+# provider API keys, MCP env maps, header tokens and connection strings. Before
+# any of that leaves the machine, `redact_secret_values` rewrites string VALUES
+# through a small JSONC tokenizer (not regexes over raw text), so comments
+# between a key and its value, comments before a block, nested structure and a
+# file truncated mid-string are all handled. Keys, numbers, booleans and
+# structure are preserved so the config stays readable.
+#
+# A string value is redacted when ANY of:
+#   - its key name looks like a credential (apiKey, api_key, token, secret, ...)
+#   - it sits anywhere inside an `env` / `environment` / `headers` object
+#   - it follows a credential-looking CLI flag in an array (["--api-key", "…"])
+#   - it is an inline `--flag=value` credential flag (value part only)
+#   - it is a URL with userinfo (scheme://user:pass@host -> userinfo redacted)
+#   - it is a `url`/`uri`/`endpoint` value with a query string (query dropped)
+#   - the string is unterminated at EOF (truncated file) -> fail closed
+# ---------------------------------------------------------------------------
+
 _REDACTED = "***REDACTED***"
 _REDACT_SUFFIXES = frozenset({".json", ".jsonc"})
 
-# Objects whose *every* string value is a potential credential regardless of key
-# name: MCP server `env`/`environment` maps (DATABASE_URL, GH_PAT, ...) and HTTP
-# `headers` maps (X-Api-Token, Cookie, ...). The whole block is redacted.
-_SECRET_BLOCK_OPEN_RE = re.compile(
-    r'"(?:env|environment|headers)"\s*:\s*\{', re.IGNORECASE
+_CRED_KEY_RE = re.compile(
+    r"api[_-]?key|apikey|access[_-]?key|secret|token|password|passwd|"
+    r"authorization|bearer|credential",
+    re.IGNORECASE,
 )
-_ANY_STRING_VALUE_RE = re.compile(r'("[^"\n]*"\s*:\s*")((?:[^"\\\n]|\\.)*)(")')
-
-# MCP launch commands carry credentials as CLI flags: `["--api-key", "sk-..."]`
-# or `["--token=sk-..."]`. Two forms:
-#  - a string literal holding a credential flag, followed by the next string
-#    literal (the value) -> value redacted.
-#  - an inline `--flag=value` string literal -> value part redacted.
-_CRED_FLAG = r'--?[A-Za-z0-9_-]*(?:key|token|secret|password|passwd|auth|credential)[A-Za-z0-9_-]*'
-_FLAG_THEN_VALUE_RE = re.compile(
-    r'("' + _CRED_FLAG + r'"\s*,\s*")((?:[^"\\\n]|\\.)*)(")', re.IGNORECASE
+_SECRET_BLOCK_KEYS = frozenset({"env", "environment", "headers"})
+_URL_KEYS = frozenset({"url", "uri", "endpoint"})
+_CRED_FLAG_RE = re.compile(
+    r"^--?[A-Za-z0-9_-]*(?:key|token|secret|password|passwd|auth|credential)[A-Za-z0-9_-]*$",
+    re.IGNORECASE,
 )
-_FLAG_INLINE_RE = re.compile(
-    r'("' + _CRED_FLAG + r'=)((?:[^"\\\n]|\\.)+)(")', re.IGNORECASE
+_CRED_FLAG_INLINE_RE = re.compile(
+    r"^(--?[A-Za-z0-9_-]*(?:key|token|secret|password|passwd|auth|credential)[A-Za-z0-9_-]*=)(.+)$",
+    re.IGNORECASE | re.DOTALL,
 )
-# Remote MCP endpoints sometimes put the token in the query string. Keep the
-# path, drop everything after `?`.
-_URL_QUERY_RE = re.compile(r'("(?:url|uri|endpoint)"\s*:\s*"[^"?\n]*\?)((?:[^"\\\n]|\\.)*)(")', re.IGNORECASE)
+# scheme://userinfo@  -> the userinfo part. Requires a scheme so a bare
+# "user:pass@host" prose fragment is not touched.
+_URL_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/?#@\s]+@)")
 
 
-def _block_end(text: str, start: int) -> int:
-    """Index just past the ``}`` matching the ``{`` at ``start``.
+class _Frame(object):
+    __slots__ = ("kind", "key", "expect", "secret", "prev_flag")
 
-    Braces inside string literals and inside JSONC ``//`` / ``/* */`` comments
-    are not structure and are skipped. Returns len(text) when unbalanced.
-    """
-    depth = 0
-    i = start
+    def __init__(self, kind, secret):
+        self.kind = kind          # "obj" | "arr"
+        self.key = None           # current key (obj)
+        self.expect = "key"       # obj: "key" | "value"
+        self.secret = secret      # inside an env/headers block
+        self.prev_flag = False    # arr: previous element was a credential flag
+
+
+def _scan_string(text, i):
+    """``text[i]`` is an opening quote. Return (end_index_of_closing_quote_or_n,
+    terminated)."""
     n = len(text)
-    in_str = False
-    while i < n:
-        ch = text[i]
-        if in_str:
-            if ch == "\\":
-                i += 1
-            elif ch == '"':
-                in_str = False
-        elif ch == '"':
-            in_str = True
-        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-            nl = text.find("\n", i)
-            i = n if nl == -1 else nl
-        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
-            close = text.find("*/", i + 2)
-            i = n if close == -1 else close + 1
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return n
+    j = i + 1
+    while j < n:
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == '"':
+            return j, True
+        if ch == "\n":
+            # JSON strings cannot span lines; treat as unterminated (truncated
+            # or malformed) and fail closed.
+            return j, False
+        j += 1
+    return n, False
 
 
-def redact_secret_values(text: str) -> str:
-    """Redact credentials in JSON/JSONC config text.
+def _transform_value(raw, frame):
+    """The replacement for string value ``raw`` given its context."""
+    if frame is not None:
+        if frame.secret:
+            return _REDACTED
+        if frame.kind == "obj" and frame.key is not None and _CRED_KEY_RE.search(frame.key):
+            return _REDACTED
+        if frame.kind == "arr" and frame.prev_flag:
+            return _REDACTED
+    m = _CRED_FLAG_INLINE_RE.match(raw)
+    if m:
+        return m.group(1) + _REDACTED
+    out = _URL_USERINFO_RE.sub(lambda u: u.group(1) + _REDACTED + "@", raw)
+    if frame is not None and frame.kind == "obj" and frame.key is not None \
+            and frame.key.lower() in _URL_KEYS and "?" in out:
+        out = out.split("?", 1)[0] + "?" + _REDACTED
+    return out
 
-    Passes: (1) every string value inside an ``env`` / ``environment`` /
-    ``headers`` object, whatever its key; (2) string values of any key whose
-    name looks like a credential; (3) the value after a credential-looking CLI
-    flag in a command/args array (``"--api-key", "sk-…"``) and inline
-    ``--token=…`` forms; (4) query strings on ``url``/``uri``/``endpoint``
-    values. Non-string values and other keys are kept.
+
+def redact_secret_values(text):
+    """Redact credentials in JSON/JSONC config text (see module comment above).
+
+    Never raises; on malformed input it degrades to redacting every string in
+    value position it cannot classify as safe.
     """
     out = []
-    pos = 0
-    for m in _SECRET_BLOCK_OPEN_RE.finditer(text):
-        if m.start() < pos:
-            continue  # nested inside a block already handled
-        brace = m.end() - 1
-        end = _block_end(text, brace)
-        out.append(text[pos:m.end()])
-        out.append(_ANY_STRING_VALUE_RE.sub(
-            lambda s: s.group(1) + _REDACTED + s.group(3), text[m.end():end]
-        ))
-        pos = end
-    out.append(text[pos:])
-    text = "".join(out)
-    _sub = lambda m: m.group(1) + _REDACTED + m.group(3)  # noqa: E731
-    text = _SECRET_KEY_VALUE_RE.sub(_sub, text)
-    text = _FLAG_THEN_VALUE_RE.sub(_sub, text)
-    text = _FLAG_INLINE_RE.sub(_sub, text)
-    return _URL_QUERY_RE.sub(_sub, text)
+    stack = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if ch == "/" and nxt == "/":
+            nl = text.find("\n", i)
+            j = n if nl == -1 else nl
+            out.append(text[i:j])
+            i = j
+            continue
+        if ch == "/" and nxt == "*":
+            close = text.find("*/", i + 2)
+            j = n if close == -1 else close + 2
+            out.append(text[i:j])
+            i = j
+            continue
+        if ch == '"':
+            j, terminated = _scan_string(text, i)
+            raw = text[i + 1:j]
+            frame = stack[-1] if stack else None
+            if frame is not None and frame.kind == "obj" and frame.expect == "key":
+                frame.key = raw
+                out.append(text[i:j + 1] if terminated else '"' + _REDACTED)
+            else:
+                if not terminated:
+                    value = _REDACTED
+                else:
+                    value = _transform_value(raw, frame)
+                out.append('"' + value + ('"' if terminated else ""))
+                if frame is not None and frame.kind == "arr":
+                    frame.prev_flag = bool(_CRED_FLAG_RE.match(raw))
+            i = j + 1 if terminated else j
+            if not terminated and j < n:
+                # Newline inside a string: keep scanning after it.
+                out.append(text[j])
+                i = j + 1
+            continue
+        if ch == ":":
+            if stack and stack[-1].kind == "obj":
+                stack[-1].expect = "value"
+        elif ch == ",":
+            if stack:
+                top = stack[-1]
+                if top.kind == "obj":
+                    top.expect = "key"
+                    top.key = None
+        elif ch == "{" or ch == "[":
+            parent = stack[-1] if stack else None
+            secret = False
+            if parent is not None:
+                secret = parent.secret or (
+                    parent.kind == "obj" and parent.key is not None
+                    and parent.key.lower() in _SECRET_BLOCK_KEYS
+                )
+            stack.append(_Frame("obj" if ch == "{" else "arr", secret))
+        elif ch == "}" or ch == "]":
+            if stack:
+                stack.pop()
+            if stack and stack[-1].kind == "obj":
+                stack[-1].expect = "key"
+                stack[-1].key = None
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def extract_rule_file_contained(

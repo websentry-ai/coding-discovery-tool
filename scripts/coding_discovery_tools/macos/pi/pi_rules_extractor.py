@@ -106,6 +106,17 @@ class MacOSPiRulesExtractor(BasePiRulesExtractor):
                 # configured install and must not produce a project row.
                 if not (agent_dir / "settings.json").is_file():
                     return
+                # Global config always belongs to the home, wherever the agent
+                # dir actually lives (default ~/.pi/agent or PI_CODING_AGENT_DIR).
+                # When the override points outside the home, the override dir is
+                # the containment boundary — it is the user's own configured
+                # location, and home-containment would otherwise refuse it.
+                default_dir = user_home / ".pi" / "agent"
+                containment = user_home if agent_dir == default_dir else agent_dir
+
+                def home_root(_rule_file: Path, _home: Path = user_home) -> Path:
+                    return _home
+
                 for name in _GLOBAL_CONFIG_FILES:
                     if name in _NEVER_READ:
                         continue
@@ -113,7 +124,7 @@ class MacOSPiRulesExtractor(BasePiRulesExtractor):
                     if not config_file.is_file():
                         continue
                     rule_info = extract_rule_file_contained(
-                        config_file, find_pi_project_root, scope="user", user_home=user_home
+                        config_file, home_root, scope="user", user_home=containment
                     )
                     if rule_info:
                         project_root = rule_info.get("project_root")

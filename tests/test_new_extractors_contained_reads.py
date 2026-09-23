@@ -114,6 +114,56 @@ class TestRedactSecretValues(unittest.TestCase):
         text = '{ "url": "https://mcp.example/sse" }'
         self.assertEqual(redact_secret_values(text), text)
 
+    # --- shapes from the codex P0 review: JSONC-aware, fail closed ---------
+
+    def test_comment_between_key_and_value(self):
+        out = redact_secret_values('{"apiKey": /* production */ "%s", "model": "m"}' % SECRET)
+        self.assertNotIn(SECRET, out)
+        self.assertEqual(out, '{"apiKey": /* production */ "***REDACTED***", "model": "m"}')
+
+    def test_comment_before_env_block(self):
+        for text in (
+            '{"env": /* c */ { "A": "%s" }}' % SECRET,
+            '{"env": // c\n { "A": "%s" }}' % SECRET,
+        ):
+            out = redact_secret_values(text)
+            self.assertNotIn(SECRET, out)
+            self.assertIn('"A": "***REDACTED***"', out)
+
+    def test_truncated_inside_credential_string_fails_closed(self):
+        partial = SECRET[:8]
+        out = redact_secret_values('{"model": "m", "apiKey": "%s' % partial)
+        self.assertNotIn(partial, out)
+        self.assertTrue(out.endswith('"apiKey": "***REDACTED***'))
+
+    def test_truncated_inside_any_string_fails_closed(self):
+        # Cannot classify an unterminated value; redact rather than guess.
+        out = redact_secret_values('{"model": "sk-partial')
+        self.assertEqual(out, '{"model": "***REDACTED***')
+
+    def test_env_block_nested_inside_array(self):
+        out = redact_secret_values('{"servers": [{"env": {"X": "%s"}}, {"name": "ok"}]}' % SECRET)
+        self.assertNotIn(SECRET, out)
+        self.assertIn('"name": "ok"', out)
+
+    # --- shapes from the round-4 security review ---------------------------
+
+    def test_positional_dsn_userinfo_redacted(self):
+        text = '{"args": ["@modelcontextprotocol/server-postgres", "postgresql://app:%s@db:5432/prod"]}' % SECRET
+        out = redact_secret_values(text)
+        self.assertNotIn(SECRET, out)
+        self.assertIn('"postgresql://***REDACTED***@db:5432/prod"', out)
+        self.assertIn('"@modelcontextprotocol/server-postgres"', out)
+
+    def test_url_userinfo_redacted(self):
+        out = redact_secret_values('{"url": "https://user:%s@mcp.example/sse"}' % SECRET)
+        self.assertEqual(out, '{"url": "https://***REDACTED***@mcp.example/sse"}')
+
+    def test_bare_user_pass_at_without_scheme_untouched(self):
+        # Prose like "contact ops@example.com" must not be mangled.
+        text = '{"note": "mail ops@example.com or user:pw@host"}'
+        self.assertEqual(redact_secret_values(text), text)
+
     def test_unbalanced_block_does_not_crash(self):
         out = redact_secret_values('{ "env": { "A": "%s", "B": "x" ' % SECRET)
         self.assertNotIn(SECRET, out)

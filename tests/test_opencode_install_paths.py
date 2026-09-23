@@ -155,6 +155,78 @@ class TestMacOSOpenCodeInstallPaths(unittest.TestCase):
     def test_nothing_present(self):
         self.assertIsNone(self.detector.detect())
 
+    def test_detect_user_install_never_consults_path(self):
+        bundle = self._write_bundle(self.home / "Applications" / "OpenCode.app", "1.6.0")
+        calls = []
+
+        def record(cmd, *_a, **_k):
+            calls.append(cmd[0])
+            return f"{self.home}/somewhere/opencode\n"
+
+        with patch(f"{_MAC_MOD}.run_command", side_effect=record):
+            result = self.detector.detect_user_install()
+        self.assertEqual(result["install_path"], str(bundle))
+        self.assertEqual(result["version"], "1.6.0")
+        self.assertNotIn("which", calls)
+
+
+class TestOpenCodeMdmPerUserDispatch(unittest.TestCase):
+    """Root/MDM scans go through user_tool_detector._detect_opencode, which
+    previously only knew npm-style locations and never reached the curl-installer
+    or app-bundle fallbacks."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.machine_apps = root / "Applications"
+        self.machine_apps.mkdir(parents=True)
+        self.home = root / "Users" / "alice"
+        (self.home / "Applications").mkdir(parents=True)
+        self._patches = [
+            patch(f"{_MH}.MACHINE_APPS_DIR", self.machine_apps),
+            patch(f"{_MAC_MOD}._APP_BUNDLE", self.machine_apps / "OpenCode.app"),
+            patch(f"{_MAC_MOD}.run_command", side_effect=_no_which),
+            patch(f"{_LINUX_MOD}.run_command", side_effect=_no_which),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def test_macos_curl_install_found_via_mdm_dispatch(self):
+        from scripts.coding_discovery_tools.user_tool_detector import _detect_opencode
+        bin_path = _make_exec(self.home / ".opencode" / "bin" / "opencode")
+        result = _detect_opencode(MacOSOpenCodeDetector(), self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(bin_path))
+
+    def test_macos_app_bundle_found_via_mdm_dispatch(self):
+        from scripts.coding_discovery_tools.user_tool_detector import _detect_opencode
+        bundle = self.home / "Applications" / "OpenCode.app"
+        (bundle / "Contents").mkdir(parents=True)
+        with open(bundle / "Contents" / "Info.plist", "wb") as fh:
+            plistlib.dump({"CFBundleShortVersionString": "1.7.0"}, fh)
+        result = _detect_opencode(MacOSOpenCodeDetector(), self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(bundle))
+        self.assertEqual(result["version"], "1.7.0")
+
+    def test_linux_curl_install_found_via_mdm_dispatch(self):
+        from scripts.coding_discovery_tools.user_tool_detector import _detect_opencode
+        bin_path = _make_exec(self.home / ".opencode" / "bin" / "opencode")
+        with patch(f"{_LINUX_MOD}.get_linux_user_homes", return_value=[]):
+            result = _detect_opencode(LinuxOpenCodeDetector(), self.home)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(bin_path))
+
+    def test_mdm_dispatch_nothing_present(self):
+        from scripts.coding_discovery_tools.user_tool_detector import _detect_opencode
+        self.assertIsNone(_detect_opencode(MacOSOpenCodeDetector(), self.home))
+
 
 class TestLinuxOpenCodeInstallPaths(unittest.TestCase):
     def setUp(self):
@@ -185,6 +257,14 @@ class TestLinuxOpenCodeInstallPaths(unittest.TestCase):
     def test_local_bin_path(self):
         bin_path = _make_exec(self.home / ".local" / "bin" / "opencode")
         self.assertEqual(self.detector.detect()["install_path"], str(bin_path))
+
+    @unittest.skipIf(os.name == "nt", "os.access(X_OK) is always true on Windows")
+    def test_non_executable_file_is_ignored(self):
+        f = self.home / ".opencode" / "bin" / "opencode"
+        f.parent.mkdir(parents=True)
+        f.write_text("leftover", encoding="utf-8")
+        f.chmod(0o644)
+        self.assertIsNone(self.detector.detect())
 
     def test_user_home_scoping_ignores_other_homes(self):
         other = Path(self.tmp.name) / "home" / "bob"

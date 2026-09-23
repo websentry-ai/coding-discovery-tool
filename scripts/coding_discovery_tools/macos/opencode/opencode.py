@@ -170,6 +170,10 @@ class MacOSOpenCodeDetector(BaseToolDetector):
         except Exception as e:
             logger.debug(f"Could not check for OpenCode command: {e}")
 
+        return self._check_user_install()
+
+    def _check_user_install(self) -> Optional[str]:
+        """Per-user binaries, then the app bundle — never the scanner's PATH."""
         home = self._home()
         for rel in _USER_RELATIVE_BINARIES:
             candidate = home / rel
@@ -193,6 +197,21 @@ class MacOSOpenCodeDetector(BaseToolDetector):
                 continue
 
         return None
+
+    def detect_user_install(self) -> Optional[Dict]:
+        """Detect without consulting PATH — for root/MDM per-user scans, where
+        ``which`` would resolve the scanner's PATH, not the scanned user's."""
+        self._resolved_path = None
+        self._resolved_is_bundle = False
+        self._resolved_from_fallback = False
+        install_path = self._check_user_install()
+        if not install_path:
+            return None
+        return {
+            "name": self.tool_name,
+            "version": self.get_version() or "Unknown",
+            "install_path": install_path,
+        }
 
     def _bundle_candidates(self, home: Path) -> List[Path]:
         """Machine-wide bundle, then the scanned user's ~/Applications sibling."""

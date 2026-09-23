@@ -115,12 +115,20 @@ class TestLinuxZedDetection(unittest.TestCase):
 
     def test_local_zed_app_dir_detected(self):
         app_dir = self.home / ".local" / "zed.app"
-        app_dir.mkdir(parents=True)
+        _make_exec(app_dir / "libexec" / "zed-editor")
         with patch(f"{_LINUX_ZED_MOD}.run_command", return_value=None):
             result = self.detector.detect()
         self.assertIsNotNone(result)
         self.assertEqual(result["name"], "Zed")
         self.assertEqual(result["install_path"], str(app_dir))
+
+    def test_emptied_zed_app_dir_not_detected(self):
+        # Zed's uninstall script leaves ~/.local/zed.app behind without a launcher.
+        (self.home / ".local" / "zed.app").mkdir(parents=True)
+        with patch(f"{_LINUX_ZED_MOD}.run_command", return_value=None), \
+             patch.object(self.detector, "MACHINE_BIN_PATHS", []), \
+             patch.object(self.detector, "MACHINE_FLATPAK_DIRS", []):
+            self.assertIsNone(self.detector.detect())
 
     def test_local_zed_app_version_from_bundled_binary(self):
         app_dir = self.home / ".local" / "zed.app"
@@ -138,7 +146,7 @@ class TestLinuxZedDetection(unittest.TestCase):
         self.assertEqual(result["version"], "1.20.3")
 
     def test_flatpak_install_detected(self):
-        flatpak = self.home / ".var" / "app" / "dev.zed.Zed"
+        flatpak = self.home / ".local" / "share" / "flatpak" / "app" / "dev.zed.Zed"
         flatpak.mkdir(parents=True)
         with patch(f"{_LINUX_ZED_MOD}.run_command", return_value=None):
             result = self.detector.detect()
@@ -146,9 +154,26 @@ class TestLinuxZedDetection(unittest.TestCase):
         self.assertEqual(result["install_path"], str(flatpak))
         self.assertEqual(result["version"], "Unknown")
 
+    def test_flatpak_data_dir_alone_not_detected(self):
+        # ~/.var/app/<id> is per-app data and survives `flatpak uninstall`.
+        (self.home / ".var" / "app" / "dev.zed.Zed").mkdir(parents=True)
+        with patch(f"{_LINUX_ZED_MOD}.run_command", return_value=None), \
+             patch.object(self.detector, "MACHINE_BIN_PATHS", []), \
+             patch.object(self.detector, "MACHINE_FLATPAK_DIRS", []):
+            self.assertIsNone(self.detector.detect())
+
+    def test_system_flatpak_install_detected(self):
+        flatpak = self.home / "var" / "lib" / "flatpak" / "app" / "dev.zed.Zed"
+        flatpak.mkdir(parents=True)
+        with patch(f"{_LINUX_ZED_MOD}.run_command", return_value=None), \
+             patch.object(self.detector, "MACHINE_BIN_PATHS", []), \
+             patch.object(self.detector, "MACHINE_FLATPAK_DIRS", [flatpak]):
+            result = self.detector.detect()
+        self.assertEqual(result["install_path"], str(flatpak))
+
     def test_preview_app_dir_detected(self):
         app_dir = self.home / ".local" / "zed-preview.app"
-        app_dir.mkdir(parents=True)
+        _make_exec(app_dir / "bin" / "zed")
         with patch(f"{_LINUX_ZED_MOD}.run_command", return_value=None):
             result = self.detector.detect()
         self.assertIsNotNone(result)
@@ -156,7 +181,8 @@ class TestLinuxZedDetection(unittest.TestCase):
 
     def test_empty_home_not_detected(self):
         with patch(f"{_LINUX_ZED_MOD}.run_command", return_value=None), \
-             patch.object(self.detector, "MACHINE_BIN_PATHS", []):
+             patch.object(self.detector, "MACHINE_BIN_PATHS", []), \
+             patch.object(self.detector, "MACHINE_FLATPAK_DIRS", []):
             self.assertIsNone(self.detector.detect())
 
     def test_distro_binary_detected(self):
@@ -167,6 +193,27 @@ class TestLinuxZedDetection(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(binary))
         self.assertEqual(result["version"], "1.18.0")
+
+    def test_zfs_zed_daemon_not_detected(self):
+        # /usr/bin/zed with no editor marker is the ZFS Event Daemon.
+        binary = _make_exec(self.home / "usr" / "bin" / "zed")
+        with patch.object(self.detector, "MACHINE_BIN_PATHS", [binary]), \
+             patch.object(self.detector, "MACHINE_ZED_MARKERS", []), \
+             patch.object(self.detector, "MACHINE_FLATPAK_DIRS", []), \
+             patch(f"{_LINUX_ZED_MOD}.run_command", return_value="zed: ZFS Event Daemon"):
+            self.assertIsNone(self.detector.detect())
+
+    def test_distro_zed_with_editor_marker_detected(self):
+        binary = _make_exec(self.home / "usr" / "bin" / "zed")
+        marker = self.home / "usr" / "share" / "applications" / "dev.zed.Zed.desktop"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("[Desktop Entry]\nName=Zed\n", encoding="utf-8")
+        with patch.object(self.detector, "MACHINE_BIN_PATHS", [binary]), \
+             patch.object(self.detector, "MACHINE_ZED_MARKERS", [marker]), \
+             patch(f"{_LINUX_ZED_MOD}.run_command", return_value="Zed 1.18.0"):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
 
 
 class TestZedFactory(unittest.TestCase):

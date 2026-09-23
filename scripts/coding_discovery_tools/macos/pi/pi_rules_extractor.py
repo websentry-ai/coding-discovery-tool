@@ -15,11 +15,11 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...coding_tool_base import BasePiRulesExtractor
+from ...rule_read_helpers import extract_rule_file_contained
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
     extract_project_level_rules_with_fallback,
-    extract_single_rule_file,
     is_running_as_root,
     is_user_level_tool_dir,
     scan_user_directories,
@@ -109,8 +109,8 @@ class MacOSPiRulesExtractor(BasePiRulesExtractor):
                     config_file = agent_dir / name
                     if not config_file.is_file():
                         continue
-                    rule_info = extract_single_rule_file(
-                        config_file, find_pi_project_root, scope="user"
+                    rule_info = extract_rule_file_contained(
+                        config_file, find_pi_project_root, scope="user", user_home=user_home
                     )
                     if rule_info:
                         project_root = rule_info.get("project_root")
@@ -161,7 +161,7 @@ class MacOSPiRulesExtractor(BasePiRulesExtractor):
                     continue
                 if not should_process_file(config_file, pi_dir.parent):
                     continue
-                rule_info = extract_single_rule_file(config_file, find_pi_project_root)
+                rule_info = extract_rule_file_contained(config_file, find_pi_project_root)
                 if rule_info:
                     project_root = rule_info.get("project_root")
                     if project_root:

@@ -18,14 +18,72 @@ descend a symlinked/junctioned directory before reaching this reader.
 
 import logging
 import os
+import re
 import stat
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE
 
 logger = logging.getLogger(__name__)
+
+# JSON/JSONC config files (opencode.json, pi models.json, Zed settings.json) can
+# carry provider API keys or MCP header tokens inline. String values of keys that
+# look like credentials are replaced before the content leaves the machine.
+# Only string values match, so `"max_tokens": 4096` is untouched.
+_SECRET_KEY_VALUE_RE = re.compile(
+    r'("[^"\n]*(?:api[_-]?key|apikey|access[_-]?key|secret|token|password|passwd|'
+    r'authorization|bearer|credential)[^"\n]*"\s*:\s*")((?:[^"\\\n]|\\.)*)(")',
+    re.IGNORECASE,
+)
+_REDACTED = "***REDACTED***"
+_REDACT_SUFFIXES = frozenset({".json", ".jsonc"})
+
+
+def redact_secret_values(text: str) -> str:
+    """Replace string values of credential-looking JSON keys with a marker."""
+    return _SECRET_KEY_VALUE_RE.sub(lambda m: m.group(1) + _REDACTED + m.group(3), text)
+
+
+def extract_rule_file_contained(
+    rule_file: Path,
+    find_project_root_func: Callable[[Path], Optional[Path]],
+    scope: str = "project",
+    user_home: Optional[Path] = None,
+) -> Optional[Dict]:
+    """``extract_single_rule_file`` shape, read through ``read_rule_file_contained``.
+
+    Project-scope files are read strictly (no symlink, single link, owned by the
+    project root). ``scope="user"`` files (the user's own global config) may be a
+    symlink from a dotfile manager, but must resolve inside ``user_home`` and be
+    owned by that user. ``.json``/``.jsonc`` content passes through
+    ``redact_secret_values``. Returns None when the read is refused.
+    """
+    try:
+        project_root = find_project_root_func(rule_file)
+        if scope == "user" and user_home is not None:
+            contained = read_rule_file_contained(rule_file, user_home, allow_symlink=True)
+        else:
+            contained = read_rule_file_contained(rule_file, project_root, allow_symlink=False)
+        if contained is None:
+            return None
+        content, truncated, size, last_modified = contained
+        if rule_file.suffix.lower() in _REDACT_SUFFIXES:
+            content = redact_secret_values(content)
+        return {
+            "file_path": str(rule_file),
+            "file_name": rule_file.name,
+            "project_root": str(project_root) if project_root else None,
+            "content": content,
+            "size": size,
+            "last_modified": last_modified,
+            "truncated": truncated,
+            "scope": scope,
+        }
+    except Exception as e:
+        logger.warning(f"Error reading rule file {rule_file}: {e}")
+        return None
 
 
 def realpath_contained(path, root) -> bool:

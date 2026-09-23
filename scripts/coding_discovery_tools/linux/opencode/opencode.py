@@ -1,6 +1,7 @@
 """OpenCode detection for Linux."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -70,14 +71,31 @@ class LinuxOpenCodeDetector(BaseToolDetector):
                     return path
         except Exception as e:
             logger.debug(f"Could not check for OpenCode command: {e}")
+        return self._check_user_install()
+
+    def _check_user_install(self) -> Optional[str]:
+        """Per-user binary locations only (no PATH lookup)."""
         for user_home in self._iter_scan_homes():
             for rel in _USER_RELATIVE_PATHS:
                 p = user_home / rel
                 try:
-                    if p.is_file():
+                    if p.is_file() and os.access(str(p), os.X_OK):
                         logger.debug(f"Found OpenCode at: {p}")
                         self._resolved_path = p
                         return str(p)
                 except OSError:
                     continue
         return None
+
+    def detect_user_install(self) -> Optional[Dict]:
+        """Detect without consulting PATH — for root/MDM per-user scans, where
+        ``which`` would resolve the scanner's PATH, not the scanned user's."""
+        self._resolved_path = None
+        install_path = self._check_user_install()
+        if not install_path:
+            return None
+        return {
+            "name": self.tool_name,
+            "version": self.get_version() or "Unknown",
+            "install_path": install_path,
+        }

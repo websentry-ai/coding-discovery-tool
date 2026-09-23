@@ -36,10 +36,16 @@ class LinuxZedDetector(BaseToolDetector):
         Path(".local") / "bin" / "zed",
         Path(".local") / "bin" / "zeditor",
     )
+    # Flatpak *install* trees (per-user, then system). ``~/.var/app/<id>`` is the
+    # app's data dir and survives ``flatpak uninstall``, so it is not a signal.
     USER_FLATPAK_DIRS = (
-        Path(".var") / "app" / "dev.zed.Zed",
-        Path(".var") / "app" / "dev.zed.Zed-Preview",
+        Path(".local") / "share" / "flatpak" / "app" / "dev.zed.Zed",
+        Path(".local") / "share" / "flatpak" / "app" / "dev.zed.Zed-Preview",
     )
+    MACHINE_FLATPAK_DIRS = [
+        Path("/var/lib/flatpak/app/dev.zed.Zed"),
+        Path("/var/lib/flatpak/app/dev.zed.Zed-Preview"),
+    ]
     # Machine-wide distro packages. Exposed as a class attribute so tests can
     # isolate themselves from whatever the CI box happens to have installed.
     MACHINE_BIN_PATHS = [
@@ -47,6 +53,17 @@ class LinuxZedDetector(BaseToolDetector):
         Path("/usr/bin/zeditor"),
         Path("/usr/local/bin/zed"),
         Path("/usr/local/bin/zeditor"),
+    ]
+    # A binary named exactly ``zed`` is also the ZFS Event Daemon. Fedora/Arch
+    # rename the editor to ``zeditor`` for that reason; where a distro keeps the
+    # ``zed`` name we require one of these editor-only markers before reporting.
+    MACHINE_ZED_MARKERS = [
+        Path("/usr/lib/zed"),
+        Path("/usr/lib/zed-editor"),
+        Path("/usr/lib64/zed"),
+        Path("/usr/share/zed"),
+        Path("/usr/share/applications/dev.zed.Zed.desktop"),
+        Path("/usr/local/share/applications/dev.zed.Zed.desktop"),
     ]
     # Probed inside a resolved app dir, in order, for the version.
     APP_DIR_BIN_RELATIVE = (
@@ -133,27 +150,57 @@ class LinuxZedDetector(BaseToolDetector):
                 return hit
         for candidate in self.MACHINE_BIN_PATHS:
             try:
-                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                if not (candidate.exists() and os.access(str(candidate), os.X_OK)):
+                    continue
+                if candidate.name == "zed" and not self._machine_zed_is_editor():
+                    logger.debug(f"Skipping {candidate}: no Zed editor marker (likely ZFS zed)")
+                    continue
+                return candidate
+            except OSError:
+                continue
+        for candidate in self.MACHINE_FLATPAK_DIRS:
+            try:
+                if candidate.is_dir():
                     return candidate
             except OSError:
                 continue
         return None
 
-    def _resolve_for_user(self, user_home: Path) -> Optional[Path]:
-        """Per-user install locations for ``user_home``, in order."""
-        dir_and_bin: Tuple[Tuple[Path, bool], ...] = tuple(
-            [(user_home / rel, True) for rel in self.USER_APP_DIRS]
-            + [(user_home / rel, False) for rel in self.USER_BIN_PATHS]
-            + [(user_home / rel, True) for rel in self.USER_FLATPAK_DIRS]
-        )
-        for candidate, expect_dir in dir_and_bin:
+    def _machine_zed_is_editor(self) -> bool:
+        """True when a distro-installed ``zed`` is corroborated as the editor."""
+        for marker in self.MACHINE_ZED_MARKERS:
             try:
-                if expect_dir:
-                    if candidate.is_dir():
-                        return candidate
-                elif candidate.exists() and os.access(str(candidate), os.X_OK):
+                if marker.exists():
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _resolve_for_user(self, user_home: Path) -> Optional[Path]:
+        """Per-user install locations for ``user_home``, in order.
+
+        App dirs count only when they still hold a launcher (an emptied
+        ``~/.local/zed.app`` left by the uninstall script is not an install).
+        """
+        for rel in self.USER_APP_DIRS:
+            candidate = user_home / rel
+            try:
+                if candidate.is_dir() and self._version_binary(candidate) is not None:
                     return candidate
             except (PermissionError, OSError) as exc:
                 logger.debug(f"Skipping Zed candidate {candidate}: {exc}")
-                continue
+        for rel in self.USER_BIN_PATHS:
+            candidate = user_home / rel
+            try:
+                if candidate.exists() and os.access(str(candidate), os.X_OK):
+                    return candidate
+            except (PermissionError, OSError) as exc:
+                logger.debug(f"Skipping Zed candidate {candidate}: {exc}")
+        for rel in self.USER_FLATPAK_DIRS:
+            candidate = user_home / rel
+            try:
+                if candidate.is_dir():
+                    return candidate
+            except (PermissionError, OSError) as exc:
+                logger.debug(f"Skipping Zed candidate {candidate}: {exc}")
         return None

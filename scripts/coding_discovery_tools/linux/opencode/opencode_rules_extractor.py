@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseOpenCodeRulesExtractor
+from ...rule_read_helpers import extract_rule_file_contained
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
-    extract_single_rule_file,
     get_linux_user_homes,
     should_process_file,
     walk_for_tool_directories,
@@ -42,8 +42,8 @@ class LinuxOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
                     return
                 for rule_file in iter_opencode_config_files(global_dir, include_root_siblings=False):
                     if should_process_file(rule_file, user_home):
-                        rule_info = extract_single_rule_file(
-                            rule_file, find_opencode_project_root, scope="user"
+                        rule_info = extract_rule_file_contained(
+                            rule_file, find_opencode_project_root, scope="user", user_home=user_home
                         )
                         if rule_info:
                             project_root = rule_info.get("project_root")
@@ -74,7 +74,7 @@ class LinuxOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
         try:
             for rule_file in iter_opencode_config_files(opencode_dir, include_root_siblings=True):
                 if should_process_file(rule_file, opencode_dir.parent):
-                    rule_info = extract_single_rule_file(rule_file, find_opencode_project_root)
+                    rule_info = extract_rule_file_contained(rule_file, find_opencode_project_root)
                     if rule_info:
                         project_root = rule_info.get("project_root")
                         if project_root:

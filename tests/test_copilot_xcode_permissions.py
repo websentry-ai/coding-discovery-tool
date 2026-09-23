@@ -1082,6 +1082,42 @@ class TestWorkspaceRulesAndSkills(unittest.TestCase):
         self.assertNotIn("AGENTS.md", blob)
         self.assertNotIn("c.md", blob)
 
+    def test_symlinked_instruction_file_outside_repo_is_refused(self):
+        # A user who controls their repo points copilot-instructions.md at a file
+        # outside the repo (another user's secret). The walk must not read it.
+        outside = Path(tempfile.mkdtemp(prefix="cx-secret-"))
+        try:
+            (outside / "id_rsa").write_text("SECRET-PRIVATE-KEY-MATERIAL", encoding="utf-8")
+            ci = self.repo / ".github" / "copilot-instructions.md"
+            ci.unlink()
+            os.symlink(outside / "id_rsa", ci)
+            blob = json.dumps(self._row())
+            self.assertNotIn("SECRET-PRIVATE-KEY-MATERIAL", blob,
+                             "a symlink to a file outside the repo must not be read")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_symlinked_github_dir_outside_repo_is_refused(self):
+        # The whole .github directory is a symlink to an out-of-repo tree; nothing
+        # under it may be captured.
+        outside = Path(tempfile.mkdtemp(prefix="cx-evil-github-"))
+        try:
+            (outside / "copilot-instructions.md").write_text("SECRET-FROM-SYMLINKED-GITHUB", encoding="utf-8")
+            shutil.rmtree(self.repo / ".github")
+            os.symlink(outside, self.repo / ".github")
+            blob = json.dumps(self._row())
+            self.assertNotIn("SECRET-FROM-SYMLINKED-GITHUB", blob,
+                             "a symlinked .github directory must not be entered")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_legitimate_regular_instruction_file_still_captured(self):
+        # Regression: a real regular copilot-instructions.md is still captured.
+        row = self._row()
+        proj = [p for p in row["projects"] if p["path"] == str(self.repo)]
+        self.assertEqual(len(proj), 1)
+        self.assertIn("copilot-instructions.md", {r["file_name"] for r in proj[0]["rules"]})
+
 
 @unittest.skipUnless(sys.platform == "darwin", "Copilot for Xcode is macOS-only")
 class TestGroupConsistencyE2E(unittest.TestCase):

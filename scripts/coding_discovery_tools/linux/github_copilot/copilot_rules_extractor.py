@@ -14,7 +14,7 @@ from ...linux_extraction_helpers import (
     should_skip_path,
     should_skip_system_path,
 )
-from ...macos_extraction_helpers import get_file_metadata, read_file_content
+from ...rule_read_helpers import read_rule_file_contained
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,10 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         continue
 
                     if _entry.is_dir():
+                        # A symlinked directory (e.g. .github -> elsewhere) is never
+                        # entered; the walk would otherwise follow the link.
+                        if _entry.is_symlink():
+                            continue
                         if item.name == ".github":
                             copilot_instructions = item / "copilot-instructions.md"
                             if copilot_instructions.exists() and copilot_instructions.is_file():
@@ -194,7 +198,7 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
 
     def _extract_path_specific_instructions(self, github_dir: Path, projects_by_root: Dict) -> None:
         copilot_dir = github_dir / "copilot"
-        if not copilot_dir.exists() or not copilot_dir.is_dir():
+        if not copilot_dir.exists() or not copilot_dir.is_dir() or copilot_dir.is_symlink():
             return
         try:
             for md_file in copilot_dir.glob("*.md"):
@@ -213,16 +217,21 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         try:
             if not rule_file.exists() or not rule_file.is_file():
                 return None
-            file_metadata = get_file_metadata(rule_file)
             project_root = find_project_root_func(rule_file)
-            content, truncated = read_file_content(rule_file, file_metadata["size"])
+            # Symlink-safe, containment-checked read: refuses a rule file whose
+            # realpath escapes the project root (e.g. a symlink at another user's
+            # secret), matching the Copilot-for-Xcode settings reader.
+            contained = read_rule_file_contained(rule_file, project_root)
+            if contained is None:
+                return None
+            content, truncated, size, last_modified = contained
             return {
                 "file_path": str(rule_file),
                 "file_name": rule_file.name,
                 "project_root": str(project_root) if project_root else None,
                 "content": content,
-                "size": file_metadata["size"],
-                "last_modified": file_metadata["last_modified"],
+                "size": size,
+                "last_modified": last_modified,
                 "truncated": truncated,
                 "scope": scope,
             }

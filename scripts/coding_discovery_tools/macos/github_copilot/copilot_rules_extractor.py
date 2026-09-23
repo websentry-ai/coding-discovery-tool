@@ -6,6 +6,7 @@ from ...vscode_extension_helpers import vscode_family_editor_dirs
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries
 from ...claude_code_skills_helpers import is_user_level_claude_subdir
+from ...rule_read_helpers import read_rule_file_contained
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -17,8 +18,6 @@ from ...macos_extraction_helpers import (
     should_skip_system_path,
     is_running_as_root,
     scan_user_directories,
-    get_file_metadata,
-    read_file_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -258,6 +257,10 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         continue
 
                     if _entry.is_dir():
+                        # A symlinked directory (e.g. .github -> elsewhere) is never
+                        # entered; the walk would otherwise follow the link.
+                        if _entry.is_symlink():
+                            continue
                         if item.name == ".github":
                             # Check copilot-instructions.md
                             copilot_instructions = item / "copilot-instructions.md"
@@ -326,7 +329,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         instructions_dir = github_dir / "instructions"
-        if not instructions_dir.exists() or not instructions_dir.is_dir():
+        if not instructions_dir.exists() or not instructions_dir.is_dir() or instructions_dir.is_symlink():
             return
 
         try:
@@ -365,7 +368,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         prompts_dir = github_dir / "prompts"
-        if not prompts_dir.exists() or not prompts_dir.is_dir():
+        if not prompts_dir.exists() or not prompts_dir.is_dir() or prompts_dir.is_symlink():
             return
 
         try:
@@ -452,17 +455,22 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             if not rule_file.exists() or not rule_file.is_file():
                 return None
 
-            file_metadata = get_file_metadata(rule_file)
             project_root = find_project_root_func(rule_file)
-            content, truncated = read_file_content(rule_file, file_metadata['size'])
+            # Symlink-safe, containment-checked read: refuses a rule file whose
+            # realpath escapes the project root (e.g. a symlink at another user's
+            # secret), matching the Copilot-for-Xcode settings reader.
+            contained = read_rule_file_contained(rule_file, project_root)
+            if contained is None:
+                return None
+            content, truncated, size, last_modified = contained
 
             return {
                 "file_path": str(rule_file),
                 "file_name": rule_file.name,
                 "project_root": str(project_root) if project_root else None,
                 "content": content,
-                "size": file_metadata['size'],
-                "last_modified": file_metadata['last_modified'],
+                "size": size,
+                "last_modified": last_modified,
                 "truncated": truncated,
                 "scope": scope
             }

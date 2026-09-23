@@ -65,6 +65,7 @@ from ...mcp_extraction_helpers import (
     _strip_trailing_commas,
     transform_mcp_servers_to_array,
 )
+from ...rule_read_helpers import _open_beneath_strict
 
 logger = logging.getLogger(__name__)
 
@@ -474,42 +475,24 @@ class MacOSCopilotXcodeSettingsExtractor:
                 out.append(item)
         return out
 
-    @staticmethod
-    def _within_home(path: Path, user_home: Path) -> bool:
-        """True when ``path`` resolves inside ``user_home``. Realpath containment (the
-        ``_read_contained`` model), NOT ``path_in_scope``: this reads
-        ``~/.config/github-copilot/xcode/mcp.json``, and ``path_in_scope`` rejects
-        every dot-directory, so it would refuse the legitimate hidden ``.config``
-        parent and lose the canonical MCP source. Realpath still refuses an
-        out-of-home symlink target (the group-container escape) while allowing hidden
-        home dirs and in-home symlinks."""
-        try:
-            real = os.path.realpath(str(path))
-            base = os.path.realpath(str(user_home))
-        except OSError:
-            return False
-        return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
-
     def _safe_read_bytes(self, path: Path, user_home: Path) -> Optional[bytes]:
         """Read a user-writable config file's bytes through the same safe boundary
-        ``_read_contained`` applies, or None. Refuse a path that resolves outside the
-        scanned home (realpath containment), open O_NOFOLLOW via the shared
-        ``_PLIST_OPEN_FLAGS``, then judge the descriptor itself — regular file, size
-        cap, single hard link, and owned by the home's user — rather than a
-        re-resolved path. A hard link to another user's file is a regular file that
-        clears containment, and a differently-owned file inside the home is still not
-        this user's, so under a root/MDM all-users scan both would otherwise be read
-        and misattributed. The ``finally`` closes ``fd`` on every refuse path. Never
-        raises."""
-        if not self._within_home(path, user_home):
-            logger.info(f"Refusing {path}: resolves outside {user_home}")
-            return None
+        ``_read_contained`` applies, or None. Resolve the path one component at a time
+        from a handle on the home with ``O_NOFOLLOW`` (so no symlinked component is
+        followed and it cannot escape the home), then judge the descriptor itself —
+        regular file, size cap, single hard link, and owned by the home's user. A hard
+        link to another user's file is a regular file inside the home, and a
+        differently-owned file inside the home is still not this user's, so under a
+        root/MDM all-users scan both would otherwise be read and misattributed. The
+        ``finally`` closes ``fd`` on every refuse path. Never raises."""
         fd = None
         try:
-            # O_NOFOLLOW: a symlink AT the final component raises here instead of
-            # being followed; O_NONBLOCK (from the shared flags) keeps a planted
-            # FIFO from blocking the scan.
-            fd = os.open(str(path), _PLIST_OPEN_FLAGS)
+            # Per-component openat from the home: a symlinked component (intermediate or
+            # final) is refused, not followed, and the file can't escape the home.
+            fd = _open_beneath_strict(path, user_home, _PLIST_OPEN_FLAGS)
+            if fd is None:
+                logger.info(f"Refusing {path}: not contained under {user_home}")
+                return None
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 return None

@@ -30,6 +30,7 @@ from coding_discovery_tools.windows.github_copilot.copilot_rules_extractor impor
     WindowsGitHubCopilotRulesExtractor,
     find_github_copilot_project_root as _win_find_root,
 )
+from coding_discovery_tools.rule_read_helpers import read_rule_file_contained  # noqa: E402
 
 _SECRET = "SECRET-OUTSIDE-THE-REPO"
 
@@ -165,6 +166,108 @@ class TestWindowsRulesWalkSafety(_RulesWalkSafetyBase, unittest.TestCase):
                 link / "evil.md", _win_find_root, scope="user", user_home=home)
             self.assertIsNone(
                 info, "a user-global junction pointing outside the home must be refused")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+@unittest.skipUnless(os.name == "posix", "per-component openat containment is POSIX; Windows runs on the VM")
+class TestReadRuleFileContainedContainment(unittest.TestCase):
+    """Containment is decided on the OPENED file, never a re-walked name. Project scope
+    (strict) resolves per component with O_NOFOLLOW; user scope follows the dotfile
+    symlink then contains the resolved descriptor to the home."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="rc-root-"))
+        self.outside = Path(tempfile.mkdtemp(prefix="rc-evil-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.outside, ignore_errors=True)
+
+    # project scope (allow_symlink=False) — strict per-component O_NOFOLLOW
+
+    def test_project_symlinked_intermediate_component_refused(self):
+        # root/link -> outside{secret}; a symlinked INTERMEDIATE component must be
+        # refused, not followed. (Revert _open_beneath_strict to os.open(full) and this
+        # reads OUT-OF-TREE-SECRET — the deterministic prove-fail.)
+        (self.outside / "rule.md").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
+        os.symlink(self.outside, self.root / "link")
+        result = read_rule_file_contained(self.root / "link" / "rule.md", self.root, allow_symlink=False)
+        self.assertIsNone(result)
+
+    def test_project_symlinked_final_component_refused(self):
+        (self.outside / "secret.md").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
+        os.symlink(self.outside / "secret.md", self.root / "rule.md")
+        result = read_rule_file_contained(self.root / "rule.md", self.root, allow_symlink=False)
+        self.assertIsNone(result)
+
+    def test_project_symlinked_component_back_inside_root_refused(self):
+        # Strict scope refuses ANY symlinked component, even one whose target is inside
+        # root — O_NOFOLLOW semantics, not mere containment.
+        (self.root / "real").mkdir()
+        (self.root / "real" / "rule.md").write_text("IN-ROOT", encoding="utf-8")
+        os.symlink(self.root / "real", self.root / "link")
+        result = read_rule_file_contained(self.root / "link" / "rule.md", self.root, allow_symlink=False)
+        self.assertIsNone(result)
+
+    def test_project_legit_nested_file_is_read(self):
+        nested = self.root / "a" / "b"
+        nested.mkdir(parents=True)
+        (nested / "rule.md").write_text("NESTED-OK", encoding="utf-8")
+        result = read_rule_file_contained(self.root / "a" / "b" / "rule.md", self.root, allow_symlink=False)
+        self.assertIsNotNone(result, "a legit nested in-root file must be read")
+        self.assertEqual(result[0], "NESTED-OK")
+
+    def test_project_path_outside_root_refused(self):
+        (self.outside / "rule.md").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
+        result = read_rule_file_contained(self.outside / "rule.md", self.root, allow_symlink=False)
+        self.assertIsNone(result, "a path not under root (.. escape) must be refused")
+
+    # user scope (allow_symlink=True) — follow then contain the descriptor
+
+    def test_user_dotfile_symlink_within_home_is_read(self):
+        (self.root / ".dotfiles").mkdir()
+        (self.root / ".dotfiles" / "g.md").write_text("MY GLOBAL RULE", encoding="utf-8")
+        rules = self.root / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        os.symlink(self.root / ".dotfiles" / "g.md", rules / "g.md")
+        result = read_rule_file_contained(rules / "g.md", self.root, allow_symlink=True)
+        self.assertIsNotNone(result, "a user-global dotfile symlink inside home must read")
+        self.assertEqual(result[0], "MY GLOBAL RULE")
+
+    def test_user_symlink_outside_home_refused_on_descriptor(self):
+        # Binding lock: there is no name pre-check any more — the open lands on a real
+        # out-of-home secret and _fd_within_root on the opened fd is the sole guard.
+        (self.outside / "secret").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
+        rules = self.root / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        os.symlink(self.outside / "secret", rules / "y.md")
+        result = read_rule_file_contained(rules / "y.md", self.root, allow_symlink=True)
+        self.assertIsNone(result, "a user-global symlink outside home must be refused")
+
+
+@unittest.skipUnless(sys.platform == "darwin", "Copilot-for-Xcode reader is macOS-only")
+class TestXcodeSafeReadBytesContainment(unittest.TestCase):
+    """The Xcode plist/JSON reader shares the same per-component containment."""
+
+    def test_symlinked_component_refused_and_legit_read(self):
+        from coding_discovery_tools.macos.github_copilot_xcode.settings_extractor import (
+            MacOSCopilotXcodeSettingsExtractor,
+        )
+        ext = MacOSCopilotXcodeSettingsExtractor()
+        home = Path(tempfile.mkdtemp(prefix="xc-home-"))
+        outside = Path(tempfile.mkdtemp(prefix="xc-evil-"))
+        try:
+            cfg = home / ".config" / "github-copilot" / "xcode"
+            cfg.mkdir(parents=True)
+            (cfg / "mcp.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(ext._safe_read_bytes(cfg / "mcp.json", home), b"{}",
+                             "a legit in-home config must be read")
+            (outside / "secret.json").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
+            os.symlink(outside / "secret.json", cfg / "evil.json")
+            self.assertIsNone(ext._safe_read_bytes(cfg / "evil.json", home),
+                              "a symlinked component pointing outside home must be refused")
         finally:
             shutil.rmtree(home, ignore_errors=True)
             shutil.rmtree(outside, ignore_errors=True)

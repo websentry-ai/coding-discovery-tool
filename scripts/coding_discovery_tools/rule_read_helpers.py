@@ -7,18 +7,26 @@ project could point ``.github/copilot-instructions.md`` (or the ``.github`` /
 read the target as their project rule. This applies the same boundary the
 Copilot-for-Xcode settings reader uses:
 
-  * realpath containment — the file's realpath must stay inside the project root,
-    so a link (symlink, or a Windows junction on an ancestor) whose target escapes
-    the repo, or points at another user's file, is refused. This is the cross-OS
+  * realpath containment — the file's realpath must stay inside the containment
+    root, so a link (symlink, or a Windows junction on an ancestor) whose target
+    escapes it, or points at another user's file, is refused. This is the cross-OS
     guard, and the ONLY one that helps on Windows, where ``O_NOFOLLOW`` is a no-op
     and every file's ``st_uid`` is 0.
-  * an ``O_NOFOLLOW`` descriptor check (POSIX) — a symlinked rule file is refused
-    outright, plus non-regular files, multiply-linked files (cross-user hard link),
-    and files not owned by the project owner.
+  * an ownership + descriptor check — regular file, owned by the containment root's
+    owner (macOS/Linux; meaningless on Windows), and in strict mode ``O_NOFOLLOW``
+    plus a single-hard-link requirement.
 
-So a symlinked rule file is refused (not read); only a real regular file inside the
-project root is read. The walks separately refuse to descend a symlinked or
-junctioned directory (``is_symlink_or_junction``) before reaching this reader.
+Behaviour differs by scope:
+  * Project/workspace reads are STRICT — ``O_NOFOLLOW``, so a symlinked rule file is
+    refused (not followed), plus the hard-link and owner checks. This is the
+    root-scan attack surface.
+  * User-scope global reads (the user's own ``~/.copilot/instructions`` /
+    ``~/.claude/rules`` / VS Code User prompts) MAY follow a symlink — so a dotfile
+    manager still works — but only when the followed target's realpath stays inside
+    the scanned user's home and (macOS/Linux) is owned by that user.
+
+The walks separately refuse to descend a symlinked or junctioned directory
+(``is_symlink_or_junction``) before reaching this reader.
 """
 
 import logging

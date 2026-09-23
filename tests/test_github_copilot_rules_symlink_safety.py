@@ -150,6 +150,31 @@ class TestWindowsRulesWalkSafety(_RulesWalkSafetyBase, unittest.TestCase):
         self.assertNotIn(_SECRET, self._walk_blob(),
                          "a junctioned .github directory must not be entered")
 
+    def test_user_scope_junction_outside_home_is_refused(self):
+        # On Windows every file's st_uid is 0, so ownership cannot backstop the
+        # user-scope containment — realpath-containment-to-home is the only guard.
+        # A user-global rule reached through a junction pointing OUTSIDE the home
+        # (file symlinks need privilege on Windows; a directory junction does not)
+        # must be refused.
+        home = Path(tempfile.mkdtemp(prefix="gh-home-"))
+        outside = Path(tempfile.mkdtemp(prefix="gh-evil-"))  # sibling of home, not under it
+        try:
+            (outside / "evil.md").write_text(_SECRET, encoding="utf-8")
+            rules = home / ".claude" / "rules"
+            rules.mkdir(parents=True)
+            link = rules / "ext"
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                check=True, capture_output=True,
+            )
+            info = self.EXTRACTOR()._extract_rule_with_scope(
+                link / "evil.md", _win_find_root, scope="user", user_home=home)
+            self.assertIsNone(
+                info, "a user-global junction pointing outside the home must be refused")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

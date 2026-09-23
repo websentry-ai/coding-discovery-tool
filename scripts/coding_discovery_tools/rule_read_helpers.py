@@ -309,12 +309,9 @@ def _fd_within_root(fd: int, root) -> bool:
 
 
 def _open_beneath_strict(rule_file, root, final_flags) -> Optional[int]:
-    """POSIX strict open: descend each path component of ``rule_file`` from a handle on
-    ``root`` with ``O_NOFOLLOW`` (``openat``), so no symlinked component — intermediate
-    or final — is ever followed and the opened file cannot escape ``root`` (the
-    RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS guarantee). Returns the file fd, or None on
-    any symlink, escape, or error. Component-wise ``openat`` is used rather than raw
-    ``openat2`` so it needs no ctypes and behaves the same on macOS and Linux."""
+    """POSIX: open ``rule_file`` by descending each path component from a handle on
+    ``root`` with ``O_NOFOLLOW`` (``openat``), or None. No symlinked component is
+    followed and the file cannot escape ``root``."""
     try:
         rel = os.path.relpath(os.path.abspath(str(rule_file)), os.path.abspath(str(root)))
     except (OSError, ValueError):
@@ -342,24 +339,34 @@ def _open_beneath_strict(rule_file, root, final_flags) -> Optional[int]:
                 pass
 
 
-def _open_contained(rule_file, root, allow_symlink) -> Optional[int]:
-    """Open ``rule_file`` under a containment guarantee, or None. POSIX project scope
-    walks per component from a root handle so containment holds by construction. User
-    scope must follow a dotfile-manager symlink, and Windows has no per-component
-    ``openat``, so both open the path then bind containment to the opened descriptor."""
-    base_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+def _open_contained(rule_file, root, allow_symlink, *, extra_flags: int = 0) -> Optional[int]:
+    """The single OS-dispatched open for contained reads, or None. ``extra_flags`` are
+    OR'd in so a caller can add its own (e.g. ``O_BINARY``)."""
+    base_flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+                  | getattr(os, "O_NOCTTY", 0) | extra_flags)
     if os.name == "posix" and not allow_symlink:
+        # Project scope: resolve per component with O_NOFOLLOW; contained by construction.
         return _open_beneath_strict(rule_file, root, base_flags)
+    # Follow-symlink scope (user, or any Windows: dir_fd is unsupported there). Pre-check
+    # the target before opening; a symlink could point outside root or at a device node.
+    try:
+        resolved = os.path.realpath(str(rule_file))
+        base = os.path.realpath(str(root))
+    except OSError:
+        return None
+    if not (resolved == base or resolved.startswith(base.rstrip(os.sep) + os.sep)):
+        return None
+    try:
+        if not stat.S_ISREG(os.stat(resolved).st_mode):
+            return None
+    except OSError:
+        return None
     flags = base_flags | (0 if allow_symlink else getattr(os, "O_NOFOLLOW", 0))
     try:
         fd = os.open(str(rule_file), flags)
     except OSError:
         return None
-    # User-scope POSIX is hardening, not fully race-free: it must follow the dotfile
-    # symlink, so it can't walk per-component, and the root side of this check is still
-    # name-resolved. The st_uid == root-owner check below is the real backstop against
-    # cross-user disclosure here; project scope closes it by construction and Windows by
-    # the handle path.
+    # Authoritative containment check, bound to the opened descriptor.
     if not _fd_within_root(fd, root):
         try:
             os.close(fd)

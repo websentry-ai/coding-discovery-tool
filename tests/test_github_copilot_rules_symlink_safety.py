@@ -237,14 +237,27 @@ class TestReadRuleFileContainedContainment(unittest.TestCase):
         self.assertEqual(result[0], "MY GLOBAL RULE")
 
     def test_user_symlink_outside_home_refused_on_descriptor(self):
-        # Binding lock: there is no name pre-check any more — the open lands on a real
-        # out-of-home secret and _fd_within_root on the opened fd is the sole guard.
+        # A user-global symlink to a real out-of-home secret is refused.
         (self.outside / "secret").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
         rules = self.root / ".claude" / "rules"
         rules.mkdir(parents=True)
         os.symlink(self.outside / "secret", rules / "y.md")
         result = read_rule_file_contained(rules / "y.md", self.root, allow_symlink=True)
         self.assertIsNone(result, "a user-global symlink outside home must be refused")
+
+    def test_user_symlink_to_non_regular_target_refused_before_open(self):
+        # A symlink to a non-regular target (device/FIFO) is refused before it is opened.
+        from unittest import mock
+        from coding_discovery_tools import rule_read_helpers as rr
+        rules = self.root / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        fifo = self.root / "planted.pipe"
+        os.mkfifo(fifo)  # in-home: only the regular-file pre-check can refuse it
+        os.symlink(fifo, rules / "x.md")
+        with mock.patch.object(rr.os, "open",
+                               side_effect=AssertionError("must not open a non-regular target")):
+            result = read_rule_file_contained(rules / "x.md", self.root, allow_symlink=True)
+        self.assertIsNone(result, "a user-global symlink to a non-regular target must be refused")
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Copilot-for-Xcode reader is macOS-only")

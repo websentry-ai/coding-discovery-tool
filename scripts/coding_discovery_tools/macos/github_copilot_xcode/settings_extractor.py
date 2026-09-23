@@ -65,7 +65,7 @@ from ...mcp_extraction_helpers import (
     _strip_trailing_commas,
     transform_mcp_servers_to_array,
 )
-from ...rule_read_helpers import _open_beneath_strict
+from ...rule_read_helpers import _open_contained
 
 logger = logging.getLogger(__name__)
 
@@ -487,9 +487,9 @@ class MacOSCopilotXcodeSettingsExtractor:
         ``finally`` closes ``fd`` on every refuse path. Never raises."""
         fd = None
         try:
-            # Per-component openat from the home: a symlinked component (intermediate or
-            # final) is refused, not followed, and the file can't escape the home.
-            fd = _open_beneath_strict(path, user_home, _PLIST_OPEN_FLAGS)
+            # The shared OS-dispatched open (strict/project scope): per-component openat
+            # on POSIX, handle-path containment on Windows. Never dir_fd on Windows.
+            fd = _open_contained(path, user_home, allow_symlink=False, extra_flags=_PLIST_OPEN_FLAGS)
             if fd is None:
                 logger.info(f"Refusing {path}: not contained under {user_home}")
                 return None

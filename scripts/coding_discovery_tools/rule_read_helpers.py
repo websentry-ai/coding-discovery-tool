@@ -1,32 +1,19 @@
 """Symlink-safe, containment-checked reading of workspace rule files.
 
-Shared by the GitHub Copilot rules extractors (macOS/Windows/Linux). The .github
-walk followed redirects, so under a root/MDM scan a user who controls their own
-project could point ``.github/copilot-instructions.md`` (or the ``.github`` /
-``instructions`` / ``prompts`` directory) at another user's file and have the walk
-read the target as their project rule. This applies the same boundary the
-Copilot-for-Xcode settings reader uses:
+Shared by the GitHub Copilot rules extractors. The .github walk follows redirects,
+so a root/MDM scan must not read a rule file whose target escapes its containment
+root (another user's file). Two scopes:
 
-  * realpath containment — the file's realpath must stay inside the containment
-    root, so a link (symlink, or a Windows junction on an ancestor) whose target
-    escapes it, or points at another user's file, is refused. This is the cross-OS
-    guard, and the ONLY one that helps on Windows, where ``O_NOFOLLOW`` is a no-op
-    and every file's ``st_uid`` is 0.
-  * an ownership + descriptor check — regular file, owned by the containment root's
-    owner (macOS/Linux; meaningless on Windows), and in strict mode ``O_NOFOLLOW``
-    plus a single-hard-link requirement.
-
-Behaviour differs by scope:
-  * Project/workspace reads are STRICT — ``O_NOFOLLOW``, so a symlinked rule file is
-    refused (not followed), plus the hard-link and owner checks. This is the
-    root-scan attack surface.
+  * Project/workspace reads are STRICT — ``O_NOFOLLOW`` (a symlinked rule file is
+    refused, not followed), single hard link, regular file, owned by the project.
   * User-scope global reads (the user's own ``~/.copilot/instructions`` /
-    ``~/.claude/rules`` / VS Code User prompts) MAY follow a symlink — so a dotfile
-    manager still works — but only when the followed target's realpath stays inside
-    the scanned user's home and (macOS/Linux) is owned by that user.
+    ``~/.claude/rules`` / VS Code User prompts) MAY follow a symlink (so a dotfile
+    manager works), but the followed target must resolve inside the user's home and
+    (macOS/Linux) be owned by that user.
 
-The walks separately refuse to descend a symlinked or junctioned directory
-(``is_symlink_or_junction``) before reaching this reader.
+realpath containment is the cross-OS guard, and the only one on Windows, where
+``O_NOFOLLOW`` is a no-op and ``st_uid`` is 0. The walks separately refuse to
+descend a symlinked/junctioned directory before reaching this reader.
 """
 
 import logging
@@ -42,12 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 def realpath_contained(path, root) -> bool:
-    """True when ``path`` resolves inside ``root``. Realpath containment (not
-    ``path_in_scope``, which rejects every dot-component and so could not accept a
-    ``.github`` path): resolves symlinks and Windows junctions, so a path whose
-    target escapes ``root`` — even through a junctioned ancestor — is refused. The
-    final rule file is additionally opened O_NOFOLLOW below, so a symlinked file is
-    refused rather than read."""
+    """True when ``path`` resolves inside ``root``. Resolves symlinks and Windows
+    junctions, so a target escaping ``root`` (even through a junctioned ancestor) is
+    refused. Not ``path_in_scope``, which rejects every dot-component and so could
+    not accept a ``.github`` path."""
     try:
         real = os.path.realpath(str(path))
         base = os.path.realpath(str(root))
@@ -62,20 +47,11 @@ def read_rule_file_contained(
     """Read a rule file's text through the safe boundary, or None if refused.
 
     Returns ``(content, truncated, size, last_modified_iso)``. In both modes the
-    file's realpath must stay inside ``containment_root`` and it must be a regular
-    file owned by that root's owner — so a root/MDM scan cannot be tricked into
-    reading another user's secret. Never raises.
-
-    ``allow_symlink=False`` (project/workspace rules): strict. Opened O_NOFOLLOW, so
-    a symlinked rule file is refused rather than followed, and a multiply-linked
-    (cross-user hard link) file is refused. This is the root-scan attack surface.
-
-    ``allow_symlink=True`` (the user's own global rules — ``~/.copilot/instructions``,
-    ``~/.claude/rules``, the VS Code User prompts dir): the link is FOLLOWED so a
-    dotfile manager (chezmoi/stow/yadm) that symlinks these into place still works,
-    but the followed target must still resolve inside ``containment_root`` (the
-    user's home) and be owned by the home's owner — so a link out of the home, or to
-    another user's file, is still refused.
+    file's realpath must stay inside ``containment_root`` and be a regular file owned
+    by that root's owner. ``allow_symlink=False`` (project/workspace) also opens
+    ``O_NOFOLLOW`` and refuses a multiply-linked file; ``allow_symlink=True`` (the
+    user's own global rules) follows the link so a dotfile manager works, still
+    contained to the home. Never raises.
     """
     if containment_root is None or not realpath_contained(rule_file, containment_root):
         logger.info(f"Refusing rule file {rule_file}: resolves outside {containment_root}")

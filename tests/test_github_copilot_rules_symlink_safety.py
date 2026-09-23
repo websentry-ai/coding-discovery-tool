@@ -1,11 +1,8 @@
-"""Symlink/junction safety of the shared GitHub Copilot .github rules walk (WEB-5935).
+"""Symlink/junction safety of the shared GitHub Copilot .github rules walk.
 
-Under a root/MDM scan the walk must not follow a redirect out of the project: a
-user who controls their own repo could point ``.github/copilot-instructions.md``
-(or the ``.github`` directory) at another user's file. Each OS extractor's walk is
-exercised only on its native OS (its home/system-path logic assumes that host); the
-CI matrix covers all three. Windows is tested with an NTFS directory *junction*,
-which ``is_symlink()`` does not detect.
+Under a root/MDM scan the walk must not follow a redirect out of the project.
+Each OS extractor's walk is exercised only on its native OS; Windows uses an NTFS
+directory junction, which ``is_symlink()`` does not detect.
 
 unittest, not pytest: CI runs ``python -m unittest discover -s tests -t .``.
 """
@@ -72,8 +69,8 @@ class _PosixRulesWalkSafety(_RulesWalkSafetyBase):
     FIND_ROOT = None  # each concrete class sets its OS's project-root resolver
 
     def test_user_scope_dotfile_symlink_within_home_is_captured(self):
-        # A dotfile manager (chezmoi/stow/yadm) symlinks ~/.claude/rules/g.md ->
-        # ~/.dotfiles/g.md — same user, inside their home. It must still be read.
+        # A user-global rule symlinked within the user's own home (dotfile manager)
+        # is still read.
         home = Path(tempfile.mkdtemp(prefix="gh-home-"))
         try:
             rules = home / ".claude" / "rules"
@@ -89,8 +86,7 @@ class _PosixRulesWalkSafety(_RulesWalkSafetyBase):
             shutil.rmtree(home, ignore_errors=True)
 
     def test_user_scope_symlink_outside_home_is_refused(self):
-        # The same root-scan attack at user scope: ~attacker/.claude/rules/y.md ->
-        # a file outside the home must still be refused.
+        # A user-global symlink pointing outside the home is still refused.
         home = Path(tempfile.mkdtemp(prefix="gh-home-"))
         outside = Path(tempfile.mkdtemp(prefix="gh-evil-"))
         try:
@@ -151,11 +147,9 @@ class TestWindowsRulesWalkSafety(_RulesWalkSafetyBase, unittest.TestCase):
                          "a junctioned .github directory must not be entered")
 
     def test_user_scope_junction_outside_home_is_refused(self):
-        # On Windows every file's st_uid is 0, so ownership cannot backstop the
-        # user-scope containment — realpath-containment-to-home is the only guard.
-        # A user-global rule reached through a junction pointing OUTSIDE the home
-        # (file symlinks need privilege on Windows; a directory junction does not)
-        # must be refused.
+        # Windows uid is 0, so realpath-containment-to-home is the only user-scope
+        # guard: a user-global rule reached through a junction out of the home
+        # (junctions need no privilege, unlike file symlinks) must be refused.
         home = Path(tempfile.mkdtemp(prefix="gh-home-"))
         outside = Path(tempfile.mkdtemp(prefix="gh-evil-"))  # sibling of home, not under it
         try:

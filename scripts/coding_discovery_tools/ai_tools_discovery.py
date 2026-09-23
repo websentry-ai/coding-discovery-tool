@@ -2563,15 +2563,12 @@ class AIToolsDetector:
 
     def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:
         """Workspace ``.github`` config Copilot for Xcode reads, per project root:
-        ``.github/copilot-instructions.md`` + ``.github/instructions/*.instructions.md``
-        as ``rules``, and ``.github/prompts/*.prompt.md`` as ``skills`` (so the UI
-        Skills section fills — the shared extractor otherwise lumps prompts into
-        rules).
+        ``copilot-instructions.md`` + ``instructions/*.instructions.md`` as ``rules``
+        and ``prompts/*.prompt.md`` as ``skills`` (so the UI Skills section fills).
 
-        Reuses the VS Code Copilot rules extractor's ``.github`` walk rather than
-        reimplementing it, then keeps only ``.github`` surfaces — dropping the
-        ``.claude/rules`` and ``AGENTS.md`` files that walk also collects but Xcode
-        does not read. Returns ``{project_root: {"rules": [...], "skills": [...]}}``.
+        Reuses the VS Code Copilot rules extractor's ``.github`` walk, then keeps only
+        ``.github`` surfaces — dropping the ``.claude/rules`` and ``AGENTS.md`` that
+        walk also collects but Xcode does not read.
         """
         result: Dict[str, Dict[str, List]] = {}
         extractor = self._github_copilot_rules_extractor

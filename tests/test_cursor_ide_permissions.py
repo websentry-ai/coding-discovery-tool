@@ -438,9 +438,8 @@ class TestCrossWorkspaceDedupe(_BaseCursorPermissionsTest):
         self.assertEqual(result["mcp_tool_allowlist"], ["a", "b", "c", "d"])
 
     def test_D1b_deterministic_regardless_of_walk_order(self):
-        """The merged allowlist must not depend on filesystem walk order. Drive the
-        walk in REVERSE (projY before projX) and assert the result is unchanged —
-        the pre-fix code returned ['a','b','d','c']; sorting the enumeration fixes it."""
+        """The merged allowlist must not depend on filesystem walk order: drive the
+        walk in REVERSE (projY before projX) and assert the result is unchanged."""
         composer = {"useYoloMode": False}
         _create_cursor_db(self.db_path, composer)
         self._write_global_permissions({"mcpAllowlist": ["a", "b"]})

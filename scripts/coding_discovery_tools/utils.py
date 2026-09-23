@@ -631,7 +631,8 @@ def _newest_mtime_within(config_dir: Path) -> Optional[float]:
     """Newest mtime of ``config_dir``, its children and its grandchildren. Never raises.
 
     A directory mtime only moves when a direct entry is added or removed, so activity
-    under ``projects/<slug>/`` never reaches the config dir itself.
+    under ``projects/<slug>/`` never reaches the config dir itself. Appends below this
+    depth stay invisible — this is a triage tag, not the presence gate.
     """
     try:
         newest = config_dir.stat().st_mtime

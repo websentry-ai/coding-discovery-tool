@@ -476,20 +476,15 @@ class MacOSCopilotXcodeSettingsExtractor:
         return out
 
     def _safe_read_bytes(self, path: Path, user_home: Path) -> Optional[bytes]:
-        """Read a user-writable config file's bytes through the same safe boundary
-        ``_read_contained`` applies, or None. Resolve the path one component at a time
-        from a handle on the home with ``O_NOFOLLOW`` (so no symlinked component is
-        followed and it cannot escape the home), then judge the descriptor itself —
-        regular file, size cap, single hard link, and owned by the home's user. A hard
-        link to another user's file is a regular file inside the home, and a
-        differently-owned file inside the home is still not this user's, so under a
-        root/MDM all-users scan both would otherwise be read and misattributed. The
-        ``finally`` closes ``fd`` on every refuse path. Never raises."""
+        """Read a user config file's bytes through the shared contained open, or None.
+        User scope: a symlinked ``~/.config`` is followed, the opened file is contained
+        to the home, and a final-component symlink (``O_NOFOLLOW``) is refused. Then
+        judge the descriptor — regular file, size cap, single hard link, owned by the
+        home's user. The ``finally`` closes ``fd`` on every refuse path. Never raises."""
         fd = None
         try:
-            # The shared OS-dispatched open (strict/project scope): per-component openat
-            # on POSIX, handle-path containment on Windows. Never dir_fd on Windows.
-            fd = _open_contained(path, user_home, allow_symlink=False, extra_flags=_PLIST_OPEN_FLAGS)
+            # User scope: follow a symlinked ~/.config, contain the opened file to home.
+            fd = _open_contained(path, user_home, allow_symlink=True, extra_flags=_PLIST_OPEN_FLAGS)
             if fd is None:
                 logger.info(f"Refusing {path}: not contained under {user_home}")
                 return None

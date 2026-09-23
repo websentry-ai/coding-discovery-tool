@@ -311,7 +311,8 @@ def _fd_within_root(fd: int, root) -> bool:
 def _open_beneath_strict(rule_file, root, final_flags) -> Optional[int]:
     """POSIX: open ``rule_file`` by descending each path component from a handle on
     ``root`` with ``O_NOFOLLOW`` (``openat``), or None. No symlinked component is
-    followed and the file cannot escape ``root``."""
+    followed and the file cannot escape ``root``. The root anchor itself is trusted
+    (opened by name)."""
     try:
         rel = os.path.relpath(os.path.abspath(str(rule_file)), os.path.abspath(str(root)))
     except (OSError, ValueError):
@@ -341,7 +342,9 @@ def _open_beneath_strict(rule_file, root, final_flags) -> Optional[int]:
 
 def _open_contained(rule_file, root, allow_symlink, *, extra_flags: int = 0) -> Optional[int]:
     """The single OS-dispatched open for contained reads, or None. ``extra_flags`` are
-    OR'd in so a caller can add its own (e.g. ``O_BINARY``)."""
+    OR'd in so a caller can add its own (e.g. ``O_BINARY``). The follow-symlink
+    pre-check is best-effort; ``_fd_within_root`` on the descriptor and the uid check
+    are the authoritative guards. A symlinked containment root is trusted as-is."""
     base_flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
                   | getattr(os, "O_NOCTTY", 0) | extra_flags)
     if os.name == "posix" and not allow_symlink:

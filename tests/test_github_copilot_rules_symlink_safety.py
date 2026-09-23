@@ -262,28 +262,67 @@ class TestReadRuleFileContainedContainment(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "Copilot-for-Xcode reader is macOS-only")
 class TestXcodeSafeReadBytesContainment(unittest.TestCase):
-    """The Xcode plist/JSON reader shares the same per-component containment."""
+    """The Xcode reader is user scope: it follows a symlinked ~/.config but contains
+    the opened file to the home and refuses a final-component symlink."""
 
-    def test_symlinked_component_refused_and_legit_read(self):
+    def _ext(self):
         from coding_discovery_tools.macos.github_copilot_xcode.settings_extractor import (
             MacOSCopilotXcodeSettingsExtractor,
         )
-        ext = MacOSCopilotXcodeSettingsExtractor()
+        return MacOSCopilotXcodeSettingsExtractor()
+
+    def test_legit_in_home_config_is_read(self):
         home = Path(tempfile.mkdtemp(prefix="xc-home-"))
-        outside = Path(tempfile.mkdtemp(prefix="xc-evil-"))
         try:
             cfg = home / ".config" / "github-copilot" / "xcode"
             cfg.mkdir(parents=True)
             (cfg / "mcp.json").write_text("{}", encoding="utf-8")
-            self.assertEqual(ext._safe_read_bytes(cfg / "mcp.json", home), b"{}",
-                             "a legit in-home config must be read")
-            (outside / "secret.json").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
-            os.symlink(outside / "secret.json", cfg / "evil.json")
-            self.assertIsNone(ext._safe_read_bytes(cfg / "evil.json", home),
-                              "a symlinked component pointing outside home must be refused")
+            self.assertEqual(self._ext()._safe_read_bytes(cfg / "mcp.json", home), b"{}")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+    def test_symlinked_config_into_home_is_read(self):
+        # ~/.config is a symlink to another in-home dir (dotfile manager) — must read.
+        home = Path(tempfile.mkdtemp(prefix="xc-home-"))
+        try:
+            real = home / "dotfiles" / "config" / "github-copilot" / "xcode"
+            real.mkdir(parents=True)
+            (real / "mcp.json").write_text("{}", encoding="utf-8")
+            os.symlink(home / "dotfiles" / "config", home / ".config")
+            path = home / ".config" / "github-copilot" / "xcode" / "mcp.json"
+            self.assertEqual(self._ext()._safe_read_bytes(path, home), b"{}",
+                             "a dotfile-managed ~/.config symlink inside home must be read")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+    def test_symlinked_config_out_of_home_is_refused(self):
+        home = Path(tempfile.mkdtemp(prefix="xc-home-"))
+        outside = Path(tempfile.mkdtemp(prefix="xc-evil-"))
+        try:
+            real = outside / "github-copilot" / "xcode"
+            real.mkdir(parents=True)
+            (real / "mcp.json").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
+            os.symlink(outside, home / ".config")
+            path = home / ".config" / "github-copilot" / "xcode" / "mcp.json"
+            self.assertIsNone(self._ext()._safe_read_bytes(path, home),
+                              "a ~/.config symlink pointing outside home must be refused")
         finally:
             shutil.rmtree(home, ignore_errors=True)
             shutil.rmtree(outside, ignore_errors=True)
+
+    def test_final_component_symlink_is_refused(self):
+        # Final component is a symlink to an in-home regular file: the pre-check passes
+        # (in-home, regular) so this locks O_NOFOLLOW refusing the final symlink itself.
+        home = Path(tempfile.mkdtemp(prefix="xc-home-"))
+        try:
+            cfg = home / ".config" / "github-copilot" / "xcode"
+            cfg.mkdir(parents=True)
+            (home / "target.json").write_text("{}", encoding="utf-8")
+            os.symlink(home / "target.json", cfg / "link.json")
+            self.assertIsNone(self._ext()._safe_read_bytes(cfg / "link.json", home),
+                              "a final-component symlink must be refused (O_NOFOLLOW)")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -627,6 +627,30 @@ def wsl_distros_present(user_home: Path) -> List[str]:
     return found
 
 
+def _newest_mtime_within(config_dir: Path) -> Optional[float]:
+    """Newest mtime of ``config_dir``, its children and its grandchildren. Never raises.
+
+    A directory mtime only moves when a direct entry is added or removed, so activity
+    under ``projects/<slug>/`` never reaches the config dir itself. Appends below this
+    depth stay invisible — this is a triage tag, not the presence gate.
+    """
+    try:
+        newest = config_dir.stat().st_mtime
+    except (PermissionError, OSError):
+        return None
+    for directory in (config_dir, *_newest_dirs_first(config_dir)):
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        newest = max(newest, entry.stat(follow_symlinks=False).st_mtime)
+                    except OSError:
+                        continue
+        except (PermissionError, OSError):
+            continue
+    return newest
+
+
 def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
     """Days since the most recently touched AI-tool config dir across ``user_homes``.
 
@@ -636,11 +660,8 @@ def newest_tool_config_dir_age_days(user_homes) -> Optional[int]:
     newest = None
     for user_home in user_homes:
         for name in _TOOL_CONFIG_DIRS:
-            try:
-                mtime = (Path(user_home) / name).stat().st_mtime
-            except (PermissionError, OSError):
-                continue
-            if newest is None or mtime > newest:
+            mtime = _newest_mtime_within(Path(user_home) / name)
+            if mtime is not None and (newest is None or mtime > newest):
                 newest = mtime
     if newest is None:
         return None

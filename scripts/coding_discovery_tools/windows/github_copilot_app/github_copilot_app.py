@@ -28,11 +28,22 @@ USER_INSTALL_DIR = Path("AppData") / "Local" / "Programs" / "GitHub Copilot"
 _MAX_DEPTH = 3
 # Run-away guard only: the largest real install tree measured holds ~12k entries.
 _MAX_ENTRIES = 50000
+# The per-user install root is owner-writable, so these names are untrusted.
+_MAX_NAMES = 6
+_MAX_NAME_CHARS = 16
+_TAG_DELIMITERS = str.maketrans({",": "_", "[": "_", "]": "_"})
+
+
+def _tag_name(name: str) -> str:
+    """One entry name, safe to embed in a probe tag."""
+    printable = "".join(char for char in name if char.isprintable())
+    return printable.translate(_TAG_DELIMITERS)[:_MAX_NAME_CHARS]
 
 
 def _find_exe(root: Path) -> str:
-    """``present``, ``no_exe``, ``truncated`` or ``unreadable``. Never raises."""
+    """``present``, ``no_exe[<names>]``, ``truncated`` or ``unreadable``. Never raises."""
     seen = 0
+    names = []
     stack = [(root, 0)]
     while stack:
         current, depth = stack.pop()
@@ -42,6 +53,8 @@ def _find_exe(root: Path) -> str:
                     seen += 1
                     if seen > _MAX_ENTRIES:
                         return "truncated"
+                    if depth == 0 and len(names) < _MAX_NAMES:
+                        names.append(_tag_name(entry.name))
                     if entry.name.lower().endswith(".exe") and entry.is_file():
                         return "present"
                     if entry.is_dir(follow_symlinks=False) and depth < _MAX_DEPTH:
@@ -49,7 +62,7 @@ def _find_exe(root: Path) -> str:
         except (PermissionError, OSError) as exc:
             logger.debug(f"Could not list {current}: {exc}")
             return "unreadable"
-    return "no_exe"
+    return f"no_exe[{','.join(sorted(names))}]" if names else "no_exe"
 
 
 def _install_state(install_dir: Path) -> str:

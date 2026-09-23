@@ -123,8 +123,7 @@ class LinuxClaudeRulesExtractor(BaseClaudeRulesExtractor):
                                 continue
                             self._extract_rules_from_claude_directory(item, projects_by_root)
                             continue
-                        # Claude Code ignores everything under .agents/; do not
-                        # descend into it or capture AGENTS.md/CLAUDE.md inside it.
+                        # Claude Code ignores everything under .agents/.
                         if item.name == ".agents":
                             continue
                         if _entry.is_symlink():

@@ -60,16 +60,13 @@ def read_rule_file_contained(
     try:
         flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
         if not allow_symlink:
-            # O_NOFOLLOW: a symlinked final component raises here instead of being
-            # followed; the descriptor, not a re-resolved path, is what we judge.
+            # O_NOFOLLOW refuses a symlinked final component (strict mode).
             flags |= getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(rule_file), flags)
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None
-        # Strict mode: a hard link keeps its target's owner while its path sits in
-        # the repo, so containment alone cannot see through one. (User-global mode
-        # follows the link, so the owner check below judges the followed target.)
+        # Strict mode: a hard link (even same-uid) passes containment and the owner check; only nlink > 1 refuses it.
         if not allow_symlink and st.st_nlink > 1:
             logger.info(f"Refusing rule file {rule_file}: multiply-linked (nlink={st.st_nlink})")
             return None

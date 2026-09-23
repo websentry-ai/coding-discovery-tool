@@ -2599,15 +2599,10 @@ class AIToolsDetector:
         return result
 
     def _process_copilot_xcode_tool(self, tool: Dict) -> Dict:
-        """Copilot for Xcode: a detection row plus its extractable surfaces —
-        auto-approval ``permissions``, configured MCP servers, the global custom
-        instruction, and per-project workspace rules + prompt skills — each attached
-        in the same shape the other Copilot rows use so the backend/frontend need no
-        change.
-
-        Every surface is best-effort/try-except with ``exc_info=True``, so one
-        failing never drops the others or the detection row itself.
-        """
+        """Copilot for Xcode: a detection row plus its surfaces — permissions, MCP
+        servers, the global instruction, and per-project workspace rules + prompt
+        skills — in the shapes the other Copilot rows use. Each surface is
+        best-effort, so one failing never drops the others or the row."""
         tool_dict = {
             "name": tool.get("name"),
             "version": tool.get("version"),

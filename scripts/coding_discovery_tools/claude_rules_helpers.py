@@ -23,12 +23,8 @@ def is_claude_local_md_file(filename: str) -> bool:
 
 
 def is_agents_md_file(filename: str) -> bool:
-    """Check if filename is an AGENTS.md file Claude Code reads (case-insensitive).
-
-    Claude Code (v2.1.277+) reads ``AGENTS.md`` and ``.claude/AGENTS.md`` as project
-    instructions, but NOT ``AGENTS.local.md`` or ``AGENTS.override.md`` — those are
-    excluded explicitly here.
-    """
+    """True for an AGENTS.md Claude Code reads (case-insensitive); excludes
+    AGENTS.local.md and AGENTS.override.md, which it does not read."""
     lower = filename.lower()
     if lower in ("agents.local.md", "agents.override.md"):
         return False

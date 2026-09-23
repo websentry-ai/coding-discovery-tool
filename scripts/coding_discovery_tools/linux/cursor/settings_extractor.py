@@ -68,7 +68,6 @@ class LinuxCursorSettingsExtractor(BaseCursorSettingsExtractor):
         except (PermissionError, OSError):
             pass
 
-        # Sort so the report is deterministic: the walk order is not stable across
-        # environments, and it decides the merge order of per-workspace MCP/terminal
-        # allowlists downstream. Lexicographic path order is stable.
+        # Deterministic order: the walk order isn't stable and it decides the
+        # merge order of per-workspace allowlists downstream.
         return sorted(found)

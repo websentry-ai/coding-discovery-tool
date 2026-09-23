@@ -15,10 +15,6 @@ Two suites carry the permission surface:
   * ``<group>.prefs`` — the local auto-approval toggles that gate the model:
       - ``EnableAutoApproval``   the master switch (default off)
       - ``TrustToolAnnotations`` (default off)
-    (These are the prefs-suite toggles the app persists on disk. They are distinct
-    from the enterprise ``CopilotPolicy`` keys — ``agentMode.autoApproval.enabled`` /
-    ``cveRemediatorAgent.enabled`` — which are pushed at runtime through a policy
-    subsystem and are not written to this UserDefaults suite.)
 
 Dev builds write to a parallel ``VEKTX9H2N7.group.dev.com.github.CopilotForXcode``
 group; both prod and dev are read, prod preferred. macOS occasionally writes a
@@ -42,8 +38,8 @@ surfaces the sibling Copilot extractors capture, so the tool is described in ful
     extractor uses.
   * Global custom instructions — the ``GlobalCopilotInstructions`` string in the
     ``.prefs`` suite, emitted as a user-scope ``projects[].rules`` entry in the
-    sibling rules shape. Project ``.github/copilot-instructions.md`` is left to the
-    shared Copilot rules extractor, which already reads it, to avoid double-counting.
+    sibling rules shape. Project ``.github/copilot-instructions.md`` is handled by
+    the shared Copilot rules extractor.
 
 This runs on customer machines: every read is best-effort and never raises.
 """
@@ -85,27 +81,18 @@ _MCP_KEY = "AutoApproval_MCP_GlobalApprovals"
 _TERMINAL_KEY = "AutoApproval_Terminal_GlobalApprovals"
 _SENSITIVE_FILES_KEY = "AutoApproval_SensitiveFiles_GlobalApprovals"
 
-# Local auto-approval toggles in the general ``.prefs`` suite (PreferenceKeys in
-# CopilotForXcode ``Keys.swift``): ``EnableAutoApproval`` is the master switch.
-# The enterprise ``CopilotPolicy`` keys are a separate runtime-pushed subsystem and
-# are deliberately not read here — they are not stored in this on-disk suite.
+# Local auto-approval toggles in the general ``.prefs`` suite; ``EnableAutoApproval``
+# is the master switch.
 _TOGGLE_KEYS = ("EnableAutoApproval", "TrustToolAnnotations")
-# The master switch: a truthy value means auto-approval is armed for this user.
 _MASTER_SWITCH_KEY = "EnableAutoApproval"
 
-# Configured (not just approved) MCP servers. The canonical source is the JSON
-# file the app reads/writes; ``configDirectory`` and ``mcp.json`` are verified from
-# CopilotForXcode ``Core/Sources/HostApp/ToolsSettings/MCPConfigConstants.swift``,
-# and its top-level key is ``"servers"`` (``ToolsConfigView.swift``).
+# Configured MCP servers: ``~/.config/github-copilot/xcode/mcp.json`` (top-level key
+# ``"servers"``).
 _MCP_JSON_RELATIVE = (".config", "github-copilot", "xcode", "mcp.json")
-# Fallback: the same JSON mirrored into the general ``.prefs`` suite. Both keys are
-# from ``Tool/Sources/Preferences/Keys.swift`` (suite = ``…group.<base>.prefs``).
+# Fallback: the same JSON mirrored into the ``GitHubCopilotMCPConfig`` .prefs key.
 _MCP_PREF_KEY = "GitHubCopilotMCPConfig"
-# The Xcode-specific GLOBAL custom instruction, a string in the ``.prefs`` suite
-# (``GitHubCopilotRequest.swift`` reads ``UserDefaults.shared.globalCopilotInstructions``).
-# Project ``.github/copilot-instructions.md`` is deliberately NOT read here — the
-# shared macOS GitHub Copilot rules extractor already covers it, so reading it
-# again would double-count the same file under a second tool row.
+# The Xcode global custom instruction, a string in the ``.prefs`` suite. Project
+# ``.github/copilot-instructions.md`` is handled by the shared copilot rules extractor.
 _GLOBAL_INSTRUCTIONS_KEY = "GlobalCopilotInstructions"
 
 # A sandboxed app's config is small; refuse a pathological file rather than load it.
@@ -232,10 +219,9 @@ class MacOSCopilotXcodeSettingsExtractor:
     # -- global custom instructions (rules) ---------------------------------
 
     def extract_rule_projects(self) -> List[Dict]:
-        """One ``{"path": <user home>, "rules": [rule]}`` per scanned user that set a
-        global Copilot instruction. Only the Xcode-specific GLOBAL instruction is
-        captured; project ``.github/copilot-instructions.md`` is left to the shared
-        Copilot rules extractor to avoid double-counting the same file."""
+        """One ``{"path": <user home>, "rules": [rule]}`` per scanned user with a
+        global Copilot instruction. Project ``.github/copilot-instructions.md`` is
+        handled by the shared copilot rules extractor."""
         projects: List[Dict] = []
 
         def per_user(user_home) -> None:
@@ -389,10 +375,8 @@ class MacOSCopilotXcodeSettingsExtractor:
             "scope": "user",
             "settings_path": str(path),
             "raw_settings": raw_settings,
-            # These keys never bypass every confirmation the way VS Code's global
-            # auto-approve does; the specific approvals ARE the posture, expressed
-            # as allow rules — so mode stays "default", matching an armed-with-rules
-            # Claude/Copilot record.
+            # The approvals are the posture (expressed as allow rules), so mode
+            # stays "default" — there is no global-bypass toggle here.
             "permission_mode": "default",
             "sandbox_enabled": None,  # Copilot for Xcode exposes no sandbox toggle
         }

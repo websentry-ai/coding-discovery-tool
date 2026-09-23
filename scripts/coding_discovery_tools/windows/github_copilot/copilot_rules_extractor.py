@@ -5,13 +5,12 @@ from typing import List, Dict
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, is_symlink_or_junction
 from ...claude_code_skills_helpers import is_user_level_claude_subdir
+from ...rule_read_helpers import read_rule_file_contained
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
-    get_file_metadata,
-    read_file_content,
     should_skip_path,
     is_running_as_admin,
     get_windows_system_directories,
@@ -117,7 +116,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         Location: %APPDATA%\\Code\\User\\prompts\\*.instructions.md
 
         """
-        def add_user_rules(directory: Path, patterns) -> None:
+        def add_user_rules(directory: Path, patterns, user_home: Path) -> None:
             """Collect each ``patterns`` match under ``directory`` as a user rule."""
             try:
                 if not directory.is_dir():
@@ -134,7 +133,8 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     except ValueError:
                         continue
                     rule_info = self._extract_rule_with_scope(
-                        rule_file, find_github_copilot_project_root, scope="user"
+                        rule_file, find_github_copilot_project_root, scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -156,9 +156,10 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 add_user_rules(
                     user_home / "AppData" / "Roaming" / editor / "User" / "prompts",
                     ("*.instructions.md", "*.prompt.md"),
+                    user_home,
                 )
-            add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",))
-            add_user_rules(user_home / ".claude" / "rules", ("**/*.md",))
+            add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",), user_home)
+            add_user_rules(user_home / ".claude" / "rules", ("**/*.md",), user_home)
 
         if is_running_as_admin():
             self._scan_user_directories(extract_for_user)
@@ -186,7 +187,8 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     rule_info = self._extract_rule_with_scope(
                         jetbrains_rule_path,
                         find_github_copilot_project_root,
-                        scope="user"
+                        scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -310,6 +312,11 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                             continue
 
                         if entry.is_dir():
+                            # A symlinked directory OR Windows junction (e.g. .github
+                            # -> elsewhere) is never entered; the walk would otherwise
+                            # follow the redirect. is_symlink() misses NTFS junctions.
+                            if is_symlink_or_junction(item):
+                                continue
                             if item.name == ".github":
                                 # Check copilot-instructions.md
                                 copilot_instructions = item / "copilot-instructions.md"
@@ -379,7 +386,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         instructions_dir = github_dir / "instructions"
-        if not instructions_dir.exists() or not instructions_dir.is_dir():
+        if not instructions_dir.exists() or not instructions_dir.is_dir() or is_symlink_or_junction(instructions_dir):
             return
 
         try:
@@ -418,7 +425,7 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         prompts_dir = github_dir / "prompts"
-        if not prompts_dir.exists() or not prompts_dir.is_dir():
+        if not prompts_dir.exists() or not prompts_dir.is_dir() or is_symlink_or_junction(prompts_dir):
             return
 
         try:
@@ -488,7 +495,8 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         self,
         rule_file: Path,
         find_project_root_func,
-        scope: str
+        scope: str,
+        user_home: Path = None
     ) -> Dict:
         """
         Extract a single rule file with metadata including scope.
@@ -505,17 +513,27 @@ class WindowsGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             if not rule_file.exists() or not rule_file.is_file():
                 return None
 
-            file_metadata = get_file_metadata(rule_file)
             project_root = find_project_root_func(rule_file)
-            content, truncated = read_file_content(rule_file, file_metadata['size'])
+            # Project rules are read strictly (no symlink) — the root-scan attack
+            # surface. The user's own global rules may be symlinked into place by a
+            # dotfile manager, so those follow the link but stay contained to the
+            # user's home and owned by that user. On Windows uid is meaningless, so
+            # realpath-containment-to-home is the guard.
+            if scope == "user" and user_home is not None:
+                contained = read_rule_file_contained(rule_file, user_home, allow_symlink=True)
+            else:
+                contained = read_rule_file_contained(rule_file, project_root, allow_symlink=False)
+            if contained is None:
+                return None
+            content, truncated, size, last_modified = contained
 
             return {
                 "file_path": str(rule_file),
                 "file_name": rule_file.name,
                 "project_root": str(project_root) if project_root else None,
                 "content": content,
-                "size": file_metadata['size'],
-                "last_modified": file_metadata['last_modified'],
+                "size": size,
+                "last_modified": last_modified,
                 "truncated": truncated,
                 "scope": scope
             }

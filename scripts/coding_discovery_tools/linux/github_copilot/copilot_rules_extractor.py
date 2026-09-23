@@ -6,7 +6,7 @@ from typing import List, Dict
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries, is_symlink_or_junction
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -14,7 +14,7 @@ from ...linux_extraction_helpers import (
     should_skip_path,
     should_skip_system_path,
 )
-from ...macos_extraction_helpers import get_file_metadata, read_file_content
+from ...rule_read_helpers import read_rule_file_contained
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,8 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         if not rule_file.is_file():
                             continue
                         rule_info = self._extract_rule_with_scope(
-                            rule_file, find_github_copilot_project_root, scope="user"
+                            rule_file, find_github_copilot_project_root, scope="user",
+                            user_home=user_home,
                         )
                         if rule_info:
                             project_root = rule_info.get("project_root")
@@ -105,7 +106,8 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             if jetbrains_rule_path.exists() and jetbrains_rule_path.is_file():
                 try:
                     rule_info = self._extract_rule_with_scope(
-                        jetbrains_rule_path, find_github_copilot_project_root, scope="user"
+                        jetbrains_rule_path, find_github_copilot_project_root, scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get("project_root")
@@ -154,6 +156,11 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         continue
 
                     if _entry.is_dir():
+                        # A symlinked directory OR Windows junction (e.g. .github ->
+                        # elsewhere) is never entered; the walk would otherwise follow
+                        # the redirect. is_symlink() misses NTFS junctions.
+                        if is_symlink_or_junction(item):
+                            continue
                         if item.name == ".github":
                             copilot_instructions = item / "copilot-instructions.md"
                             if copilot_instructions.exists() and copilot_instructions.is_file():
@@ -194,7 +201,7 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
 
     def _extract_path_specific_instructions(self, github_dir: Path, projects_by_root: Dict) -> None:
         copilot_dir = github_dir / "copilot"
-        if not copilot_dir.exists() or not copilot_dir.is_dir():
+        if not copilot_dir.exists() or not copilot_dir.is_dir() or is_symlink_or_junction(copilot_dir):
             return
         try:
             for md_file in copilot_dir.glob("*.md"):
@@ -209,20 +216,30 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         except (PermissionError, OSError) as e:
             logger.debug(f"Error reading copilot directory {copilot_dir}: {e}")
 
-    def _extract_rule_with_scope(self, rule_file: Path, find_project_root_func, scope: str) -> Dict:
+    def _extract_rule_with_scope(self, rule_file: Path, find_project_root_func, scope: str,
+                                 user_home: Path = None) -> Dict:
         try:
             if not rule_file.exists() or not rule_file.is_file():
                 return None
-            file_metadata = get_file_metadata(rule_file)
             project_root = find_project_root_func(rule_file)
-            content, truncated = read_file_content(rule_file, file_metadata["size"])
+            # Project rules are read strictly (no symlink) — the root-scan attack
+            # surface. The user's own global rules may be symlinked into place by a
+            # dotfile manager, so those follow the link but stay contained to the
+            # user's home and owned by that user.
+            if scope == "user" and user_home is not None:
+                contained = read_rule_file_contained(rule_file, user_home, allow_symlink=True)
+            else:
+                contained = read_rule_file_contained(rule_file, project_root, allow_symlink=False)
+            if contained is None:
+                return None
+            content, truncated, size, last_modified = contained
             return {
                 "file_path": str(rule_file),
                 "file_name": rule_file.name,
                 "project_root": str(project_root) if project_root else None,
                 "content": content,
-                "size": file_metadata["size"],
-                "last_modified": file_metadata["last_modified"],
+                "size": size,
+                "last_modified": last_modified,
                 "truncated": truncated,
                 "scope": scope,
             }

@@ -59,12 +59,16 @@ def find_zed_project_root(rule_file: Path) -> Path:
     Global:  ~/.config/zed/settings.json -> ~   (file -> zed -> .config -> home)
     Root rules: <project>/.rules -> <project>   (the file's own directory)
     Project: <project>/.zed/settings.json -> <project>  (file -> .zed -> project)
+
+    Branches on directory names rather than a separator-specific substring so
+    the same logic holds for Windows backslash paths.
     """
-    if ".config/zed" in str(rule_file):
-        return rule_file.parent.parent.parent
+    parent = rule_file.parent
+    if parent.name == "zed" and parent.parent.name == ".config":
+        return parent.parent.parent
     if rule_file.name == _PROJECT_ROOT_RULES_FILE:
         return rule_file.parent
-    return rule_file.parent.parent
+    return parent.parent
 
 
 class MacOSZedRulesExtractor(BaseZedRulesExtractor):

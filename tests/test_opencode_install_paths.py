@@ -10,6 +10,7 @@ the module-level ``_APP_BUNDLE`` patched, so the test never touches the real
 ``/Applications`` and runs on Linux CI unchanged.
 """
 
+import os
 import plistlib
 import tempfile
 import unittest
@@ -92,6 +93,7 @@ class TestMacOSOpenCodeInstallPaths(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(bin_path))
 
+    @unittest.skipIf(os.name == "nt", "os.access(X_OK) is always true on Windows; macOS-only detector")
     def test_non_executable_file_is_ignored(self):
         f = self.home / ".local" / "bin" / "opencode"
         f.parent.mkdir(parents=True)

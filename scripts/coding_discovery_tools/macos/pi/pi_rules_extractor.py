@@ -48,10 +48,14 @@ def find_pi_project_root(rule_file: Path) -> Path:
 
     Global: ~/.pi/agent/settings.json -> ~        (file -> agent -> .pi -> home)
     Project: <project>/.pi/settings.json -> <project>  (file -> .pi -> project)
+
+    Branches on directory names rather than a separator-specific substring so
+    the same logic holds for Windows backslash paths.
     """
-    if ".pi/agent" in str(rule_file):
-        return rule_file.parent.parent.parent
-    return rule_file.parent.parent
+    parent = rule_file.parent
+    if parent.name == "agent" and parent.parent.name == ".pi":
+        return parent.parent.parent
+    return parent.parent
 
 
 class MacOSPiRulesExtractor(BasePiRulesExtractor):

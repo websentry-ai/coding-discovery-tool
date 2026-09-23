@@ -81,7 +81,8 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         if not rule_file.is_file():
                             continue
                         rule_info = self._extract_rule_with_scope(
-                            rule_file, find_github_copilot_project_root, scope="user"
+                            rule_file, find_github_copilot_project_root, scope="user",
+                            user_home=user_home,
                         )
                         if rule_info:
                             project_root = rule_info.get("project_root")
@@ -105,7 +106,8 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             if jetbrains_rule_path.exists() and jetbrains_rule_path.is_file():
                 try:
                     rule_info = self._extract_rule_with_scope(
-                        jetbrains_rule_path, find_github_copilot_project_root, scope="user"
+                        jetbrains_rule_path, find_github_copilot_project_root, scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get("project_root")
@@ -214,15 +216,20 @@ class LinuxGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         except (PermissionError, OSError) as e:
             logger.debug(f"Error reading copilot directory {copilot_dir}: {e}")
 
-    def _extract_rule_with_scope(self, rule_file: Path, find_project_root_func, scope: str) -> Dict:
+    def _extract_rule_with_scope(self, rule_file: Path, find_project_root_func, scope: str,
+                                 user_home: Path = None) -> Dict:
         try:
             if not rule_file.exists() or not rule_file.is_file():
                 return None
             project_root = find_project_root_func(rule_file)
-            # Symlink-safe, containment-checked read: refuses a rule file whose
-            # realpath escapes the project root (e.g. a symlink at another user's
-            # secret), matching the Copilot-for-Xcode settings reader.
-            contained = read_rule_file_contained(rule_file, project_root)
+            # Project rules are read strictly (no symlink) — the root-scan attack
+            # surface. The user's own global rules may be symlinked into place by a
+            # dotfile manager, so those follow the link but stay contained to the
+            # user's home and owned by that user.
+            if scope == "user" and user_home is not None:
+                contained = read_rule_file_contained(rule_file, user_home, allow_symlink=True)
+            else:
+                contained = read_rule_file_contained(rule_file, project_root, allow_symlink=False)
             if contained is None:
                 return None
             content, truncated, size, last_modified = contained

@@ -23,12 +23,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from coding_discovery_tools.macos.github_copilot.copilot_rules_extractor import (  # noqa: E402
     MacOSGitHubCopilotRulesExtractor,
+    find_github_copilot_project_root as _mac_find_root,
 )
 from coding_discovery_tools.linux.github_copilot.copilot_rules_extractor import (  # noqa: E402
     LinuxGitHubCopilotRulesExtractor,
+    find_github_copilot_project_root as _linux_find_root,
 )
 from coding_discovery_tools.windows.github_copilot.copilot_rules_extractor import (  # noqa: E402
     WindowsGitHubCopilotRulesExtractor,
+    find_github_copilot_project_root as _win_find_root,
 )
 
 _SECRET = "SECRET-OUTSIDE-THE-REPO"
@@ -66,6 +69,42 @@ class _RulesWalkSafetyBase:
 class _PosixRulesWalkSafety(_RulesWalkSafetyBase):
     """POSIX (macOS/Linux) symlink attack cases."""
 
+    FIND_ROOT = None  # each concrete class sets its OS's project-root resolver
+
+    def test_user_scope_dotfile_symlink_within_home_is_captured(self):
+        # A dotfile manager (chezmoi/stow/yadm) symlinks ~/.claude/rules/g.md ->
+        # ~/.dotfiles/g.md — same user, inside their home. It must still be read.
+        home = Path(tempfile.mkdtemp(prefix="gh-home-"))
+        try:
+            rules = home / ".claude" / "rules"
+            rules.mkdir(parents=True)
+            (home / ".dotfiles").mkdir()
+            (home / ".dotfiles" / "g.md").write_text("MY GLOBAL RULE", encoding="utf-8")
+            os.symlink(home / ".dotfiles" / "g.md", rules / "g.md")
+            info = self.EXTRACTOR()._extract_rule_with_scope(
+                rules / "g.md", self.FIND_ROOT, scope="user", user_home=home)
+            self.assertIsNotNone(info, "a user-global dotfile symlink inside the home must be captured")
+            self.assertEqual(info["content"], "MY GLOBAL RULE")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+    def test_user_scope_symlink_outside_home_is_refused(self):
+        # The same root-scan attack at user scope: ~attacker/.claude/rules/y.md ->
+        # a file outside the home must still be refused.
+        home = Path(tempfile.mkdtemp(prefix="gh-home-"))
+        outside = Path(tempfile.mkdtemp(prefix="gh-evil-"))
+        try:
+            rules = home / ".claude" / "rules"
+            rules.mkdir(parents=True)
+            (outside / "secret").write_text(_SECRET, encoding="utf-8")
+            os.symlink(outside / "secret", rules / "y.md")
+            info = self.EXTRACTOR()._extract_rule_with_scope(
+                rules / "y.md", self.FIND_ROOT, scope="user", user_home=home)
+            self.assertIsNone(info, "a user-global symlink pointing outside the home must be refused")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(outside, ignore_errors=True)
+
     def test_symlinked_instruction_file_outside_repo_is_refused(self):
         secret = self.outside / "id_rsa"
         secret.write_text(_SECRET, encoding="utf-8")
@@ -86,11 +125,13 @@ class _PosixRulesWalkSafety(_RulesWalkSafetyBase):
 @unittest.skipUnless(sys.platform == "darwin", "macOS extractor runs on macOS")
 class TestMacOSRulesWalkSafety(_PosixRulesWalkSafety, unittest.TestCase):
     EXTRACTOR = MacOSGitHubCopilotRulesExtractor
+    FIND_ROOT = staticmethod(_mac_find_root)
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux extractor runs on Linux")
 class TestLinuxRulesWalkSafety(_PosixRulesWalkSafety, unittest.TestCase):
     EXTRACTOR = LinuxGitHubCopilotRulesExtractor
+    FIND_ROOT = staticmethod(_linux_find_root)
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows extractor runs on Windows")

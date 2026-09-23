@@ -114,7 +114,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         """
         Extract global GitHub Copilot rules from VS Code.
         """
-        def add_user_rules(directory: Path, patterns) -> None:
+        def add_user_rules(directory: Path, patterns, user_home: Path) -> None:
             """Collect each ``patterns`` match under ``directory`` as a user rule."""
             try:
                 if not directory.is_dir():
@@ -131,7 +131,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     except ValueError:
                         continue
                     rule_info = self._extract_rule_with_scope(
-                        rule_file, find_github_copilot_project_root, scope="user"
+                        rule_file, find_github_copilot_project_root, scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -152,9 +153,10 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 add_user_rules(
                     user_home / "Library" / "Application Support" / editor / "User" / "prompts",
                     ("*.instructions.md", "*.prompt.md"),
+                    user_home,
                 )
-            add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",))
-            add_user_rules(user_home / ".claude" / "rules", ("**/*.md",))
+            add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",), user_home)
+            add_user_rules(user_home / ".claude" / "rules", ("**/*.md",), user_home)
 
         if is_running_as_root():
             scan_user_directories(extract_for_user)
@@ -176,7 +178,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     rule_info = self._extract_rule_with_scope(
                         jetbrains_rule_path,
                         find_github_copilot_project_root,
-                        scope="user"
+                        scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -439,7 +442,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         self,
         rule_file: Path,
         find_project_root_func,
-        scope: str
+        scope: str,
+        user_home: Path = None
     ) -> Dict:
         """
         Extract a single rule file with metadata including scope.
@@ -457,10 +461,14 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 return None
 
             project_root = find_project_root_func(rule_file)
-            # Symlink-safe, containment-checked read: refuses a rule file whose
-            # realpath escapes the project root (e.g. a symlink at another user's
-            # secret), matching the Copilot-for-Xcode settings reader.
-            contained = read_rule_file_contained(rule_file, project_root)
+            # Project rules are read strictly (no symlink) — the root-scan attack
+            # surface. The user's own global rules may be symlinked into place by a
+            # dotfile manager, so those follow the link but stay contained to the
+            # user's home and owned by that user.
+            if scope == "user" and user_home is not None:
+                contained = read_rule_file_contained(rule_file, user_home, allow_symlink=True)
+            else:
+                contained = read_rule_file_contained(rule_file, project_root, allow_symlink=False)
             if contained is None:
                 return None
             content, truncated, size, last_modified = contained

@@ -14,6 +14,8 @@ from .copilot_cli import LinuxCopilotCliDetector, LinuxCopilotCliMCPConfigExtrac
 from .augment import LinuxAugmentDetector, LinuxAugmentMCPConfigExtractor, LinuxAugmentRulesExtractor, LinuxAugmentSettingsExtractor, LinuxAugmentSkillsExtractor
 from .codex import LinuxCodexDetector, LinuxCodexRulesExtractor, LinuxCodexMCPConfigExtractor, LinuxCodexSkillsExtractor
 from .opencode import LinuxOpenCodeDetector, LinuxOpenCodeRulesExtractor, LinuxOpenCodeMCPConfigExtractor, LinuxOpenCodeSkillsExtractor
+from .pi import LinuxPiDetector, LinuxPiRulesExtractor
+from .zed import LinuxZedDetector, LinuxZedRulesExtractor
 from .openclaw import LinuxOpenClawDetector
 from .replit import LinuxReplitDetector, LinuxReplitSkillsExtractor
 from .jetbrains import LinuxJetBrainsDetector, LinuxJetBrainsMCPConfigExtractor
@@ -72,6 +74,10 @@ __all__ = [
     "LinuxOpenCodeRulesExtractor",
     "LinuxOpenCodeMCPConfigExtractor",
     "LinuxOpenCodeSkillsExtractor",
+    "LinuxPiDetector",
+    "LinuxPiRulesExtractor",
+    "LinuxZedDetector",
+    "LinuxZedRulesExtractor",
     "LinuxOpenClawDetector",
     "LinuxReplitDetector",
     "LinuxReplitSkillsExtractor",

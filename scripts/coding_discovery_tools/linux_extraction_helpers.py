@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .constants import MAX_SEARCH_DEPTH
-from .project_dir_index import dispatch_matches
+from .project_dir_index import dispatch_matches, dispatch_file_matches
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,8 @@ def walk_for_tool_directories(
     extract_from_dir_func,
     projects_by_root: Dict,
     current_depth: int = 0,
+    file_marker_names=None,
+    extract_from_file_func=None,
 ) -> None:
     """Linux-aware walk: uses Linux should_skip_system_path, not the macOS one
     (macOS skips '/home' entirely, which would drop all /home/* configs).
@@ -181,6 +183,21 @@ def walk_for_tool_directories(
         # the direct walk or it would silently never match.
         markers_all_hidden=tool_dir_name.startswith("."),
     )
+
+    if file_marker_names and extract_from_file_func is not None:
+        # Project-root marker FILES (e.g. opencode.json) from the same index.
+        def on_file(marker: Path) -> None:
+            try:
+                extract_from_file_func(marker, projects_by_root)
+            except (PermissionError, OSError):
+                pass
+            except Exception as e:
+                logger.debug(f"Error processing {marker}: {e}")
+
+        dispatch_file_matches(
+            root_path, current_dir, _linux_project_skip, _LINUX_PROJECT_SKIP_ID,
+            file_marker_names, on_file,
+        )
 
 
 def get_linux_user_homes() -> List[Path]:

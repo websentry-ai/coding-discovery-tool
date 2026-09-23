@@ -110,7 +110,9 @@ class _OpenCodeConfigMixin:
 
     def test_root_sibling_jsonc_recorded_verbatim(self):
         oc = self._oc_dir()
-        (self.proj / "opencode.jsonc").write_text(JSONC_BODY, encoding="utf-8")
+        # write_bytes: write_text would turn \n into \r\n on Windows, and the
+        # hardened reader records the file byte-for-byte.
+        (self.proj / "opencode.jsonc").write_bytes(JSONC_BODY.encode("utf-8"))
         projects = self._project_rules(oc)
         self.assertEqual(self._names(projects), ["opencode.jsonc"])
         rule = projects[0]["rules"][0]

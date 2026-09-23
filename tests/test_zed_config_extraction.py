@@ -88,7 +88,9 @@ class _ZedConfigMixin:
     def test_jsonc_settings_recorded_verbatim(self):
         """No ``json.loads``: JSONC would raise, and parsing would reformat."""
         zed_dir = self._zed_dir()
-        (zed_dir / "settings.json").write_text(JSONC_BODY, encoding="utf-8")
+        # write_bytes: write_text would turn \n into \r\n on Windows, and the
+        # hardened reader records the file byte-for-byte.
+        (zed_dir / "settings.json").write_bytes(JSONC_BODY.encode("utf-8"))
         projects = self._project_rules(zed_dir)
         rule = next(r for r in projects[0]["rules"] if r["file_name"] == "settings.json")
         self.assertEqual(rule["content"], JSONC_BODY)

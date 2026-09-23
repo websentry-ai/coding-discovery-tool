@@ -49,6 +49,36 @@ class TestRedactSecretValues(unittest.TestCase):
         self.assertIn('"token_budget": 1000', out)
         self.assertIn('"model": "anthropic/claude-sonnet-5"', out)
 
+    def test_env_and_headers_blocks_fully_redacted(self):
+        text = (
+            '{\n'
+            '  "mcp": {\n'
+            '    "db": { "type": "local", "command": ["npx", "db-mcp"],\n'
+            '            "environment": { "DATABASE_URL": "postgres://u:%s@h/db", "DEBUG": "1" } },\n'
+            '    "hub": { "type": "remote", "url": "https://hub",\n'
+            '             "headers": { "X-Api-Token": "%s", "Accept": "application/json" } }\n'
+            '  },\n'
+            '  "context_servers": { "gh": { "command": "gh-mcp", "env": { "GH_PAT": "%s" } } },\n'
+            '  "model": "m"\n'
+            '}\n'
+        ) % (SECRET, SECRET, SECRET)
+        out = redact_secret_values(text)
+        self.assertNotIn(SECRET, out)
+        # Whole block redacted, key names preserved.
+        self.assertIn('"DATABASE_URL": "***REDACTED***"', out)
+        self.assertIn('"DEBUG": "***REDACTED***"', out)
+        self.assertIn('"X-Api-Token": "***REDACTED***"', out)
+        self.assertIn('"Accept": "***REDACTED***"', out)
+        self.assertIn('"GH_PAT": "***REDACTED***"', out)
+        # Outside the blocks, nothing else changes.
+        self.assertIn('"command": ["npx", "db-mcp"]', out)
+        self.assertIn('"url": "https://hub"', out)
+        self.assertIn('"model": "m"', out)
+
+    def test_unbalanced_block_does_not_crash(self):
+        out = redact_secret_values('{ "env": { "A": "%s", "B": "x" ' % SECRET)
+        self.assertNotIn(SECRET, out)
+
     def test_handles_escaped_quotes_and_jsonc(self):
         text = '// comment\n{ "api_key": "ab\\"cd", "SECRET_TOKEN": "x", }\n'
         out = redact_secret_values(text)

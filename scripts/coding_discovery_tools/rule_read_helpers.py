@@ -40,9 +40,61 @@ _SECRET_KEY_VALUE_RE = re.compile(
 _REDACTED = "***REDACTED***"
 _REDACT_SUFFIXES = frozenset({".json", ".jsonc"})
 
+# Objects whose *every* string value is a potential credential regardless of key
+# name: MCP server `env`/`environment` maps (DATABASE_URL, GH_PAT, ...) and HTTP
+# `headers` maps (X-Api-Token, Cookie, ...). The whole block is redacted.
+_SECRET_BLOCK_OPEN_RE = re.compile(
+    r'"(?:env|environment|headers)"\s*:\s*\{', re.IGNORECASE
+)
+_ANY_STRING_VALUE_RE = re.compile(r'("[^"\n]*"\s*:\s*")((?:[^"\\\n]|\\.)*)(")')
+
+
+def _block_end(text: str, start: int) -> int:
+    """Index just past the ``}`` matching the ``{`` at ``start``; respects
+    strings and escapes. Returns len(text) when unbalanced."""
+    depth = 0
+    i = start
+    in_str = False
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(text)
+
 
 def redact_secret_values(text: str) -> str:
-    """Replace string values of credential-looking JSON keys with a marker."""
+    """Redact credentials in JSON/JSONC config text.
+
+    Two passes: (1) every string value inside an ``env`` / ``environment`` /
+    ``headers`` object, whatever its key; (2) string values of any key whose
+    name looks like a credential. Non-string values and other keys are kept.
+    """
+    out = []
+    pos = 0
+    for m in _SECRET_BLOCK_OPEN_RE.finditer(text):
+        if m.start() < pos:
+            continue  # nested inside a block already handled
+        brace = m.end() - 1
+        end = _block_end(text, brace)
+        out.append(text[pos:m.end()])
+        out.append(_ANY_STRING_VALUE_RE.sub(
+            lambda s: s.group(1) + _REDACTED + s.group(3), text[m.end():end]
+        ))
+        pos = end
+    out.append(text[pos:])
+    text = "".join(out)
     return _SECRET_KEY_VALUE_RE.sub(lambda m: m.group(1) + _REDACTED + m.group(3), text)
 
 

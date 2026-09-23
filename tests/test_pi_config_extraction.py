@@ -102,7 +102,9 @@ class _PiConfigMixin:
         """No JSON parsing: settings may be JSONC; content is raw bytes-in-text."""
         raw = '{\n  // comment\n  "model": "pi-1",\n}\n'
         pi_dir = self._pi_dir()
-        (pi_dir / "settings.json").write_text(raw, encoding="utf-8")
+        # write_bytes: write_text would turn \n into \r\n on Windows, and the
+        # hardened reader records the file byte-for-byte.
+        (pi_dir / "settings.json").write_bytes(raw.encode("utf-8"))
         projects = self._project_rules(pi_dir)
         rule = next(r for r in projects[0]["rules"] if r["file_name"] == "settings.json")
         self.assertEqual(rule["content"], raw)

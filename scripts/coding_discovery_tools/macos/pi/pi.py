@@ -24,10 +24,12 @@ from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
 from ...utils import (
     extract_version_number,
+    machine_global_binary_owned_by_user,
     run_command,
     _is_scanning_users_own_home,
     _which_no_cwd,
 )
+from ...macos_extraction_helpers import is_running_as_root
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,15 @@ _USER_RELATIVE_BIN_PATHS = (
     Path(".bun") / "bin" / "pi",
 )
 
+# Machine-global locations (Homebrew, npm -g under /usr/local). Under a root
+# scan these are attributed per ``machine_global_binary_owned_by_user`` so one
+# user's Homebrew install is not fanned out to every account. Class-level list
+# so tests can isolate from the CI box.
+_MACHINE_GLOBAL_BIN_PATHS = (
+    Path("/opt/homebrew/bin/pi"),
+    Path("/usr/local/bin/pi"),
+)
+
 
 def _node_version_key(version_dir: Path):
     """Sort key for ``~/.nvm/versions/node/<v>`` dirs (newest first when reversed)."""
@@ -63,6 +74,8 @@ class MacOSPiDetector(BaseToolDetector):
     is scoped to that single user; otherwise the current user's home is checked.
     Root/all-users enumeration is the caller's job (``detect_tool_for_user``).
     """
+
+    MACHINE_GLOBAL_BIN_PATHS = list(_MACHINE_GLOBAL_BIN_PATHS)
 
     def __init__(self) -> None:
         self.user_home: Optional[Path] = None
@@ -171,7 +184,20 @@ class MacOSPiDetector(BaseToolDetector):
                 except OSError:
                     continue
 
-            # PATH fallback (Homebrew, system installs), only for the scanning
+            # Machine-global installs (Homebrew / npm -g). Under root, only when
+            # the binary is attributable to this user (its owner, or root-owned).
+            is_root = is_running_as_root()
+            for candidate in self.MACHINE_GLOBAL_BIN_PATHS:
+                try:
+                    if not (candidate.exists() and os.access(str(candidate), os.X_OK)):
+                        continue
+                    if is_root and not machine_global_binary_owned_by_user(candidate, user_home):
+                        continue
+                    return candidate
+                except OSError:
+                    continue
+
+            # PATH fallback (other system installs), only for the scanning
             # user's own home so root's PATH is never attributed to another user.
             try:
                 if _is_scanning_users_own_home(user_home):

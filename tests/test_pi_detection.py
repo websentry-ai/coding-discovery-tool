@@ -97,6 +97,36 @@ class _PiDetectionMixin:
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(link))
 
+    def test_homebrew_binary_with_agent_dir_detected(self):
+        """Homebrew / npm -g installs live outside the home; a root/MDM scan must
+        still find them (with ~/.pi/agent corroborating) without touching PATH."""
+        brew = _make_exec(self.home / "opt" / "homebrew" / "bin" / "pi")
+        self._agent_dir()
+        with patch.object(self.detector, "MACHINE_GLOBAL_BIN_PATHS", [brew]), \
+             patch(f"{_PI_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_PI_MOD}.run_command", return_value="pi 0.86.1"):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(brew))
+
+    def test_homebrew_binary_owned_by_other_user_skipped_when_root(self):
+        brew = _make_exec(self.home / "opt" / "homebrew" / "bin" / "pi")
+        self._agent_dir()
+        with patch.object(self.detector, "MACHINE_GLOBAL_BIN_PATHS", [brew]), \
+             patch(f"{_PI_MOD}.is_running_as_root", return_value=True), \
+             patch(f"{_PI_MOD}.machine_global_binary_owned_by_user", return_value=False), \
+             patch(f"{_PI_MOD}._is_scanning_users_own_home", return_value=False), \
+             patch(f"{_PI_MOD}.run_command", return_value="pi 0.86.1"):
+            self.assertIsNone(self.detector.detect())
+
+    def test_homebrew_binary_without_agent_dir_not_detected(self):
+        """Machine-global paths still go through the collision guard."""
+        brew = _make_exec(self.home / "opt" / "homebrew" / "bin" / "pi")
+        with patch.object(self.detector, "MACHINE_GLOBAL_BIN_PATHS", [brew]), \
+             patch(f"{_PI_MOD}.is_running_as_root", return_value=False), \
+             patch(f"{_PI_MOD}.run_command", return_value="pi 3.14"):
+            self.assertIsNone(self.detector.detect())
+
     # --- false-positive / residue kills -----------------------------------
 
     def test_unrelated_pi_binary_not_detected(self):

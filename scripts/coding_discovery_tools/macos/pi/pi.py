@@ -50,6 +50,25 @@ _USER_RELATIVE_BIN_PATHS = (
     Path(".bun") / "bin" / "pi",
 )
 
+def pi_agent_dir(user_home: Path) -> Path:
+    """The agent state dir for ``user_home`` (``~/.pi/agent`` by default).
+
+    ``PI_CODING_AGENT_DIR`` is a per-user setting read from the SCANNER's
+    environment, so it is honoured only when the scanned home is the scanning
+    user's own. Under a root/MDM multi-user scan every other account gets the
+    default; otherwise one directory would corroborate (and be probed for) all
+    users. Shared by the detector and the rules extractor so both agree.
+    """
+    override = os.environ.get(_PI_AGENT_DIR_ENV)
+    if override:
+        try:
+            if _is_scanning_users_own_home(user_home):
+                return Path(override)
+        except (OSError, RuntimeError):
+            pass
+    return user_home / ".pi" / "agent"
+
+
 # Machine-global locations (Homebrew, npm -g under /usr/local). Under a root
 # scan these are attributed per ``machine_global_binary_owned_by_user`` so one
 # user's Homebrew install is not fanned out to every account. Class-level list
@@ -151,11 +170,8 @@ class MacOSPiDetector(BaseToolDetector):
         return [Path.home()]
 
     def _agent_dir(self, user_home: Path) -> Path:
-        """The agent state dir for ``user_home`` (``~/.pi/agent`` by default)."""
-        override = os.environ.get(_PI_AGENT_DIR_ENV)
-        if override:
-            return Path(override)
-        return user_home / ".pi" / "agent"
+        """The agent state dir for ``user_home`` — see ``pi_agent_dir``."""
+        return pi_agent_dir(user_home)
 
     def _resolve_pi_binary(self, user_home: Path) -> Optional[Path]:
         """Return the ``pi`` launcher for ``user_home``, if any. Never raises."""

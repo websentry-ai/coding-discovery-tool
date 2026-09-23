@@ -75,6 +75,45 @@ class TestRedactSecretValues(unittest.TestCase):
         self.assertIn('"url": "https://hub"', out)
         self.assertIn('"model": "m"', out)
 
+    def test_brace_inside_jsonc_comment_does_not_end_block(self):
+        text = (
+            '{ "env": {\n'
+            '    // legacy: { "OLD": "x" }\n'
+            '    "A": "1",\n'
+            '    /* also } here */\n'
+            '    "DATABASE_URL": "postgres://u:%s@h/db"\n'
+            '  },\n'
+            '  "model": "m" }\n'
+        ) % SECRET
+        out = redact_secret_values(text)
+        self.assertNotIn(SECRET, out)
+        self.assertIn('"DATABASE_URL": "***REDACTED***"', out)
+        self.assertIn('"model": "m"', out)
+
+    def test_cli_flag_values_in_args_redacted(self):
+        text = (
+            '{ "context_servers": { "gh": {\n'
+            '    "command": "gh-mcp",\n'
+            '    "args": ["--verbose", "--api-key", "%s", "--token=%s", "--port", "8080"]\n'
+            '} } }\n'
+        ) % (SECRET, SECRET)
+        out = redact_secret_values(text)
+        self.assertNotIn(SECRET, out)
+        self.assertIn('"--api-key", "***REDACTED***"', out)
+        self.assertIn('"--token=***REDACTED***"', out)
+        self.assertIn('"--port", "8080"', out)
+        self.assertIn('"--verbose"', out)
+
+    def test_url_query_string_redacted(self):
+        text = '{ "mcp": { "hub": { "type": "remote", "url": "https://mcp.example/sse?token=%s&x=1" } } }' % SECRET
+        out = redact_secret_values(text)
+        self.assertNotIn(SECRET, out)
+        self.assertIn('"url": "https://mcp.example/sse?***REDACTED***"', out)
+
+    def test_url_without_query_untouched(self):
+        text = '{ "url": "https://mcp.example/sse" }'
+        self.assertEqual(redact_secret_values(text), text)
+
     def test_unbalanced_block_does_not_crash(self):
         out = redact_secret_values('{ "env": { "A": "%s", "B": "x" ' % SECRET)
         self.assertNotIn(SECRET, out)

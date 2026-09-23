@@ -127,6 +127,29 @@ class _PiDetectionMixin:
              patch(f"{_PI_MOD}.run_command", return_value="pi 3.14"):
             self.assertIsNone(self.detector.detect())
 
+    def test_agent_dir_override_honoured_for_own_home(self):
+        override = self.home / "custom-agent"
+        binary = _make_exec(override / "bin" / "pi")
+        with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(override)}), \
+             patch(f"{_PI_MOD}._is_scanning_users_own_home", return_value=True), \
+             patch(f"{_PI_MOD}.run_command", return_value="pi 0.86.1"):
+            result = self.detector.detect()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["install_path"], str(binary))
+
+    def test_agent_dir_override_ignored_for_other_users_home(self):
+        """Root/MDM scan: the scanner's own PI_CODING_AGENT_DIR must not
+        corroborate or supply binaries for every scanned account."""
+        override = self.home / "scanner-agent"
+        _make_exec(override / "bin" / "pi")
+        # Scanned user has an unrelated `pi` and NO ~/.pi/agent.
+        _make_exec(self.home / ".local" / "bin" / "pi")
+        with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(override)}), \
+             patch(f"{_PI_MOD}._is_scanning_users_own_home", return_value=False), \
+             patch.object(self.detector, "MACHINE_GLOBAL_BIN_PATHS", []), \
+             patch(f"{_PI_MOD}.run_command", return_value="pi 3.14"):
+            self.assertIsNone(self.detector.detect())
+
     # --- false-positive / residue kills -----------------------------------
 
     def test_unrelated_pi_binary_not_detected(self):

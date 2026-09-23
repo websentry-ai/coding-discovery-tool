@@ -16,6 +16,7 @@ from typing import Dict, List
 
 from ...coding_tool_base import BasePiRulesExtractor
 from ...rule_read_helpers import extract_rule_file_contained
+from .pi import pi_agent_dir
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -98,7 +99,9 @@ class MacOSPiRulesExtractor(BasePiRulesExtractor):
 
         def extract_for_user(user_home: Path) -> None:
             try:
-                agent_dir = user_home / ".pi" / "agent"
+                # Same resolution as the detector (honours PI_CODING_AGENT_DIR
+                # for the scanner's own home only).
+                agent_dir = pi_agent_dir(user_home)
                 # Gate: a bare ``~/.pi/agent`` (session state only) is not a
                 # configured install and must not produce a project row.
                 if not (agent_dir / "settings.json").is_file():

@@ -48,14 +48,34 @@ _SECRET_BLOCK_OPEN_RE = re.compile(
 )
 _ANY_STRING_VALUE_RE = re.compile(r'("[^"\n]*"\s*:\s*")((?:[^"\\\n]|\\.)*)(")')
 
+# MCP launch commands carry credentials as CLI flags: `["--api-key", "sk-..."]`
+# or `["--token=sk-..."]`. Two forms:
+#  - a string literal holding a credential flag, followed by the next string
+#    literal (the value) -> value redacted.
+#  - an inline `--flag=value` string literal -> value part redacted.
+_CRED_FLAG = r'--?[A-Za-z0-9_-]*(?:key|token|secret|password|passwd|auth|credential)[A-Za-z0-9_-]*'
+_FLAG_THEN_VALUE_RE = re.compile(
+    r'("' + _CRED_FLAG + r'"\s*,\s*")((?:[^"\\\n]|\\.)*)(")', re.IGNORECASE
+)
+_FLAG_INLINE_RE = re.compile(
+    r'("' + _CRED_FLAG + r'=)((?:[^"\\\n]|\\.)+)(")', re.IGNORECASE
+)
+# Remote MCP endpoints sometimes put the token in the query string. Keep the
+# path, drop everything after `?`.
+_URL_QUERY_RE = re.compile(r'("(?:url|uri|endpoint)"\s*:\s*"[^"?\n]*\?)((?:[^"\\\n]|\\.)*)(")', re.IGNORECASE)
+
 
 def _block_end(text: str, start: int) -> int:
-    """Index just past the ``}`` matching the ``{`` at ``start``; respects
-    strings and escapes. Returns len(text) when unbalanced."""
+    """Index just past the ``}`` matching the ``{`` at ``start``.
+
+    Braces inside string literals and inside JSONC ``//`` / ``/* */`` comments
+    are not structure and are skipped. Returns len(text) when unbalanced.
+    """
     depth = 0
     i = start
+    n = len(text)
     in_str = False
-    while i < len(text):
+    while i < n:
         ch = text[i]
         if in_str:
             if ch == "\\":
@@ -64,6 +84,12 @@ def _block_end(text: str, start: int) -> int:
                 in_str = False
         elif ch == '"':
             in_str = True
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            nl = text.find("\n", i)
+            i = n if nl == -1 else nl
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            close = text.find("*/", i + 2)
+            i = n if close == -1 else close + 1
         elif ch == "{":
             depth += 1
         elif ch == "}":
@@ -71,15 +97,18 @@ def _block_end(text: str, start: int) -> int:
             if depth == 0:
                 return i + 1
         i += 1
-    return len(text)
+    return n
 
 
 def redact_secret_values(text: str) -> str:
     """Redact credentials in JSON/JSONC config text.
 
-    Two passes: (1) every string value inside an ``env`` / ``environment`` /
+    Passes: (1) every string value inside an ``env`` / ``environment`` /
     ``headers`` object, whatever its key; (2) string values of any key whose
-    name looks like a credential. Non-string values and other keys are kept.
+    name looks like a credential; (3) the value after a credential-looking CLI
+    flag in a command/args array (``"--api-key", "sk-…"``) and inline
+    ``--token=…`` forms; (4) query strings on ``url``/``uri``/``endpoint``
+    values. Non-string values and other keys are kept.
     """
     out = []
     pos = 0
@@ -95,7 +124,11 @@ def redact_secret_values(text: str) -> str:
         pos = end
     out.append(text[pos:])
     text = "".join(out)
-    return _SECRET_KEY_VALUE_RE.sub(lambda m: m.group(1) + _REDACTED + m.group(3), text)
+    _sub = lambda m: m.group(1) + _REDACTED + m.group(3)  # noqa: E731
+    text = _SECRET_KEY_VALUE_RE.sub(_sub, text)
+    text = _FLAG_THEN_VALUE_RE.sub(_sub, text)
+    text = _FLAG_INLINE_RE.sub(_sub, text)
+    return _URL_QUERY_RE.sub(_sub, text)
 
 
 def extract_rule_file_contained(

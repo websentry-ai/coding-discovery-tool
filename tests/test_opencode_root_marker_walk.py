@@ -7,6 +7,11 @@ the same single pass that indexes hidden dirs — so no extra walk is added.
 
 Fixtures live under a non-hidden dir inside ``$HOME``: the walk deliberately
 skips hidden home dirs and OS temp roots, so ``tempfile`` would be pruned.
+
+POSIX-only: these are the macOS/Linux extractors driving their own skip lists,
+which are not meaningful against a ``C:\\Users`` tree (the Windows extractor
+has its own package). Unit-level coverage of the same routes runs everywhere in
+``test_opencode_project_config_extraction``.
 """
 
 import os
@@ -97,11 +102,13 @@ class _RootMarkerWalkMixin:
         self.assertNotIn("code/linked", self._results())
 
 
+@unittest.skipUnless(os.name == "posix", "macOS/Linux extractor walk; POSIX skip lists")
 class TestMacOSRootMarkerWalk(_RootMarkerWalkMixin, unittest.TestCase):
     def run_walk(self, home, projects):
         MacOSOpenCodeRulesExtractor()._extract_project_level_rules(home, projects)
 
 
+@unittest.skipUnless(os.name == "posix", "macOS/Linux extractor walk; POSIX skip lists")
 class TestLinuxRootMarkerWalk(_RootMarkerWalkMixin, unittest.TestCase):
     def run_walk(self, home, projects):
         with patch(f"{_LINUX_EXT_MOD}.get_linux_user_homes", return_value=[home]):

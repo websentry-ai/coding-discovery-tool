@@ -114,12 +114,33 @@ class TestRedactSecretValues(unittest.TestCase):
         text = '{ "url": "https://mcp.example/sse" }'
         self.assertEqual(redact_secret_values(text), text)
 
+    def test_commented_out_credentials_redacted(self):
+        text = (
+            '{\n'
+            '  // "apiKey": "%s",  <- old key parked here\n'
+            '  /* backup:\n'
+            '     "token": "%s" */\n'
+            '  "model": "m"\n'
+            '}\n'
+        ) % (SECRET, SECRET)
+        out = redact_secret_values(text)
+        self.assertNotIn(SECRET, out)
+        self.assertEqual(
+            out,
+            '{\n'
+            '  // [comment redacted]\n'
+            '  /* [comment redacted] */\n'
+            '\n'
+            '  "model": "m"\n'
+            '}\n',
+        )
+
     # --- shapes from the codex P0 review: JSONC-aware, fail closed ---------
 
     def test_comment_between_key_and_value(self):
         out = redact_secret_values('{"apiKey": /* production */ "%s", "model": "m"}' % SECRET)
         self.assertNotIn(SECRET, out)
-        self.assertEqual(out, '{"apiKey": /* production */ "***REDACTED***", "model": "m"}')
+        self.assertEqual(out, '{"apiKey": /* [comment redacted] */ "***REDACTED***", "model": "m"}')
 
     def test_comment_before_env_block(self):
         for text in (
@@ -171,7 +192,7 @@ class TestRedactSecretValues(unittest.TestCase):
     def test_handles_escaped_quotes_and_jsonc(self):
         text = '// comment\n{ "api_key": "ab\\"cd", "SECRET_TOKEN": "x", }\n'
         out = redact_secret_values(text)
-        self.assertEqual(out, '// comment\n{ "api_key": "***REDACTED***", "SECRET_TOKEN": "***REDACTED***", }\n')
+        self.assertEqual(out, '// [comment redacted]\n{ "api_key": "***REDACTED***", "SECRET_TOKEN": "***REDACTED***", }\n')
 
 
 class _Base(unittest.TestCase):

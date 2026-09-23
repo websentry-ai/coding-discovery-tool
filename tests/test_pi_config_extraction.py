@@ -108,7 +108,8 @@ class _PiConfigMixin:
         (pi_dir / "settings.json").write_bytes(raw.encode("utf-8"))
         projects = self._project_rules(pi_dir)
         rule = next(r for r in projects[0]["rules"] if r["file_name"] == "settings.json")
-        self.assertEqual(rule["content"], raw)
+        # Byte-identical except the comment body, which the redactor replaces.
+        self.assertEqual(rule["content"], raw.replace("// comment", "// [comment redacted]"))
 
     # --- global -----------------------------------------------------------
 

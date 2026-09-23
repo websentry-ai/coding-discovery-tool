@@ -40,6 +40,14 @@ JSONC_BODY = (
     '  "permission": { "bash": "ask", },\n'
     '}\n'
 )
+# Payload form: byte-identical except the comment body -> placeholder.
+JSONC_EXPECTED = (
+    '{\n'
+    '  // [comment redacted]\n'
+    '  "model": "anthropic/claude-sonnet-5",\n'
+    '  "permission": { "bash": "ask", },\n'
+    '}\n'
+)
 
 
 class _OpenCodeConfigMixin:
@@ -116,7 +124,7 @@ class _OpenCodeConfigMixin:
         projects = self._project_rules(oc)
         self.assertEqual(self._names(projects), ["opencode.jsonc"])
         rule = projects[0]["rules"][0]
-        self.assertEqual(rule["content"], JSONC_BODY)
+        self.assertEqual(rule["content"], JSONC_EXPECTED)
         self.assertEqual(Path(rule["file_path"]), self.proj / "opencode.jsonc")
 
     def test_all_sources_combined(self):

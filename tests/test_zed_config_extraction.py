@@ -24,6 +24,9 @@ _MACOS_EXT_MOD = "scripts.coding_discovery_tools.macos.zed.zed_rules_extractor"
 _LINUX_EXT_MOD = "scripts.coding_discovery_tools.linux.zed.zed_rules_extractor"
 
 JSONC_BODY = '{\n  // the default model\n  "assistant": {"version": "2"},\n}\n'
+# What lands in the payload: structure and values byte-identical (never
+# json.loads-ed), comment body replaced by the redaction placeholder.
+JSONC_EXPECTED = '{\n  // [comment redacted]\n  "assistant": {"version": "2"},\n}\n'
 
 
 class _ZedConfigMixin:
@@ -93,7 +96,7 @@ class _ZedConfigMixin:
         (zed_dir / "settings.json").write_bytes(JSONC_BODY.encode("utf-8"))
         projects = self._project_rules(zed_dir)
         rule = next(r for r in projects[0]["rules"] if r["file_name"] == "settings.json")
-        self.assertEqual(rule["content"], JSONC_BODY)
+        self.assertEqual(rule["content"], JSONC_EXPECTED)
 
     # --- global -----------------------------------------------------------
 

@@ -47,9 +47,13 @@ logger = logging.getLogger(__name__)
 #   - it is a URL with userinfo (scheme://user:pass@host -> userinfo redacted)
 #   - it is a `url`/`uri`/`endpoint` value with a query string (query dropped)
 #   - the string is unterminated at EOF (truncated file) -> fail closed
+# Comment bodies (// and /* */) are replaced with a placeholder outright, since
+# commented-out keys are a common way to park an old credential.
 # ---------------------------------------------------------------------------
 
 _REDACTED = "***REDACTED***"
+_COMMENT_LINE = "// [comment redacted]"
+_COMMENT_BLOCK = "/* [comment redacted] */"
 _REDACT_SUFFIXES = frozenset({".json", ".jsonc"})
 
 _CRED_KEY_RE = re.compile(
@@ -135,16 +139,20 @@ def redact_secret_values(text):
     while i < n:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
+        # Comments are dropped to a placeholder: users park old keys in
+        # `// "apiKey": "sk-…"` lines, and comment text is never structure the
+        # backend needs. Line breaks are preserved so line numbers still line up.
         if ch == "/" and nxt == "/":
             nl = text.find("\n", i)
             j = n if nl == -1 else nl
-            out.append(text[i:j])
+            out.append(_COMMENT_LINE)
             i = j
             continue
         if ch == "/" and nxt == "*":
             close = text.find("*/", i + 2)
             j = n if close == -1 else close + 2
-            out.append(text[i:j])
+            out.append(_COMMENT_BLOCK)
+            out.append("\n" * text.count("\n", i, j))
             i = j
             continue
         if ch == '"':

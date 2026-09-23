@@ -11,10 +11,9 @@ Extracts OpenCode configuration files from:
 Config files are recorded as raw text through the rules mechanism; they are
 never json.loads-ed (opencode.jsonc allows comments and trailing commas).
 
-Known limitation: a project with a root-level opencode.json and NO .opencode/
-directory is not discovered. The filesystem walk keys on the hidden `.opencode`
-marker directory; adding a non-hidden filename marker would force a full
-filesystem walk, a cost deliberately not taken.
+A project with only a root-level opencode.json[c] (no .opencode/ dir) is
+discovered via the shared index's file markers; when both exist, the `.opencode/`
+route records the root sibling and the file route is skipped to avoid duplicates.
 """
 
 import logging
@@ -42,6 +41,10 @@ logger = logging.getLogger(__name__)
 _RULE_SUBDIRS = ("agent", "agents", "commands")
 
 _CONFIG_FILENAMES = ("opencode.json", "opencode.jsonc")
+# Project-root marker files: a project may carry only `<project>/opencode.json[c]`
+# with no `.opencode/` dir. These are indexed alongside hidden dirs
+# (project_dir_index.INDEXED_FILE_MARKERS), so finding them is free.
+OPENCODE_ROOT_MARKERS = frozenset(_CONFIG_FILENAMES)
 
 
 def iter_opencode_config_files(opencode_dir: Path, include_root_siblings: bool) -> List[Path]:
@@ -182,7 +185,9 @@ class MacOSOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
             """Wrapper to use shared walk helper with tool-specific extraction."""
             walk_for_tool_directories(
                 root, current, ".opencode", self._extract_rules_from_opencode_directory,
-                projects, current_depth
+                projects, current_depth,
+                file_marker_names=OPENCODE_ROOT_MARKERS,
+                extract_from_file_func=self._extract_rules_from_root_config,
             )
         
         extract_project_level_rules_with_fallback(
@@ -190,7 +195,9 @@ class MacOSOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
             ".opencode",
             self._extract_rules_from_opencode_directory,
             walk_for_opencode_dirs,
-            projects_by_root
+            projects_by_root,
+            file_marker_names=OPENCODE_ROOT_MARKERS,
+            extract_from_file_func=self._extract_rules_from_root_config
         )
 
     def _extract_rules_from_opencode_directory(self, opencode_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
@@ -217,3 +224,24 @@ class MacOSOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
         except Exception as e:
             logger.debug(f"Error extracting rules from {opencode_dir}: {e}")
 
+    def _extract_rules_from_root_config(self, config_file: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
+        """
+        Record a project-root `opencode.json[c]` that has no `.opencode/` dir.
+
+        When `.opencode/` exists beside it, `_extract_rules_from_opencode_directory`
+        already records the root sibling, so this route steps aside.
+        """
+        try:
+            # `.opencode/opencode.json` and a root file beside a `.opencode/` dir are
+            # both recorded by the directory route; only the bare root file is ours.
+            if config_file.parent.name == ".opencode" or (config_file.parent / ".opencode").is_dir():
+                return
+            if not should_process_file(config_file, config_file.parent):
+                return
+            rule_info = extract_rule_file_contained(config_file, find_opencode_project_root)
+            if rule_info:
+                project_root = rule_info.get('project_root')
+                if project_root:
+                    add_rule_to_project(rule_info, project_root, projects_by_root)
+        except Exception as e:
+            logger.debug(f"Error extracting root config {config_file}: {e}")

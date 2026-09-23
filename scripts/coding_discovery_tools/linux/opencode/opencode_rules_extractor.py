@@ -16,6 +16,7 @@ from ...linux_extraction_helpers import (
 # Path logic is OS-independent; share it with the macOS implementation
 # (see that module's docstring for the layout and the known limitation).
 from ...macos.opencode.opencode_rules_extractor import (
+    OPENCODE_ROOT_MARKERS,
     find_opencode_project_root,
     iter_opencode_config_files,
 )
@@ -65,6 +66,8 @@ class LinuxOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
                     user_home, user_home, ".opencode",
                     self._extract_rules_from_opencode_directory,
                     projects_by_root, current_depth=0,
+                    file_marker_names=OPENCODE_ROOT_MARKERS,
+                    extract_from_file_func=self._extract_rules_from_root_config,
                 )
             except (PermissionError, OSError) as e:
                 logger.debug(f"Skipping {user_home}: {e}")
@@ -81,3 +84,20 @@ class LinuxOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
                             add_rule_to_project(rule_info, project_root, projects_by_root)
         except Exception as e:
             logger.debug(f"Error extracting rules from {opencode_dir}: {e}")
+
+    def _extract_rules_from_root_config(self, config_file: Path, projects_by_root: Dict) -> None:
+        """Project-root `opencode.json[c]` with no `.opencode/` beside it."""
+        try:
+            # `.opencode/opencode.json` and a root file beside a `.opencode/` dir are
+            # both recorded by the directory route; only the bare root file is ours.
+            if config_file.parent.name == ".opencode" or (config_file.parent / ".opencode").is_dir():
+                return
+            if not should_process_file(config_file, config_file.parent):
+                return
+            rule_info = extract_rule_file_contained(config_file, find_opencode_project_root)
+            if rule_info:
+                project_root = rule_info.get("project_root")
+                if project_root:
+                    add_rule_to_project(rule_info, project_root, projects_by_root)
+        except Exception as e:
+            logger.debug(f"Error extracting root config {config_file}: {e}")

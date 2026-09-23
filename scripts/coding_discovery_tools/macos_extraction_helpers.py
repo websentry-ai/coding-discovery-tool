@@ -15,7 +15,7 @@ from typing import List, Dict, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH, SKIP_DIRS, SKIP_SYSTEM_DIRS
 from .mcp_extraction_helpers import is_home_dotdir_descendant
-from .project_dir_index import dispatch_matches
+from .project_dir_index import dispatch_matches, dispatch_file_matches
 
 logger = logging.getLogger(__name__)
 
@@ -597,7 +597,9 @@ def extract_project_level_rules_with_fallback(
     tool_dir_name: str,
     extract_from_dir_func,
     walk_for_dirs_func,
-    projects_by_root: Dict[str, List[Dict]]
+    projects_by_root: Dict[str, List[Dict]],
+    file_marker_names=None,
+    extract_from_file_func=None,
 ) -> None:
     """
     Shared helper for extracting project-level rules with root path handling.
@@ -636,8 +638,9 @@ def extract_project_level_rules_with_fallback(
             logger.info("Falling back to home directory search")
             home_path = Path.home()
             extract_project_level_rules_with_fallback(
-                home_path, tool_dir_name, extract_from_dir_func, 
-                walk_for_dirs_func, projects_by_root
+                home_path, tool_dir_name, extract_from_dir_func,
+                walk_for_dirs_func, projects_by_root,
+                file_marker_names, extract_from_file_func,
             )
     else:
         # For non-root paths, use standard rglob
@@ -651,6 +654,18 @@ def extract_project_level_rules_with_fallback(
             except (PermissionError, OSError) as e:
                 logger.debug(f"Skipping {tool_dir}: {e}")
                 continue
+        if file_marker_names and extract_from_file_func is not None:
+            for name in sorted(file_marker_names):
+                for marker in root_path.rglob(name):
+                    try:
+                        if marker.is_symlink() or not marker.is_file():
+                            continue
+                        if not should_process_directory(marker.parent, root_path):
+                            continue
+                        extract_from_file_func(marker, projects_by_root)
+                    except (PermissionError, OSError) as e:
+                        logger.debug(f"Skipping {marker}: {e}")
+                        continue
 
 
 # macOS project-walk prune (skip dirs + system dirs + hidden home-level tool
@@ -669,7 +684,9 @@ def walk_for_tool_directories(
     tool_dir_name: str,
     extract_from_dir_func,
     projects_by_root: Dict[str, List[Dict]],
-    current_depth: int = 0
+    current_depth: int = 0,
+    file_marker_names=None,
+    extract_from_file_func=None,
 ) -> None:
     """
     Find each tool-specific dir under ``current_dir`` and extract from it.
@@ -700,6 +717,21 @@ def walk_for_tool_directories(
         # the direct walk or it would silently never match.
         markers_all_hidden=tool_dir_name.startswith("."),
     )
+
+    if file_marker_names and extract_from_file_func is not None:
+        # Project-root marker FILES (e.g. opencode.json) from the same index.
+        def on_file(marker: Path) -> None:
+            try:
+                extract_from_file_func(marker, projects_by_root)
+            except (PermissionError, OSError):
+                pass
+            except Exception as e:
+                logger.debug(f"Error processing {marker}: {e}")
+
+        dispatch_file_matches(
+            root_path, current_dir, _macos_project_skip, _MACOS_PROJECT_SKIP_ID,
+            file_marker_names, on_file,
+        )
 
 
 def extract_project_level_mcp_configs_with_fallback(

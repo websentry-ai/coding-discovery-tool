@@ -210,8 +210,7 @@ class WindowsClaudeRulesExtractor(BaseClaudeRulesExtractor):
                             # Don't recurse into .claude directory
                             continue
 
-                        # Claude Code ignores everything under .agents/; do not
-                        # descend into it or capture AGENTS.md/CLAUDE.md inside it.
+                        # Claude Code ignores everything under .agents/.
                         if item.name == ".agents":
                             continue
 

@@ -106,9 +106,7 @@ class TestClaudeCodeAgentsMdCapture(unittest.TestCase):
         names = {r["file_name"] for _root, r in rules}
         self.assertNotIn("AGENTS.local.md", names)
         self.assertNotIn("AGENTS.override.md", names)
-        # Nothing from under .agents/ (neither its AGENTS.md nor CLAUDE.md). Assert on
-        # the file paths, not the project-root basename: a file inside .agents/ resolves
-        # to a ".agents" root, so a root-name check never sees the leak.
+        # Nothing under .agents/ (assert on file paths, not the project-root basename).
         paths = [r["file_path"] for _root, r in rules]
         self.assertFalse(
             any(".agents" in Path(p).parts for p in paths),

@@ -260,9 +260,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         continue
 
                     if _entry.is_dir():
-                        # A symlinked directory OR Windows junction (e.g. .github ->
-                        # elsewhere) is never entered; the walk would otherwise follow
-                        # the redirect. is_symlink() misses NTFS junctions.
+                        # Never enter a symlinked or junctioned directory
+                        # (is_symlink() misses NTFS junctions).
                         if is_symlink_or_junction(item):
                             continue
                         if item.name == ".github":
@@ -461,10 +460,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 return None
 
             project_root = find_project_root_func(rule_file)
-            # Project rules are read strictly (no symlink) — the root-scan attack
-            # surface. The user's own global rules may be symlinked into place by a
-            # dotfile manager, so those follow the link but stay contained to the
-            # user's home and owned by that user.
+            # Strict for project rules; user-global rules may be symlinked into
+            # place (dotfile managers), so follow but stay contained to the home.
             if scope == "user" and user_home is not None:
                 contained = read_rule_file_contained(rule_file, user_home, allow_symlink=True)
             else:

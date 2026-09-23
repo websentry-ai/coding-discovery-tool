@@ -28,8 +28,6 @@ USER_INSTALL_DIR = Path("AppData") / "Local" / "Programs" / "GitHub Copilot"
 _MAX_DEPTH = 3
 # Run-away guard only: the largest real install tree measured holds ~12k entries.
 _MAX_ENTRIES = 50000
-# npm and MSI installers ship shims, so a launcher is not always a PE.
-_LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat", ".ps1", ".com")
 # The per-user install root is owner-writable, so these names are untrusted.
 _MAX_NAMES = 6
 _MAX_NAME_CHARS = 16
@@ -57,7 +55,7 @@ def _find_exe(root: Path) -> str:
                         return "truncated"
                     if depth == 0 and len(names) < _MAX_NAMES:
                         names.append(_tag_name(entry.name))
-                    if entry.name.lower().endswith(_LAUNCHER_SUFFIXES) and entry.is_file():
+                    if entry.name.lower().endswith(".exe") and entry.is_file():
                         return "present"
                     if entry.is_dir(follow_symlinks=False) and depth < _MAX_DEPTH:
                         stack.append((Path(entry.path), depth + 1))

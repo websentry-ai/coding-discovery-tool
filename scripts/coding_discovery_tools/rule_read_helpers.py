@@ -6,8 +6,9 @@ root (another user's file). Two scopes:
 
   * Project/workspace reads are STRICT — resolved one component at a time from a
     handle on the project root with ``O_NOFOLLOW`` (``openat``), so no symlinked
-    component, intermediate or final, is ever followed and the opened file cannot
-    escape the root. Containment holds by construction, not by re-walking a name.
+    component BELOW the root, intermediate or final, is ever followed. The root
+    anchor itself is opened by name and trusted (a root swapped for a symlink after
+    the discovery walk is not caught).
   * User-scope global reads (the user's own ``~/.copilot/instructions`` /
     ``~/.claude/rules`` / VS Code User prompts) MAY follow a symlink (so a dotfile
     manager works), so they open the path and then contain the OPENED descriptor's
@@ -310,9 +311,9 @@ def _fd_within_root(fd: int, root) -> bool:
 
 def _open_beneath_strict(rule_file, root, final_flags) -> Optional[int]:
     """POSIX: open ``rule_file`` by descending each path component from a handle on
-    ``root`` with ``O_NOFOLLOW`` (``openat``), or None. No symlinked component is
-    followed and the file cannot escape ``root``. The root anchor itself is trusted
-    (opened by name)."""
+    ``root`` with ``O_NOFOLLOW`` (``openat``), or None. No symlinked component below
+    the root is followed. The root anchor itself is opened by name and trusted (a root
+    swapped for a symlink is not caught)."""
     try:
         rel = os.path.relpath(os.path.abspath(str(rule_file)), os.path.abspath(str(root)))
     except (OSError, ValueError):
@@ -321,6 +322,8 @@ def _open_beneath_strict(rule_file, root, final_flags) -> Optional[int]:
     if not parts or os.pardir in parts:  # empty, or escapes root with ".."
         return None
     o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not o_nofollow:  # no O_NOFOLLOW: fail closed rather than open a symlink
+        return None
     o_directory = getattr(os, "O_DIRECTORY", 0)
     dir_fd = None
     try:
@@ -348,7 +351,7 @@ def _open_contained(rule_file, root, allow_symlink, *, extra_flags: int = 0) -> 
     base_flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
                   | getattr(os, "O_NOCTTY", 0) | extra_flags)
     if os.name == "posix" and not allow_symlink:
-        # Project scope: resolve per component with O_NOFOLLOW; contained by construction.
+        # Project scope: resolve per component with O_NOFOLLOW; no symlink below root.
         return _open_beneath_strict(rule_file, root, base_flags)
     # Follow-symlink scope (user, or any Windows: dir_fd is unsupported there). Pre-check
     # the target before opening; a symlink could point outside root or at a device node.

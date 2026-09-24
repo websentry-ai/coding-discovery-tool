@@ -245,6 +245,25 @@ class TestReadRuleFileContainedContainment(unittest.TestCase):
         result = read_rule_file_contained(rules / "y.md", self.root, allow_symlink=True)
         self.assertIsNone(result, "a user-global symlink outside home must be refused")
 
+    def test_user_scope_descriptor_guard_refuses_when_precheck_passes(self):
+        # Pre-check passes (realpath points at an in-home file) but the open lands
+        # outside home; _fd_within_root on the descriptor is what refuses it.
+        from unittest import mock
+        from coding_discovery_tools import rule_read_helpers as rr
+        (self.outside / "secret").write_text("OUT-OF-TREE-SECRET", encoding="utf-8")
+        decoy = self.root / "decoy.md"
+        decoy.write_text("DECOY", encoding="utf-8")
+        rules = self.root / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        rule = rules / "y.md"
+        os.symlink(self.outside / "secret", rule)  # real symlink aims out of home
+        real_realpath = os.path.realpath
+        def fake_realpath(p, *a, **k):
+            return real_realpath(str(decoy)) if str(p) == str(rule) else real_realpath(p, *a, **k)
+        with mock.patch.object(rr.os.path, "realpath", side_effect=fake_realpath):
+            result = read_rule_file_contained(rule, self.root, allow_symlink=True)
+        self.assertIsNone(result, "the opened file resolving outside home must be refused")
+
     def test_user_symlink_to_non_regular_target_refused_before_open(self):
         # A symlink to a non-regular target (device/FIFO) is refused before it is opened.
         from unittest import mock

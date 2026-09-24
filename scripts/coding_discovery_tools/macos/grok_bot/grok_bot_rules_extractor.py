@@ -80,10 +80,12 @@ class MacOSGrokBotRulesExtractor(BaseGrokBotRulesExtractor):
                 config_file = data_dir / name
                 if not config_file.is_file():
                     continue
-                rule_info = extract_rule_file_contained(
-                    config_file, home_root, scope="user", user_home=user_home
-                )
+                # Strict read: a symlinked or hard-linked settings.json could point
+                # at the daemon credential beside it, which _NEVER_READ checks by
+                # name only.
+                rule_info = extract_rule_file_contained(config_file, home_root)
                 if rule_info:
+                    rule_info["scope"] = "user"
                     project_root = rule_info.get("project_root")
                     if project_root:
                         add_rule_to_project(rule_info, project_root, projects_by_root)

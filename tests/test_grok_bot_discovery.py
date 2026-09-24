@@ -9,6 +9,7 @@ Bundles and homes are built in temp dirs; no test touches ``/Applications`` or
 the real home.
 """
 
+import os
 import plistlib
 import tempfile
 import unittest
@@ -108,13 +109,28 @@ class TestMacOSGrokBotConfigExtraction(unittest.TestCase):
         names = [r["file_name"] for p in projects for r in p["rules"]]
         self.assertEqual(names, ["settings.json"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX links; the extractor is macOS-only")
+    def test_symlinked_settings_json_not_followed(self):
+        """A settings.json link to the daemon credential must not smuggle it out."""
+        cred = self.data_dir / "local-exec-daemon-credential.json"
+        cred.write_text('{"data": "sealed"}', encoding="utf-8")
+        (self.data_dir / "settings.json").symlink_to(cred)
+        self.assertEqual(self._extract(), [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX links; the extractor is macOS-only")
+    def test_hardlinked_settings_json_not_read(self):
+        cred = self.data_dir / "local-exec-daemon-credential.json"
+        cred.write_text('{"data": "sealed"}', encoding="utf-8")
+        os.link(cred, self.data_dir / "settings.json")
+        self.assertEqual(self._extract(), [])
+
     def test_secret_values_redacted(self):
         (self.data_dir / "settings.json").write_text(
-            '{"apiKey": "sk-live-abc123", "localToolPermission": "ask"}', encoding="utf-8"
+            '{"apiKey": "test-redaction-value", "localToolPermission": "ask"}', encoding="utf-8"
         )
         [project] = self._extract()
         content = project["rules"][0]["content"]
-        self.assertNotIn("sk-live-abc123", content)
+        self.assertNotIn("test-redaction-value", content)
         self.assertIn('"localToolPermission": "ask"', content)
 
 

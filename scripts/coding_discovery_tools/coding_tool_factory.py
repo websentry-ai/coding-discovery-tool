@@ -25,6 +25,8 @@ from .coding_tool_base import (
     BasePiRulesExtractor,
     BaseZedRulesExtractor,
     BaseGrokBotRulesExtractor,
+    BaseMuseCodeRulesExtractor,
+    BaseMuseCodeSkillsExtractor,
     BaseCursorCliRulesExtractor,
     BaseCopilotCliRulesExtractor,
     BaseCopilotCliSettingsExtractor,
@@ -565,6 +567,40 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_muse_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Muse (Meta's personal agent app) detector for the OS.
+
+        Returns:
+            BaseToolDetector instance, or None on an OS without support yet.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.muse.muse import MacOSMuseDetector
+            return MacOSMuseDetector()
+        else:
+            return None
+
+    @staticmethod
+    def create_muse_code_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Muse Code detector for the OS.
+
+        Returns:
+            BaseToolDetector instance, or None on an OS without support yet.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.muse_code.muse_code import MacOSMuseCodeDetector
+            return MacOSMuseCodeDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_openclaw_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate OpenClaw detector for the OS.
@@ -820,6 +856,15 @@ class ToolDetectorFactory:
         grok_bot_detector = ToolDetectorFactory.create_grok_bot_detector(os_name)
         if grok_bot_detector is not None:
             detectors.append(grok_bot_detector)
+
+        # Add Muse and Muse Code detectors (macOS)
+        muse_detector = ToolDetectorFactory.create_muse_detector(os_name)
+        if muse_detector is not None:
+            detectors.append(muse_detector)
+
+        muse_code_detector = ToolDetectorFactory.create_muse_code_detector(os_name)
+        if muse_code_detector is not None:
+            detectors.append(muse_code_detector)
 
         openclaw_detector = ToolDetectorFactory.create_openclaw_detector(os_name)
         if openclaw_detector is not None:
@@ -1602,6 +1647,54 @@ class GrokBotRulesExtractorFactory:
         if os_name == "Darwin":
             from .macos.grok_bot.grok_bot_rules_extractor import MacOSGrokBotRulesExtractor
             return MacOSGrokBotRulesExtractor()
+        else:
+            return None
+
+
+class MuseCodeRulesExtractorFactory:
+    """Factory for creating OS-specific Muse Code config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMuseCodeRulesExtractor]:
+        """Create appropriate Muse Code config extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.muse_code.muse_code_rules_extractor import MacOSMuseCodeRulesExtractor
+            return MacOSMuseCodeRulesExtractor()
+        else:
+            return None
+
+
+class MuseCodeMCPConfigExtractorFactory:
+    """Factory for creating OS-specific Muse Code MCP config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMCPConfigExtractor]:
+        """Create appropriate Muse Code MCP config extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.muse_code.mcp_config_extractor import MacOSMuseCodeMCPConfigExtractor
+            return MacOSMuseCodeMCPConfigExtractor()
+        else:
+            return None
+
+
+class MuseCodeSkillsExtractorFactory:
+    """Factory for creating OS-specific Muse Code skills extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseMuseCodeSkillsExtractor]:
+        """Create appropriate Muse Code skills extractor for the OS (None if unsupported)."""
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.muse_code.skills_extractor import MacOSMuseCodeSkillsExtractor
+            return MacOSMuseCodeSkillsExtractor()
         else:
             return None
 

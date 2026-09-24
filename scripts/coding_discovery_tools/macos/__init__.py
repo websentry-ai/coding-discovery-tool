@@ -18,6 +18,8 @@ from .opencode import MacOSOpenCodeDetector
 from .pi import MacOSPiDetector
 from .zed import MacOSZedDetector
 from .grok_bot import MacOSGrokBotDetector
+from .muse import MacOSMuseDetector
+from .muse_code import MacOSMuseCodeDetector
 from .junie import MacOSJunieDetector
 from .github_copilot_xcode import MacOSGitHubCopilotXcodeDetector
 from .xcode import MacOSXcodeDetector
@@ -41,6 +43,8 @@ __all__ = [
     'MacOSPiDetector',
     'MacOSZedDetector',
     'MacOSGrokBotDetector',
+    'MacOSMuseDetector',
+    'MacOSMuseCodeDetector',
     'MacOSJunieDetector',
     'MacOSGitHubCopilotXcodeDetector',
     'MacOSXcodeDetector',

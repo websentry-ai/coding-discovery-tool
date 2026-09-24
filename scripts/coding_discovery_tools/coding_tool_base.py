@@ -355,6 +355,27 @@ class BaseGrokBotRulesExtractor(ABC):
         pass
 
 
+class BaseMuseCodeRulesExtractor(ABC):
+    """Abstract base class for extracting Muse Code config."""
+
+    @abstractmethod
+    def extract_all_muse_code_rules(self) -> List[Dict]:
+        """
+        Extract Muse Code config for every user home in scope.
+
+        Searches for:
+        - Global config: ~/.config/muse/settings.json (model defaults, MCP
+          servers, hooks, runtime capabilities)
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: the user home
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseGitHubCopilotRulesExtractor(ABC):
     """Abstract base class for extracting GitHub Copilot rules from all projects."""
 
@@ -745,6 +766,10 @@ class BaseCodexSkillsExtractor(_BaseAgentSkillsExtractor):
 class BaseGeminiCliSkillsExtractor(_BaseAgentSkillsExtractor):
     """Extract Gemini CLI skills. Paths: user ``~/.gemini/skills/`` (+ ``~/.agents/skills/``
     alias); project ``.gemini/skills/`` (+ ``.agents/skills/`` alias)."""
+
+
+class BaseMuseCodeSkillsExtractor(_BaseAgentSkillsExtractor):
+    """Extract Muse Code personal skills. Paths: user ``~/.config/muse/skills/<name>/``."""
 
 
 class BaseOpenCodeSkillsExtractor(_BaseAgentSkillsExtractor):

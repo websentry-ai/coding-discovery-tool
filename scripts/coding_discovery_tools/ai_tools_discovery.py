@@ -51,6 +51,9 @@ try:
         PiRulesExtractorFactory,
         ZedRulesExtractorFactory,
         GrokBotRulesExtractorFactory,
+        MuseCodeRulesExtractorFactory,
+        MuseCodeMCPConfigExtractorFactory,
+        MuseCodeSkillsExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -128,6 +131,9 @@ except ImportError:
         PiRulesExtractorFactory,
         ZedRulesExtractorFactory,
         GrokBotRulesExtractorFactory,
+        MuseCodeRulesExtractorFactory,
+        MuseCodeMCPConfigExtractorFactory,
+        MuseCodeSkillsExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -523,6 +529,11 @@ class AIToolsDetector:
 
             # Initialize Grok Bot extractor (macOS; None elsewhere)
             self._grok_bot_rules_extractor = GrokBotRulesExtractorFactory.create(self.system)
+
+            # Initialize Muse Code extractors (macOS; None elsewhere)
+            self._muse_code_rules_extractor = MuseCodeRulesExtractorFactory.create(self.system)
+            self._muse_code_mcp_extractor = MuseCodeMCPConfigExtractorFactory.create(self.system)
+            self._muse_code_skills_extractor = MuseCodeSkillsExtractorFactory.create(self.system)
 
             # Initialize JetBrains extractors (macOS only, returns None for unsupported OS)
             self._jetbrains_mcp_extractor = JetBrainsMCPConfigExtractorFactory.create(self.system)
@@ -1043,6 +1054,35 @@ class AIToolsDetector:
             logger.error(f"Error extracting Grok Bot rules: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": "Grok Bot rules"}, level="warning")
             return []
+
+    def extract_all_muse_code_rules(self) -> List[Dict]:
+        """
+        Extract Muse Code config for every user home in scope.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the user home
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._muse_code_rules_extractor:
+                return self._muse_code_rules_extractor.extract_all_muse_code_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Muse Code rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Muse Code rules"}, level="warning")
+            return []
+
+    def extract_all_muse_code_skills(self) -> Optional[Dict]:
+        """Extract all Muse Code personal skills (~/.config/muse/skills)."""
+        try:
+            if self._muse_code_skills_extractor:
+                return self._muse_code_skills_extractor.extract_all_skills()
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting Muse Code skills: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Muse Code skills"}, level="warning")
+            return None
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
         """
@@ -3245,6 +3285,16 @@ class AIToolsDetector:
                 self._grok_bot_rules_extractor,
                 None,
                 self.extract_all_grok_bot_rules,
+            )
+
+        elif tool_name == "muse code":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._muse_code_rules_extractor,
+                self._muse_code_mcp_extractor,
+                self.extract_all_muse_code_rules,
+                skills_extractor=self._muse_code_skills_extractor,
+                extract_skills_func=self.extract_all_muse_code_skills,
             )
 
         elif tool_name.lower().startswith("junie"):

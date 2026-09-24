@@ -87,7 +87,7 @@ class TestMacOSGrokBotConfigExtraction(unittest.TestCase):
 
     def test_settings_json_collected_as_user_scope(self):
         body = '{\n  "localToolPermission": "ask",\n  "mcpBoxServers": ["srv-1"]\n}'
-        (self.data_dir / "settings.json").write_text(body, encoding="utf-8")
+        (self.data_dir / "settings.json").write_bytes(body.encode("utf-8"))
         projects = self._extract()
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0]["project_root"], str(self.home))

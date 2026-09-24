@@ -295,6 +295,7 @@ class TestDiscoveryWiring(unittest.TestCase):
     def _detector(self, by_user):
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         det = AIToolsDetector(os_name="Darwin")
+        det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
         ex = det._copilot_xcode_settings_extractor
         ex.extract_settings_by_user = lambda: by_user
         # This test isolates the permissions wiring; keep the other surfaces empty so
@@ -323,8 +324,7 @@ class TestDiscoveryWiring(unittest.TestCase):
 
 
 class TestGreptileRegressions(unittest.TestCase):
-    """Prove-fail regressions for the four auto-approval review findings. Each
-    asserts the fixed behaviour and fails on the pre-fix code."""
+    """Auto-approval review-finding regressions."""
 
     _LOGGER = "coding_discovery_tools.macos.github_copilot_xcode.settings_extractor"
 
@@ -334,7 +334,7 @@ class TestGreptileRegressions(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.home, ignore_errors=True)
 
-    # Finding 1 — a withheld list-object approval must not become active.
+    # A withheld list-object approval must not become active.
     def test_list_object_withheld_approval_is_excluded(self):
         _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {
             _MCP_KEY: [{"name": "x", "approve": False}, {"name": "y", "approve": True}],
@@ -343,12 +343,11 @@ class TestGreptileRegressions(unittest.TestCase):
         # Pre-fix: _name_of ignored the verdict, so "x" leaked into the allowlist.
         self.assertEqual(rec["mcp_tool_allowlist"], ["y"])
 
-    # Finding 2 — a symlinked container must not redirect the read out of the home.
+    # A symlinked container must not redirect the read out of the home.
     @unittest.skipUnless(os.name == "posix", "symlink semantics are POSIX-specific")
     def test_symlinked_container_escaping_home_is_refused(self):
-        # A parent component (the group container) is a symlink to an out-of-home
-        # tree that holds an attacker-owned plist. lstat follows parent symlinks,
-        # so the pre-fix reader would open and report it.
+        # The group-container parent is a symlink to an out-of-home plist (lstat
+        # follows parent symlinks).
         outside = Path(tempfile.mkdtemp(prefix="copilot-xcode-evil-"))
         try:
             evil_prefs = outside / "Library" / "Preferences"
@@ -364,7 +363,7 @@ class TestGreptileRegressions(unittest.TestCase):
         finally:
             shutil.rmtree(outside, ignore_errors=True)
 
-    # Finding 3 — non-JSON-safe plist values must not break json.dumps(record).
+    # Non-JSON-safe plist values must not break json.dumps(record).
     def test_raw_settings_with_data_and_date_is_json_serializable(self):
         _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {
             _SENSITIVE_FILES_KEY: {
@@ -380,7 +379,7 @@ class TestGreptileRegressions(unittest.TestCase):
         json.dumps(rec)  # must not raise
         self.assertIn("Edit(~/.env)", rec["allow_rules"])
 
-    # Finding 4 — per-user extraction failures must log a traceback (exc_info).
+    # Per-user extraction failures must log a traceback (exc_info).
     def test_per_user_failure_logs_traceback(self):
         ex = CopilotXcodeSettingsExtractorFactory.create("Darwin")
         ex._scan_users = lambda cb: cb(self.home)
@@ -395,7 +394,7 @@ class TestGreptileRegressions(unittest.TestCase):
         self.assertTrue(any(r.exc_info for r in cm.records),
                         "the failure must be logged with a traceback (exc_info=True)")
 
-    # Finding 2 (round 2) — a hard link to another user's plist must be refused.
+    # A hard link to another user's plist must be refused.
     @unittest.skipUnless(os.name == "posix", "hard-link semantics are POSIX-specific")
     def test_multiply_linked_plist_is_refused(self):
         path = _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["x"]})
@@ -406,7 +405,7 @@ class TestGreptileRegressions(unittest.TestCase):
         # Pre-fix: no nlink check, so the multiply-linked plist was read.
         self.assertIsNone(_extractor_over(self.home).extract_settings())
 
-    # Finding 2 (round 2) — a plist owned by a different uid must be refused.
+    # A plist owned by a different uid must be refused.
     def test_foreign_owned_plist_is_refused(self):
         _write_suite(self.home, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["x"]})
         ex = _extractor_over(self.home)
@@ -464,7 +463,7 @@ class TestRoutingRegression(unittest.TestCase):
         det._process_copilot_xcode_tool = spy
         return calls
 
-    # A1 — VS Code Copilot still takes the VS Code settings path, not the Xcode one.
+    # VS Code Copilot still takes the VS Code settings path, not the Xcode one.
     def test_a1_vscode_copilot_routes_to_vscode_handler(self):
         det = self._detector()
         det._canonical_vscode_copilot = "github copilot (vs code)"
@@ -482,7 +481,7 @@ class TestRoutingRegression(unittest.TestCase):
         self.assertEqual(row["permissions"]["permission_mode"], "bypassPermissions")
         self.assertNotIn("mcp_tool_allowlist", row["permissions"], "must be the VS Code record")
 
-    # A2 — sibling tools still route to their own handlers with the new branch present.
+    # Sibling tools still route to their own handlers with the new branch present.
     def test_a2_sibling_tools_route_to_their_handlers(self):
         import coding_discovery_tools.ai_tools_discovery as aitd
         det = self._detector()
@@ -511,7 +510,7 @@ class TestRoutingRegression(unittest.TestCase):
         self.assertEqual(r_cli["name"], "GitHub Copilot CLI")
         self.assertEqual(r_cursor["name"], "Cursor")
 
-    # A3 — prove-fail guard: loosening the route to the substring re-hijacks VS Code.
+    # VS Code Copilot must never receive the Xcode permissions.
     def test_a3_vscode_copilot_never_gets_xcode_permissions(self):
         det = self._detector()
         det._canonical_vscode_copilot = "github copilot (vs code)"
@@ -561,6 +560,7 @@ class TestRealEntrypointE2E(unittest.TestCase):
                     patch.object(sx, "is_running_as_root", lambda: False), \
                     patch.object(sx, "scan_user_directories", lambda cb: cb(home)):
                 det = AIToolsDetector(os_name="Darwin")  # real xcode extractor inside
+                det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
                 detector = ToolDetectorFactory.create_copilot_xcode_detector("Darwin")
                 detector.user_home = home  # scan the planted install, not the real machine
                 detected = detector.detect()
@@ -583,7 +583,7 @@ class TestAbuseAndStress(unittest.TestCase):
     def _rec(self, approvals):
         return self.ex._build_record(approvals, {}, Path("/x/auto.plist"))
 
-    # C2 — a command with shell metacharacters/newline/quotes cannot break the record.
+    # A command with shell metacharacters/newline/quotes cannot break the record.
     def test_c2_shell_metacharacters_stay_inside_one_allow_rule(self):
         nasty = 'git commit -m "x"; rm -rf / & echo `whoami`\n$(id)'
         rec = self._rec({_TERMINAL_KEY: [nasty]})
@@ -594,7 +594,7 @@ class TestAbuseAndStress(unittest.TestCase):
         self.assertNotIn("deny_rules", rec)
         json.dumps(rec)  # structure intact and serializable
 
-    # C3 — a bare-scalar approval value, and a very large list, degrade gracefully.
+    # A bare-scalar approval value, and a very large list, degrade gracefully.
     def test_c3_scalar_value_is_ignored_not_thrown(self):
         rec = self._rec({_MCP_KEY: 42, _TERMINAL_KEY: "plainword-not-json"})
         self.assertNotIn("mcp_tool_allowlist", rec)
@@ -771,7 +771,9 @@ class TestExpandedWiring(unittest.TestCase):
 
     def _detector(self):
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
-        return AIToolsDetector(os_name="Darwin")
+        det = AIToolsDetector(os_name="Darwin")
+        det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
+        return det
 
     def test_all_three_surfaces_attached(self):
         det = self._detector()
@@ -834,6 +836,7 @@ class TestGroupConsistency(unittest.TestCase):
 
         from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         det = AIToolsDetector(os_name="Darwin")
+        det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
         det._copilot_xcode_settings_extractor._scan_users = lambda cb: cb(self.home)
         row = det.process_single_tool(
             {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a", "projects": []})
@@ -880,14 +883,13 @@ class TestGroupHardening(unittest.TestCase):
                 return [r["content"] for r in p["rules"]]
         return []
 
-    # G1 — multi-user scan: each user's surfaces resolve to that user's own active
+    # Multi-user scan: each user's surfaces resolve to that user's own active
     # group; a stray other-group suite in one user's home never leaks into their
     # row, and no user borrows another user's group. User A is a prod install with
     # a stray dev suite (the leak the fix closes; prod is preferred so dev is inert);
     # user B is a clean dev-only install.
     def test_g1_multi_user_mixed_group_isolation(self):
-        # User A: PROD install (prod autoApproval permissions), plus a stray dev
-        # .prefs whose values the pre-fix prod->dev fallthrough would surface.
+        # User A: prod install with a stray dev .prefs that must not leak.
         a = self._home("copilot-xcode-g1a-")
         _write_suite(a, _PROD_GROUP, _AUTOAPPROVAL_SUFFIX, {_MCP_KEY: ["A-prod-approved"]})
         _write_general_prefs(a, {
@@ -925,10 +927,8 @@ class TestGroupHardening(unittest.TestCase):
         self.assertEqual(a_perm["mcp_tool_allowlist"], ["A-prod-approved"])
         self.assertEqual(b_perm["mcp_tool_allowlist"], ["B-dev-approved"])
 
-    # G2 — behavior-pinning (NOT prove-fail). Contract read from _read_mcp_servers:
-    # ~/.config/github-copilot/xcode/mcp.json is group-INDEPENDENT (it belongs to the
-    # install), so it is surfaced even when _active_group() is None (no group suite
-    # at all). No exception is raised.
+    # mcp.json is group-independent, so it is surfaced even when no group suite
+    # exists (_active_group() is None), and nothing throws.
     def test_g2_stray_mcp_json_without_any_group_is_surfaced(self):
         home = self._home("copilot-xcode-g2-")
         _write_mcp_json(home, {"servers": {"stray-file-mcp": {"command": "x"}}})
@@ -942,7 +942,7 @@ class TestGroupHardening(unittest.TestCase):
         self.assertEqual(ex.extract_rule_projects(), [])
         self.assertEqual(ex.extract_settings_by_user(), [])
 
-    # G4 — dev-active mirror: a dev-only install resolves every surface from dev, and
+    # Dev-active mirror: a dev-only install resolves every surface from dev, and
     # a stray prod artifact that is NOT a recognized suite (so _group_present(prod) is
     # False) never makes prod the active group nor appears in the row.
     def test_g4_dev_active_ignores_unrecognized_prod_artifact(self):
@@ -1014,6 +1014,103 @@ class TestToggleKeys(unittest.TestCase):
                       "EnableAutoApproval=True must rank the riskiest user first")
 
 
+@unittest.skipUnless(sys.platform == "darwin", "drives the real macOS Copilot rules walk")
+class TestWorkspaceRulesAndSkills(unittest.TestCase):
+    """The Xcode row also carries per-project ``.github`` config: instructions as
+    rules, ``prompts/*.prompt.md`` as skills. Root-safe: settings stubbed, walk
+    rooted at a fixture."""
+
+    def setUp(self):
+        # Under the real home so the extractor's system-path skip (rejects /tmp)
+        # does not drop the walk.
+        self.root = Path(tempfile.mkdtemp(prefix="cx-ws-", dir=str(Path.home())))
+        self.repo = self.root / "myrepo"
+        gh = self.repo / ".github"
+        gh.mkdir(parents=True)
+        (gh / "copilot-instructions.md").write_text("# be kind", encoding="utf-8")
+        (gh / "instructions").mkdir()
+        (gh / "instructions" / "style.instructions.md").write_text("# style", encoding="utf-8")
+        (gh / "prompts").mkdir()
+        (gh / "prompts" / "refactor.prompt.md").write_text("# refactor", encoding="utf-8")
+        # Surfaces Xcode does NOT read — must not appear on the row.
+        (self.repo / "AGENTS.md").write_text("# agents", encoding="utf-8")
+        (self.repo / ".claude" / "rules").mkdir(parents=True)
+        (self.repo / ".claude" / "rules" / "c.md").write_text("# claude", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _row(self):
+        from coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        det = AIToolsDetector(os_name="Darwin")
+        ex = det._copilot_xcode_settings_extractor
+        ex.extract_settings_by_user = lambda: []   # keep the row hermetic:
+        ex.extract_mcp_projects = lambda: []        # no real host permissions/MCP/
+        ex.extract_rule_projects = lambda: []       # global-instruction reads
+        # Root the shared ".github" walk at the fixture instead of "/".
+        rx = det._github_copilot_rules_extractor
+        rx._extract_workspace_rules = (
+            lambda root_path, pbr: rx._walk_for_github_directories(self.root, self.root, pbr, 0)
+        )
+        return det._process_copilot_xcode_tool(
+            {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a"})
+
+    def test_project_rules_and_prompt_skills_are_captured(self):
+        row = self._row()
+        proj = [p for p in row["projects"] if p["path"] == str(self.repo)]
+        self.assertEqual(len(proj), 1, "the workspace project must appear on the Xcode row")
+        rule_names = {r["file_name"] for r in proj[0]["rules"]}
+        skill_names = {s["file_name"] for s in proj[0]["skills"]}
+        # rules: copilot-instructions.md + path-specific instructions
+        self.assertIn("copilot-instructions.md", rule_names)
+        self.assertIn("style.instructions.md", rule_names)
+        # skills: the prompt file (NOT lumped into rules)
+        self.assertEqual(skill_names, {"refactor.prompt.md"})
+        self.assertNotIn("refactor.prompt.md", rule_names)
+
+    def test_non_xcode_github_surfaces_are_dropped(self):
+        row = self._row()
+        blob = json.dumps(row)
+        # AGENTS.md and .claude/rules are collected by the shared walk but are not
+        # Xcode surfaces, so they must not ride the Xcode row.
+        self.assertNotIn("AGENTS.md", blob)
+        self.assertNotIn("c.md", blob)
+
+    def test_symlinked_instruction_file_outside_repo_is_refused(self):
+        # copilot-instructions.md symlinked outside the repo must not be read.
+        outside = Path(tempfile.mkdtemp(prefix="cx-secret-"))
+        try:
+            (outside / "id_rsa").write_text("SECRET-PRIVATE-KEY-MATERIAL", encoding="utf-8")
+            ci = self.repo / ".github" / "copilot-instructions.md"
+            ci.unlink()
+            os.symlink(outside / "id_rsa", ci)
+            blob = json.dumps(self._row())
+            self.assertNotIn("SECRET-PRIVATE-KEY-MATERIAL", blob,
+                             "a symlink to a file outside the repo must not be read")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_symlinked_github_dir_outside_repo_is_refused(self):
+        # a symlinked .github directory must not be entered.
+        outside = Path(tempfile.mkdtemp(prefix="cx-evil-github-"))
+        try:
+            (outside / "copilot-instructions.md").write_text("SECRET-FROM-SYMLINKED-GITHUB", encoding="utf-8")
+            shutil.rmtree(self.repo / ".github")
+            os.symlink(outside, self.repo / ".github")
+            blob = json.dumps(self._row())
+            self.assertNotIn("SECRET-FROM-SYMLINKED-GITHUB", blob,
+                             "a symlinked .github directory must not be entered")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_legitimate_regular_instruction_file_still_captured(self):
+        # Regression: a real regular copilot-instructions.md is still captured.
+        row = self._row()
+        proj = [p for p in row["projects"] if p["path"] == str(self.repo)]
+        self.assertEqual(len(proj), 1)
+        self.assertIn("copilot-instructions.md", {r["file_name"] for r in proj[0]["rules"]})
+
+
 @unittest.skipUnless(sys.platform == "darwin", "Copilot for Xcode is macOS-only")
 class TestGroupConsistencyE2E(unittest.TestCase):
     """G3: the prod-permissions + stray-dev-prefs fixture driven through the REAL
@@ -1037,6 +1134,7 @@ class TestGroupConsistencyE2E(unittest.TestCase):
                     patch.object(sxmod, "is_running_as_root", lambda: False), \
                     patch.object(sxmod, "scan_user_directories", lambda cb: cb(home)):
                 det = AIToolsDetector(os_name="Darwin")
+                det._copilot_xcode_workspace_surfaces = lambda: {}  # don't walk the host .github tree
                 row = det._process_copilot_xcode_tool(
                     {"name": "GitHub Copilot (Xcode)", "version": "1", "install_path": "/a"})
             self.assertEqual(row["permissions"]["mcp_tool_allowlist"], ["prod-approved"])

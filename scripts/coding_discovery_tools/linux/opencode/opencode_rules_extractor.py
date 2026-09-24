@@ -5,22 +5,23 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseOpenCodeRulesExtractor
+from ...rule_read_helpers import extract_rule_file_contained
 from ...linux_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
-    extract_single_rule_file,
     get_linux_user_homes,
     should_process_file,
     walk_for_tool_directories,
 )
+# Path logic is OS-independent; share it with the macOS implementation
+# (see that module's docstring for the layout and the known limitation).
+from ...macos.opencode.opencode_rules_extractor import (
+    OPENCODE_ROOT_MARKERS,
+    find_opencode_project_root,
+    iter_opencode_config_files,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def find_opencode_project_root(rule_file: Path) -> Path:
-    if ".config/opencode/agent" in str(rule_file):
-        return rule_file.parent.parent.parent.parent
-    return rule_file.parent.parent.parent
 
 
 class LinuxOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
@@ -36,18 +37,21 @@ class LinuxOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
 
     def _extract_global_rules(self, projects_by_root: Dict) -> None:
         def extract_for_user(user_home: Path) -> None:
-            global_rules_dir = user_home / ".config" / "opencode" / "agent"
-            if global_rules_dir.exists() and global_rules_dir.is_dir():
-                try:
-                    for rule_file in global_rules_dir.glob("*.md"):
-                        if should_process_file(rule_file, user_home):
-                            rule_info = extract_single_rule_file(rule_file, find_opencode_project_root)
-                            if rule_info:
-                                project_root = rule_info.get("project_root")
-                                if project_root:
-                                    add_rule_to_project(rule_info, project_root, projects_by_root)
-                except Exception as e:
-                    logger.debug(f"Error extracting global OpenCode rules for {user_home}: {e}")
+            global_dir = user_home / ".config" / "opencode"
+            try:
+                if not global_dir.is_dir():
+                    return
+                for rule_file in iter_opencode_config_files(global_dir, include_root_siblings=False):
+                    if should_process_file(rule_file, user_home):
+                        rule_info = extract_rule_file_contained(
+                            rule_file, find_opencode_project_root, scope="user", user_home=user_home
+                        )
+                        if rule_info:
+                            project_root = rule_info.get("project_root")
+                            if project_root:
+                                add_rule_to_project(rule_info, project_root, projects_by_root)
+            except Exception as e:
+                logger.debug(f"Error extracting global OpenCode rules for {user_home}: {e}")
 
         for user_home in get_linux_user_homes():
             try:
@@ -62,21 +66,38 @@ class LinuxOpenCodeRulesExtractor(BaseOpenCodeRulesExtractor):
                     user_home, user_home, ".opencode",
                     self._extract_rules_from_opencode_directory,
                     projects_by_root, current_depth=0,
+                    file_marker_names=OPENCODE_ROOT_MARKERS,
+                    extract_from_file_func=self._extract_rules_from_root_config,
                 )
             except (PermissionError, OSError) as e:
                 logger.debug(f"Skipping {user_home}: {e}")
 
     def _extract_rules_from_opencode_directory(self, opencode_dir: Path, projects_by_root: Dict) -> None:
-        agent_dir = opencode_dir / "agent"
-        if not agent_dir.exists() or not agent_dir.is_dir():
-            return
+        # Emits a project only when a rule/config file exists (bare dirs yield nothing).
         try:
-            for rule_file in agent_dir.glob("*.md"):
+            for rule_file in iter_opencode_config_files(opencode_dir, include_root_siblings=True):
                 if should_process_file(rule_file, opencode_dir.parent):
-                    rule_info = extract_single_rule_file(rule_file, find_opencode_project_root)
+                    rule_info = extract_rule_file_contained(rule_file, find_opencode_project_root)
                     if rule_info:
                         project_root = rule_info.get("project_root")
                         if project_root:
                             add_rule_to_project(rule_info, project_root, projects_by_root)
         except Exception as e:
             logger.debug(f"Error extracting rules from {opencode_dir}: {e}")
+
+    def _extract_rules_from_root_config(self, config_file: Path, projects_by_root: Dict) -> None:
+        """Project-root `opencode.json[c]` with no `.opencode/` beside it."""
+        try:
+            # `.opencode/opencode.json` and a root file beside a `.opencode/` dir are
+            # both recorded by the directory route; only the bare root file is ours.
+            if config_file.parent.name == ".opencode" or (config_file.parent / ".opencode").is_dir():
+                return
+            if not should_process_file(config_file, config_file.parent):
+                return
+            rule_info = extract_rule_file_contained(config_file, find_opencode_project_root)
+            if rule_info:
+                project_root = rule_info.get("project_root")
+                if project_root:
+                    add_rule_to_project(rule_info, project_root, projects_by_root)
+        except Exception as e:
+            logger.debug(f"Error extracting root config {config_file}: {e}")

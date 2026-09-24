@@ -18,12 +18,15 @@ logger = logging.getLogger(__name__)
 class MacOSWindsurfDetector(BaseToolDetector):
     """Windsurf IDE detector for macOS systems."""
 
+    # Windsurf ships as Devin.app since the rebrand; older installs keep the
+    # original bundle, so both names are accepted.
     DEFAULT_APP_PATH = Path("/Applications/Windsurf.app")
+    REBRANDED_APP_PATH = Path("/Applications/Devin.app")
 
     @property
     def tool_name(self) -> str:
         """Return the name of the tool being detected."""
-        return "Windsurf"
+        return "Devin Desktop"
 
     def detect(self) -> Optional[Dict]:
         """
@@ -45,7 +48,9 @@ class MacOSWindsurfDetector(BaseToolDetector):
     def _resolve_app_path(self) -> Optional[Path]:
         """The installed bundle: machine-wide, else the scanned user's own."""
         user_home = getattr(self, 'user_home', None)
-        for candidate in macos_app_candidates(self.DEFAULT_APP_PATH, user_home):
+        candidates = (macos_app_candidates(self.DEFAULT_APP_PATH, user_home)
+                      + macos_app_candidates(self.REBRANDED_APP_PATH, user_home))
+        for candidate in candidates:
             try:
                 if candidate.exists():
                     return candidate

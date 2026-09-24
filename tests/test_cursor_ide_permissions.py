@@ -437,6 +437,30 @@ class TestCrossWorkspaceDedupe(_BaseCursorPermissionsTest):
         result = self._extract()
         self.assertEqual(result["mcp_tool_allowlist"], ["a", "b", "c", "d"])
 
+    def test_D1b_deterministic_regardless_of_walk_order(self):
+        """The merged allowlist must not depend on filesystem walk order: drive the
+        walk in REVERSE (projY before projX) and assert the result is unchanged."""
+        composer = {"useYoloMode": False}
+        _create_cursor_db(self.db_path, composer)
+        self._write_global_permissions({"mcpAllowlist": ["a", "b"]})
+        self._write_workspace_permissions("projX", {"mcpAllowlist": ["b", "c"]})
+        self._write_workspace_permissions("projY", {"mcpAllowlist": ["a", "d"]})
+
+        projY_cursor = self.user_home / "projY" / ".cursor"
+        projX_cursor = self.user_home / "projX" / ".cursor"
+
+        def reverse_walk(user_home, start, dir_name, callback, state, current_depth=0):
+            # Yield projY before projX — the opposite of sorted path order.
+            callback(projY_cursor, {})
+            callback(projX_cursor, {})
+
+        with patch(
+            "scripts.coding_discovery_tools.linux.cursor.settings_extractor.walk_for_tool_directories",
+            side_effect=reverse_walk,
+        ):
+            result = self._extract()
+        self.assertEqual(result["mcp_tool_allowlist"], ["a", "b", "c", "d"])
+
     def test_D2_unhashable_mcp_entries_deduped_via_typeerror_fallback(self):
         """Dict-valued mcp entries dedupe through the unhashable fallback path.
 

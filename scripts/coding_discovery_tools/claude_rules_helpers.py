@@ -22,6 +22,15 @@ def is_claude_local_md_file(filename: str) -> bool:
     return filename.lower() == "claude.local.md"
 
 
+def is_agents_md_file(filename: str) -> bool:
+    """True for an AGENTS.md Claude Code reads (case-insensitive); excludes
+    AGENTS.local.md and AGENTS.override.md, which it does not read."""
+    lower = filename.lower()
+    if lower in ("agents.local.md", "agents.override.md"):
+        return False
+    return lower == "agents.md"
+
+
 def build_rules_project_list(projects_by_root: Dict[str, List[Dict]]) -> List[Dict]:
     """
     Convert projects dictionary to list format with 'rules' key.

@@ -17,6 +17,7 @@ from typing import List, Dict
 
 from ...claude_rules_helpers import (
     is_claude_md_file,
+    is_agents_md_file,
     is_claude_local_md_file,
     build_rules_project_list,
     extract_user_rules_from_rules_directory,
@@ -207,6 +208,10 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
                             # Don't recurse into .claude directory
                             continue
 
+                        # Claude Code ignores everything under .agents/.
+                        if item.name == ".agents":
+                            continue
+
                         if _entry.is_symlink():
                             continue
 
@@ -215,7 +220,7 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
 
                     elif _entry.is_file():
                         # Check for .clauderules or CLAUDE.md files (case-insensitive for claude.md)
-                        if item.name == ".clauderules" or is_claude_md_file(item.name):
+                        if item.name == ".clauderules" or is_claude_md_file(item.name) or is_agents_md_file(item.name):
                             if should_process_file(item, root_path):
                                 extract_and_add_rule(
                                     item, find_claude_project_root, add_rule_to_project,
@@ -259,7 +264,7 @@ class MacOSClaudeRulesExtractor(BaseClaudeRulesExtractor):
 
             # Extract CLAUDE.md (case-insensitive) from .claude directory
             for item in claude_dir.iterdir():
-                if item.is_file() and is_claude_md_file(item.name):
+                if item.is_file() and (is_claude_md_file(item.name) or is_agents_md_file(item.name)):
                     extract_and_add_rule(
                         item, find_claude_project_root, add_rule_to_project,
                         projects_by_root, scope="project"

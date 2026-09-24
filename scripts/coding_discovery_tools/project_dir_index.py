@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 _INDEX_CACHE: Dict[tuple, Dict[str, List[Path]]] = {}
 _INDEX_LOCK = threading.Lock()
 
+# Project-root marker FILES recorded by the same walk that indexes hidden dirs.
+# OpenCode's primary project config is `<project>/opencode.json[c]` with no
+# `.opencode/` dir beside it, so a dir-only index would miss most projects.
+# Costs one set lookup per entry in a walk that already happens. Stored under a
+# `file:` key so directory matchers never see them.
+INDEXED_FILE_MARKERS = frozenset({"opencode.json", "opencode.jsonc"})
+_FILE_KEY_PREFIX = "file:"
+
 
 def _is_dispatchable(path: Path) -> bool:
     """True if ``path`` still resolves to a real directory. ``stat`` follows, so a
@@ -68,6 +76,9 @@ def _collect(root_path: Path, current_dir: Path,
                     if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
                         continue
                     if not entry.is_dir():  # follows symlinks, like Path.is_dir()
+                        if (entry.name in INDEXED_FILE_MARKERS
+                                and not entry.is_symlink() and entry.is_file()):
+                            index.setdefault(_FILE_KEY_PREFIX + entry.name, []).append(item)
                         continue
                     if entry.name.startswith("."):
                         index.setdefault(entry.name, []).append(item)
@@ -185,6 +196,82 @@ def dispatch_matches(root_path: Path, current_dir: Path,
             continue
         # Wrap on_match so an extractor error is contained the same way the direct
         # walk contains it, regardless of which route ran.
+        try:
+            on_match(target)
+        except (PermissionError, OSError, ValueError):
+            continue
+        except Exception as e:
+            logger.debug("on_match failed for %s: %s", target, e)
+
+
+def _is_plain_file(path: Path) -> bool:
+    """Regular file, not a symlink (lstat: the link itself is judged)."""
+    try:
+        return stat.S_ISREG(os.lstat(str(path)).st_mode)
+    except OSError:
+        return False
+
+
+def _walk_direct_files(root_path: Path, current_dir: Path, file_names,
+                       on_match: Callable[[Path], None],
+                       should_skip: Callable[[Path], bool]) -> None:
+    """Index fallback for marker files. Never descends links."""
+    try:
+        scan = os.scandir(current_dir)
+    except (PermissionError, OSError):
+        return
+    root_real = os.path.realpath(str(root_path))
+    with scan:
+        try:
+            for entry in scan:
+                try:
+                    item = Path(entry.path)
+                    if should_skip(item):
+                        continue
+                    if len(item.relative_to(root_path).parts) > MAX_SEARCH_DEPTH:
+                        continue
+                    if entry.is_dir():
+                        if not entry.is_symlink():
+                            _walk_direct_files(root_path, item, file_names, on_match, should_skip)
+                        continue
+                    if entry.name in file_names and _is_plain_file(item) \
+                            and _within_scan_root(item, root_real):
+                        on_match(item)
+                except (PermissionError, OSError, ValueError):
+                    continue
+                except Exception as e:
+                    logger.debug("skipping %s: %s", entry.path, e)
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.debug("iteration stopped for %s: %s", current_dir, e)
+
+
+def dispatch_file_matches(root_path: Path, current_dir: Path,
+                          should_skip: Callable[[Path], bool], skip_id: str,
+                          file_names, on_match: Callable[[Path], None]) -> None:
+    """Dispatch project-root marker FILES (must be in ``INDEXED_FILE_MARKERS``)
+    to ``on_match`` via the shared index, falling back to a direct walk."""
+    unknown = set(file_names) - INDEXED_FILE_MARKERS
+    if unknown:
+        # Not in the index; the direct walk is the only route that can find them.
+        logger.debug("file markers %s not indexed; direct walk", sorted(unknown))
+        _walk_direct_files(root_path, current_dir, set(file_names), on_match, should_skip)
+        return
+    try:
+        index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
+        targets = [f for name in file_names for f in index.get(_FILE_KEY_PREFIX + name, [])]
+    except Exception as e:
+        logger.warning("shared index failed (%s); independent walk fallback", e)
+        _walk_direct_files(root_path, current_dir, set(file_names), on_match, should_skip)
+        return
+    root_real = os.path.realpath(str(root_path))
+    for target in targets:
+        if not _is_plain_file(target):
+            logger.warning("index target dropped, no longer a regular file: %s", target)
+            continue
+        if not _within_scan_root(target, root_real):
+            logger.warning("index target dropped, resolves outside scan root: %s", target)
+            continue
         try:
             on_match(target)
         except (PermissionError, OSError, ValueError):

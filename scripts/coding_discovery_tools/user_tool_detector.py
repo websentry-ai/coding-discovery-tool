@@ -270,8 +270,23 @@ def _detect_codex(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]
 
 
 def _detect_opencode(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
-    """Detect OpenCode installation for a user."""
-    return _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai")
+    """Detect OpenCode installation for a user.
+
+    npm/nvm/bun globals first; then the detector's own PATH-free resolution
+    (curl installer ``~/.opencode/bin``, ``~/.bun/bin``, the desktop app bundle),
+    which the npm helper does not know about. ``detector.detect()`` itself is
+    still skipped: it resolves the SCANNER's PATH under root.
+    """
+    result = _detect_npm_global_cli(detector, user_home, "opencode", "opencode-ai")
+    if result is not None:
+        return result
+    # Only detectors that implement the PATH-free resolver (macOS/Linux); the
+    # isinstance check keeps duck-typed test doubles from short-circuiting here.
+    if not isinstance(detector, BaseToolDetector) \
+            or not callable(getattr(type(detector), "detect_user_install", None)):
+        return None
+    detector.user_home = user_home
+    return detector.detect_user_install()
 
 
 def _detect_gemini_cli(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:

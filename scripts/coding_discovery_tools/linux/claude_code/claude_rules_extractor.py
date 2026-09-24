@@ -11,6 +11,7 @@ from typing import Dict, List
 
 from ...claude_rules_helpers import (
     is_claude_md_file,
+    is_agents_md_file,
     is_claude_local_md_file,
     build_rules_project_list,
     extract_user_rules_from_rules_directory,
@@ -122,13 +123,16 @@ class LinuxClaudeRulesExtractor(BaseClaudeRulesExtractor):
                                 continue
                             self._extract_rules_from_claude_directory(item, projects_by_root)
                             continue
+                        # Claude Code ignores everything under .agents/.
+                        if item.name == ".agents":
+                            continue
                         if _entry.is_symlink():
                             continue
                         self._walk_for_claude_files(
                             root_path, item, projects_by_root, current_depth + 1
                         )
                     elif _entry.is_file():
-                        if item.name == ".clauderules" or is_claude_md_file(item.name):
+                        if item.name == ".clauderules" or is_claude_md_file(item.name) or is_agents_md_file(item.name):
                             if should_process_file(item, root_path):
                                 extract_and_add_rule(
                                     item, find_claude_project_root, add_rule_to_project,
@@ -158,7 +162,7 @@ class LinuxClaudeRulesExtractor(BaseClaudeRulesExtractor):
                     projects_by_root, scope="project",
                 )
             for item in claude_dir.iterdir():
-                if item.is_file() and is_claude_md_file(item.name):
+                if item.is_file() and (is_claude_md_file(item.name) or is_agents_md_file(item.name)):
                     extract_and_add_rule(
                         item, find_claude_project_root, add_rule_to_project,
                         projects_by_root, scope="project",

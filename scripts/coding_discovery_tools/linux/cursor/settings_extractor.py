@@ -68,4 +68,6 @@ class LinuxCursorSettingsExtractor(BaseCursorSettingsExtractor):
         except (PermissionError, OSError):
             pass
 
-        return found
+        # Deterministic order: the walk order isn't stable and it decides the
+        # merge order of per-workspace allowlists downstream.
+        return sorted(found)

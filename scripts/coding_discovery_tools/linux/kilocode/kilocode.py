@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class LinuxKiloCodeDetector(BaseToolDetector):
     """Detector for Kilo Code installations on Linux systems."""
 
-    SUPPORTED_IDES = ["Code", "Cursor"]
+    SUPPORTED_IDES = ["Code", "Cursor", "Windsurf"]
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
 
     @property

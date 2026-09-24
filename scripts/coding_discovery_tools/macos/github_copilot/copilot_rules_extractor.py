@@ -4,8 +4,9 @@ from typing import List, Dict
 from ...vscode_extension_helpers import vscode_family_editor_dirs
 
 from ...coding_tool_base import BaseGitHubCopilotRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries
+from ...constants import MAX_SEARCH_DEPTH, traverses_other_tool_config_dir, scan_dir_entries, is_symlink_or_junction
 from ...claude_code_skills_helpers import is_user_level_claude_subdir
+from ...rule_read_helpers import read_rule_file_contained
 from ...macos_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -17,8 +18,6 @@ from ...macos_extraction_helpers import (
     should_skip_system_path,
     is_running_as_root,
     scan_user_directories,
-    get_file_metadata,
-    read_file_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,7 +114,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         """
         Extract global GitHub Copilot rules from VS Code.
         """
-        def add_user_rules(directory: Path, patterns) -> None:
+        def add_user_rules(directory: Path, patterns, user_home: Path) -> None:
             """Collect each ``patterns`` match under ``directory`` as a user rule."""
             try:
                 if not directory.is_dir():
@@ -132,7 +131,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     except ValueError:
                         continue
                     rule_info = self._extract_rule_with_scope(
-                        rule_file, find_github_copilot_project_root, scope="user"
+                        rule_file, find_github_copilot_project_root, scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -153,9 +153,10 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                 add_user_rules(
                     user_home / "Library" / "Application Support" / editor / "User" / "prompts",
                     ("*.instructions.md", "*.prompt.md"),
+                    user_home,
                 )
-            add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",))
-            add_user_rules(user_home / ".claude" / "rules", ("**/*.md",))
+            add_user_rules(user_home / ".copilot" / "instructions", ("**/*.instructions.md",), user_home)
+            add_user_rules(user_home / ".claude" / "rules", ("**/*.md",), user_home)
 
         if is_running_as_root():
             scan_user_directories(extract_for_user)
@@ -177,7 +178,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                     rule_info = self._extract_rule_with_scope(
                         jetbrains_rule_path,
                         find_github_copilot_project_root,
-                        scope="user"
+                        scope="user",
+                        user_home=user_home,
                     )
                     if rule_info:
                         project_root = rule_info.get('project_root')
@@ -258,6 +260,10 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
                         continue
 
                     if _entry.is_dir():
+                        # Never enter a symlinked or junctioned directory
+                        # (is_symlink() misses NTFS junctions).
+                        if is_symlink_or_junction(item):
+                            continue
                         if item.name == ".github":
                             # Check copilot-instructions.md
                             copilot_instructions = item / "copilot-instructions.md"
@@ -326,7 +332,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         instructions_dir = github_dir / "instructions"
-        if not instructions_dir.exists() or not instructions_dir.is_dir():
+        if not instructions_dir.exists() or not instructions_dir.is_dir() or is_symlink_or_junction(instructions_dir):
             return
 
         try:
@@ -365,7 +371,7 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             projects_by_root: Dict to populate with rule info
         """
         prompts_dir = github_dir / "prompts"
-        if not prompts_dir.exists() or not prompts_dir.is_dir():
+        if not prompts_dir.exists() or not prompts_dir.is_dir() or is_symlink_or_junction(prompts_dir):
             return
 
         try:
@@ -435,7 +441,8 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
         self,
         rule_file: Path,
         find_project_root_func,
-        scope: str
+        scope: str,
+        user_home: Path = None
     ) -> Dict:
         """
         Extract a single rule file with metadata including scope.
@@ -452,17 +459,24 @@ class MacOSGitHubCopilotRulesExtractor(BaseGitHubCopilotRulesExtractor):
             if not rule_file.exists() or not rule_file.is_file():
                 return None
 
-            file_metadata = get_file_metadata(rule_file)
             project_root = find_project_root_func(rule_file)
-            content, truncated = read_file_content(rule_file, file_metadata['size'])
+            # Strict for project rules; user-global rules may be symlinked into
+            # place (dotfile managers), so follow but stay contained to the home.
+            if scope == "user" and user_home is not None:
+                contained = read_rule_file_contained(rule_file, user_home, allow_symlink=True)
+            else:
+                contained = read_rule_file_contained(rule_file, project_root, allow_symlink=False)
+            if contained is None:
+                return None
+            content, truncated, size, last_modified = contained
 
             return {
                 "file_path": str(rule_file),
                 "file_name": rule_file.name,
                 "project_root": str(project_root) if project_root else None,
                 "content": content,
-                "size": file_metadata['size'],
-                "last_modified": file_metadata['last_modified'],
+                "size": size,
+                "last_modified": last_modified,
                 "truncated": truncated,
                 "scope": scope
             }

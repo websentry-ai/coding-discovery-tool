@@ -20,7 +20,7 @@ class WindowsWindsurfDetector(BaseToolDetector):
     @property
     def tool_name(self) -> str:
         """Return the name of the tool being detected."""
-        return "Windsurf"
+        return "Devin Desktop"
 
     def detect(self) -> Optional[Dict]:
         """
@@ -37,7 +37,11 @@ class WindowsWindsurfDetector(BaseToolDetector):
                 if not windsurf_path.exists():
                     continue
 
-                windsurf_exe = windsurf_path / "Windsurf.exe"
+                windsurf_exe = next(
+                    (windsurf_path / name for name in ("Windsurf.exe", "Devin.exe")
+                     if (windsurf_path / name).exists()),
+                    windsurf_path / "Windsurf.exe",
+                )
                 has_exe = windsurf_exe.exists()
                 has_resources = (windsurf_path / "resources" / "app").exists()
             except PermissionError as e:
@@ -84,6 +88,12 @@ class WindowsWindsurfDetector(BaseToolDetector):
             user_home / "AppData" / "Local" / "Programs" / "Windsurf",
             user_home / "AppData" / "Local" / "Programs" / "windsurf",
             user_home / "AppData" / "Roaming" / "Windsurf",
+            # renamed to Devin after the rebrand; both layouts are in the wild
+            user_home / "AppData" / "Local" / "Programs" / "Devin",
+            user_home / "AppData" / "Local" / "Programs" / "devin",
+            user_home / "AppData" / "Roaming" / "Devin",
+            Path("C:\\Program Files") / "Devin",
+            Path("C:\\Program Files (x86)") / "Devin",
             Path("C:\\Program Files") / "Windsurf",
             Path("C:\\Program Files") / "windsurf",
             Path("C:\\Program Files (x86)") / "Windsurf",

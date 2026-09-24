@@ -10,6 +10,8 @@ from typing import Optional, Dict, List
 from ...coding_tool_base import BaseMCPConfigExtractor
 from ...windows_extraction_helpers import should_skip_path
 from ...mcp_extraction_helpers import (
+    drop_pre_rename_duplicates,
+    settings_file_readable,
     extract_kilocode_mcp_from_dir,
     walk_for_kilocode_mcp_configs,
     extract_ide_global_configs_with_root_support,
@@ -24,7 +26,7 @@ class WindowsKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
 
     # Code base global storage paths for different IDEs
     KILOCODE_EXTENSION_ID = "kilocode.Kilo-Code"
-    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Antigravity']
+    IDE_NAMES = ['Code', 'Cursor', 'Windsurf', 'Devin', 'Antigravity']
 
     def extract_mcp_config(self) -> Optional[Dict]:
         """
@@ -77,7 +79,7 @@ class WindowsKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
         Returns:
             List of global config dicts
         """
-        configs = []
+        by_ide = {}
         # Windows VS Code/Cursor global storage path
         code_base = user_home / "AppData" / "Roaming"
         
@@ -89,12 +91,13 @@ class WindowsKiloCodeMCPConfigExtractor(BaseMCPConfigExtractor):
                 # Fallback to direct path (for compatibility)
                 config_path = code_base / ide_name / "User" / "globalStorage" / self.KILOCODE_EXTENSION_ID / "mcp_settings.json"
             
-            if config_path.exists():
+            if settings_file_readable(config_path):
+                by_ide.setdefault(ide_name, [])   # answered, servers or not
                 config = self._read_global_config(config_path, ide_name)
                 if config:
-                    configs.append(config)
+                    by_ide[ide_name].append(config)
         
-        return configs
+        return drop_pre_rename_duplicates(by_ide)
     
     def _read_global_config(self, config_path: Path, ide_name: str) -> Optional[Dict]:
         """

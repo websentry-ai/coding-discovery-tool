@@ -48,6 +48,8 @@ try:
         GeminiCliRulesExtractorFactory,
         CodexRulesExtractorFactory,
         OpenCodeRulesExtractorFactory,
+        PiRulesExtractorFactory,
+        ZedRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -122,6 +124,8 @@ except ImportError:
         GeminiCliRulesExtractorFactory,
         CodexRulesExtractorFactory,
         OpenCodeRulesExtractorFactory,
+        PiRulesExtractorFactory,
+        ZedRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -194,6 +198,18 @@ _AUGMENT_CACHE_UNSET = object()
 # Sentry metric keys must match [a-zA-Z_][a-zA-Z0-9_.\-]* — tool names like
 # "Gemini CLI" / "Roo Code" carry spaces, so they cannot be used verbatim.
 _METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
+
+
+# Artifact extraction routes on the reported name. The editor ships as Devin
+# Desktop since the rebrand, but its rules, skills and MCP still key on the
+# original name, so route the new one to it.
+_ROUTING_ALIASES = {"devin desktop": "windsurf"}
+
+
+def _routing_name(tool) -> str:
+    """The lowercased name the artifact branches switch on."""
+    name = (tool.get("name") or "").lower()
+    return _ROUTING_ALIASES.get(name, name)
 
 
 def _metric_safe_name(name: str) -> str:
@@ -496,6 +512,12 @@ class AIToolsDetector:
             # Initialize OpenCode extractors (macOS only, returns None for unsupported OS)
             self._opencode_rules_extractor = OpenCodeRulesExtractorFactory.create(self.system)
             self._opencode_mcp_extractor = OpenCodeMCPConfigExtractorFactory.create(self.system)
+
+            # Initialize pi coding agent extractor (macOS + Linux; None elsewhere)
+            self._pi_rules_extractor = PiRulesExtractorFactory.create(self.system)
+
+            # Initialize Zed extractor (macOS + Linux; None elsewhere)
+            self._zed_rules_extractor = ZedRulesExtractorFactory.create(self.system)
 
             # Initialize JetBrains extractors (macOS only, returns None for unsupported OS)
             self._jetbrains_mcp_extractor = JetBrainsMCPConfigExtractorFactory.create(self.system)
@@ -961,6 +983,42 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting OpenCode rules: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": "OpenCode rules"}, level="warning")
+            return []
+
+    def extract_all_pi_rules(self) -> List[Dict]:
+        """
+        Extract all pi coding agent config from all projects.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._pi_rules_extractor:
+                return self._pi_rules_extractor.extract_all_pi_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Pi rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Pi rules"}, level="warning")
+            return []
+
+    def extract_all_zed_rules(self) -> List[Dict]:
+        """
+        Extract all Zed config from all projects.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the project root
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._zed_rules_extractor:
+                return self._zed_rules_extractor.extract_all_zed_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Zed rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Zed rules"}, level="warning")
             return []
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
@@ -2441,7 +2499,7 @@ class AIToolsDetector:
         Returns a tool dict with ``name``, ``version``, ``install_path``,
         ``_config_path`` and ``projects``.
         """
-        tool_name = tool.get("name", "").lower()
+        tool_name = _routing_name(tool)
         cfg = tool.get("_config_path") or ""
 
         result = {
@@ -2561,15 +2619,36 @@ class AIToolsDetector:
             _normalize_encoded_paths(result)
         return result
 
-    def _process_copilot_xcode_tool(self, tool: Dict) -> Dict:
-        """Copilot for Xcode: a detection row plus its three extractable surfaces —
-        auto-approval ``permissions``, configured MCP servers, and the global custom
-        instruction — each attached in the same shape the other Copilot rows use so
-        the backend/frontend need no change.
+    def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:
+        """Workspace ``.github`` config Copilot for Xcode reads, per project root:
+        ``copilot-instructions.md`` + ``instructions/*.instructions.md`` as ``rules``
+        and ``prompts/*.prompt.md`` as ``skills`` (so the UI Skills section fills).
 
-        Every surface is best-effort/try-except with ``exc_info=True``, so one
-        failing never drops the others or the detection row itself.
+        Reuses the VS Code Copilot rules extractor's ``.github`` walk, then keeps only
+        ``.github`` surfaces — dropping the ``.claude/rules`` and ``AGENTS.md`` that
+        walk also collects but Xcode does not read.
         """
+        result: Dict[str, Dict[str, List]] = {}
+        extractor = self._github_copilot_rules_extractor
+        if not extractor or not hasattr(extractor, "_extract_workspace_rules"):
+            return result
+
+        projects_by_root: Dict[str, List[Dict]] = {}
+        extractor._extract_workspace_rules(Path("/"), projects_by_root)
+        for project_root, entries in projects_by_root.items():
+            for entry in entries:
+                # Xcode reads only the per-project .github/** surfaces.
+                if "/.github/" not in entry.get("file_path", ""):
+                    continue
+                bucket = "skills" if entry.get("file_name", "").endswith(".prompt.md") else "rules"
+                result.setdefault(project_root, {"rules": [], "skills": []})[bucket].append(entry)
+        return result
+
+    def _process_copilot_xcode_tool(self, tool: Dict) -> Dict:
+        """Copilot for Xcode: a detection row plus its surfaces — permissions, MCP
+        servers, the global instruction, and per-project workspace rules + prompt
+        skills — in the shapes the other Copilot rows use. Each surface is
+        best-effort, so one failing never drops the others or the row."""
         tool_dict = {
             "name": tool.get("name"),
             "version": tool.get("version"),
@@ -2619,6 +2698,15 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting Copilot for Xcode instructions: {e}", exc_info=True)
 
+        logger.info("  Extracting Copilot for Xcode workspace rules and skills...")
+        try:
+            for project_root, surfaces in self._copilot_xcode_workspace_surfaces().items():
+                slot = _slot(project_root)
+                slot["rules"].extend(surfaces["rules"])
+                slot["skills"].extend(surfaces["skills"])
+        except Exception as e:
+            logger.error(f"Error extracting Copilot for Xcode workspace rules/skills: {e}", exc_info=True)
+
         if projects_dict:
             tool_dict["projects"] = [
                 {"path": path, "mcpServers": data["mcpServers"],
@@ -2638,7 +2726,7 @@ class AIToolsDetector:
         Returns:
             Tool dict with projects populated
         """
-        tool_name = tool.get("name", "").lower()
+        tool_name = _routing_name(tool)
         projects_dict = {}
 
         if tool_name == "openclaw":
@@ -3110,6 +3198,22 @@ class AIToolsDetector:
                 self.extract_all_opencode_rules,
                 skills_extractor=self._opencode_skills_extractor,
                 extract_skills_func=self.extract_all_opencode_skills,
+            )
+
+        elif tool_name.replace(" ", "").lower() == "picodingagent":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._pi_rules_extractor,
+                None,
+                self.extract_all_pi_rules,
+            )
+
+        elif tool_name == "zed":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._zed_rules_extractor,
+                None,
+                self.extract_all_zed_rules,
             )
 
         elif tool_name.lower().startswith("junie"):

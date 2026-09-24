@@ -24,6 +24,7 @@ from .coding_tool_base import (
     BaseOpenCodeRulesExtractor,
     BasePiRulesExtractor,
     BaseZedRulesExtractor,
+    BaseGrokBotRulesExtractor,
     BaseCursorCliRulesExtractor,
     BaseCopilotCliRulesExtractor,
     BaseCopilotCliSettingsExtractor,
@@ -544,6 +545,26 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_grok_bot_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create appropriate Grok Bot detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance, or None on an OS without support yet.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.grok_bot.grok_bot import MacOSGrokBotDetector
+            return MacOSGrokBotDetector()
+        else:
+            return None
+
+    @staticmethod
     def create_openclaw_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate OpenClaw detector for the OS.
@@ -794,6 +815,11 @@ class ToolDetectorFactory:
         zed_detector = ToolDetectorFactory.create_zed_detector(os_name)
         if zed_detector is not None:
             detectors.append(zed_detector)
+
+        # Add Grok Bot detector (macOS)
+        grok_bot_detector = ToolDetectorFactory.create_grok_bot_detector(os_name)
+        if grok_bot_detector is not None:
+            detectors.append(grok_bot_detector)
 
         openclaw_detector = ToolDetectorFactory.create_openclaw_detector(os_name)
         if openclaw_detector is not None:
@@ -1552,6 +1578,30 @@ class ZedRulesExtractorFactory:
         elif os_name == "Linux":
             from .linux import LinuxZedRulesExtractor
             return LinuxZedRulesExtractor()
+        else:
+            return None
+
+
+class GrokBotRulesExtractorFactory:
+    """Factory for creating OS-specific Grok Bot config extractors."""
+
+    @staticmethod
+    def create(os_name: Optional[str] = None) -> Optional[BaseGrokBotRulesExtractor]:
+        """
+        Create appropriate Grok Bot config extractor for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseGrokBotRulesExtractor instance, or None on an OS without support yet.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.grok_bot.grok_bot_rules_extractor import MacOSGrokBotRulesExtractor
+            return MacOSGrokBotRulesExtractor()
         else:
             return None
 

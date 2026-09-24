@@ -50,6 +50,7 @@ try:
         OpenCodeRulesExtractorFactory,
         PiRulesExtractorFactory,
         ZedRulesExtractorFactory,
+        GrokBotRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -126,6 +127,7 @@ except ImportError:
         OpenCodeRulesExtractorFactory,
         PiRulesExtractorFactory,
         ZedRulesExtractorFactory,
+        GrokBotRulesExtractorFactory,
         CursorMCPConfigExtractorFactory,
         ClaudeMCPConfigExtractorFactory,
         ClaudeSettingsExtractorFactory,
@@ -518,6 +520,9 @@ class AIToolsDetector:
 
             # Initialize Zed extractor (macOS + Linux; None elsewhere)
             self._zed_rules_extractor = ZedRulesExtractorFactory.create(self.system)
+
+            # Initialize Grok Bot extractor (macOS; None elsewhere)
+            self._grok_bot_rules_extractor = GrokBotRulesExtractorFactory.create(self.system)
 
             # Initialize JetBrains extractors (macOS only, returns None for unsupported OS)
             self._jetbrains_mcp_extractor = JetBrainsMCPConfigExtractorFactory.create(self.system)
@@ -1019,6 +1024,24 @@ class AIToolsDetector:
         except Exception as e:
             logger.error(f"Error extracting Zed rules: {e}", exc_info=True)
             report_to_sentry(e, {"phase": "extract", "tool_name": "Zed rules"}, level="warning")
+            return []
+
+    def extract_all_grok_bot_rules(self) -> List[Dict]:
+        """
+        Extract Grok Bot config for every user home in scope.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: Path to the user home
+            - rules: List of rule file dicts with metadata
+        """
+        try:
+            if self._grok_bot_rules_extractor:
+                return self._grok_bot_rules_extractor.extract_all_grok_bot_rules()
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting Grok Bot rules: {e}", exc_info=True)
+            report_to_sentry(e, {"phase": "extract", "tool_name": "Grok Bot rules"}, level="warning")
             return []
 
     def extract_all_github_copilot_rules(self, tool_name: str = None) -> List[Dict]:
@@ -3214,6 +3237,14 @@ class AIToolsDetector:
                 self._zed_rules_extractor,
                 None,
                 self.extract_all_zed_rules,
+            )
+
+        elif tool_name == "grok bot":
+            projects_dict = self._process_tool_with_rules_and_mcp(
+                tool,
+                self._grok_bot_rules_extractor,
+                None,
+                self.extract_all_grok_bot_rules,
             )
 
         elif tool_name.lower().startswith("junie"):

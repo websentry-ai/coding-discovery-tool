@@ -333,6 +333,28 @@ class BaseZedRulesExtractor(ABC):
         pass
 
 
+class BaseGrokBotRulesExtractor(ABC):
+    """Abstract base class for extracting Grok Bot config."""
+
+    @abstractmethod
+    def extract_all_grok_bot_rules(self) -> List[Dict]:
+        """
+        Extract Grok Bot desktop config for every user home in scope.
+
+        Searches for:
+        - Global config: ~/.grokbot/settings.json (local execution permission,
+          egress routing, MCP server ids). Grok Bot has no project-level config;
+          its skills and MCP server definitions live on its cloud computer.
+
+        Returns:
+            List of project dicts, each containing:
+            - project_root: the user home
+            - rules: List of rule file dicts with metadata (file_path, file_name,
+              content, size, last_modified, truncated)
+        """
+        pass
+
+
 class BaseGitHubCopilotRulesExtractor(ABC):
     """Abstract base class for extracting GitHub Copilot rules from all projects."""
 

@@ -9,16 +9,13 @@ Project skills: **/.agents/skills/<name>/SKILL.md
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseReplitSkillsExtractor
-from ...constants import MAX_SEARCH_DEPTH, SHARED_SKILL_DIRS, traverses_other_tool_config_dir, is_symlink_or_junction, scan_dir_entries
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
-    get_windows_system_directories,
-    should_skip_path,
+    walk_for_tool_directories,
 )
 from ...replit_skills_helpers import (
     REPLIT_PARENT_DIR_NAMES,
@@ -75,85 +72,31 @@ class WindowsReplitSkillsExtractor(BaseReplitSkillsExtractor):
         return
 
     def _extract_project_level_skills(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
-        """Extract project-level skills recursively from all projects."""
-        try:
-            top_level_dirs = [item for item in root_path.iterdir()
-                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())
-                              and not is_symlink_or_junction(item)]
+        """Extract project-level skills via the shared single-pass directory index.
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {
-                    executor.submit(self._walk_for_skills, root_path, dir_path, projects_by_root, current_depth=1)
-                    for dir_path in top_level_dirs
-                }
+        Every tool reuses ONE memoized walk of the drive instead of each
+        re-walking it independently.
+        """
+        walk_for_tool_directories(
+            root_path, root_path, REPLIT_PARENT_DIR_NAMES,
+            self._extract_skills_from_parent_dir, projects_by_root,
+        )
 
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.debug(f"Error in parallel processing: {e}")
-        except (PermissionError, OSError):
-            self._walk_for_skills(root_path, root_path, projects_by_root, current_depth=0)
-
-    def _walk_for_skills(
-        self,
-        root_path: Path,
-        current_dir: Path,
-        projects_by_root: Dict[str, List[Dict]],
-        current_depth: int = 0,
+    def _extract_skills_from_parent_dir(
+        self, parent_dir: Path, projects_by_root: Dict[str, List[Dict]]
     ) -> None:
-        """Recursively walk the tree collecting Replit skills from .agents/skills/."""
-        if current_depth > MAX_SEARCH_DEPTH:
-            return
-        if is_symlink_or_junction(current_dir):
-            return
-
-        try:
-            for _entry in scan_dir_entries(current_dir):
-                item = Path(_entry.path)
-                try:
-                    if (
-                        should_skip_path(item, get_windows_system_directories())
-                        or traverses_other_tool_config_dir(item, allow=SHARED_SKILL_DIRS | set(REPLIT_PARENT_DIR_NAMES))
-                    ):
-                        continue
-
-                    try:
-                        depth = len(item.relative_to(root_path).parts)
-                        if depth > MAX_SEARCH_DEPTH:
-                            continue
-                    except ValueError:
-                        continue
-
-                    if is_symlink_or_junction(item):
-                        continue
-                    if _entry.is_dir():
-                        if item.name in REPLIT_PARENT_DIR_NAMES:
-                            for config in REPLIT_ITEM_CONFIGS:
-                                type_dir = item / config.dir_name
-                                if type_dir.exists() and type_dir.is_dir() and not is_symlink_or_junction(type_dir):
-                                    if not is_user_level_claude_subdir(type_dir, self._users_directory):
-                                        extract_replit_items_from_directory(
-                                            type_dir,
-                                            projects_by_root,
-                                            extract_single_rule_file,
-                                            self._add_skill_to_project_threadsafe,
-                                            config,
-                                        )
-                            continue
-
-                        self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {item}: {e}")
-                    continue
-
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error walking {current_dir}: {e}")
+        """Extract skills from a matched tool parent dir."""
+        for config in REPLIT_ITEM_CONFIGS:
+            type_dir = parent_dir / config.dir_name
+            if type_dir.exists() and type_dir.is_dir():
+                if not is_user_level_claude_subdir(type_dir, self._users_directory):
+                    extract_replit_items_from_directory(
+                        type_dir,
+                        projects_by_root,
+                        extract_single_rule_file,
+                        self._add_skill_to_project_threadsafe,
+                        config,
+                    )
 
     def _add_skill_to_project_threadsafe(
         self,

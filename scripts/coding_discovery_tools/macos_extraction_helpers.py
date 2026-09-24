@@ -64,7 +64,17 @@ _PLIST_OPEN_FLAGS = (
 
 
 def read_bundle_version(app_bundle: Path) -> Optional[str]:
-    """CFBundleShortVersionString, read without following a redirected Info.plist.
+    """CFBundleShortVersionString, read without following a redirected Info.plist."""
+    return _read_bundle_string(app_bundle, "CFBundleShortVersionString")
+
+
+def read_bundle_identifier(app_bundle: Path) -> Optional[str]:
+    """CFBundleIdentifier, read without following a redirected Info.plist."""
+    return _read_bundle_string(app_bundle, "CFBundleIdentifier")
+
+
+def _read_bundle_string(app_bundle: Path, key: str) -> Optional[str]:
+    """A string value from the bundle's Info.plist.
 
     The bundle can sit under a user-writable home, so the plist is opened
     O_NOFOLLOW and must be a regular file: a symlink to a FIFO would otherwise
@@ -84,8 +94,8 @@ def read_bundle_version(app_bundle: Path) -> Optional[str]:
     except Exception as e:
         logger.debug(f"Could not parse {info_plist}: {e}")
         return None
-    version = plist.get("CFBundleShortVersionString") if isinstance(plist, dict) else None
-    return version.strip() if isinstance(version, str) and version.strip() else None
+    value = plist.get(key) if isinstance(plist, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def macos_app_candidates(app_path: Path, user_home: Optional[Path] = None) -> List[Path]:

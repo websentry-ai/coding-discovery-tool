@@ -10,7 +10,7 @@ mechanism, with secret values redacted by ``extract_rule_file_contained``.
 
 Project-level files Muse Code reads (AGENTS.md / CLAUDE.md, .mcp.json and
 .claude/.codex/.agents skills) are shared with other agents and are reported
-under those agents, not here.
+under those agents when they are installed, not here.
 """
 
 import logging

@@ -4,7 +4,8 @@ Skills extraction for Muse Code on macOS systems.
 Muse Code installs personal skills (``muse skills install``) into
 ``~/.config/muse/skills/<name>/SKILL.md``; the ``.muse`` lock directory beside
 them holds no skills. Project skills come from the shared ``.claude``,
-``.codex`` and ``.agents`` directories and are reported under those agents.
+``.codex`` and ``.agents`` directories and are reported under those agents
+when they are installed.
 """
 
 import logging

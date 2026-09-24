@@ -23,6 +23,9 @@ from unittest.mock import patch
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.macos.muse.muse import MacOSMuseDetector
 from scripts.coding_discovery_tools.macos.muse_code.muse_code import MacOSMuseCodeDetector
+from scripts.coding_discovery_tools.macos.muse_code.mcp_config_extractor import (
+    MacOSMuseCodeMCPConfigExtractor,
+)
 from scripts.coding_discovery_tools.macos.muse_code.muse_code_rules_extractor import (
     MacOSMuseCodeRulesExtractor,
 )
@@ -33,6 +36,7 @@ from scripts.coding_discovery_tools.macos.muse_code.skills_extractor import (
 _MH = "scripts.coding_discovery_tools.macos_extraction_helpers"
 _RULES_MOD = "scripts.coding_discovery_tools.macos.muse_code.muse_code_rules_extractor"
 _SKILLS_MOD = "scripts.coding_discovery_tools.macos.muse_code.skills_extractor"
+_MCP_MOD = "scripts.coding_discovery_tools.macos.muse_code.mcp_config_extractor"
 
 
 def _bundle(parent: Path, bundle_id: str, version: str = "3.0") -> Path:
@@ -71,6 +75,12 @@ class TestMacOSMuseDetection(unittest.TestCase):
     def test_unrelated_muse_app_not_detected(self):
         _bundle(self.machine_apps, "com.museapp.macos")
         self.assertIsNone(self._detect())
+
+    def test_user_bundle_found_behind_unrelated_machine_wide_muse(self):
+        """The whiteboard Muse.app in /Applications must not hide Meta's in ~/Applications."""
+        _bundle(self.machine_apps, "com.museapp.macos")
+        app = _bundle(self.user_home / "Applications", "com.meta.endo")
+        self.assertEqual(self._detect()["install_path"], str(app))
 
     def test_user_applications_bundle_detected(self):
         app = _bundle(self.user_home / "Applications", "com.meta.endo")
@@ -135,6 +145,13 @@ class TestMacOSMuseCodeExtraction(unittest.TestCase):
         with root_patch, home_patch:
             return MacOSMuseCodeRulesExtractor().extract_all_muse_code_rules()
 
+    def _mcp(self):
+        with patch(f"{_MCP_MOD}.is_running_as_root", return_value=False), \
+                patch("pathlib.Path.home", return_value=self.home), \
+                patch(f"{_MCP_MOD}.transform_mcp_servers_to_array",
+                      side_effect=lambda servers: [{"name": n, **c} for n, c in servers.items()]):
+            return MacOSMuseCodeMCPConfigExtractor().extract_mcp_config()
+
     def _skills(self):
         root_patch, home_patch = self._home_patches(_SKILLS_MOD)
         with root_patch, home_patch:
@@ -154,16 +171,38 @@ class TestMacOSMuseCodeExtraction(unittest.TestCase):
         names = [r["file_name"] for p in self._rules() for r in p["rules"]]
         self.assertEqual(names, ["settings.json"])
 
+    def test_mcp_servers_keyed_on_home(self):
+        body = {"schema_version": 1, "mcpServers": {"deepwiki": {"url": "https://mcp.deepwiki.com/mcp"}}}
+        (self.config_dir / "settings.json").write_bytes(json.dumps(body).encode("utf-8"))
+        result = self._mcp()
+        self.assertEqual(
+            result,
+            {"projects": [{"path": str(self.home),
+                           "mcpServers": [{"name": "deepwiki", "url": "https://mcp.deepwiki.com/mcp"}]}]},
+        )
+
+    def test_no_mcp_servers_returns_none(self):
+        (self.config_dir / "settings.json").write_bytes(b'{"schema_version": 1}')
+        self.assertIsNone(self._mcp())
+
     @unittest.skipIf(os.name == "nt", "POSIX links; the extractor is macOS-only")
     def test_linked_settings_json_not_read(self):
-        """A settings.json link to auth.json must not smuggle the tokens out."""
-        auth = self.config_dir / "auth.json"
-        auth.write_text('{"access_token": "secret"}', encoding="utf-8")
-        (self.config_dir / "settings.json").symlink_to(auth)
+        """A linked settings.json must not smuggle another file out, via config or MCP."""
+        other = self.config_dir / "auth.json"
+        other.write_bytes(b'{"access_token": "secret", "mcpServers": {"x": {"url": "https://a"}}}')
+        (self.config_dir / "settings.json").symlink_to(other)
         self.assertEqual(self._rules(), [])
+        self.assertIsNone(self._mcp())
         (self.config_dir / "settings.json").unlink()
-        os.link(auth, self.config_dir / "settings.json")
+        os.link(other, self.config_dir / "settings.json")
         self.assertEqual(self._rules(), [])
+        self.assertIsNone(self._mcp())
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "needs mkfifo")
+    def test_fifo_settings_json_does_not_hang(self):
+        os.mkfifo(self.config_dir / "settings.json")
+        self.assertEqual(self._rules(), [])
+        self.assertIsNone(self._mcp())
 
     def test_personal_skill_attributed_to_home(self):
         skill_dir = self.config_dir / "skills" / "review"

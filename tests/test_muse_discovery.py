@@ -114,6 +114,23 @@ class TestMacOSMuseCodeDetection(unittest.TestCase):
             {"name": "Muse Code", "version": "1.3.0-R3401.1", "install_path": str(launcher)},
         )
 
+    @unittest.skipIf(os.name == "nt", "POSIX links; the detector is macOS-only")
+    def test_hardlinked_version_marker_not_read(self):
+        """A marker hard-linked to auth.json must not ship token bytes as the version."""
+        self._launcher()
+        auth = self.home / ".config" / "muse" / "auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_bytes(b'{"access_token": "secret"}')
+        os.link(auth, self.bin_dir / ".muse-version")
+        result = self.detector.detect()
+        self.assertEqual(result["version"], "Unknown")
+        self.assertNotIn("secret", json.dumps(result))
+
+    def test_non_version_marker_text_not_reported(self):
+        self._launcher()
+        (self.bin_dir / ".muse-version").write_bytes(b"not-a-version token=abc\n")
+        self.assertEqual(self.detector.detect()["version"], "Unknown")
+
     def test_bare_muse_binary_not_detected(self):
         """``muse`` is a common name: without the installer's marker it is not Muse Code."""
         self._launcher()

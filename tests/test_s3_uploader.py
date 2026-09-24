@@ -20,6 +20,7 @@ from scripts.coding_discovery_tools.s3_uploader import (
     should_use_s3,
     try_s3_upload,
     _strip_ephemeral,
+    _redact_signed_urls,
 )
 from scripts.coding_discovery_tools.utils import send_report_to_backend
 
@@ -547,3 +548,23 @@ class TestHashForwarding(_ServerMixin, unittest.TestCase):
         body = json.loads(legacy_req["body"])
         self.assertNotIn("tool_name", body)
         self.assertNotIn("payload_hash", body)
+
+
+class TestSignedUrlRedaction(unittest.TestCase):
+    """A presigned URL is a bearer credential; it must never reach telemetry."""
+
+    def test_query_string_is_stripped(self):
+        body = json.dumps({
+            "upload_url": "https://s3.us-west-2.amazonaws.com/bucket/key.json"
+                          "?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA",
+        })
+        redacted = _redact_signed_urls(body)
+        self.assertNotIn("X-Amz-Signature", redacted)
+        self.assertNotIn("AKIA", redacted)
+        self.assertIn("s3.us-west-2.amazonaws.com/bucket/key.json", redacted)
+
+    def test_unsigned_text_is_untouched(self):
+        self.assertEqual(_redact_signed_urls("plain error, no url"), "plain error, no url")
+
+    def test_handles_none(self):
+        self.assertEqual(_redact_signed_urls(None), "")

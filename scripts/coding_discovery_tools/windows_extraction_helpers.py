@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
 
 from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -373,8 +374,75 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
     # Skip system directories if provided (Windows-specific)
     if system_dirs and path.name in system_dirs:
         return True
-    
+
     return False
+
+
+# Windows project-walk prune: SKIP_DIRS plus the Windows system directories.
+# The id keys the shared directory index cache — every per-tool walk that shares
+# this prune passes the same id so the C:\ subtree is indexed ONCE, not per tool.
+def _windows_project_skip(item: Path) -> bool:
+    """Return True for a path a Windows project walk must not enter."""
+    return should_skip_path(item, get_windows_system_directories())
+
+
+_WINDOWS_PROJECT_SKIP_ID = "windows_project"
+
+
+def walk_for_tool_directories(
+    root_path: Path,
+    current_dir: Path,
+    tool_dir_names,
+    extract_from_dir_func,
+    projects_by_root,
+    current_depth: int = 0,
+) -> None:
+    """Find each tool-specific config dir under ``current_dir`` and extract from it.
+
+    The Windows counterpart of ``linux_extraction_helpers.walk_for_tool_directories``
+    and ``macos_extraction_helpers.walk_for_tool_directories``: it routes through the
+    shared single-pass directory index (``project_dir_index.dispatch_matches``) so
+    that every per-tool walk reuses ONE memoized ``basename -> [dirs]`` map of the
+    C:\\ subtree instead of re-walking the whole drive. On an index fault it falls
+    back to an independent walk, and a subtree that is not fully readable degrades
+    gracefully (permission errors never crash the scan). The shared index already
+    enforces the depth limit, the outermost-only prune (never recurse into a matched
+    project), and refuses a marker whose reparse point resolves outside the scan root.
+
+    Args:
+        root_path: Root search path (for depth calculation), e.g. ``Path("C:\\")``.
+        current_dir: Directory to search from (usually the same as ``root_path``).
+        tool_dir_names: The marker directory name to match (e.g. ``".clinerules"``),
+            or an iterable of names (e.g. ``CLINE_PARENT_DIR_NAMES``).
+        extract_from_dir_func: ``func(tool_dir: Path, projects_by_root)`` invoked for
+            each matched directory. Any per-tool guard (junction skip, other-tool
+            config-dir skip) belongs inside this callback.
+        projects_by_root: Accumulator passed straight through to the callback.
+        current_depth: Unused; retained for call-site compatibility with the old
+            per-tool walkers.
+    """
+    if isinstance(tool_dir_names, str):
+        names = frozenset((tool_dir_names,))
+    else:
+        names = frozenset(tool_dir_names)
+    if not names:
+        return
+
+    def on_match(tool_dir: Path) -> None:
+        try:
+            extract_from_dir_func(tool_dir, projects_by_root)
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:  # noqa: BLE001 - one bad dir must not abort the walk
+            logger.debug(f"Error processing {tool_dir}: {e}")
+
+    dispatch_matches(
+        root_path, current_dir, _windows_project_skip, _WINDOWS_PROJECT_SKIP_ID,
+        lambda name: name in names, on_match,
+        # The shared index stores only hidden dirs; a non-hidden marker must use the
+        # direct-walk route or it would silently never match.
+        markers_all_hidden=all(name.startswith(".") for name in names),
+    )
 
 
 def extract_and_add_rule(

@@ -6,18 +6,16 @@ on the user's machine, grouping them by project root.
 """
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorCliRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
     extract_single_rule_file,
     find_project_root,
-    should_skip_path,
+    walk_for_tool_directories,
     is_running_as_admin,
 )
 
@@ -91,70 +89,12 @@ class WindowsCursorCliRulesExtractor(BaseCursorCliRulesExtractor):
 
         Uses parallel processing for top-level directories to improve performance.
         """
-        try:
-            system_dirs = self._get_system_directories()
-            top_level_dirs = [item for item in root_path.iterdir()
-                            if item.is_dir() and not should_skip_path(item, system_dirs)]
-
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {
-                    executor.submit(self._walk_for_cursor_directories, root_path, dir_path, projects_by_root, current_depth=1)
-                    for dir_path in top_level_dirs
-                }
-
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.debug(f"Error in parallel processing: {e}")
-        except (PermissionError, OSError):
-            self._walk_for_cursor_directories(root_path, root_path, projects_by_root, current_depth=0)
-
-    def _walk_for_cursor_directories(
-        self,
-        root_path: Path,
-        current_dir: Path,
-        projects_by_root: Dict[str, List[Dict]],
-        current_depth: int = 0
-    ) -> None:
-        """
-        Recursively walk directory tree looking for .cursor directories.
-        """
-        if current_depth > MAX_SEARCH_DEPTH:
-            return
-
-        try:
-            for _entry in scan_dir_entries(current_dir):
-                item = Path(_entry.path)
-                try:
-                    system_dirs = self._get_system_directories()
-                    if should_skip_path(item, system_dirs):
-                        continue
-
-                    try:
-                        depth = len(item.relative_to(root_path).parts)
-                        if depth > MAX_SEARCH_DEPTH:
-                            continue
-                    except ValueError:
-                        continue
-
-                    if _entry.is_dir():
-                        if item.name == ".cursor":
-                            self._extract_rules_from_cursor_directory(item, projects_by_root)
-                            continue
-
-                        self._walk_for_cursor_directories(root_path, item, projects_by_root, current_depth + 1)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {item}: {e}")
-                    continue
-
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error walking {current_dir}: {e}")
+        # Route through the shared single-pass directory index so every tool reuses
+        # ONE memoized walk of the drive instead of each re-walking it independently.
+        walk_for_tool_directories(
+            root_path, root_path, ".cursor",
+            self._extract_rules_from_cursor_directory, projects_by_root,
+        )
 
     def _extract_rules_from_cursor_directory(self, cursor_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """
@@ -185,10 +125,3 @@ class WindowsCursorCliRulesExtractor(BaseCursorCliRulesExtractor):
                 if project_root:
                     add_rule_to_project(rule_info, project_root, projects_by_root)
 
-    def _get_system_directories(self) -> set:
-        return {
-            'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
-            'System Volume Information', '$Recycle.Bin', 'Recovery',
-            'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
-            'Config.Msi', 'Documents and Settings', 'MSOCache'
-        }

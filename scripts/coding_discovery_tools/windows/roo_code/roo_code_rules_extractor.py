@@ -3,17 +3,15 @@ Roo Code rules extraction for Windows systems.
 """
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseRooRulesExtractor
-from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
     extract_single_rule_file,
-    should_skip_path,
+    walk_for_tool_directories,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,69 +82,12 @@ class WindowsRooRulesExtractor(BaseRooRulesExtractor):
         """
         Extract project-level rules recursively from all projects using optimized walker.
         """
-        try:
-            system_dirs = self._get_system_directories()
-            top_level_dirs = [item for item in root_path.iterdir()
-                            if item.is_dir() and not should_skip_path(item, system_dirs)]
-
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {
-                    executor.submit(self._walk_for_roo_directories, root_path, dir_path, projects_by_root, current_depth=1)
-                    for dir_path in top_level_dirs
-                }
-
-                for future in as_completed(futures):
-                    try:
-                        future.result()  # Raises exception if any occurred
-                    except Exception as e:
-                        logger.debug(f"Error in parallel processing: {e}")
-        except (PermissionError, OSError):
-            # Fallback to sequential if parallel fails
-            self._walk_for_roo_directories(root_path, root_path, projects_by_root, current_depth=0)
-
-    def _walk_for_roo_directories(
-        self,
-        root_path: Path,
-        current_dir: Path,
-        projects_by_root: Dict[str, List[Dict]],
-        current_depth: int = 0
-    ) -> None:
-        """
-        Recursively walk directory tree looking for .roo directories.
-        """
-        if current_depth > MAX_SEARCH_DEPTH:
-            return
-
-        try:
-            for _entry in scan_dir_entries(current_dir):
-                item = Path(_entry.path)
-                try:
-                    system_dirs = self._get_system_directories()
-                    if should_skip_path(item, system_dirs):
-                        continue
-                    try:
-                        depth = len(item.relative_to(root_path).parts)
-                        if depth > MAX_SEARCH_DEPTH:
-                            continue
-                    except ValueError:
-                        continue
-
-                    if _entry.is_dir():
-                        if item.name == ".roo":
-                            self._extract_rules_from_roo_directory(item, projects_by_root)
-                            continue
-                        self._walk_for_roo_directories(root_path, item, projects_by_root, current_depth + 1)
-
-                except (PermissionError, OSError):
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error processing {item}: {e}")
-                    continue
-
-        except (PermissionError, OSError):
-            pass
-        except Exception as e:
-            logger.debug(f"Error walking {current_dir}: {e}")
+        # Route through the shared single-pass directory index so every tool reuses
+        # ONE memoized walk of the drive instead of each re-walking it independently.
+        walk_for_tool_directories(
+            root_path, root_path, ".roo",
+            self._extract_rules_from_roo_directory, projects_by_root,
+        )
 
     def _extract_rules_from_roo_directory(
         self, roo_dir: Path, projects_by_root: Dict[str, List[Dict]]
@@ -177,14 +118,3 @@ class WindowsRooRulesExtractor(BaseRooRulesExtractor):
             logger.debug(f"Error accessing .roo directory {roo_dir}: {e}")
         except Exception as e:
             logger.debug(f"Error extracting rules from {roo_dir}: {e}")
-
-    def _get_system_directories(self) -> set:
-        """
-        Get Windows system directories to skip.
-        """
-        return {
-            'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
-            'System Volume Information', '$Recycle.Bin', 'Recovery',
-            'PerfLogs', 'Boot', 'System32', 'SysWOW64', 'WinSxS',
-            'Config.Msi', 'Documents and Settings', 'MSOCache'
-        }

@@ -4,20 +4,25 @@ Shared by the GitHub Copilot rules extractors. The .github walk follows redirect
 so a root/MDM scan must not read a rule file whose target escapes its containment
 root (another user's file). Two scopes:
 
-  * Project/workspace reads are STRICT — ``O_NOFOLLOW`` (a symlinked rule file is
-    refused, not followed), single hard link, regular file, owned by the project.
+  * Project/workspace reads are STRICT — resolved one component at a time from a
+    handle on the project root with ``O_NOFOLLOW`` (``openat``), so no symlinked
+    component BELOW the root, intermediate or final, is ever followed. The root
+    anchor itself is opened by name and trusted (a root swapped for a symlink after
+    the discovery walk is not caught).
   * User-scope global reads (the user's own ``~/.copilot/instructions`` /
     ``~/.claude/rules`` / VS Code User prompts) MAY follow a symlink (so a dotfile
-    manager works), but the followed target must resolve inside the user's home and
-    (macOS/Linux) be owned by that user.
+    manager works), so they open the path and then contain the OPENED descriptor's
+    kernel path to the user's home; the ``st_uid`` owner check is the real backstop.
 
-realpath containment is the cross-OS guard, and the only one on Windows, where
-``O_NOFOLLOW`` is a no-op and ``st_uid`` is 0. The walks separately refuse to
-descend a symlinked/junctioned directory before reaching this reader.
+Windows has no per-component ``openat`` and cannot ``os.open`` a directory, so it
+opens the file and contains the handle's real path (``GetFinalPathNameByHandle``).
+The walks separately refuse to descend a symlinked/junctioned directory before
+reaching this reader.
 """
 
 import logging
 import os
+import platform
 import re
 import stat
 from datetime import datetime
@@ -245,17 +250,136 @@ def extract_rule_file_contained(
         return None
 
 
-def realpath_contained(path, root) -> bool:
-    """True when ``path`` resolves inside ``root``. Resolves symlinks and Windows
-    junctions, so a target escaping ``root`` (even through a junctioned ancestor) is
-    refused. Not ``path_in_scope``, which rejects every dot-component and so could
-    not accept a ``.github`` path."""
+def _fd_real_path(fd: int) -> Optional[str]:
+    """The kernel's own path for an open fd, read from the descriptor so a later path
+    swap can't change it, or None. Never re-walked with ``realpath``: Linux ``readlink``
+    of the fd magic-link, macOS ``F_GETPATH``, Windows ``GetFinalPathNameByHandle``."""
+    system = platform.system()
+    if system == "Windows":
+        from .utils import _windows_final_path, _strip_extended_prefix
+        final = _windows_final_path(fd)
+        return _strip_extended_prefix(final) if final else None
+    if system == "Darwin":
+        try:
+            import fcntl
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\x00" * 1024)
+            return raw.split(b"\x00", 1)[0].decode("utf-8", "replace") or None
+        except (OSError, ValueError):
+            return None
     try:
-        real = os.path.realpath(str(path))
+        return os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        return None
+
+
+def _dir_real_path(root) -> Optional[str]:
+    """The kernel's own path for directory ``root``, or None. POSIX takes it from an
+    open directory handle so an ancestor swap can't forge it; Windows can't ``os.open``
+    a directory, so it resolves the name (the file side is still handle-bound)."""
+    if platform.system() == "Windows":
+        from .utils import _strip_extended_prefix
+        try:
+            return _strip_extended_prefix(os.path.realpath(str(root)))
+        except OSError:
+            return None
+    dir_fd = None
+    try:
+        dir_fd = os.open(str(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        return _fd_real_path(dir_fd)
+    except OSError:
+        return None
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass
+
+
+def _fd_within_root(fd: int, root) -> bool:
+    """True when the file the fd actually opened resolves inside ``root``. Both sides
+    are handle/kernel paths compared after ``normpath`` only, never re-walked by name,
+    so the check holds on Windows too (where ``O_NOFOLLOW`` and ``st_uid`` are inert)."""
+    real = _fd_real_path(fd)
+    base = _dir_real_path(root)
+    if real is None or base is None:
+        return False
+    real_n = os.path.normcase(os.path.normpath(real))
+    base_n = os.path.normcase(os.path.normpath(base))
+    return real_n == base_n or real_n.startswith(base_n.rstrip(os.sep) + os.sep)
+
+
+def _open_beneath_strict(rule_file, root, final_flags) -> Optional[int]:
+    """POSIX: open ``rule_file`` by descending each path component from a handle on
+    ``root`` with ``O_NOFOLLOW`` (``openat``), or None. No symlinked component below
+    the root is followed. The root anchor itself is opened by name and trusted (a root
+    swapped for a symlink is not caught)."""
+    try:
+        rel = os.path.relpath(os.path.abspath(str(rule_file)), os.path.abspath(str(root)))
+    except (OSError, ValueError):
+        return None
+    parts = [p for p in rel.split(os.sep) if p and p != os.curdir]
+    if not parts or os.pardir in parts:  # empty, or escapes root with ".."
+        return None
+    o_nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not o_nofollow:  # no O_NOFOLLOW: fail closed rather than open a symlink
+        return None
+    o_directory = getattr(os, "O_DIRECTORY", 0)
+    dir_fd = None
+    try:
+        dir_fd = os.open(str(root), os.O_RDONLY | o_directory)  # trusted anchor
+        for comp in parts[:-1]:
+            next_fd = os.open(comp, os.O_RDONLY | o_directory | o_nofollow, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = next_fd
+        return os.open(parts[-1], final_flags | o_nofollow, dir_fd=dir_fd)
+    except OSError:
+        return None
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass
+
+
+def _open_contained(rule_file, root, allow_symlink, *, extra_flags: int = 0) -> Optional[int]:
+    """The single OS-dispatched open for contained reads, or None. ``extra_flags`` are
+    OR'd in so a caller can add its own (e.g. ``O_BINARY``). The follow-symlink
+    pre-check is best-effort; ``_fd_within_root`` on the descriptor and the uid check
+    are the authoritative guards. A symlinked containment root is trusted as-is."""
+    base_flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+                  | getattr(os, "O_NOCTTY", 0) | extra_flags)
+    if os.name == "posix" and not allow_symlink:
+        # Project scope: resolve per component with O_NOFOLLOW; no symlink below root.
+        return _open_beneath_strict(rule_file, root, base_flags)
+    # Follow-symlink scope (user, or any Windows: dir_fd is unsupported there). Pre-check
+    # the target before opening; a symlink could point outside root or at a device node.
+    try:
+        resolved = os.path.realpath(str(rule_file))
         base = os.path.realpath(str(root))
     except OSError:
-        return False
-    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+        return None
+    if not (resolved == base or resolved.startswith(base.rstrip(os.sep) + os.sep)):
+        return None
+    try:
+        if not stat.S_ISREG(os.stat(resolved).st_mode):
+            return None
+    except OSError:
+        return None
+    flags = base_flags | (0 if allow_symlink else getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(str(rule_file), flags)
+    except OSError:
+        return None
+    # Authoritative containment check, bound to the opened descriptor.
+    if not _fd_within_root(fd, root):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+    return fd
 
 
 def read_rule_file_contained(
@@ -263,23 +387,22 @@ def read_rule_file_contained(
 ) -> Optional[Tuple[str, bool, int, str]]:
     """Read a rule file's text through the safe boundary, or None if refused.
 
-    Returns ``(content, truncated, size, last_modified_iso)``. In both modes the
-    file's realpath must stay inside ``containment_root`` and be a regular file owned
-    by that root's owner. ``allow_symlink=False`` (project/workspace) also opens
-    ``O_NOFOLLOW`` and refuses a multiply-linked file; ``allow_symlink=True`` (the
-    user's own global rules) follows the link so a dotfile manager works, still
-    contained to the home. Never raises.
+    Returns ``(content, truncated, size, last_modified_iso)``. Containment is enforced
+    on the OPENED file: ``allow_symlink=False`` (project/workspace) resolves it per
+    component from the root with ``O_NOFOLLOW`` and refuses a multiply-linked file;
+    ``allow_symlink=True`` (the user's own global rules) follows the link so a dotfile
+    manager works, then contains the resolved descriptor to the home. The file must be
+    a regular file owned by the root's owner. Never raises.
     """
-    if containment_root is None or not realpath_contained(rule_file, containment_root):
-        logger.info(f"Refusing rule file {rule_file}: resolves outside {containment_root}")
+    if containment_root is None:
+        logger.info(f"Refusing rule file {rule_file}: no containment root")
         return None
     fd = None
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-        if not allow_symlink:
-            # O_NOFOLLOW refuses a symlinked final component (strict mode).
-            flags |= getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(rule_file), flags)
+        fd = _open_contained(rule_file, containment_root, allow_symlink)
+        if fd is None:
+            logger.info(f"Refusing rule file {rule_file}: not contained under {containment_root}")
+            return None
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None

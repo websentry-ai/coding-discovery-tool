@@ -1249,6 +1249,52 @@ class TestSyncedSkillDiscovery(unittest.TestCase):
             self.assertIn("docx", found)
             self.assertIn("pptx", found)
 
+    def test_real_augment_extractor_does_not_pick_up_synced(self):
+        # Directive 1/3: drive the actual Augment delegation, which passes ~/.claude
+        # as a compat root. It must not descend into the synced bucket (scan_synced
+        # defaults off), so it never claims a claude.ai-synced body as its own.
+        from scripts.coding_discovery_tools.augment_skills_helpers import (
+            extract_augment_user_level_items,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            aug = home / ".augment" / "skills" / "my-augment" / "SKILL.md"
+            aug.parent.mkdir(parents=True)
+            aug.write_text("---\nname: my-augment\n---\nx\n")
+            syn = home / ".claude" / "skills" / "synced" / "org_set" / "docx" / "SKILL.md"
+            syn.parent.mkdir(parents=True)
+            syn.write_text("---\nname: docx\n---\nx\n")
+
+            skills = []
+            extract_augment_user_level_items(home, skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS)
+            names = {s.get("skill_name") for s in skills}
+            self.assertIn("my-augment", names)
+            self.assertNotIn("docx", names)
+
+    def test_a_bad_synced_bucket_does_not_drop_normal_skills(self):
+        # IO isolation: a synced dir that can't be listed (perms, race) must only
+        # skip synced discovery, never abort the normal user-skill scan.
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local = home / ".claude" / "skills" / "my-local" / "SKILL.md"
+            local.parent.mkdir(parents=True)
+            local.write_text("---\nname: my-local\n---\nx\n")
+            syn = home / ".claude" / "skills" / "synced" / "org_set" / "docx" / "SKILL.md"
+            syn.parent.mkdir(parents=True)
+            syn.write_text("---\nname: docx\n---\nx\n")
+
+            orig = Path.iterdir
+
+            def boom(self):
+                if self.name == "synced":
+                    raise PermissionError("locked")
+                return orig(self)
+
+            with patch.object(Path, "iterdir", boom):
+                found = self._run(home, scan_synced=True)
+            self.assertIn("my-local", found)   # normal skill survives the bad bucket
+
 
 if __name__ == "__main__":
     unittest.main()

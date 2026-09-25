@@ -458,13 +458,17 @@ def extract_user_level_items(
             root = _resolved_root(type_dir)
             try:
                 if config.layout == "nested":
-                    skill_dirs = list(type_dir.iterdir())
                     # Skills synced from claude.ai nest one level deeper, under an
                     # opaque per-account bucket: skills/synced/<bucket>/<name>/. Only
                     # Claude Code loads that layout, so only its extractor opts in;
                     # other tools pass ~/.claude as a compat root and must not claim
-                    # these bodies as their own.
+                    # these bodies as their own. When we do descend, drop the raw
+                    # 'synced' entry from the normal list — its buckets are handled
+                    # below, and this keeps the main loop from ever iterating it (so
+                    # a bad synced dir can't abort the normal scan).
                     synced_root = type_dir / "synced"
+                    skill_dirs = [d for d in type_dir.iterdir()
+                                  if not (scan_synced and d.name == "synced")]
                     if scan_synced and synced_root.is_dir() and not is_symlink_or_junction(synced_root):
                         try:
                             for bucket in synced_root.iterdir():

@@ -30,6 +30,7 @@ from coding_discovery_tools.windows_extraction_helpers import (  # noqa: E402
     _WINDOWS_PROJECT_SKIP_ID,
 )
 from coding_discovery_tools import project_dir_index as pdi  # noqa: E402
+from coding_discovery_tools.constants import MAX_SEARCH_DEPTH  # noqa: E402
 
 
 def _win_dispatched(root: Path, markers):
@@ -126,6 +127,97 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
         self.assertIn("readable/.clinerules", got,
                       "a sibling fault must not hide readable tools")
 
+    def test_shared_helper_does_not_prune_other_tool_config_dirs(self):
+        # DELIBERATE limitation, and the exact reason 8 skills extractors were NOT
+        # migrated: the shared helper prunes ONLY system dirs. A marker bundled
+        # inside another tool's per-user config dir (e.g. ~/.antigravity/...) IS
+        # dispatched -- a false positive for a skills walk that must apply
+        # traverses_other_tool_config_dir. Guard-free extractors are unaffected;
+        # guarded ones keep their bespoke walk (see TestGuardedSkillsExtractors...).
+        self._mk(".antigravity", "extensions", "pkg", ".claude")
+        self._mk("myproject", ".claude")
+        got = _win_dispatched(self.root, ".claude")
+        self.assertIn("myproject/.claude", got)
+        self.assertIn(
+            ".antigravity/extensions/pkg/.claude", got,
+            "shared helper does not prune other-tool config dirs; guarded skills "
+            "extractors must not use it as-is",
+        )
+
+    def test_marker_beyond_max_depth_is_not_dispatched(self):
+        # The depth limit must match the old bespoke walk (MAX_SEARCH_DEPTH).
+        deep = self.root
+        for i in range(MAX_SEARCH_DEPTH + 2):
+            deep = deep / f"d{i}"
+        (deep / ".clinerules").mkdir(parents=True)
+        self._mk("shallow", ".clinerules")
+        got = _win_dispatched(self.root, ".clinerules")
+        self.assertEqual(got, ["shallow/.clinerules"],
+                         "a marker past MAX_SEARCH_DEPTH must not be dispatched")
+
+    @unittest.skipUnless(os.name == "posix", "symlink creation is POSIX here")
+    def test_symlinked_marker_dir_is_not_descended(self):
+        # The index never descends a symlink (matches the old walk's is_symlink
+        # skip). A marker reachable ONLY through a symlink is not dispatched.
+        self._mk("real", "hidden_target", ".clinerules")
+        os.symlink(str(self.root / "real" / "hidden_target"), str(self.root / "link"))
+        got = _win_dispatched(self.root, ".clinerules")
+        self.assertIn("real/hidden_target/.clinerules", got)
+        self.assertFalse(
+            any(g.startswith("link/") for g in got),
+            "a marker reached only via a symlink must not be dispatched",
+        )
+
+    def test_matches_old_bespoke_walk_semantics(self):
+        # Backward-compat oracle for the guard-free extractors: the old bespoke
+        # walk = recurse, skip system dirs, depth-limit, dispatch the OUTERMOST
+        # marker, never descend a matched dir or a symlink. The shared helper must
+        # produce exactly that set. (Guarded extractors keep their own walk and
+        # are covered separately.)
+        self._mk("p1", ".clinerules")
+        self._mk("p1", "sub", ".clinerules")            # nested under a match -> pruned
+        self._mk("p2", "src", "nested", ".clinerules")
+        self._mk("p3")                                   # no marker
+        self.assertEqual(
+            _win_dispatched(self.root, ".clinerules"),
+            self._old_walk_oracle(".clinerules"),
+        )
+
+    def _old_walk_oracle(self, marker):
+        """The guard-free bespoke walk's semantics, as a backward-compat oracle."""
+        from coding_discovery_tools.windows_extraction_helpers import (
+            should_skip_path, get_windows_system_directories,
+        )
+        sysdirs = get_windows_system_directories()
+        found = []
+
+        def rec(cur, depth):
+            if depth > MAX_SEARCH_DEPTH:
+                return
+            try:
+                entries = list(os.scandir(cur))
+            except OSError:
+                return
+            for e in entries:
+                p = Path(e.path)
+                if should_skip_path(p, sysdirs):
+                    continue
+                try:
+                    if len(p.relative_to(self.root).parts) > MAX_SEARCH_DEPTH:
+                        continue
+                except ValueError:
+                    continue
+                if not e.is_dir():
+                    continue
+                if e.name == marker:
+                    found.append(os.path.relpath(str(p), str(self.root)).replace(os.sep, "/"))
+                    continue  # outermost: never descend a matched dir
+                if not e.is_symlink():
+                    rec(p, depth + 1)
+
+        rec(self.root, 0)
+        return sorted(found)
+
 
 # Each migrated extractor, its module path, the class, and the marker(s) its
 # project-level walk now dispatches through the shared index. The tuple is what a
@@ -201,6 +293,72 @@ class TestMigratedExtractorsRouteThroughSharedIndex(unittest.TestCase):
                     _WINDOWS_PROJECT_SKIP_ID, seen_skip_ids,
                     f"{class_name} must dispatch through the shared Windows index",
                 )
+
+
+class TestGuardedSkillsExtractorsStayUnmigrated(unittest.TestCase):
+    """The skills extractors whose bespoke walk applies extra prune guards
+    (``traverses_other_tool_config_dir`` / ``is_symlink_or_junction``) must NOT be
+    moved onto the generic shared helper: it does not replicate those guards, so
+    migrating them would report other tools' bundled config dirs as the user's own
+    (proven in ``test_shared_helper_does_not_prune_other_tool_config_dirs``). This
+    locks that decision so a future refactor cannot silently reintroduce the bug."""
+
+    GUARDED = [
+        "codex/skills_extractor.py",
+        "gemini_cli/skills_extractor.py",
+        "junie/skills_extractor.py",
+        "kilocode/skills_extractor.py",
+        "opencode/skills_extractor.py",
+        "replit/skills_extractor.py",
+        "windsurf/skills_extractor.py",
+        "copilot_cli/copilot_cli_skills_extractor.py",
+    ]
+
+    def test_guarded_skills_keep_their_prune_and_avoid_shared_helper(self):
+        base = (Path(__file__).resolve().parent.parent
+                / "scripts" / "coding_discovery_tools" / "windows")
+        for rel in self.GUARDED:
+            src = (base / rel).read_text()
+            with self.subTest(extractor=rel):
+                self.assertIn("traverses_other_tool_config_dir", src,
+                              f"{rel} must keep its other-tool prune")
+                self.assertNotIn("walk_for_tool_directories", src,
+                                 f"{rel} must NOT use the guard-free shared helper")
+
+
+class TestClineSkillsRoutesThroughSharedIndex(unittest.TestCase):
+    """cline skills IS migrated (it had no extra prune guard). Prove its
+    project-level walk dispatches through the shared Windows index."""
+
+    def setUp(self):
+        pdi.clear_cache()
+        self._tmp = tempfile.mkdtemp(prefix="win-cline-skills-", dir=str(Path.home()))
+        self.root = Path(self._tmp).resolve()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        pdi.clear_cache()
+
+    def test_cline_skills_dispatches_via_shared_windows_index(self):
+        import importlib
+        import unittest.mock as mock
+        (self.root / "proj" / ".clinerules" / "skills").mkdir(parents=True)
+        mod = importlib.import_module(
+            "coding_discovery_tools.windows.cline.skills_extractor")
+        extractor = mod.WindowsClineSkillsExtractor()
+        seen = []
+        real = weh.dispatch_matches
+
+        def spy(root_path, current_dir, should_skip, skip_id, is_match, on_match,
+                markers_all_hidden=True, _real=real):
+            seen.append(skip_id)
+            return _real(root_path, current_dir, should_skip, skip_id, is_match,
+                         on_match, markers_all_hidden=markers_all_hidden)
+
+        with mock.patch.object(weh, "dispatch_matches", spy):
+            extractor._extract_project_level_skills(self.root, {})
+        self.assertIn(_WINDOWS_PROJECT_SKIP_ID, seen,
+                      "cline skills must dispatch through the shared Windows index")
 
 
 if __name__ == "__main__":

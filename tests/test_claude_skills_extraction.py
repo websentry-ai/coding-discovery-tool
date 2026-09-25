@@ -25,6 +25,7 @@ from scripts.coding_discovery_tools.claude_code_skills_helpers import (
     COMMAND_CONFIG,
     AGENT_CONFIG,
     CLAUDE_ITEM_CONFIGS,
+    extract_user_level_items,
 )
 from scripts.coding_discovery_tools.macos_extraction_helpers import (
     extract_single_rule_file,
@@ -1188,6 +1189,44 @@ class TestMacOSExtractorAgents(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["type"], "agent")
         self.assertEqual(items[0]["skill_name"], "ci")
+
+
+class TestSyncedSkillDiscovery(unittest.TestCase):
+    """Skills synced from claude.ai nest under skills/synced/<bucket>/<name>/ —
+    one level deeper than a normal user skill. Discovery has to descend into the
+    bucket, or synced skills are never recorded and their runs can never match a
+    body."""
+
+    def _run(self, home):
+        user_skills = []
+        extract_user_level_items(home, user_skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS)
+        return {s.get("skill_name"): s for s in user_skills}
+
+    def test_synced_skill_is_discovered_alongside_a_normal_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local = home / ".claude" / "skills" / "my-local" / "SKILL.md"
+            local.parent.mkdir(parents=True)
+            local.write_text("---\nname: my-local\n---\nbody\n")
+            synced = home / ".claude" / "skills" / "synced" / "orgA_set1" / "docx" / "SKILL.md"
+            synced.parent.mkdir(parents=True)
+            synced.write_text("---\nname: docx\n---\n# docx\n")
+
+            found = self._run(home)
+            self.assertIn("docx", found)          # the synced skill
+            self.assertIn("my-local", found)      # no regression
+            self.assertEqual(found["docx"]["scope"], "user")
+
+    def test_multiple_buckets_are_all_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for bucket, name in (("orgA_s1", "docx"), ("orgB_s2", "pptx")):
+                f = home / ".claude" / "skills" / "synced" / bucket / name / "SKILL.md"
+                f.parent.mkdir(parents=True)
+                f.write_text(f"---\nname: {name}\n---\n# {name}\n")
+            found = self._run(home)
+            self.assertIn("docx", found)
+            self.assertIn("pptx", found)
 
 
 if __name__ == "__main__":

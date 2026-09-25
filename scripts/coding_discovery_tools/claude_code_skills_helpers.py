@@ -457,7 +457,16 @@ def extract_user_level_items(
             root = _resolved_root(type_dir)
             try:
                 if config.layout == "nested":
-                    for subdir in type_dir.iterdir():
+                    skill_dirs = list(type_dir.iterdir())
+                    # Skills synced from claude.ai nest one level deeper, under an
+                    # opaque per-account bucket: skills/synced/<bucket>/<name>/. Add
+                    # each bucket's skill dirs so synced skills are discovered too.
+                    synced_root = type_dir / "synced"
+                    if synced_root.is_dir() and not is_symlink_or_junction(synced_root):
+                        for bucket in synced_root.iterdir():
+                            if bucket.is_dir() and not is_symlink_or_junction(bucket):
+                                skill_dirs.extend(bucket.iterdir())
+                    for subdir in skill_dirs:
                         # Skip symlinked/junctioned skill dirs / marker files: under a
                         # root all-user scan a link could redirect the read into
                         # another user's tree (security).

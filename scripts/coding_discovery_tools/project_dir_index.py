@@ -57,22 +57,16 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> Optional[bool]:
-    """Index hidden dirs by basename, ancestor-first; never descends links.
+    """Index hidden dirs by basename, ancestor-first; never follows links.
 
-    Distinguishes two ways a listing can fail, because they cache differently:
-    - ``None`` — CURRENT_DIR could not be OPENED at all. A stable denial (a locked
-      profile, ``Application Data``) or an absent dir: it reads the same for the
-      rest of the scan, so a partial index built around it is safe to cache. This
-      is the Windows deep-denial case the shared single pass depends on.
-    - ``False`` — a listing was cut short AFTER it began (an ``os.scandir``
-      iteration that threw partway: a network share or cloud-placeholder folder).
-      That is transient — entries after the fault are simply missing — so it must
-      NOT be frozen into the cache, and it propagates up from any descendant.
-    - ``True`` — CURRENT_DIR and every descendant either listed completely or was
-      a stable open-denial. Safe to cache.
+    The return says how the listing went, because it decides what gets cached:
+    - ``None`` — couldn't open the dir (locked or gone); it stays that way for the
+      whole scan, so the result is safe to cache.
+    - ``False`` — the listing broke off partway (a flaky network or cloud folder);
+      later entries are missing, so it must not be cached, and this bubbles up.
+    - ``True`` — this dir and everything under it listed fully, or was safely locked.
 
-    A child open-denial (``None``) does not taint the parent; only a mid-listing
-    truncation (``False``) does."""
+    A child that couldn't be opened is fine; one that broke off mid-list is not."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
@@ -97,10 +91,8 @@ def _collect(root_path: Path, current_dir: Path,
                     if entry.name.startswith("."):
                         index.setdefault(entry.name, []).append(item)
                     if not entry.is_symlink():  # never descend a link/junction
-                        # Only a descendant's MID-LISTING truncation taints us; a
-                        # stable open-denial (None) leaves the partial cacheable.
                         if _collect(root_path, item, should_skip, index) is False:
-                            truncated = True
+                            truncated = True  # only a mid-list break stops caching
                 except (PermissionError, OSError, ValueError):
                     continue
                 except Exception as e:  # one bad entry must not abort the walk
@@ -115,12 +107,10 @@ def _collect(root_path: Path, current_dir: Path,
 def get_subtree_index(root_path: Path, current_dir: Path,
                       should_skip: Callable[[Path], bool],
                       skip_id: str) -> Dict[str, List[Path]]:
-    """Memoized ``basename -> [dirs]`` map. ``skip_id`` stops callers with
-    different prunes sharing a tree. An index built over stable open-denials (a
-    readable root with some deep subtree locked — the Windows shape) IS cached so
-    per-tool walks reuse one pass. It is left uncached only when the root cannot be
-    opened or a listing was truncated mid-way (a transient fault), so a later
-    lookup re-attempts instead of freezing an incomplete result."""
+    """Memoized ``basename -> [dirs]`` map; ``skip_id`` keeps callers with different
+    prunes apart. Cached when the root listed and anything unreadable below it was
+    just locked, not broken off mid-list — so every per-tool walk reuses one pass.
+    A truncated or unopenable root is left uncached so the next lookup retries."""
     key = (skip_id, str(root_path), str(current_dir))
     with _INDEX_LOCK:
         cached = _INDEX_CACHE.get(key)
@@ -130,11 +120,9 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     # (a duplicate concurrent build is wasted but harmless).
     index: Dict[str, List[Path]] = {}
     if _collect(root_path, current_dir, should_skip, index) is not True:
-        # None -> root couldn't be opened; False -> a listing was cut short partway
-        # somewhere in the tree. Either way the result is incomplete in a way that
-        # may resolve next time, so leave it uncached and re-attempt. A stable deep
-        # open-denial does NOT land here — it returns True, so that (Windows-shaped)
-        # partial index IS cached and every per-tool walk reuses one pass.
+        # None: couldn't open the root. False: a listing broke off partway. Both may
+        # work next time, so don't cache. A locked dir returns True and is cached, so
+        # the per-tool walks still share one pass.
         logger.debug("index not safe to cache, re-attempt later: %s", current_dir)
         return index
     with _INDEX_LOCK:
@@ -142,13 +130,10 @@ def get_subtree_index(root_path: Path, current_dir: Path,
 
 
 def outermost_only(dirs: List[Path]) -> List[Path]:
-    """Keep only the shallowest match on any path (the old "don't recurse into a
-    matched dir" prune). Drops any match that has ANOTHER match among its
-    ancestors, keeping survivors in input order. Checking all inputs (not just
-    the ones kept so far) de-nests correctly even when a child precedes its parent
-    — e.g. a cross-basename matcher whose per-basename buckets aren't globally
-    ancestor-first — without reordering, so the index and fallback dispatch orders
-    still match."""
+    """Keep only the shallowest match on each path — the old "don't recurse into a
+    matched dir" rule. Drops any match that sits under another match, in the input
+    order, so the index and fallback walks dispatch the same set the same way even
+    when a child happens to come before its parent in the list."""
     return [p for p in dirs if not any(other in p.parents for other in dirs)]
 
 

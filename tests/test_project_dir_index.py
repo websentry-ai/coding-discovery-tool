@@ -182,13 +182,11 @@ class TestSubtreeIndex(unittest.TestCase):
         self.assertIs(a, b)  # cached and reused despite the deep denial
 
     def _flaky_scandir(self, fault_dir: Path, fault_after: str):
-        """Return a drop-in for os.scandir that behaves normally except that,
-        the first time ``fault_dir`` is listed, it yields real entries and raises
-        OSError right after the entry named ``fault_after`` -- a faithful model of
-        a directory whose iteration truncates mid-way (a transient fault on a
-        network share or a cloud-placeholder dir), not a clean up-front denial.
-        The returned object is BOTH a context manager and an iterator, like the
-        real os.scandir, so it drives _collect's real mid-iteration branch."""
+        """A drop-in for os.scandir that lists ``fault_dir`` normally the first time
+        but raises OSError right after the entry named ``fault_after`` -- a directory
+        whose listing breaks off partway, not one that fails to open. Like the real
+        scandir it is both a context manager and an iterator, so it exercises
+        _collect's mid-list break rather than the open-failure path."""
         real = os.scandir
         target = os.path.normpath(str(fault_dir))
         state = {"armed": True}
@@ -224,12 +222,9 @@ class TestSubtreeIndex(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "uses a scandir fault injector")
     def test_mid_listing_truncation_is_not_cached_and_reattempts(self):
-        # A child dir whose OWN listing is cut short partway (a transient fault:
-        # network share, cloud-placeholder folder) must NOT be frozen into the
-        # cache -- entries after the fault are simply missing, and a later lookup
-        # can recover them. So the truncated build is returned UNCACHED, and the
-        # next lookup re-lists and picks up what the fault hid. A readable sibling
-        # is unaffected. (Contrast: a stable open-denial IS cached; next test.)
+        # A child whose listing breaks off partway must not be cached: its later
+        # entries are missing, so the next lookup re-lists and recovers them. A
+        # readable sibling is unaffected. (A locked dir IS cached -- next test.)
         self.mk("flaky", "a", ".cursor")            # listed before the fault
         self.mk("flaky", "zzz", ".cursor")          # after the fault -> missed once
         self.mk("readable", ".cursor")
@@ -255,11 +250,9 @@ class TestSubtreeIndex(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
     def test_stable_open_denial_leaves_partial_index_cached(self):
-        # A child that denies UP FRONT (os.scandir raises on open) is the stable
-        # Windows permission case (a locked profile, Application Data): it reads the
-        # same for the rest of the scan, so the partial index built around it IS
-        # cached -- the mechanism the single-pass perf win depends on. Only a
-        # transient MID-listing truncation (previous test) is left uncached.
+        # A child that can't be opened (a locked profile, Application Data) reads the
+        # same all scan, so the index around it IS cached -- what lets the ten tools
+        # share one pass. Only a mid-list break (previous test) is left uncached.
         self.mk("readable", ".cursor")
         denied = self.mk("denied", "sub")
         (denied / ".windsurf").mkdir()

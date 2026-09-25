@@ -17,6 +17,7 @@ from ...windows_extraction_helpers import (
     extract_single_rule_file,
     is_user_level_tool_dir,
     scan_windows_user_directories,
+    should_skip_path,
     walk_for_tool_directories,
 )
 

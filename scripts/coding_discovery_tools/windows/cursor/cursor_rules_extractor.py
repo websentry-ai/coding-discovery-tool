@@ -15,7 +15,7 @@ from typing import List, Dict
 
 from ...coding_tool_base import BaseCursorRulesExtractor
 from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
-from ...cursor_rules_helpers import is_cursor_rule_md_file, is_agents_md_file, extract_cursor_rules_from_dir
+from ...cursor_rules_helpers import is_agents_md_file, extract_cursor_rules_from_dir
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -27,7 +27,6 @@ from ...windows_extraction_helpers import (
     scan_windows_user_directories,
     should_skip_path,
     walk_for_tool_directories,
-    is_running_as_admin,
 )
 
 logger = logging.getLogger(__name__)

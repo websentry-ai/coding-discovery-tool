@@ -13,7 +13,6 @@ from ...coding_tool_base import BaseKiloCodeRulesExtractor
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
-    extract_single_rule_file,
     walk_for_tool_directories,
 )
 

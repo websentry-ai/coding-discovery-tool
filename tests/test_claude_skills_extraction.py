@@ -25,6 +25,7 @@ from scripts.coding_discovery_tools.claude_code_skills_helpers import (
     COMMAND_CONFIG,
     AGENT_CONFIG,
     CLAUDE_ITEM_CONFIGS,
+    extract_user_level_items,
 )
 from scripts.coding_discovery_tools.macos_extraction_helpers import (
     extract_single_rule_file,
@@ -1188,6 +1189,111 @@ class TestMacOSExtractorAgents(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["type"], "agent")
         self.assertEqual(items[0]["skill_name"], "ci")
+
+
+class TestSyncedSkillDiscovery(unittest.TestCase):
+    """Skills synced from claude.ai nest under skills/synced/<bucket>/<name>/ —
+    one level deeper than a normal user skill. Discovery has to descend into the
+    bucket, or synced skills are never recorded and their runs can never match a
+    body."""
+
+    def _run(self, home, scan_synced=True):
+        # scan_synced mirrors the Claude Code extractor opting in; other tools
+        # share this scanner with it off.
+        user_skills = []
+        extract_user_level_items(
+            home, user_skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS,
+            scan_synced=scan_synced,
+        )
+        return {s.get("skill_name"): s for s in user_skills}
+
+    def test_other_tools_do_not_claim_synced_bodies(self):
+        # The synced descent is Claude-only. A compat caller (scan_synced=False,
+        # the default) must not inventory claude.ai-synced bodies as its own.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local = home / ".claude" / "skills" / "my-local" / "SKILL.md"
+            local.parent.mkdir(parents=True)
+            local.write_text("---\nname: my-local\n---\nbody\n")
+            synced = home / ".claude" / "skills" / "synced" / "orgA_set1" / "docx" / "SKILL.md"
+            synced.parent.mkdir(parents=True)
+            synced.write_text("---\nname: docx\n---\n# docx\n")
+
+            found = self._run(home, scan_synced=False)
+            self.assertNotIn("docx", found)     # synced body not claimed
+            self.assertIn("my-local", found)    # normal skill still found
+
+    def test_synced_skill_is_discovered_alongside_a_normal_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local = home / ".claude" / "skills" / "my-local" / "SKILL.md"
+            local.parent.mkdir(parents=True)
+            local.write_text("---\nname: my-local\n---\nbody\n")
+            synced = home / ".claude" / "skills" / "synced" / "orgA_set1" / "docx" / "SKILL.md"
+            synced.parent.mkdir(parents=True)
+            synced.write_text("---\nname: docx\n---\n# docx\n")
+
+            found = self._run(home)
+            self.assertIn("docx", found)          # the synced skill
+            self.assertIn("my-local", found)      # no regression
+            self.assertEqual(found["docx"]["scope"], "user")
+
+    def test_multiple_buckets_are_all_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for bucket, name in (("orgA_s1", "docx"), ("orgB_s2", "pptx")):
+                f = home / ".claude" / "skills" / "synced" / bucket / name / "SKILL.md"
+                f.parent.mkdir(parents=True)
+                f.write_text(f"---\nname: {name}\n---\n# {name}\n")
+            found = self._run(home)
+            self.assertIn("docx", found)
+            self.assertIn("pptx", found)
+
+    def test_real_augment_extractor_does_not_pick_up_synced(self):
+        # Directive 1/3: drive the actual Augment delegation, which passes ~/.claude
+        # as a compat root. It must not descend into the synced bucket (scan_synced
+        # defaults off), so it never claims a claude.ai-synced body as its own.
+        from scripts.coding_discovery_tools.augment_skills_helpers import (
+            extract_augment_user_level_items,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            aug = home / ".augment" / "skills" / "my-augment" / "SKILL.md"
+            aug.parent.mkdir(parents=True)
+            aug.write_text("---\nname: my-augment\n---\nx\n")
+            syn = home / ".claude" / "skills" / "synced" / "org_set" / "docx" / "SKILL.md"
+            syn.parent.mkdir(parents=True)
+            syn.write_text("---\nname: docx\n---\nx\n")
+
+            skills = []
+            extract_augment_user_level_items(home, skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS)
+            names = {s.get("skill_name") for s in skills}
+            self.assertIn("my-augment", names)
+            self.assertNotIn("docx", names)
+
+    def test_a_bad_synced_bucket_does_not_drop_normal_skills(self):
+        # IO isolation: a synced dir that can't be listed (perms, race) must only
+        # skip synced discovery, never abort the normal user-skill scan.
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local = home / ".claude" / "skills" / "my-local" / "SKILL.md"
+            local.parent.mkdir(parents=True)
+            local.write_text("---\nname: my-local\n---\nx\n")
+            syn = home / ".claude" / "skills" / "synced" / "org_set" / "docx" / "SKILL.md"
+            syn.parent.mkdir(parents=True)
+            syn.write_text("---\nname: docx\n---\nx\n")
+
+            orig = Path.iterdir
+
+            def boom(self):
+                if self.name == "synced":
+                    raise PermissionError("locked")
+                return orig(self)
+
+            with patch.object(Path, "iterdir", boom):
+                found = self._run(home, scan_synced=True)
+            self.assertIn("my-local", found)   # normal skill survives the bad bucket
 
 
 if __name__ == "__main__":

@@ -58,15 +58,17 @@ def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> bool:
     """Index hidden dirs by basename, ancestor-first; never descends links.
-    Returns True only if the whole subtree read; the caller decides whether a
-    partial (root-readable) result is cacheable."""
+    Returns True if CURRENT_DIR's own listing completed. A denied/faulted child
+    subtree does NOT flip it to False: those denials are stable within a scan, so
+    the (Windows-shaped) partial result stays cacheable. Only a failure to open
+    current_dir or a truncated iteration of current_dir itself returns False, so
+    a later lookup re-attempts rather than freezing an incomplete root listing."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
         logger.debug("could not read %s: %s", current_dir, e)
         return False
 
-    readable = True
     with scan:
         try:
             for entry in scan:
@@ -84,17 +86,16 @@ def _collect(root_path: Path, current_dir: Path,
                     if entry.name.startswith("."):
                         index.setdefault(entry.name, []).append(item)
                     if not entry.is_symlink():  # never descend a link/junction
-                        if not _collect(root_path, item, should_skip, index):
-                            readable = False
+                        _collect(root_path, item, should_skip, index)  # child denial is stable, not our concern
                 except (PermissionError, OSError, ValueError):
                     continue
                 except Exception as e:  # one bad entry must not abort the walk
                     logger.debug("skipping %s: %s", entry.path, e)
                     continue
-        except (PermissionError, OSError) as e:  # iterator faulted mid-walk
+        except (PermissionError, OSError) as e:  # current_dir's own iteration truncated
             logger.debug("iteration stopped for %s: %s", current_dir, e)
-            readable = False
-    return readable
+            return False
+    return True
 
 
 def get_subtree_index(root_path: Path, current_dir: Path,
@@ -112,37 +113,28 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     # Build outside the lock so parallel walks don't serialize; publish atomically
     # (a duplicate concurrent build is wasted but harmless).
     index: Dict[str, List[Path]] = {}
-    fully_read = _collect(root_path, current_dir, should_skip, index)
-    if not fully_read:
-        # Distinguish an unreadable/absent ROOT from a readable root with some
-        # denied deep subtrees. On real Windows the root (e.g. C:\) reads fine but
-        # deep dirs (other users, protected system paths) are permanently denied;
-        # not caching there means every per-tool walk re-lists the whole drive and
-        # the shared index buys nothing. Those denials are stable for the scan (the
-        # cache is per-process and cleared between scans), so a root-readable
-        # partial index is safe to reuse. An unreadable/not-yet-existing root is
-        # still left uncached so a later lookup can re-attempt and see it appear.
-        try:
-            with os.scandir(current_dir):
-                root_readable = True
-        except OSError:
-            root_readable = False
-        if not root_readable:
-            logger.debug("root not readable, not caching: %s", current_dir)
-            return index
-        logger.debug("root readable, deep subtree denied; caching partial: %s", current_dir)
+    root_listed = _collect(root_path, current_dir, should_skip, index)
+    if not root_listed:
+        # current_dir could not be opened, or its own listing truncated mid-way:
+        # leave it uncached so a later lookup re-attempts (it may open / complete
+        # next time). Deep-child denials do NOT reach here — they leave the root
+        # listing complete, so that (Windows-shaped) partial index IS cached and
+        # every per-tool walk reuses it instead of re-listing the whole drive.
+        logger.debug("root listing incomplete, not caching: %s", current_dir)
+        return index
     with _INDEX_LOCK:
         return _INDEX_CACHE.setdefault(key, index)
 
 
 def outermost_only(dirs: List[Path]) -> List[Path]:
     """Keep only the shallowest match on any path (the old "don't recurse into a
-    matched dir" prune). Input must be ancestor-before-descendant."""
-    kept: List[Path] = []
-    for path in dirs:
-        if not any(anchor in path.parents for anchor in kept):
-            kept.append(path)
-    return kept
+    matched dir" prune). Drops any match that has ANOTHER match among its
+    ancestors, keeping survivors in input order. Checking all inputs (not just
+    the ones kept so far) de-nests correctly even when a child precedes its parent
+    — e.g. a cross-basename matcher whose per-basename buckets aren't globally
+    ancestor-first — without reordering, so the index and fallback dispatch orders
+    still match."""
+    return [p for p in dirs if not any(other in p.parents for other in dirs)]
 
 
 def _walk_direct(root_path: Path, current_dir: Path,

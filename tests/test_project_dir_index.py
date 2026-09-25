@@ -48,6 +48,16 @@ class TestOutermostOnly(unittest.TestCase):
         c = Path("/a/.cursor/n/.cursor")  # nested under b -> dropped
         self.assertEqual(outermost_only([a, b, c]), [a, b])
 
+    def test_denests_child_listed_before_parent(self):
+        # A cross-basename matcher (skills passes .cline + .claude) flattens
+        # per-basename buckets, so a child can appear BEFORE its parent. The child
+        # must still be dropped — the reason the check is against all inputs, not
+        # just the ones kept so far.
+        other = Path("/early/.cline")
+        parent = Path("/proj/.claude")
+        child = Path("/proj/.claude/.cline")  # listed before its parent
+        self.assertEqual(outermost_only([other, child, parent]), [other, parent])
+
 
 class TestSubtreeIndex(unittest.TestCase):
     def setUp(self):

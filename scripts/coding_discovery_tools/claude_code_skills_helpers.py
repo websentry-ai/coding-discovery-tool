@@ -466,9 +466,15 @@ def extract_user_level_items(
                     # these bodies as their own.
                     synced_root = type_dir / "synced"
                     if scan_synced and synced_root.is_dir() and not is_symlink_or_junction(synced_root):
-                        for bucket in synced_root.iterdir():
-                            if bucket.is_dir() and not is_symlink_or_junction(bucket):
-                                skill_dirs.extend(bucket.iterdir())
+                        try:
+                            for bucket in synced_root.iterdir():
+                                if bucket.is_dir() and not is_symlink_or_junction(bucket):
+                                    skill_dirs.extend(bucket.iterdir())
+                        except OSError:
+                            # A bad bucket (restrictive perms under a root scan, a
+                            # race) must not abort discovery of the normal user
+                            # skills already collected above.
+                            pass
                     for subdir in skill_dirs:
                         # Skip symlinked/junctioned skill dirs / marker files: under a
                         # root all-user scan a link could redirect the read into

@@ -378,9 +378,8 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
     return False
 
 
-# Windows project-walk prune: SKIP_DIRS plus the Windows system directories.
-# Every tool passes the same id below, so the drive is indexed once and shared,
-# not re-indexed per tool.
+# Windows project-walk prune: SKIP_DIRS plus the Windows system directories. Every
+# tool passes the same id below, so the drive is indexed once and shared, not per tool.
 def _windows_project_skip(item: Path) -> bool:
     """Return True for a path a Windows project walk must not enter."""
     return should_skip_path(item, get_windows_system_directories())
@@ -397,27 +396,18 @@ def walk_for_tool_directories(
     projects_by_root,
     current_depth: int = 0,
 ) -> None:
-    """Find each tool-specific config dir under ``current_dir`` and extract from it.
-
-    The Windows counterpart of the Linux/macOS ``walk_for_tool_directories``: it uses
-    the shared directory index (``project_dir_index.dispatch_matches``) so the drive
-    is walked once for all tools instead of once per tool. On an index fault it falls
-    back to an independent walk, and unreadable subtrees are skipped rather than
-    crashing the scan. The shared index already applies the depth limit, keeps only
-    the outermost match (never recurses into a matched project), and drops a marker
-    that resolves outside the scan root.
+    """Find each tool-specific config dir under ``current_dir`` and extract from it,
+    using the shared directory index so the drive is walked once for all tools.
 
     Args:
         root_path: Root search path (for depth calculation), e.g. ``Path("C:\\")``.
         current_dir: Directory to search from (usually the same as ``root_path``).
-        tool_dir_names: The marker directory name to match (e.g. ``".clinerules"``),
-            or an iterable of names (e.g. ``CLINE_PARENT_DIR_NAMES``).
-        extract_from_dir_func: ``func(tool_dir: Path, projects_by_root)`` invoked for
-            each matched directory. Any per-tool guard (junction skip, other-tool
-            config-dir skip) belongs inside this callback.
+        tool_dir_names: A marker dir name (e.g. ``".clinerules"``) or an iterable of
+            names (e.g. ``CLINE_PARENT_DIR_NAMES``).
+        extract_from_dir_func: ``func(tool_dir, projects_by_root)`` called per matched
+            dir. Any per-tool guard (junction/other-tool-config skip) goes in it.
         projects_by_root: Accumulator passed straight through to the callback.
-        current_depth: Unused; retained for call-site compatibility with the old
-            per-tool walkers.
+        current_depth: Unused; kept for call-site compatibility with the old walkers.
     """
     if isinstance(tool_dir_names, str):
         names = frozenset((tool_dir_names,))

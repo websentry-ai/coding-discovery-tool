@@ -50,9 +50,8 @@ class TestOutermostOnly(unittest.TestCase):
         self.assertEqual(outermost_only([a, b, c]), [a, b])
 
     def test_denests_child_listed_before_parent(self):
-        # When a matcher takes several names (skills takes .cline + .claude), a child
-        # can be listed before its parent. It must still be dropped -- which is why
-        # the check looks at all inputs, not only the ones kept so far.
+        # A matcher over several names (skills: .cline + .claude) can list a child
+        # before its parent, so the check scans all inputs to still drop it.
         other = Path("/early/.cline")
         parent = Path("/proj/.claude")
         child = Path("/proj/.claude/.cline")  # listed before its parent
@@ -164,10 +163,8 @@ class TestSubtreeIndex(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
     def test_partial_readable_root_is_cached(self):
-        # Root readable, a deep subtree denied (the real-Windows shape): the index
-        # must still be CACHED so the per-tool walks reuse one pass instead of each
-        # re-listing the whole drive. The marker in the readable part is found, and
-        # the second lookup returns the same cached object.
+        # Root readable but a deep subtree locked (the real Windows shape): still
+        # cached, so the marker is found and the second lookup reuses it.
         self.mk("readable", ".cursor")
         blocked = self.mk("locked", "sub")
         (blocked / ".windsurf").mkdir()
@@ -221,9 +218,8 @@ class TestSubtreeIndex(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "uses a scandir fault injector")
     def test_mid_listing_truncation_is_not_cached_and_reattempts(self):
-        # A child whose listing breaks off partway must not be cached: its later
-        # entries are missing, so the next lookup re-lists and recovers them. A
-        # readable sibling is unaffected. (A locked dir IS cached -- next test.)
+        # A child whose listing breaks off partway must not be cached, so the next
+        # lookup re-lists and recovers its missing entries. (A locked dir IS cached.)
         self.mk("flaky", "a", ".cursor")            # listed before the fault
         self.mk("flaky", "zzz", ".cursor")          # after the fault -> missed once
         self.mk("readable", ".cursor")
@@ -249,9 +245,8 @@ class TestSubtreeIndex(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
     def test_stable_open_denial_leaves_partial_index_cached(self):
-        # A child that can't be opened (a locked profile, Application Data) reads the
-        # same all scan, so the index around it IS cached -- what lets the ten tools
-        # share one pass. Only a mid-list break (previous test) is left uncached.
+        # A child that can't be opened (a locked profile) reads the same all scan, so
+        # the index around it IS cached. Only a mid-list break is left uncached.
         self.mk("readable", ".cursor")
         denied = self.mk("denied", "sub")
         (denied / ".windsurf").mkdir()

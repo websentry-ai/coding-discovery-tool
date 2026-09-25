@@ -57,16 +57,8 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> Optional[bool]:
-    """Index hidden dirs by basename, ancestor-first; never follows links.
-
-    The return says how the listing went, because it decides what gets cached:
-    - ``None`` — couldn't open the dir (locked or gone); it stays that way for the
-      whole scan, so the result is safe to cache.
-    - ``False`` — the listing broke off partway (a flaky network or cloud folder);
-      later entries are missing, so it must not be cached, and this bubbles up.
-    - ``True`` — this dir and everything under it listed fully, or was safely locked.
-
-    A child that couldn't be opened is fine; one that broke off mid-list is not."""
+    """Index hidden dirs by basename, ancestor-first; never follows links. Returns
+    None (dir unopenable), False (a listing broke off partway; don't cache), or True."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
@@ -107,10 +99,8 @@ def _collect(root_path: Path, current_dir: Path,
 def get_subtree_index(root_path: Path, current_dir: Path,
                       should_skip: Callable[[Path], bool],
                       skip_id: str) -> Dict[str, List[Path]]:
-    """Memoized ``basename -> [dirs]`` map; ``skip_id`` keeps callers with different
-    prunes apart. Cached when the root listed and anything unreadable below it was
-    just locked, not broken off mid-list — so every per-tool walk reuses one pass.
-    A truncated or unopenable root is left uncached so the next lookup retries."""
+    """Memoized ``basename -> [dirs]`` map, keyed by ``skip_id``. Cached unless the
+    root was unopenable or a listing broke off partway, so a later lookup retries."""
     key = (skip_id, str(root_path), str(current_dir))
     with _INDEX_LOCK:
         cached = _INDEX_CACHE.get(key)
@@ -120,9 +110,8 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     # (a duplicate concurrent build is wasted but harmless).
     index: Dict[str, List[Path]] = {}
     if _collect(root_path, current_dir, should_skip, index) is not True:
-        # None: couldn't open the root. False: a listing broke off partway. Both may
-        # work next time, so don't cache. A locked dir returns True and is cached, so
-        # the per-tool walks still share one pass.
+        # Root unopenable (None) or a listing broke off partway (False): may work
+        # next time, so don't cache. A locked dir returns True and stays cached.
         logger.debug("index not safe to cache, re-attempt later: %s", current_dir)
         return index
     with _INDEX_LOCK:
@@ -130,10 +119,8 @@ def get_subtree_index(root_path: Path, current_dir: Path,
 
 
 def outermost_only(dirs: List[Path]) -> List[Path]:
-    """Keep only the shallowest match on each path — the old "don't recurse into a
-    matched dir" rule. Drops any match that sits under another match, in the input
-    order, so the index and fallback walks dispatch the same set the same way even
-    when a child happens to come before its parent in the list."""
+    """Keep only the shallowest match on each path (drop any under another match), in
+    input order, so the index and fallback walks dispatch the same set the same way."""
     return [p for p in dirs if not any(other in p.parents for other in dirs)]
 
 
@@ -186,9 +173,8 @@ def dispatch_matches(root_path: Path, current_dir: Path,
         return
     try:
         index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
-        # Each name's dirs come out parents-first. A matcher for a single name keeps
-        # that order; one matching several names (skills) can mix a child in before
-        # its parent, which outermost_only sorts out.
+        # Dirs for one name come out parents-first; a matcher over several names
+        # (skills) can mix a child in before its parent, which outermost_only sorts out.
         matches = [d for name, dirs in index.items() if is_match(name) for d in dirs]
         targets = outermost_only(matches)
     except Exception as e:

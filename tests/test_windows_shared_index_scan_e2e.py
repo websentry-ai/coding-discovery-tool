@@ -91,10 +91,8 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
         )
 
     def test_second_tool_reuses_the_memoized_index(self):
-        # The whole point of the migration: the C:\ subtree is indexed ONCE and
-        # every subsequent per-tool walk reads that cached map. Prove the index is
-        # populated for the Windows skip id after the first walk and that a second
-        # marker resolves against the same cached tree.
+        # The point of the migration: the C:\ subtree is indexed once and every later
+        # per-tool walk reuses it. Prove it is cached under the Windows skip id.
         self._mk("repo", ".clinerules")
         self._mk("repo", ".cursor")
         first = _win_dispatched(self.root, ".clinerules")
@@ -128,12 +126,8 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
                       "a sibling fault must not hide readable tools")
 
     def test_shared_helper_does_not_prune_other_tool_config_dirs(self):
-        # DELIBERATE limitation, and the exact reason 8 skills extractors were NOT
-        # migrated: the shared helper prunes ONLY system dirs. A marker bundled
-        # inside another tool's per-user config dir (e.g. ~/.antigravity/...) IS
-        # dispatched -- a false positive for a skills walk that must apply
-        # traverses_other_tool_config_dir. Guard-free extractors are unaffected;
-        # guarded ones keep their bespoke walk (see TestGuardedSkillsExtractors...).
+        # Deliberate limit (and why 8 skills extractors stay unmigrated): the shared
+        # helper prunes only system dirs, so a marker inside another tool's config dir is dispatched.
         self._mk(".antigravity", "extensions", "pkg", ".claude")
         self._mk("myproject", ".claude")
         got = _win_dispatched(self.root, ".claude")
@@ -169,11 +163,8 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
         )
 
     def test_matches_old_bespoke_walk_semantics(self):
-        # Backward-compat oracle for the guard-free extractors on an in-root,
-        # symlink-free tree: recurse, skip system dirs, depth-limit, dispatch the
-        # OUTERMOST marker, never descend a matched dir. The shared helper produces
-        # exactly that set. Where the two INTENTIONALLY diverge (directory symlinks,
-        # out-of-root targets) is covered by the divergence test below.
+        # Backward-compat oracle on an ordinary in-root, symlink-free tree: the shared
+        # helper's output must match the old walk. Symlink divergence is tested below.
         self._mk("p1", ".clinerules")
         self._mk("p1", "sub", ".clinerules")            # nested under a match -> pruned
         self._mk("p2", "src", "nested", ".clinerules")
@@ -185,15 +176,8 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "symlink creation is POSIX here")
     def test_symlink_handling_diverges_from_old_walk_by_design(self):
-        # The old bespoke walks recursed on DirEntry.is_dir(), which FOLLOWS
-        # symlinks, and had no within-scan-root guard -- so they descended directory
-        # symlinks and even dispatched a marker whose real target was OUTSIDE the
-        # scan root (verified against the real origin/main antigravity walker). The
-        # shared index does neither, on purpose and more safely:
-        #   * symlink to an IN-root dir: the real path is still indexed; the symlink
-        #     path is not (no double-report, no symlink loops on a full-drive walk);
-        #   * symlink to an OUT-of-root dir: dropped entirely.
-        # Nothing genuinely under the scan root is lost.
+        # The old walks followed directory symlinks and had no within-root guard, so
+        # they descended symlinks and dispatched out-of-root targets; the index drops both.
         self._mk("real", "hidden", ".clinerules")
         os.symlink(str(self.root / "real" / "hidden"), str(self.root / "link"))
         outside = Path(tempfile.mkdtemp(prefix="win-outside-"))
@@ -204,9 +188,8 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
             new = _win_dispatched(self.root, ".clinerules")
         finally:
             shutil.rmtree(outside, ignore_errors=True)
-        # Old descended both symlinks (this is what the shared index deliberately
-        # stops doing) -- pins the real pre-change behavior so the divergence is
-        # documented, not silently assumed.
+        # Old descended both symlinks -- pins the real pre-change behavior so the
+        # divergence is documented, not assumed.
         self.assertIn("link/.clinerules", old)
         self.assertIn("escape/.clinerules", old)
         # New descends neither, but keeps the real in-root path.
@@ -257,9 +240,8 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
         return sorted(found)
 
 
-# Each migrated extractor, its module path, the class, and the marker(s) its
-# project-level walk now dispatches through the shared index. The tuple is what a
-# migrated extractor's ``_extract_project_level_rules(root, acc)`` must route.
+# Each migrated extractor: module, class, and the marker(s) its project-level walk
+# dispatches through the shared index.
 _MIGRATED = [
     ("coding_discovery_tools.windows.cline.cline_rules_extractor",
      "WindowsClineRulesExtractor", (".clinerules",)),

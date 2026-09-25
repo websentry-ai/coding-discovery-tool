@@ -223,56 +223,54 @@ class TestSubtreeIndex(unittest.TestCase):
         return flaky, state
 
     @unittest.skipUnless(os.name == "posix", "uses a scandir fault injector")
-    def test_truncated_child_listing_is_cached_but_self_heals_next_scan(self):
-        # A child dir whose OWN listing truncates mid-way (transient) while the
-        # ROOT listing completes: markers found BEFORE the fault are kept, markers
-        # AFTER it are missed for this scan, a readable sibling is unaffected, and
-        # -- the deliberate tradeoff -- the (partial) index IS cached so every
-        # per-tool walk reuses one pass (the same mechanism that lets a real Windows
-        # permission-denied subtree still be cached; see test_partial_readable...).
-        # The miss is not permanent: the cache is per-scan, so the NEXT scan (after
-        # clear_cache) re-lists and finds it.
-        self.mk("flaky", "a", ".cursor")            # before the fault
-        self.mk("flaky", "zzz", ".cursor")          # after the fault -> missed this scan
-        self.mk("readable", ".cursor")              # sibling of flaky -> unaffected
+    def test_mid_listing_truncation_is_not_cached_and_reattempts(self):
+        # A child dir whose OWN listing is cut short partway (a transient fault:
+        # network share, cloud-placeholder folder) must NOT be frozen into the
+        # cache -- entries after the fault are simply missing, and a later lookup
+        # can recover them. So the truncated build is returned UNCACHED, and the
+        # next lookup re-lists and picks up what the fault hid. A readable sibling
+        # is unaffected. (Contrast: a stable open-denial IS cached; next test.)
+        self.mk("flaky", "a", ".cursor")            # listed before the fault
+        self.mk("flaky", "zzz", ".cursor")          # after the fault -> missed once
+        self.mk("readable", ".cursor")
         flaky, _ = self._flaky_scandir(self.root / "flaky", "a")
+        key = ("trunc", str(self.root), str(self.root))
 
         clear_cache()
         with mock.patch.object(pdi.os, "scandir", flaky):
             idx1 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+            cached_after_truncation = key in pdi._INDEX_CACHE
+            # The fault fired once; the re-attempt lists flaky in full.
             idx2 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+            cached_after_reattempt = key in pdi._INDEX_CACHE
+            idx3 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
         found1 = {p.parts[-2] for p in idx1.get(".cursor", [])}
-        self.assertIn("a", found1, "pre-fault marker is kept")
-        self.assertIn("readable", found1, "a readable sibling is unaffected")
-        self.assertNotIn("zzz", found1, "post-fault sibling is missed this scan")
-        self.assertIs(idx1, idx2, "partial index is cached and reused within the scan")
-
-        # New scan boundary: cache cleared, dir now healthy -> the miss self-heals.
-        clear_cache()
-        idx3 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
-        found3 = {p.parts[-2] for p in idx3.get(".cursor", [])}
-        self.assertEqual(found3, {"a", "zzz", "readable"},
-                         "next scan re-lists the recovered dir and finds all markers")
+        found2 = {p.parts[-2] for p in idx2.get(".cursor", [])}
+        self.assertEqual(found1, {"a", "readable"}, "truncated build keeps pre-fault entries")
+        self.assertNotIn("zzz", found1, "post-fault entry is missing from the truncated build")
+        self.assertFalse(cached_after_truncation, "a mid-listing truncation must not be cached")
+        self.assertEqual(found2, {"a", "zzz", "readable"}, "the re-attempt recovers the hidden entry")
+        self.assertTrue(cached_after_reattempt, "the completed re-attempt is cached")
+        self.assertIs(idx3, idx2, "once complete, the index is cached and reused")
 
     @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
-    def test_denied_child_and_truncated_child_both_leave_root_cached(self):
-        # Both a child that denies UP FRONT (scandir raises immediately, the stable
-        # Windows permission case) and a child that truncates MID-iteration leave
-        # the root listing complete, so the index is cached either way. This ties
-        # the P2 tradeoff to why it exists: caching-on-partial is REQUIRED for the
-        # perf win on Windows (deep permission denials), and it is the same code
-        # path that makes a transient truncation sticky within one scan.
+    def test_stable_open_denial_leaves_partial_index_cached(self):
+        # A child that denies UP FRONT (os.scandir raises on open) is the stable
+        # Windows permission case (a locked profile, Application Data): it reads the
+        # same for the rest of the scan, so the partial index built around it IS
+        # cached -- the mechanism the single-pass perf win depends on. Only a
+        # transient MID-listing truncation (previous test) is left uncached.
         self.mk("readable", ".cursor")
         denied = self.mk("denied", "sub")
         (denied / ".windsurf").mkdir()
         os.chmod(str(denied), 0o000)
         try:
             clear_cache()
-            idx = get_subtree_index(self.root, self.root, _never_skip, "mix")
-            cached = pdi._INDEX_CACHE.get(("mix", str(self.root), str(self.root)))
+            idx = get_subtree_index(self.root, self.root, _never_skip, "denied")
+            cached = pdi._INDEX_CACHE.get(("denied", str(self.root), str(self.root)))
         finally:
             os.chmod(str(denied), 0o755)
-        self.assertIsNotNone(cached, "an up-front denied child leaves the root cached")
+        self.assertIsNotNone(cached, "a stable open-denied child leaves the root cached")
         self.assertIn(".cursor", idx, "the readable sibling is still indexed")
 
     def test_unexpected_entry_error_does_not_abort_build(self):

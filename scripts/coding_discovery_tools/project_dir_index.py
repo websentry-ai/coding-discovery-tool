@@ -6,7 +6,7 @@ import os
 import stat
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 try:
     from .constants import MAX_SEARCH_DEPTH
@@ -56,19 +56,30 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
 
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
-             index: Dict[str, List[Path]]) -> bool:
+             index: Dict[str, List[Path]]) -> Optional[bool]:
     """Index hidden dirs by basename, ancestor-first; never descends links.
-    Returns True if CURRENT_DIR's own listing completed. A denied/faulted child
-    subtree does NOT flip it to False: those denials are stable within a scan, so
-    the (Windows-shaped) partial result stays cacheable. Only a failure to open
-    current_dir or a truncated iteration of current_dir itself returns False, so
-    a later lookup re-attempts rather than freezing an incomplete root listing."""
+
+    Distinguishes two ways a listing can fail, because they cache differently:
+    - ``None`` — CURRENT_DIR could not be OPENED at all. A stable denial (a locked
+      profile, ``Application Data``) or an absent dir: it reads the same for the
+      rest of the scan, so a partial index built around it is safe to cache. This
+      is the Windows deep-denial case the shared single pass depends on.
+    - ``False`` — a listing was cut short AFTER it began (an ``os.scandir``
+      iteration that threw partway: a network share or cloud-placeholder folder).
+      That is transient — entries after the fault are simply missing — so it must
+      NOT be frozen into the cache, and it propagates up from any descendant.
+    - ``True`` — CURRENT_DIR and every descendant either listed completely or was
+      a stable open-denial. Safe to cache.
+
+    A child open-denial (``None``) does not taint the parent; only a mid-listing
+    truncation (``False``) does."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
-        logger.debug("could not read %s: %s", current_dir, e)
-        return False
+        logger.debug("could not open %s: %s", current_dir, e)
+        return None
 
+    truncated = False
     with scan:
         try:
             for entry in scan:
@@ -86,25 +97,30 @@ def _collect(root_path: Path, current_dir: Path,
                     if entry.name.startswith("."):
                         index.setdefault(entry.name, []).append(item)
                     if not entry.is_symlink():  # never descend a link/junction
-                        _collect(root_path, item, should_skip, index)  # child denial is stable, not our concern
+                        # Only a descendant's MID-LISTING truncation taints us; a
+                        # stable open-denial (None) leaves the partial cacheable.
+                        if _collect(root_path, item, should_skip, index) is False:
+                            truncated = True
                 except (PermissionError, OSError, ValueError):
                     continue
                 except Exception as e:  # one bad entry must not abort the walk
                     logger.debug("skipping %s: %s", entry.path, e)
                     continue
-        except (PermissionError, OSError) as e:  # current_dir's own iteration truncated
+        except (PermissionError, OSError) as e:  # current_dir's own iteration cut short
             logger.debug("iteration stopped for %s: %s", current_dir, e)
             return False
-    return True
+    return False if truncated else True
 
 
 def get_subtree_index(root_path: Path, current_dir: Path,
                       should_skip: Callable[[Path], bool],
                       skip_id: str) -> Dict[str, List[Path]]:
     """Memoized ``basename -> [dirs]`` map. ``skip_id`` stops callers with
-    different prunes sharing a tree. A partial read (root readable, some deep
-    subtree denied) IS cached so per-tool walks reuse one pass; only an
-    unreadable/absent root is left uncached so a later lookup can re-attempt."""
+    different prunes sharing a tree. An index built over stable open-denials (a
+    readable root with some deep subtree locked — the Windows shape) IS cached so
+    per-tool walks reuse one pass. It is left uncached only when the root cannot be
+    opened or a listing was truncated mid-way (a transient fault), so a later
+    lookup re-attempts instead of freezing an incomplete result."""
     key = (skip_id, str(root_path), str(current_dir))
     with _INDEX_LOCK:
         cached = _INDEX_CACHE.get(key)
@@ -113,14 +129,13 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     # Build outside the lock so parallel walks don't serialize; publish atomically
     # (a duplicate concurrent build is wasted but harmless).
     index: Dict[str, List[Path]] = {}
-    root_listed = _collect(root_path, current_dir, should_skip, index)
-    if not root_listed:
-        # current_dir could not be opened, or its own listing truncated mid-way:
-        # leave it uncached so a later lookup re-attempts (it may open / complete
-        # next time). Deep-child denials do NOT reach here — they leave the root
-        # listing complete, so that (Windows-shaped) partial index IS cached and
-        # every per-tool walk reuses it instead of re-listing the whole drive.
-        logger.debug("root listing incomplete, not caching: %s", current_dir)
+    if _collect(root_path, current_dir, should_skip, index) is not True:
+        # None -> root couldn't be opened; False -> a listing was cut short partway
+        # somewhere in the tree. Either way the result is incomplete in a way that
+        # may resolve next time, so leave it uncached and re-attempt. A stable deep
+        # open-denial does NOT land here — it returns True, so that (Windows-shaped)
+        # partial index IS cached and every per-tool walk reuses one pass.
+        logger.debug("index not safe to cache, re-attempt later: %s", current_dir)
         return index
     with _INDEX_LOCK:
         return _INDEX_CACHE.setdefault(key, index)

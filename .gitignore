@@ -51,4 +51,3 @@ Thumbs.db
 
 # Local git worktrees
 .claude/worktrees/
-*.bak

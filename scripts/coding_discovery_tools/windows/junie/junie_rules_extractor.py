@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseJunieRulesExtractor
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     add_rule_to_project,
     build_project_list,
@@ -18,7 +19,7 @@ from ...windows_extraction_helpers import (
     is_user_level_tool_dir,
     scan_windows_user_directories,
     should_skip_path,
-    walk_for_tool_directories,
+    get_windows_system_directories,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,22 +84,52 @@ class WindowsJunieRulesExtractor(BaseJunieRulesExtractor):
         scan_windows_user_directories(extract_for_user)
 
     def _extract_project_level_rules(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
-        """Find project-level .junie directories via the shared directory index.
+        """Walk the drive recursively for project-level .junie directories."""
+        self._walk_for_junie_dirs(root_path, root_path, projects_by_root, current_depth=0)
 
-        Uses the shared directory index so the drive is walked once for all tools,
-        not walked again by each tool.
-        """
-        walk_for_tool_directories(
-            root_path, root_path, JUNIE_DIR_NAME,
-            self._extract_project_junie_dir, projects_by_root,
-        )
-
-    def _extract_project_junie_dir(self, junie_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
-        """Extract a matched .junie directory, skipping the user-level one."""
-        # Skip user-level ~\.junie — handled by _extract_global_rules.
-        if is_user_level_tool_dir(junie_dir):
+    def _walk_for_junie_dirs(
+        self,
+        root_path: Path,
+        current_dir: Path,
+        projects_by_root: Dict[str, List[Dict]],
+        current_depth: int = 0,
+    ) -> None:
+        """Recursively walk directory tree looking for .junie directories."""
+        if current_depth > MAX_SEARCH_DEPTH:
             return
-        self._extract_junie_dir_rules(junie_dir, projects_by_root)
+
+        try:
+            system_dirs = get_windows_system_directories()
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
+                try:
+                    if should_skip_path(item, system_dirs):
+                        continue
+
+                    try:
+                        depth = len(item.relative_to(root_path).parts)
+                        if depth > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
+
+                    if _entry.is_dir():
+                        if item.name == JUNIE_DIR_NAME:
+                            # Skip user-level ~\.junie — handled by _extract_global_rules.
+                            if is_user_level_tool_dir(item):
+                                continue
+                            self._extract_junie_dir_rules(item, projects_by_root)
+                        else:
+                            self._walk_for_junie_dirs(root_path, item, projects_by_root, current_depth + 1)
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {item}: {e}")
+                    continue
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error walking {current_dir}: {e}")
 
     def _extract_junie_dir_rules(self, junie_dir: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """Extract all .md files from a project-level .junie directory."""

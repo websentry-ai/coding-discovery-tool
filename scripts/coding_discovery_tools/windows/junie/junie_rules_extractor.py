@@ -85,8 +85,8 @@ class WindowsJunieRulesExtractor(BaseJunieRulesExtractor):
     def _extract_project_level_rules(self, root_path: Path, projects_by_root: Dict[str, List[Dict]]) -> None:
         """Find project-level .junie directories via the shared directory index.
 
-        Routes through the shared single-pass index so every tool reuses ONE
-        memoized walk of the drive instead of each re-walking it independently.
+        Uses the shared directory index so the drive is walked once for all tools,
+        not walked again by each tool.
         """
         walk_for_tool_directories(
             root_path, root_path, JUNIE_DIR_NAME,

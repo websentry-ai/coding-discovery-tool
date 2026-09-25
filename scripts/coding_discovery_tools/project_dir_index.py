@@ -186,8 +186,9 @@ def dispatch_matches(root_path: Path, current_dir: Path,
         return
     try:
         index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
-        # Buckets are ancestor-first, so single-basename matchers stay DFS-ordered.
-        # A cross-basename matcher would have to re-establish that order.
+        # Each name's dirs come out parents-first. A matcher for a single name keeps
+        # that order; one matching several names (skills) can mix a child in before
+        # its parent, which outermost_only sorts out.
         matches = [d for name, dirs in index.items() if is_match(name) for d in dirs]
         targets = outermost_only(matches)
     except Exception as e:
@@ -291,6 +292,6 @@ def dispatch_file_matches(root_path: Path, current_dir: Path,
 
 
 def clear_cache() -> None:
-    """Drop all memoized indexes (test isolation)."""
+    """Drop all cached indexes (test isolation)."""
     with _INDEX_LOCK:
         _INDEX_CACHE.clear()

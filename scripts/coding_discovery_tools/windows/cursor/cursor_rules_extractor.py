@@ -91,10 +91,9 @@ class WindowsCursorRulesExtractor(BaseCursorRulesExtractor):
         """
         Extract project-level rules recursively from all projects.
 
-        Finds each project's ``.cursor`` directory through the shared single-pass
-        directory index (so every tool reuses ONE memoized walk of the drive
-        instead of each re-walking it). The per-project AGENTS.md sweep stays inside
-        ``_extract_rules_from_cursor_directory``, scoped to the matched project.
+        Finds each project's ``.cursor`` directory through the shared directory
+        index, so the drive is walked once for all tools. The per-project AGENTS.md
+        sweep stays inside ``_extract_rules_from_cursor_directory``.
 
         Args:
             root_path: Root directory to search from (root drive for MDM)

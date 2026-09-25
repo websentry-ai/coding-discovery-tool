@@ -82,8 +82,8 @@ class WindowsRooRulesExtractor(BaseRooRulesExtractor):
         """
         Extract project-level rules recursively from all projects using optimized walker.
         """
-        # Route through the shared single-pass directory index so every tool reuses
-        # ONE memoized walk of the drive instead of each re-walking it independently.
+        # Use the shared directory index: the drive is walked once for all
+        # tools, not walked again by each tool.
         walk_for_tool_directories(
             root_path, root_path, ".roo",
             self._extract_rules_from_roo_directory, projects_by_root,

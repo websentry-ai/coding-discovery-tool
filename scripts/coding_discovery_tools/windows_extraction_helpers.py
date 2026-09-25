@@ -379,8 +379,8 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
 
 
 # Windows project-walk prune: SKIP_DIRS plus the Windows system directories.
-# The id keys the shared directory index cache — every per-tool walk that shares
-# this prune passes the same id so the C:\ subtree is indexed ONCE, not per tool.
+# Every tool passes the same id below, so the drive is indexed once and shared,
+# not re-indexed per tool.
 def _windows_project_skip(item: Path) -> bool:
     """Return True for a path a Windows project walk must not enter."""
     return should_skip_path(item, get_windows_system_directories())
@@ -399,15 +399,13 @@ def walk_for_tool_directories(
 ) -> None:
     """Find each tool-specific config dir under ``current_dir`` and extract from it.
 
-    The Windows counterpart of ``linux_extraction_helpers.walk_for_tool_directories``
-    and ``macos_extraction_helpers.walk_for_tool_directories``: it routes through the
-    shared single-pass directory index (``project_dir_index.dispatch_matches``) so
-    that every per-tool walk reuses ONE memoized ``basename -> [dirs]`` map of the
-    C:\\ subtree instead of re-walking the whole drive. On an index fault it falls
-    back to an independent walk, and a subtree that is not fully readable degrades
-    gracefully (permission errors never crash the scan). The shared index already
-    enforces the depth limit, the outermost-only prune (never recurse into a matched
-    project), and refuses a marker whose reparse point resolves outside the scan root.
+    The Windows counterpart of the Linux/macOS ``walk_for_tool_directories``: it uses
+    the shared directory index (``project_dir_index.dispatch_matches``) so the drive
+    is walked once for all tools instead of once per tool. On an index fault it falls
+    back to an independent walk, and unreadable subtrees are skipped rather than
+    crashing the scan. The shared index already applies the depth limit, keeps only
+    the outermost match (never recurses into a matched project), and drops a marker
+    that resolves outside the scan root.
 
     Args:
         root_path: Root search path (for depth calculation), e.g. ``Path("C:\\")``.

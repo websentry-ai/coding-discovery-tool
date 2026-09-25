@@ -50,10 +50,9 @@ class TestOutermostOnly(unittest.TestCase):
         self.assertEqual(outermost_only([a, b, c]), [a, b])
 
     def test_denests_child_listed_before_parent(self):
-        # A cross-basename matcher (skills passes .cline + .claude) flattens
-        # per-basename buckets, so a child can appear BEFORE its parent. The child
-        # must still be dropped — the reason the check is against all inputs, not
-        # just the ones kept so far.
+        # When a matcher takes several names (skills takes .cline + .claude), a child
+        # can be listed before its parent. It must still be dropped -- which is why
+        # the check looks at all inputs, not only the ones kept so far.
         other = Path("/early/.cline")
         parent = Path("/proj/.claude")
         child = Path("/proj/.claude/.cline")  # listed before its parent

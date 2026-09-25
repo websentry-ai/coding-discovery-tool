@@ -89,8 +89,8 @@ class WindowsCursorCliRulesExtractor(BaseCursorCliRulesExtractor):
 
         Uses parallel processing for top-level directories to improve performance.
         """
-        # Route through the shared single-pass directory index so every tool reuses
-        # ONE memoized walk of the drive instead of each re-walking it independently.
+        # Use the shared directory index: the drive is walked once for all
+        # tools, not walked again by each tool.
         walk_for_tool_directories(
             root_path, root_path, ".cursor",
             self._extract_rules_from_cursor_directory, projects_by_root,

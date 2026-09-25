@@ -148,8 +148,8 @@ class WindowsKiloCodeRulesExtractor(BaseKiloCodeRulesExtractor):
             root_path: Root directory to search from (root drive for MDM)
             projects_by_root: Dictionary to populate with rules grouped by project root
         """
-        # Route through the shared single-pass directory index so every tool reuses
-        # ONE memoized walk of the drive instead of each re-walking it independently.
+        # Use the shared directory index: the drive is walked once for all
+        # tools, not walked again by each tool.
         walk_for_tool_directories(
             root_path, root_path, ".kilocode",
             self._extract_rules_from_kilocode_directory, projects_by_root,

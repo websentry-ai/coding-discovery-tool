@@ -150,8 +150,8 @@ class WindowsClineRulesExtractor(BaseClineRulesExtractor):
         """
         Extract project-level rules recursively from all projects.
 
-        Routes through the shared single-pass directory index so every tool reuses
-        ONE memoized walk of the drive instead of each re-walking it independently.
+        Uses the shared directory index so the drive is walked once for all tools,
+        not walked again by each tool.
 
         Args:
             root_path: Root directory to search from (root drive for MDM)

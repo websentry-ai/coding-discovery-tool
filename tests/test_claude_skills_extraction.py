@@ -1197,10 +1197,31 @@ class TestSyncedSkillDiscovery(unittest.TestCase):
     bucket, or synced skills are never recorded and their runs can never match a
     body."""
 
-    def _run(self, home):
+    def _run(self, home, scan_synced=True):
+        # scan_synced mirrors the Claude Code extractor opting in; other tools
+        # share this scanner with it off.
         user_skills = []
-        extract_user_level_items(home, user_skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS)
+        extract_user_level_items(
+            home, user_skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS,
+            scan_synced=scan_synced,
+        )
         return {s.get("skill_name"): s for s in user_skills}
+
+    def test_other_tools_do_not_claim_synced_bodies(self):
+        # The synced descent is Claude-only. A compat caller (scan_synced=False,
+        # the default) must not inventory claude.ai-synced bodies as its own.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local = home / ".claude" / "skills" / "my-local" / "SKILL.md"
+            local.parent.mkdir(parents=True)
+            local.write_text("---\nname: my-local\n---\nbody\n")
+            synced = home / ".claude" / "skills" / "synced" / "orgA_set1" / "docx" / "SKILL.md"
+            synced.parent.mkdir(parents=True)
+            synced.write_text("---\nname: docx\n---\n# docx\n")
+
+            found = self._run(home, scan_synced=False)
+            self.assertNotIn("docx", found)     # synced body not claimed
+            self.assertIn("my-local", found)    # normal skill still found
 
     def test_synced_skill_is_discovered_alongside_a_normal_one(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -418,6 +418,7 @@ def extract_user_level_items(
     user_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
     parent_dir_names: Tuple[str, ...] = (CLAUDE_DIR_NAME,),
     plugin_lookup: Optional[Dict[str, Dict]] = None,
+    scan_synced: bool = False,
 ) -> None:
     """
     Extract user-level items (skills, commands, agents) from a user's home directory.
@@ -459,10 +460,12 @@ def extract_user_level_items(
                 if config.layout == "nested":
                     skill_dirs = list(type_dir.iterdir())
                     # Skills synced from claude.ai nest one level deeper, under an
-                    # opaque per-account bucket: skills/synced/<bucket>/<name>/. Add
-                    # each bucket's skill dirs so synced skills are discovered too.
+                    # opaque per-account bucket: skills/synced/<bucket>/<name>/. Only
+                    # Claude Code loads that layout, so only its extractor opts in;
+                    # other tools pass ~/.claude as a compat root and must not claim
+                    # these bodies as their own.
                     synced_root = type_dir / "synced"
-                    if synced_root.is_dir() and not is_symlink_or_junction(synced_root):
+                    if scan_synced and synced_root.is_dir() and not is_symlink_or_junction(synced_root):
                         for bucket in synced_root.iterdir():
                             if bucket.is_dir() and not is_symlink_or_junction(bucket):
                                 skill_dirs.extend(bucket.iterdir())

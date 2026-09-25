@@ -46,7 +46,7 @@ class LinuxClaudeSkillsExtractor(BaseClaudeSkillsExtractor):
         def extract_for_user(user_home: Path) -> None:
             extract_user_level_items(
                 user_home, user_skills, extract_single_rule_file, CLAUDE_ITEM_CONFIGS,
-                plugin_lookup=plugin_lookup,
+                plugin_lookup=plugin_lookup, scan_synced=True,
             )
 
         for user_home in get_linux_user_homes():

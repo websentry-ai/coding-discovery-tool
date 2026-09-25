@@ -11,14 +11,17 @@ Project skills: **/.cline/skills/<name>/SKILL.md
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict
 
 from ...coding_tool_base import BaseClineSkillsExtractor
+from ...constants import MAX_SEARCH_DEPTH, scan_dir_entries
 from ...windows_extraction_helpers import (
     extract_single_rule_file,
+    get_windows_system_directories,
     scan_windows_user_directories,
-    walk_for_tool_directories,
+    should_skip_path,
 )
 from ...cline_skills_helpers import (
     CLINE_PARENT_DIR_NAMES,
@@ -98,27 +101,85 @@ class WindowsClineSkillsExtractor(BaseClineSkillsExtractor):
             root_path: Root directory to search from
             projects_by_root: Dictionary to populate with skills grouped by project root
         """
-        walk_for_tool_directories(
-            root_path, root_path, CLINE_PARENT_DIR_NAMES,
-            self._extract_skills_from_parent_dir, projects_by_root,
-        )
+        try:
+            top_level_dirs = [item for item in root_path.iterdir()
+                              if item.is_dir() and not should_skip_path(item, get_windows_system_directories())]
 
-    def _extract_skills_from_parent_dir(
-        self, parent_dir: Path, projects_by_root: Dict[str, List[Dict]]
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {
+                    executor.submit(self._walk_for_skills, root_path, dir_path, projects_by_root, current_depth=1)
+                    for dir_path in top_level_dirs
+                }
+
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.debug(f"Error in parallel processing: {e}")
+        except (PermissionError, OSError):
+            self._walk_for_skills(root_path, root_path, projects_by_root, current_depth=0)
+
+    def _walk_for_skills(
+        self,
+        root_path: Path,
+        current_dir: Path,
+        projects_by_root: Dict[str, List[Dict]],
+        current_depth: int = 0
     ) -> None:
-        """Extract skills from a matched Cline parent dir (e.g. ``.clinerules``)."""
-        for config in CLINE_ITEM_CONFIGS:
-            type_dir = parent_dir / config.dir_name
-            if type_dir.exists() and type_dir.is_dir():
-                # is_user_level_claude_subdir works generically for any tool dir
-                if not is_user_level_claude_subdir(type_dir, self._users_directory):
-                    extract_cline_items_from_directory(
-                        type_dir,
-                        projects_by_root,
-                        extract_single_rule_file,
-                        self._add_skill_to_project_threadsafe,
-                        config,
-                    )
+        """
+        Recursively walk directory tree looking for Cline skills directories.
+
+        Args:
+            root_path: Root search path (for depth calculation)
+            current_dir: Current directory being processed
+            projects_by_root: Dictionary to populate with skills
+            current_depth: Current recursion depth
+        """
+        if current_depth > MAX_SEARCH_DEPTH:
+            return
+
+        try:
+            for _entry in scan_dir_entries(current_dir):
+                item = Path(_entry.path)
+                try:
+                    if should_skip_path(item, get_windows_system_directories()):
+                        continue
+
+                    try:
+                        depth = len(item.relative_to(root_path).parts)
+                        if depth > MAX_SEARCH_DEPTH:
+                            continue
+                    except ValueError:
+                        continue
+
+                    if _entry.is_dir():
+                        if item.name in CLINE_PARENT_DIR_NAMES:
+                            for config in CLINE_ITEM_CONFIGS:
+                                type_dir = item / config.dir_name
+                                if type_dir.exists() and type_dir.is_dir():
+                                    # is_user_level_claude_subdir works generically for any tool dir
+                                    if not is_user_level_claude_subdir(type_dir, self._users_directory):
+                                        extract_cline_items_from_directory(
+                                            type_dir,
+                                            projects_by_root,
+                                            extract_single_rule_file,
+                                            self._add_skill_to_project_threadsafe,
+                                            config,
+                                        )
+                            continue
+
+                        self._walk_for_skills(root_path, item, projects_by_root, current_depth + 1)
+
+                except (PermissionError, OSError):
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error processing {item}: {e}")
+                    continue
+
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:
+            logger.debug(f"Error walking {current_dir}: {e}")
 
     def _add_skill_to_project_threadsafe(
         self,

@@ -7,6 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -179,6 +180,100 @@ class TestSubtreeIndex(unittest.TestCase):
             os.chmod(str(blocked), 0o755)
         self.assertIn(".cursor", a)
         self.assertIs(a, b)  # cached and reused despite the deep denial
+
+    def _flaky_scandir(self, fault_dir: Path, fault_after: str):
+        """Return a drop-in for os.scandir that behaves normally except that,
+        the first time ``fault_dir`` is listed, it yields real entries and raises
+        OSError right after the entry named ``fault_after`` -- a faithful model of
+        a directory whose iteration truncates mid-way (a transient fault on a
+        network share or a cloud-placeholder dir), not a clean up-front denial.
+        The returned object is BOTH a context manager and an iterator, like the
+        real os.scandir, so it drives _collect's real mid-iteration branch."""
+        real = os.scandir
+        target = os.path.normpath(str(fault_dir))
+        state = {"armed": True}
+
+        def flaky(path):
+            if os.path.normpath(str(path)) == target and state["armed"]:
+                state["armed"] = False
+                base = real(path)
+
+                class Scan:
+                    def __enter__(s):
+                        return s
+
+                    def __exit__(s, *a):
+                        try:
+                            base.close()
+                        except Exception:
+                            pass
+                        return False
+
+                    def __iter__(s):
+                        # Sort so the fault deterministically lands right after
+                        # ``fault_after`` regardless of the OS's scandir order.
+                        for e in sorted(base, key=lambda x: x.name):
+                            yield e
+                            if e.name == fault_after:
+                                raise OSError("transient truncation")
+
+                return Scan()
+            return real(path)
+
+        return flaky, state
+
+    @unittest.skipUnless(os.name == "posix", "uses a scandir fault injector")
+    def test_truncated_child_listing_is_cached_but_self_heals_next_scan(self):
+        # A child dir whose OWN listing truncates mid-way (transient) while the
+        # ROOT listing completes: markers found BEFORE the fault are kept, markers
+        # AFTER it are missed for this scan, a readable sibling is unaffected, and
+        # -- the deliberate tradeoff -- the (partial) index IS cached so every
+        # per-tool walk reuses one pass (the same mechanism that lets a real Windows
+        # permission-denied subtree still be cached; see test_partial_readable...).
+        # The miss is not permanent: the cache is per-scan, so the NEXT scan (after
+        # clear_cache) re-lists and finds it.
+        self.mk("flaky", "a", ".cursor")            # before the fault
+        self.mk("flaky", "zzz", ".cursor")          # after the fault -> missed this scan
+        self.mk("readable", ".cursor")              # sibling of flaky -> unaffected
+        flaky, _ = self._flaky_scandir(self.root / "flaky", "a")
+
+        clear_cache()
+        with mock.patch.object(pdi.os, "scandir", flaky):
+            idx1 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+            idx2 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+        found1 = {p.parts[-2] for p in idx1.get(".cursor", [])}
+        self.assertIn("a", found1, "pre-fault marker is kept")
+        self.assertIn("readable", found1, "a readable sibling is unaffected")
+        self.assertNotIn("zzz", found1, "post-fault sibling is missed this scan")
+        self.assertIs(idx1, idx2, "partial index is cached and reused within the scan")
+
+        # New scan boundary: cache cleared, dir now healthy -> the miss self-heals.
+        clear_cache()
+        idx3 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+        found3 = {p.parts[-2] for p in idx3.get(".cursor", [])}
+        self.assertEqual(found3, {"a", "zzz", "readable"},
+                         "next scan re-lists the recovered dir and finds all markers")
+
+    @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
+    def test_denied_child_and_truncated_child_both_leave_root_cached(self):
+        # Both a child that denies UP FRONT (scandir raises immediately, the stable
+        # Windows permission case) and a child that truncates MID-iteration leave
+        # the root listing complete, so the index is cached either way. This ties
+        # the P2 tradeoff to why it exists: caching-on-partial is REQUIRED for the
+        # perf win on Windows (deep permission denials), and it is the same code
+        # path that makes a transient truncation sticky within one scan.
+        self.mk("readable", ".cursor")
+        denied = self.mk("denied", "sub")
+        (denied / ".windsurf").mkdir()
+        os.chmod(str(denied), 0o000)
+        try:
+            clear_cache()
+            idx = get_subtree_index(self.root, self.root, _never_skip, "mix")
+            cached = pdi._INDEX_CACHE.get(("mix", str(self.root), str(self.root)))
+        finally:
+            os.chmod(str(denied), 0o755)
+        self.assertIsNotNone(cached, "an up-front denied child leaves the root cached")
+        self.assertIn(".cursor", idx, "the readable sibling is still indexed")
 
     def test_unexpected_entry_error_does_not_abort_build(self):
         # A predicate that blows up on one entry must not stop the whole walk —

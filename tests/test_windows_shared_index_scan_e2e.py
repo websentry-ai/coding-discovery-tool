@@ -169,11 +169,11 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
         )
 
     def test_matches_old_bespoke_walk_semantics(self):
-        # Backward-compat oracle for the guard-free extractors: the old bespoke
-        # walk = recurse, skip system dirs, depth-limit, dispatch the OUTERMOST
-        # marker, never descend a matched dir or a symlink. The shared helper must
-        # produce exactly that set. (Guarded extractors keep their own walk and
-        # are covered separately.)
+        # Backward-compat oracle for the guard-free extractors on an in-root,
+        # symlink-free tree: recurse, skip system dirs, depth-limit, dispatch the
+        # OUTERMOST marker, never descend a matched dir. The shared helper produces
+        # exactly that set. Where the two INTENTIONALLY diverge (directory symlinks,
+        # out-of-root targets) is covered by the divergence test below.
         self._mk("p1", ".clinerules")
         self._mk("p1", "sub", ".clinerules")            # nested under a match -> pruned
         self._mk("p2", "src", "nested", ".clinerules")
@@ -183,8 +183,47 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
             self._old_walk_oracle(".clinerules"),
         )
 
+    @unittest.skipUnless(os.name == "posix", "symlink creation is POSIX here")
+    def test_symlink_handling_diverges_from_old_walk_by_design(self):
+        # The old bespoke walks recursed on DirEntry.is_dir(), which FOLLOWS
+        # symlinks, and had no within-scan-root guard -- so they descended directory
+        # symlinks and even dispatched a marker whose real target was OUTSIDE the
+        # scan root (verified against the real origin/main antigravity walker). The
+        # shared index does neither, on purpose and more safely:
+        #   * symlink to an IN-root dir: the real path is still indexed; the symlink
+        #     path is not (no double-report, no symlink loops on a full-drive walk);
+        #   * symlink to an OUT-of-root dir: dropped entirely.
+        # Nothing genuinely under the scan root is lost.
+        self._mk("real", "hidden", ".clinerules")
+        os.symlink(str(self.root / "real" / "hidden"), str(self.root / "link"))
+        outside = Path(tempfile.mkdtemp(prefix="win-outside-"))
+        try:
+            (outside / ".clinerules").mkdir()
+            os.symlink(str(outside), str(self.root / "escape"))
+            old = self._old_walk_oracle(".clinerules")
+            new = _win_dispatched(self.root, ".clinerules")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+        # Old descended both symlinks (this is what the shared index deliberately
+        # stops doing) -- pins the real pre-change behavior so the divergence is
+        # documented, not silently assumed.
+        self.assertIn("link/.clinerules", old)
+        self.assertIn("escape/.clinerules", old)
+        # New descends neither, but keeps the real in-root path.
+        self.assertIn("real/hidden/.clinerules", new)
+        self.assertFalse(any(g.startswith("link/") for g in new),
+                         "shared index must not descend an in-root symlink")
+        self.assertFalse(any(g.startswith("escape/") for g in new),
+                         "shared index must not dispatch an out-of-root target")
+
     def _old_walk_oracle(self, marker):
-        """The guard-free bespoke walk's semantics, as a backward-compat oracle."""
+        """The guard-free bespoke walk's real semantics, validated against the
+        origin/main ``_walk_for_*`` recursion (e.g. antigravity's
+        ``_walk_for_agent_dirs``): recurse, skip system dirs, depth-limit, dispatch
+        the OUTERMOST marker, never descend a MATCHED dir. It recursed on
+        ``DirEntry.is_dir()`` (which follows symlinks) with no within-root guard, so
+        it DID descend directory symlinks and DID dispatch out-of-root targets --
+        the two points where the shared index deliberately diverges."""
         from coding_discovery_tools.windows_extraction_helpers import (
             should_skip_path, get_windows_system_directories,
         )
@@ -212,8 +251,7 @@ class TestWindowsToolDirWalkE2E(unittest.TestCase):
                 if e.name == marker:
                     found.append(os.path.relpath(str(p), str(self.root)).replace(os.sep, "/"))
                     continue  # outermost: never descend a matched dir
-                if not e.is_symlink():
-                    rec(p, depth + 1)
+                rec(p, depth + 1)  # follows symlinks, matching the old walk
 
         rec(self.root, 0)
         return sorted(found)

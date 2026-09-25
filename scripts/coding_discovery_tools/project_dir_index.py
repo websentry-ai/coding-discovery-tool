@@ -57,8 +57,9 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
              index: Dict[str, List[Path]]) -> bool:
-    """Index hidden dirs by basename, ancestor-first; never descends links. True
-    only if the whole subtree read, so partial indexes are not cached."""
+    """Index hidden dirs by basename, ancestor-first; never descends links.
+    Returns True only if the whole subtree read; the caller decides whether a
+    partial (root-readable) result is cacheable."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
@@ -100,7 +101,9 @@ def get_subtree_index(root_path: Path, current_dir: Path,
                       should_skip: Callable[[Path], bool],
                       skip_id: str) -> Dict[str, List[Path]]:
     """Memoized ``basename -> [dirs]`` map. ``skip_id`` stops callers with
-    different prunes sharing a tree; a partial read is returned but not cached."""
+    different prunes sharing a tree. A partial read (root readable, some deep
+    subtree denied) IS cached so per-tool walks reuse one pass; only an
+    unreadable/absent root is left uncached so a later lookup can re-attempt."""
     key = (skip_id, str(root_path), str(current_dir))
     with _INDEX_LOCK:
         cached = _INDEX_CACHE.get(key)
@@ -111,8 +114,23 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     index: Dict[str, List[Path]] = {}
     fully_read = _collect(root_path, current_dir, should_skip, index)
     if not fully_read:
-        logger.warning("subtree not fully readable, not caching: %s", current_dir)
-        return index
+        # Distinguish an unreadable/absent ROOT from a readable root with some
+        # denied deep subtrees. On real Windows the root (e.g. C:\) reads fine but
+        # deep dirs (other users, protected system paths) are permanently denied;
+        # not caching there means every per-tool walk re-lists the whole drive and
+        # the shared index buys nothing. Those denials are stable for the scan (the
+        # cache is per-process and cleared between scans), so a root-readable
+        # partial index is safe to reuse. An unreadable/not-yet-existing root is
+        # still left uncached so a later lookup can re-attempt and see it appear.
+        try:
+            with os.scandir(current_dir):
+                root_readable = True
+        except OSError:
+            root_readable = False
+        if not root_readable:
+            logger.debug("root not readable, not caching: %s", current_dir)
+            return index
+        logger.debug("root readable, deep subtree denied; caching partial: %s", current_dir)
     with _INDEX_LOCK:
         return _INDEX_CACHE.setdefault(key, index)
 

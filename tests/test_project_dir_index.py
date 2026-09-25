@@ -152,6 +152,24 @@ class TestSubtreeIndex(unittest.TestCase):
         (later / ".cursor").mkdir(parents=True)
         self.assertIn(".cursor", get_subtree_index(self.root, later, _never_skip, "t"))
 
+    @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
+    def test_partial_readable_root_is_cached(self):
+        # Root readable, a deep subtree denied (the real-Windows shape): the index
+        # must still be CACHED so the per-tool walks reuse one pass instead of each
+        # re-listing the whole drive. The marker in the readable part is found, and
+        # the second lookup returns the same cached object.
+        self.mk("readable", ".cursor")
+        blocked = self.mk("locked", "sub")
+        (blocked / ".windsurf").mkdir()
+        os.chmod(str(blocked), 0o000)
+        try:
+            a = get_subtree_index(self.root, self.root, _never_skip, "partial")
+            b = get_subtree_index(self.root, self.root, _never_skip, "partial")
+        finally:
+            os.chmod(str(blocked), 0o755)
+        self.assertIn(".cursor", a)
+        self.assertIs(a, b)  # cached and reused despite the deep denial
+
     def test_unexpected_entry_error_does_not_abort_build(self):
         # A predicate that blows up on one entry must not stop the whole walk —
         # sibling subtrees are still indexed (matches the old walk's broad guard).

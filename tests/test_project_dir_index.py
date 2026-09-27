@@ -7,6 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -47,6 +48,14 @@ class TestOutermostOnly(unittest.TestCase):
         b = Path("/a/.cursor")
         c = Path("/a/.cursor/n/.cursor")  # nested under b -> dropped
         self.assertEqual(outermost_only([a, b, c]), [a, b])
+
+    def test_denests_child_listed_before_parent(self):
+        # A matcher over several names (skills: .cline + .claude) can list a child
+        # before its parent, so the check scans all inputs to still drop it.
+        other = Path("/early/.cline")
+        parent = Path("/proj/.claude")
+        child = Path("/proj/.claude/.cline")  # listed before its parent
+        self.assertEqual(outermost_only([other, child, parent]), [other, parent])
 
 
 class TestSubtreeIndex(unittest.TestCase):
@@ -151,6 +160,105 @@ class TestSubtreeIndex(unittest.TestCase):
         self.assertEqual(get_subtree_index(self.root, later, _never_skip, "t"), {})
         (later / ".cursor").mkdir(parents=True)
         self.assertIn(".cursor", get_subtree_index(self.root, later, _never_skip, "t"))
+
+    @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
+    def test_partial_readable_root_is_cached(self):
+        # Root readable but a deep subtree locked (the real Windows shape): still
+        # cached, so the marker is found and the second lookup reuses it.
+        self.mk("readable", ".cursor")
+        blocked = self.mk("locked", "sub")
+        (blocked / ".windsurf").mkdir()
+        os.chmod(str(blocked), 0o000)
+        try:
+            a = get_subtree_index(self.root, self.root, _never_skip, "partial")
+            b = get_subtree_index(self.root, self.root, _never_skip, "partial")
+        finally:
+            os.chmod(str(blocked), 0o755)
+        self.assertIn(".cursor", a)
+        self.assertIs(a, b)  # cached and reused despite the deep denial
+
+    def _flaky_scandir(self, fault_dir: Path, fault_after: str):
+        """A drop-in for os.scandir that lists ``fault_dir`` normally the first time
+        but raises OSError right after the entry named ``fault_after`` -- a directory
+        whose listing breaks off partway, not one that fails to open. Like the real
+        scandir it is both a context manager and an iterator, so it exercises
+        _collect's mid-list break rather than the open-failure path."""
+        real = os.scandir
+        target = os.path.normpath(str(fault_dir))
+        state = {"armed": True}
+
+        def flaky(path):
+            if os.path.normpath(str(path)) == target and state["armed"]:
+                state["armed"] = False
+                base = real(path)
+
+                class Scan:
+                    def __enter__(s):
+                        return s
+
+                    def __exit__(s, *a):
+                        try:
+                            base.close()
+                        except Exception:
+                            pass
+                        return False
+
+                    def __iter__(s):
+                        # Sort so the fault deterministically lands right after
+                        # ``fault_after`` regardless of the OS's scandir order.
+                        for e in sorted(base, key=lambda x: x.name):
+                            yield e
+                            if e.name == fault_after:
+                                raise OSError("transient truncation")
+
+                return Scan()
+            return real(path)
+
+        return flaky, state
+
+    @unittest.skipUnless(os.name == "posix", "uses a scandir fault injector")
+    def test_mid_listing_truncation_is_not_cached_and_reattempts(self):
+        # A child whose listing breaks off partway must not be cached, so the next
+        # lookup re-lists and recovers its missing entries. (A locked dir IS cached.)
+        self.mk("flaky", "a", ".cursor")            # listed before the fault
+        self.mk("flaky", "zzz", ".cursor")          # after the fault -> missed once
+        self.mk("readable", ".cursor")
+        flaky, _ = self._flaky_scandir(self.root / "flaky", "a")
+        key = ("trunc", str(self.root), str(self.root))
+
+        clear_cache()
+        with mock.patch.object(pdi.os, "scandir", flaky):
+            idx1 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+            cached_after_truncation = key in pdi._INDEX_CACHE
+            # The fault fired once; the re-attempt lists flaky in full.
+            idx2 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+            cached_after_reattempt = key in pdi._INDEX_CACHE
+            idx3 = get_subtree_index(self.root, self.root, _never_skip, "trunc")
+        found1 = {p.parts[-2] for p in idx1.get(".cursor", [])}
+        found2 = {p.parts[-2] for p in idx2.get(".cursor", [])}
+        self.assertEqual(found1, {"a", "readable"}, "truncated build keeps pre-fault entries")
+        self.assertNotIn("zzz", found1, "post-fault entry is missing from the truncated build")
+        self.assertFalse(cached_after_truncation, "a mid-listing truncation must not be cached")
+        self.assertEqual(found2, {"a", "zzz", "readable"}, "the re-attempt recovers the hidden entry")
+        self.assertTrue(cached_after_reattempt, "the completed re-attempt is cached")
+        self.assertIs(idx3, idx2, "once complete, the index is cached and reused")
+
+    @unittest.skipUnless(os.name == "posix", "chmod 000 is POSIX-specific")
+    def test_stable_open_denial_leaves_partial_index_cached(self):
+        # A child that can't be opened (a locked profile) reads the same all scan, so
+        # the index around it IS cached. Only a mid-list break is left uncached.
+        self.mk("readable", ".cursor")
+        denied = self.mk("denied", "sub")
+        (denied / ".windsurf").mkdir()
+        os.chmod(str(denied), 0o000)
+        try:
+            clear_cache()
+            idx = get_subtree_index(self.root, self.root, _never_skip, "denied")
+            cached = pdi._INDEX_CACHE.get(("denied", str(self.root), str(self.root)))
+        finally:
+            os.chmod(str(denied), 0o755)
+        self.assertIsNotNone(cached, "a stable open-denied child leaves the root cached")
+        self.assertIn(".cursor", idx, "the readable sibling is still indexed")
 
     def test_unexpected_entry_error_does_not_abort_build(self):
         # A predicate that blows up on one entry must not stop the whole walk —

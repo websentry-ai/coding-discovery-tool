@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
 
 from .constants import MAX_CONFIG_FILE_SIZE, SKIP_DIRS
+from .project_dir_index import dispatch_matches
 
 logger = logging.getLogger(__name__)
 
@@ -373,8 +374,63 @@ def should_skip_path(path: Path, system_dirs: Optional[set] = None) -> bool:
     # Skip system directories if provided (Windows-specific)
     if system_dirs and path.name in system_dirs:
         return True
-    
+
     return False
+
+
+# Windows project-walk prune: SKIP_DIRS plus the Windows system directories. Every
+# tool passes the same id below, so the drive is indexed once and shared, not per tool.
+def _windows_project_skip(item: Path) -> bool:
+    """Return True for a path a Windows project walk must not enter."""
+    return should_skip_path(item, get_windows_system_directories())
+
+
+_WINDOWS_PROJECT_SKIP_ID = "windows_project"
+
+
+def walk_for_tool_directories(
+    root_path: Path,
+    current_dir: Path,
+    tool_dir_names,
+    extract_from_dir_func,
+    projects_by_root,
+    current_depth: int = 0,
+) -> None:
+    """Find each tool-specific config dir under ``current_dir`` and extract from it,
+    using the shared directory index so the drive is walked once for all tools.
+
+    Args:
+        root_path: Root search path (for depth calculation), e.g. ``Path("C:\\")``.
+        current_dir: Directory to search from (usually the same as ``root_path``).
+        tool_dir_names: A marker dir name (e.g. ``".clinerules"``) or an iterable of
+            names (e.g. ``CLINE_PARENT_DIR_NAMES``).
+        extract_from_dir_func: ``func(tool_dir, projects_by_root)`` called per matched
+            dir. Any per-tool guard (junction/other-tool-config skip) goes in it.
+        projects_by_root: Accumulator passed straight through to the callback.
+        current_depth: Unused; kept for call-site compatibility with the old walkers.
+    """
+    if isinstance(tool_dir_names, str):
+        names = frozenset((tool_dir_names,))
+    else:
+        names = frozenset(tool_dir_names)
+    if not names:
+        return
+
+    def on_match(tool_dir: Path) -> None:
+        try:
+            extract_from_dir_func(tool_dir, projects_by_root)
+        except (PermissionError, OSError):
+            pass
+        except Exception as e:  # noqa: BLE001 - one bad dir must not abort the walk
+            logger.debug(f"Error processing {tool_dir}: {e}")
+
+    dispatch_matches(
+        root_path, current_dir, _windows_project_skip, _WINDOWS_PROJECT_SKIP_ID,
+        lambda name: name in names, on_match,
+        # The shared index stores only hidden dirs; a non-hidden marker must use the
+        # direct-walk route or it would silently never match.
+        markers_all_hidden=all(name.startswith(".") for name in names),
+    )
 
 
 def extract_and_add_rule(

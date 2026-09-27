@@ -6,7 +6,7 @@ import os
 import stat
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 try:
     from .constants import MAX_SEARCH_DEPTH
@@ -56,16 +56,16 @@ def _within_scan_root(target: Path, root_real: str) -> bool:
 
 def _collect(root_path: Path, current_dir: Path,
              should_skip: Callable[[Path], bool],
-             index: Dict[str, List[Path]]) -> bool:
-    """Index hidden dirs by basename, ancestor-first; never descends links. True
-    only if the whole subtree read, so partial indexes are not cached."""
+             index: Dict[str, List[Path]]) -> Optional[bool]:
+    """Index hidden dirs by basename, ancestor-first; never follows links. Returns
+    None (dir unopenable), False (a listing broke off partway; don't cache), or True."""
     try:
         scan = os.scandir(current_dir)
     except (PermissionError, OSError) as e:
-        logger.debug("could not read %s: %s", current_dir, e)
-        return False
+        logger.debug("could not open %s: %s", current_dir, e)
+        return None
 
-    readable = True
+    truncated = False
     with scan:
         try:
             for entry in scan:
@@ -83,24 +83,24 @@ def _collect(root_path: Path, current_dir: Path,
                     if entry.name.startswith("."):
                         index.setdefault(entry.name, []).append(item)
                     if not entry.is_symlink():  # never descend a link/junction
-                        if not _collect(root_path, item, should_skip, index):
-                            readable = False
+                        if _collect(root_path, item, should_skip, index) is False:
+                            truncated = True  # only a mid-list break stops caching
                 except (PermissionError, OSError, ValueError):
                     continue
                 except Exception as e:  # one bad entry must not abort the walk
                     logger.debug("skipping %s: %s", entry.path, e)
                     continue
-        except (PermissionError, OSError) as e:  # iterator faulted mid-walk
+        except (PermissionError, OSError) as e:  # current_dir's own iteration cut short
             logger.debug("iteration stopped for %s: %s", current_dir, e)
-            readable = False
-    return readable
+            return False
+    return False if truncated else True
 
 
 def get_subtree_index(root_path: Path, current_dir: Path,
                       should_skip: Callable[[Path], bool],
                       skip_id: str) -> Dict[str, List[Path]]:
-    """Memoized ``basename -> [dirs]`` map. ``skip_id`` stops callers with
-    different prunes sharing a tree; a partial read is returned but not cached."""
+    """Memoized ``basename -> [dirs]`` map, keyed by ``skip_id``. Cached unless the
+    root was unopenable or a listing broke off partway, so a later lookup retries."""
     key = (skip_id, str(root_path), str(current_dir))
     with _INDEX_LOCK:
         cached = _INDEX_CACHE.get(key)
@@ -109,22 +109,19 @@ def get_subtree_index(root_path: Path, current_dir: Path,
     # Build outside the lock so parallel walks don't serialize; publish atomically
     # (a duplicate concurrent build is wasted but harmless).
     index: Dict[str, List[Path]] = {}
-    fully_read = _collect(root_path, current_dir, should_skip, index)
-    if not fully_read:
-        logger.warning("subtree not fully readable, not caching: %s", current_dir)
+    if _collect(root_path, current_dir, should_skip, index) is not True:
+        # Root unopenable (None) or a listing broke off partway (False): may work
+        # next time, so don't cache. A locked dir returns True and stays cached.
+        logger.debug("index not safe to cache, re-attempt later: %s", current_dir)
         return index
     with _INDEX_LOCK:
         return _INDEX_CACHE.setdefault(key, index)
 
 
 def outermost_only(dirs: List[Path]) -> List[Path]:
-    """Keep only the shallowest match on any path (the old "don't recurse into a
-    matched dir" prune). Input must be ancestor-before-descendant."""
-    kept: List[Path] = []
-    for path in dirs:
-        if not any(anchor in path.parents for anchor in kept):
-            kept.append(path)
-    return kept
+    """Keep only the shallowest match on each path (drop any under another match), in
+    input order, so the index and fallback walks dispatch the same set the same way."""
+    return [p for p in dirs if not any(other in p.parents for other in dirs)]
 
 
 def _walk_direct(root_path: Path, current_dir: Path,
@@ -176,8 +173,8 @@ def dispatch_matches(root_path: Path, current_dir: Path,
         return
     try:
         index = get_subtree_index(root_path, current_dir, should_skip, skip_id)
-        # Buckets are ancestor-first, so single-basename matchers stay DFS-ordered.
-        # A cross-basename matcher would have to re-establish that order.
+        # Dirs for one name come out parents-first; a matcher over several names
+        # (skills) can mix a child in before its parent, which outermost_only sorts out.
         matches = [d for name, dirs in index.items() if is_match(name) for d in dirs]
         targets = outermost_only(matches)
     except Exception as e:
@@ -281,6 +278,6 @@ def dispatch_file_matches(root_path: Path, current_dir: Path,
 
 
 def clear_cache() -> None:
-    """Drop all memoized indexes (test isolation)."""
+    """Drop all cached indexes (test isolation)."""
     with _INDEX_LOCK:
         _INDEX_CACHE.clear()

@@ -135,7 +135,7 @@ class TestS3UploadFlow(_ServerMixin, unittest.TestCase):
         from_s3_body = json.loads(self.server.requests[2]["body"])
         self.assertNotIn("tools", from_s3_body)
         self.assertEqual(from_s3_body["object_key"], "org/1/run/abc.json")
-        self.assertEqual(from_s3_body["device_id"], "DEV-1")
+        self.assertEqual(from_s3_body["device_discovery_id"], "DEV-1")
 
     @patch.object(utils_mod, "_SENTRY_DSN", "")
     def test_app_name_forwarded_to_step3(self):

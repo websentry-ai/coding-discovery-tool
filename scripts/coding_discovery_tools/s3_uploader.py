@@ -151,7 +151,7 @@ def try_s3_upload(
     ctx = sentry_context or {}
 
     # ─── Step 1: get presigned URL ──────────────────────────────────────
-    meta_body = {"device_id": payload.get("device_id")}
+    meta_body = {"device_discovery_id": payload.get("device_discovery_id") or payload.get("device_id")}
     if payload.get("run_id"):
         meta_body["run_id"] = payload["run_id"]
 
@@ -193,7 +193,7 @@ def try_s3_upload(
     # backend's /from-s3/ handler receives the same context (including
     # `app_name` for MDM-tagged scans like JumpCloud).
     notify_body = {
-        "device_id": payload.get("device_id"),
+        "device_discovery_id": payload.get("device_discovery_id") or payload.get("device_id"),
         "object_key": object_key,
         "system_user": payload.get("system_user"),
         "home_user": payload.get("home_user"),

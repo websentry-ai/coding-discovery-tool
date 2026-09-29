@@ -1429,7 +1429,7 @@ def send_scan_event(
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
     payload = {
-        "device_id": device_id,
+        "device_discovery_id": device_id,
         "run_id": run_id,
         "scan_event": scan_event,
     }
@@ -3260,7 +3260,7 @@ def send_discovery_metrics(
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     payload: Dict[str, Any] = {
-        "device_id": device_id,
+        "device_discovery_id": device_id,
         "tools": [],
         "sentry_metrics": sentry_metrics,
     }

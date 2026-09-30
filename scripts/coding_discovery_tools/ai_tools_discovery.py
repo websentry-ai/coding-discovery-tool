@@ -108,6 +108,7 @@ try:
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
+    from .hooks_extractor import extract_hooks
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .sweep_connectors import run_sweep
@@ -188,6 +189,7 @@ except ImportError:
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
+    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
@@ -293,6 +295,19 @@ def _home_for_user(user: str):
     if platform.system() == "Linux":
         return linux_home_for_user(user)
     return Path.home()
+
+
+def _scan_user_homes() -> List[Path]:
+    """Every enumerated user's home, as main() scans them; the current user when none are found."""
+    if platform.system() == "Darwin":
+        users = get_all_users_macos()
+    elif platform.system() == "Windows":
+        users = get_all_users_windows()
+    elif platform.system() == "Linux":
+        users = get_all_users_linux()
+    else:
+        users = []
+    return [_home_for_user(user) for user in users] or [Path.home()]
 
 
 def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
@@ -1964,6 +1979,24 @@ class AIToolsDetector:
         skills = project.get("skills", [])
         return len(mcp_servers) == 0 and len(rules) == 0 and len(skills) == 0
 
+    def _merge_hooks_into_projects(self, tool: Dict, tool_dict: Dict) -> None:
+        """Attach the hooks this tool runs: user and managed hooks under each home, project hooks under the project."""
+        projects_dict = {p.get("path"): p for p in tool_dict.get("projects") or [] if isinstance(p, dict)}
+        project_paths = set(projects_dict)
+        for record in tool.get("_settings") or []:
+            path = record.get("settings_path", "") if isinstance(record, dict) else ""
+            if path.endswith((".claude/settings.json", ".claude/settings.local.json")):
+                project_paths.add(str(Path(path).parent.parent))
+        hooks_by_project = extract_hooks(tool.get("name", ""), _scan_user_homes(), project_paths)
+        for project_path, hooks in hooks_by_project.items():
+            if project_path not in projects_dict:
+                projects_dict[project_path] = {"path": project_path, "rules": [], "skills": [], "mcpServers": []}
+                tool_dict.setdefault("projects", []).append(projects_dict[project_path])
+            projects_dict[project_path]["hooks"] = hooks
+        if hooks_by_project:
+            count = sum(len(hooks) for hooks in hooks_by_project.values())
+            logger.info(f"  ✓ Found {count} hook(s) in {len(hooks_by_project)} project(s)")
+
     @staticmethod
     def _deduplicate_project_items(items: List[Dict]) -> List[Dict]:
         """Remove duplicate items by file_path, keeping the first occurrence."""
@@ -2679,6 +2712,7 @@ class AIToolsDetector:
         one chokepoint that every tool routes through."""
         result = self._process_single_tool_raw(tool)
         if isinstance(result, dict):
+            self._merge_hooks_into_projects(tool, result)
             _normalize_encoded_paths(result)
         return result
 

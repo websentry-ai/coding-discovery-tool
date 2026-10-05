@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
-from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, _command_of, extract_hooks
+from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, _command_of, extract_hooks, redact_secrets
 from scripts.coding_discovery_tools.project_dir_index import clear_cache
 
 # The per-OS project skip rule refuses system temp dirs; tests run the shared index over one.
@@ -149,6 +149,17 @@ class TestExtractHooks(unittest.TestCase):
         self.assertIn("https://hooks.example.com", hook["script_content"])
         self.assertIn("open('~/.aws/credentials')", hook["script_content"])  # code stays visible to the rating
 
+    def test_redaction_covers_common_hook_credentials_and_keeps_code(self):
+        secrets = ['password = "correct horse battery staple"', "PASSWORD='two words'", "token=abc123def",
+                   'curl -H "X-Api-Key: hdrkey123"', "curl -u admin:hunter2 https://x.invalid",
+                   "curl https://hooks.slack.com/services/T0/B0/slacksecret"]
+        code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
+
+        for line in secrets:
+            self.assertIn("***REDACTED***", redact_secrets(line), line)
+        for line in code:
+            self.assertEqual(redact_secrets(line), line)
+
     def test_jsonc_settings_with_comments_still_yield_hooks(self):
         (self.home / ".gemini").mkdir(parents=True)
         (self.home / ".gemini/settings.json").write_text(
@@ -229,6 +240,13 @@ class TestExtractHooks(unittest.TestCase):
             detector._merge_hooks_into_projects({"name": "Claude Code", "_settings": [plist]}, owned)
             detector._merge_hooks_into_projects({"name": "Claude Code"}, augment)
 
+        slashed = {"projects": [{"path": str(self.home) + "/"}]}
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery.extract_hooks",
+                   side_effect=lambda *a: {k: list(v) for k, v in managed.items()}), \
+                patch("scripts.coding_discovery_tools.ai_tools_discovery._scan_user_homes", return_value=[self.home]):
+            detector._merge_hooks_into_projects({"name": "Claude Code"}, slashed)
+
+        self.assertEqual(len(slashed["projects"]), 1)  # a trailing slash still joins the existing row
         self.assertEqual(bare["projects"], [])
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])

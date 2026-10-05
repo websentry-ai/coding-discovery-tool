@@ -2002,16 +2002,18 @@ class AIToolsDetector:
                                                        record.get("settings_path", "plist"))]
         for home in homes if plist_hooks else []:
             hooks_by_project.setdefault(str(home), []).extend(plist_hooks)
+        existing = {_normalise_path(p): p for p in projects_dict if isinstance(p, str)}
         for project_path, hooks in list(hooks_by_project.items()):
-            if project_path not in projects_dict:
-                owns_data = any(p == project_path or p.startswith(project_path.rstrip("/\\") + os.sep)
-                                for p in projects_dict if isinstance(p, str))
+            key = _normalise_path(project_path)
+            if key not in existing:
+                owns_data = any(p.startswith(key + "/") for p in existing)
                 if all(hook.get("scope") == "managed" for hook in hooks) and not owns_data:
                     del hooks_by_project[project_path]
                     continue  # managed policy alone is not this user's data; a row here would be a phantom install
                 projects_dict[project_path] = {"path": project_path, "rules": [], "skills": [], "mcpServers": []}
                 tool_dict.setdefault("projects", []).append(projects_dict[project_path])
-            projects_dict[project_path]["hooks"] = hooks
+                existing[key] = project_path
+            projects_dict[existing[key]]["hooks"] = hooks
         if hooks_by_project:
             count = sum(len(hooks) for hooks in hooks_by_project.values())
             logger.info(f"  ✓ Found {count} hook(s) in {len(hooks_by_project)} project(s)")

@@ -101,14 +101,28 @@ _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_CHAINING = (";", "&", "|", "`", "$(", "\n", ">", "<")
 _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
+# A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
+_KEY = r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|secret|password|passwd|pwd|credential|private[-_]?key)[A-Za-z0-9_-]*"
+_VALUE = r"""(?:'[^'\n]*'|"[^"\n]*"|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)"""
 _SECRET_PATTERNS = [
-    re.compile(r"(?i)(authorization:\s*(?:bearer|basic|token)\s+)[^\s'\"]+"),
-    re.compile(r"(?i)(--?(?:[a-z0-9]+[-_])*(?:token|api[-_]?key|apikey|secret|password|passwd|auth)(?:=|\s+)['\"]?)[^\s'\"]+"),
-    re.compile(r"(?i)(\b[a-z0-9_]*(?:token|api_?key|secret|password|passwd)[a-z0-9_]*['\"]?\s*[=:]\s*['\"])[^'\"\s]{4,}(?=['\"])"),
-    re.compile(r"(\b[A-Z0-9_]*(?:TOKEN|API_?KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*=)[^\s'\"$()`;|&]+"),
+    # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
+    re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]*(?:key|token|secret|auth)[a-z0-9-]*|[a-z0-9-]*api-key)"
+               r"\s*:\s*(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
+    # Flags: --api-key VALUE, --password='a b', -token=x.
+    re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
+    # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
+    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\s*[=:]\s*)" + _VALUE),
+    # curl -u / --user user:pass
+    re.compile(r"((?:^|\s)(?:-u|--user)(?:=|\s+)['\"]?)[^\s'\":]+:[^\s'\"]+"),
+    # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+:[^/\s@'\"]+(?=@)"),
-    re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth)=)[^&\s'\"]+"),
-    re.compile(r"()\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"),
+    re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth|password)=)[^&\s'\"]+"),
+    # Webhook URLs whose secret is the path.
+    re.compile(r"(?i)(https://(?:hooks\.slack\.com/(?:services|workflows|triggers)/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/"
+               r"|[a-z0-9.-]*\.webhook\.office\.com/))[^\s'\"]+"),
+    # Known token formats anywhere.
+    re.compile(r"()\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}"
+               r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"),
 ]
 
 

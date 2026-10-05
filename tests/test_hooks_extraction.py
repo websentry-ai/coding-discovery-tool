@@ -163,7 +163,7 @@ class TestExtractHooks(unittest.TestCase):
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
                    'headers = {"Authorization": "Bearer dictcred"}', "headers['Authorization'] = 'Bearer subcred'",
-                   "os.environ['API_KEY'] = 'envcred'", 'PASSWORD="cut-off-by-truncation',
+                   "os.environ['API_KEY'] = 'envcred'", 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIcut-off-by-truncation"]
         code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
 
@@ -230,13 +230,13 @@ class TestExtractHooks(unittest.TestCase):
         with patch("scripts.coding_discovery_tools.ai_tools_discovery.extract_hooks", return_value=found), \
                 patch("scripts.coding_discovery_tools.ai_tools_discovery._scan_user_homes", return_value=[self.home]):
             for name in ("GitHub Copilot Chat (VS Code)", "GitHub Copilot (VS Code)", "GitHub Copilot CLI",
-                         "GitHub Copilot (JetBrains)"):
+                         "GitHub Copilot (JetBrains)", "GitHub Copilot (CLion)"):
                 rows[name] = {"projects": []}
                 detector._merge_hooks_into_projects({"name": name}, rows[name])
 
         self.assertEqual({name: len(row["projects"]) for name, row in rows.items()},
                          {"GitHub Copilot Chat (VS Code)": 1, "GitHub Copilot (VS Code)": 0, "GitHub Copilot CLI": 1,
-                          "GitHub Copilot (JetBrains)": 0})
+                          "GitHub Copilot (JetBrains)": 0, "GitHub Copilot (CLion)": 0})
 
     def test_managed_hooks_are_reported_but_never_count_as_owned_data(self):
         detector = AIToolsDetector.__new__(AIToolsDetector)

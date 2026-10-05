@@ -1997,7 +1997,7 @@ class AIToolsDetector:
         if (routing == "auggie cli" or routing.startswith("augment (")) \
                 and routing != self._canonical_augment_surface_by_config.get(tool.get("_config_path") or ""):
             return  # non-canonical Augment surfaces share the canonical row's ~/.augment config
-        if routing.startswith("github copilot") and "cli" not in routing \
+        if routing.startswith("github copilot") and not routing.endswith(" cli") \
                 and (tool.get("name") or "").lower() != self._canonical_vscode_copilot:
             return  # only the canonical VS Code Copilot row carries the shared ~/.copilot hooks
         projects_dict = {p.get("path"): p for p in tool_dict.get("projects") or [] if isinstance(p, dict)}

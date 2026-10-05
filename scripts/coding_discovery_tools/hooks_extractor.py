@@ -103,9 +103,9 @@ _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
 _KEY = r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|secret|password|passwd|pwd|credential|private[-_]?key)[A-Za-z0-9_-]*"
-_VALUE = ("(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
+_VALUE = ("(?:(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
           + r"""|'(?:[^'\\\n]|\\.)*(?:'|$)|"(?:[^"\\\n]|\\.)*(?:"|$)"""  # quoted (escapes inside); end of line closes a cut-off one
-          + r"""|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)""")  # unquoted, unless it is code
+          + r""")|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)""")  # unquoted, unless it is code
 _SECRET_PATTERNS = [
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]*(?:key|token|secret|auth)[a-z0-9-]*|[a-z0-9-]*api-key)"

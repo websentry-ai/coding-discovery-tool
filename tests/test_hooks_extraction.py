@@ -162,7 +162,9 @@ class TestExtractHooks(unittest.TestCase):
                    "curl https://hooks.slack.com/services/T0/B0/slacksecret",
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
-                   'headers = {"Authorization": "Bearer dictcred"}']
+                   'headers = {"Authorization": "Bearer dictcred"}', "headers['Authorization'] = 'Bearer subcred'",
+                   "os.environ['API_KEY'] = 'envcred'", 'PASSWORD="cut-off-by-truncation',
+                   "-----BEGIN RSA PRIVATE KEY-----\nMIIcut-off-by-truncation"]
         code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
 
         for line in secrets:

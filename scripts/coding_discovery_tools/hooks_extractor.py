@@ -102,7 +102,8 @@ _SHELL_CHAINING = (";", "&", "|", "`", "$(", "\n", ">", "<")
 _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
-_KEY = r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|secret|password|passwd|pwd|credential|private[-_]?key)[A-Za-z0-9_-]*"
+_KEY = (r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|access[-_]?key|secret|password|passwd|pwd|credential"
+        r"|private[-_]?key|auth(?![a-z]))[A-Za-z0-9_-]*")  # auth, but not author
 _VALUE = ("(?:(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
           + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z)"""  # quoted or backticked, may span lines
           + r""")|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)""")  # unquoted, unless it is code
@@ -126,7 +127,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(?=-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
     # Known token formats anywhere.
     re.compile(r"()\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}"
-               r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"),
+               r"|A[KS]IA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"),
 ]
 
 
@@ -282,6 +283,8 @@ def _program_path(command: str, config_dir: Path, project_root: Optional[Path], 
         for var, value in (("HOME", str(home)), ("CLAUDE_PROJECT_DIR", str(project_root or config_dir.parent))):
             program = program.replace(f"${{{var}}}", value).replace(f"${var}", value)
     path = Path(program)
+    if family is None and "/" not in program and "\\" not in program:
+        return None  # a bare command name is found through PATH, never a local file of that name
     if path.is_absolute():
         return path
     # Agents run project hooks from the project root; user-level Cursor/Copilot paths are relative to the config dir.
@@ -382,12 +385,18 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
         return {}
     user_files, project_files, managed_patterns = files
     by_project: Dict[str, List[Dict]] = {}
-    try:
-        managed_files = [p for pattern in managed_patterns for p in _expand(pattern)]
-        managed_dirs = sorted({p.parent for p in managed_patterns})
-        project_dir_names = {pattern.split("/")[0] for pattern in project_files}
-        projects = set(project_paths)
-        for home in user_homes:
+    managed_dirs = sorted({p.parent for p in managed_patterns})
+    project_dir_names = {pattern.split("/")[0] for pattern in project_files}
+    projects = set(project_paths)
+    managed_files = []
+    for pattern in managed_patterns:
+        try:
+            managed_files.extend(_expand(pattern))
+        except OSError as e:
+            logger.debug(f"  hooks: skipped managed {pattern}: {e}")
+    # One unreadable home or project never hides the hooks of the others.
+    for home in user_homes:
+        try:
             unbound = _unbound_scripts(home, None, managed_dirs)
             for pattern in user_files:
                 pattern_path, root = _user_config_path(home, pattern)
@@ -399,7 +408,10 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
                     _hooks_in_file(path, "managed", home, None, path.parent, False, unbound))
             if project_dir_names:
                 projects |= _project_roots_with_hook_dirs(home, project_dir_names)
-        for project in projects:
+        except Exception as e:
+            logger.warning(f"  hooks: skipped {home} for {tool_name}: {e}")
+    for project in projects:
+        try:
             root = Path(project)
             home = next((h for h in user_homes if root == h or h in root.parents), None)
             if home is None or root == home:
@@ -410,6 +422,6 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
                     scope = "local" if path.name == "settings.local.json" else "project"
                     by_project.setdefault(project, []).extend(
                         _hooks_in_file(path, scope, home, root, root, False, unbound))
-    except Exception as e:
-        logger.warning(f"  hooks: extraction failed for {tool_name}: {e}")
+        except Exception as e:
+            logger.warning(f"  hooks: skipped {project} for {tool_name}: {e}")
     return {path: hooks for path, hooks in by_project.items() if hooks}

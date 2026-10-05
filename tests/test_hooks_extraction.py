@@ -115,6 +115,30 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual(_flat(extract_hooks("Codex", [self.home], []))[0]["script_content"], "print('audit')")
 
+    def test_a_bare_command_is_never_read_from_a_local_file(self):
+        _write(self.project / "cat", "not the cat that runs")
+        _write(self.project / ".claude/settings.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "cat README.md"}]}]}})
+
+        hook = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))[0]
+
+        self.assertNotIn("script_content", hook)
+
+    def test_an_unreadable_home_does_not_hide_other_homes(self):
+        other = Path(self._tmp.name) / "bob"
+        _write(other / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo bob"}]}]}})
+        real_expand = __import__("scripts.coding_discovery_tools.hooks_extractor", fromlist=["_expand"])._expand
+
+        def locked(path):
+            if self.home in path.parents:
+                raise PermissionError("locked home")
+            return real_expand(path)
+
+        with patch("scripts.coding_discovery_tools.hooks_extractor._expand", side_effect=locked):
+            hooks = _flat(extract_hooks("Codex", [self.home, other], []))
+
+        self.assertEqual([h["command"] for h in hooks], ["echo bob"])
+
     def test_files_named_as_arguments_are_never_read(self):
         _write(self.home / ".ssh/id_rsa", "PRIVATE KEY")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
@@ -171,7 +195,8 @@ class TestExtractHooks(unittest.TestCase):
         for secret in ("s3cr3t", "k3y", "abc123", "xoxq-literal-1", "quoted-cred-1", "quoted-cred-2", "json-cred-3"):
             self.assertNotIn(secret, hook["command"] + hook["script_content"])
         self.assertIn("https://hooks.example.com", hook["script_content"])
-        self.assertIn("open('~/.aws/credentials')", hook["script_content"])  # code stays visible to the rating
+        self.assertIn("open('~/.aws/credentials')", hook["script_content"])
+        self.assertEqual(redact_secrets("author = 'Ada'"), "author = 'Ada'")  # code stays visible to the rating
 
     def test_redaction_covers_common_hook_credentials_and_keeps_code(self):
         secrets = ['password = "correct horse battery staple"', "PASSWORD='two words'", "token=abc123def",
@@ -180,7 +205,8 @@ class TestExtractHooks(unittest.TestCase):
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
                    'headers = {"Authorization": "Bearer dictcred"}', "headers['Authorization'] = 'Bearer subcred'",
-                   "os.environ['API_KEY'] = 'envcred'", 'password = ("paren cred")', 'api_key: str = "typedcred"', "const api_key = `backtickcred`;", 'API_TOKEN="multi\nline-cred"', 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
+                   "os.environ['API_KEY'] = 'envcred'", 'password = ("paren cred")', 'api_key: str = "typedcred"', "export AWS_SECRET_ACCESS_KEY=awssecret", "ACCESS_KEY=accesscred",
+                   "AUTH='authcred'", "ASIAABCDEFGHIJKLMNOP", "const api_key = `backtickcred`;", 'API_TOKEN="multi\nline-cred"', 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIcut-off-by-truncation"]
         code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
 

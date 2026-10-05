@@ -100,6 +100,7 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertNotIn("script_content", hook)
 
+    @unittest.skipIf(platform.system() == "Windows", "cmd and PowerShell do not expand ${HOME}")
     def test_a_double_quoted_variable_with_a_suffix_is_expanded(self):
         _write(self.home / "audit.py", "print('audit')")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
@@ -179,7 +180,7 @@ class TestExtractHooks(unittest.TestCase):
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
                    'headers = {"Authorization": "Bearer dictcred"}', "headers['Authorization'] = 'Bearer subcred'",
-                   "os.environ['API_KEY'] = 'envcred'", 'password = ("paren cred")', 'api_key: str = "typedcred"', 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
+                   "os.environ['API_KEY'] = 'envcred'", 'password = ("paren cred")', 'api_key: str = "typedcred"', "const api_key = `backtickcred`;", 'API_TOKEN="multi\nline-cred"', 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIcut-off-by-truncation"]
         code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
 

@@ -104,7 +104,7 @@ _REDACTED = "***REDACTED***"
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
 _KEY = r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|secret|password|passwd|pwd|credential|private[-_]?key)[A-Za-z0-9_-]*"
 _VALUE = ("(?:(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
-          + r"""|'(?:[^'\\\n]|\\.)*(?:'|$)|"(?:[^"\\\n]|\\.)*(?:"|$)"""  # quoted (escapes inside); end of line closes a cut-off one
+          + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z)"""  # quoted or backticked, may span lines
           + r""")|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)""")  # unquoted, unless it is code
 _SECRET_PATTERNS = [
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
@@ -308,12 +308,17 @@ def _unbound_scripts(home: Path, project_root: Optional[Path], managed_dirs: Lis
     return {Path(os.path.normpath(str(p))) for p in scripts}
 
 
-def hooks_from_settings(hooks: Dict, source: str) -> List[Dict]:
+def hooks_from_settings(hooks: Dict, source: str, tool_name: str = "Claude Code") -> List[Dict]:
     """Managed hooks from a settings object another extractor already loaded (the Claude MDM plist)."""
+    files = hook_files_for(tool_name)
+    managed_dirs = sorted({p.parent for p in files[2]}) if files else []
+    home = Path.home()
+    unbound = _unbound_scripts(home, None, managed_dirs)
     found = []
     for event, matcher, hook in _iter_commands(hooks if isinstance(hooks, dict) else {}):
         hook_type, command = _command_of(hook)
-        if command and not _is_unbound_hook(command, None, set()):
+        program = _program_path(command, managed_dirs[0] if managed_dirs else home, None, home) if command else None
+        if command and not _is_unbound_hook(command, program, unbound):
             found.append({"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
                           "file_path": source, "scope": "managed"})
     return found

@@ -21,14 +21,17 @@ import json
 import logging
 import os
 import platform
+import re
 import shlex
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 try:
+    from .mcp_extraction_helpers import _strip_jsonc_comments
     from .project_dir_index import dispatch_matches
     from .rule_read_helpers import read_rule_file_contained
 except ImportError:  # pragma: no cover - direct-script execution fallback
+    from mcp_extraction_helpers import _strip_jsonc_comments
     from project_dir_index import dispatch_matches
     from rule_read_helpers import read_rule_file_contained
 
@@ -93,6 +96,27 @@ _FLAG_ONLY_OPTIONS = {
     "cmd": set(),
 }
 _POWERSHELL_VALUE_OPTIONS = {"-executionpolicy", "-ep"}
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Shell operators that chain a second command after the first.
+_SHELL_CHAINING = (";", "&", "|", "`", "$(", "\n", ">", "<")
+_REDACTED = "***REDACTED***"
+# Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
+_SECRET_PATTERNS = [
+    re.compile(r"(?i)(authorization:\s*(?:bearer|basic|token)\s+)[^\s'\"]+"),
+    re.compile(r"(?i)(--?(?:[a-z0-9]+[-_])*(?:token|api[-_]?key|apikey|secret|password|passwd|auth)(?:=|\s+))[^\s'\"]+"),
+    re.compile(r"(?i)(\b[a-z0-9_]*(?:token|api_?key|secret|password|passwd)[a-z0-9_]*\s*[=:]\s*['\"])[^'\"\s]{4,}(?=['\"])"),
+    re.compile(r"(\b[A-Z0-9_]*(?:TOKEN|API_?KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*=)[^\s'\"$()`;|&]+"),
+    re.compile(r"(://)[^/\s:@'\"]+:[^/\s@'\"]+(?=@)"),
+    re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth)=)[^&\s'\"]+"),
+    re.compile(r"()\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"),
+]
+
+
+def redact_secrets(text: str) -> str:
+    """Hook command or script with inline credentials replaced; the code around them is kept."""
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(lambda m: m.group(1) + _REDACTED, text)
+    return text
 _UNBOUND_HOOK_BINARY = Path("/opt/unbound/current/unbound-hook/unbound-hook")
 
 
@@ -136,9 +160,12 @@ def _load_hooks(path: Path, root: Path, follow_symlinks: bool) -> Dict:
     text = read[0] if read else None
     try:
         data = json.loads(text) if text else None
-    except ValueError as e:
-        logger.debug(f"  hooks: could not parse {path}: {e}")
-        return {}
+    except ValueError:
+        try:
+            data = json.loads(_strip_jsonc_comments(text))  # Gemini and Augment settings are JSONC
+        except ValueError as e:
+            logger.debug(f"  hooks: could not parse {path}: {e}")
+            return {}
     hooks = data.get("hooks") if isinstance(data, dict) else None
     return hooks if isinstance(hooks, dict) else {}
 
@@ -180,16 +207,16 @@ def _tokens(command: str) -> List[str]:
     return words if posix else [w.strip('"\'') for w in words]
 
 
-def _script_argument(args: List[str], family: str) -> Optional[str]:
-    """The script an interpreter runs, or None when an option could be inline code, a module or an option value."""
+def _script_argument(args: List[str], family: str) -> Optional[int]:
+    """Index of the script an interpreter runs, or None when an option could be inline code, a module or a value."""
     i = 0
     while i < len(args):
         word = args[i]
         if not word.startswith("-"):
-            return word
+            return i
         option = word.lower() if family == "powershell" else word
         if family == "powershell" and option in ("-file", "-f"):
-            return args[i + 1] if i + 1 < len(args) else None
+            return i + 1 if i + 1 < len(args) else None
         if family == "powershell" and option in _POWERSHELL_VALUE_OPTIONS:
             i += 2
             continue
@@ -199,21 +226,41 @@ def _script_argument(args: List[str], family: str) -> Optional[str]:
     return None
 
 
+def _quote_of(command: str, index: int, count: int) -> str:
+    """The quote that opens shell word ``index``: "'", '"' or ''. Unknown counts as single-quoted (no expansion)."""
+    if platform.system() == "Windows":
+        return ""
+    try:
+        raw = shlex.split(command, posix=False)
+    except ValueError:
+        return "'"
+    if len(raw) != count:
+        return "'"
+    return raw[index][0] if raw[index][:1] in ("'", '"') else ""
+
+
 def _program_path(command: str, config_dir: Path, project_root: Optional[Path], home: Path) -> Optional[Path]:
     """The file the hook runs: its first word, or the script an interpreter is given. Never an argument."""
     words = _tokens(command)
     if not words:
         return None
-    program = words[0]
-    family = _INTERPRETERS.get(Path(program).name.lower().removesuffix(".exe"))
+    index = 0
+    while index < len(words) - 1 and _ENV_ASSIGNMENT.match(words[index]):
+        index += 1  # `NAME=value cmd` runs cmd
+    family = _INTERPRETERS.get(Path(words[index]).name.lower().removesuffix(".exe"))
     if family is not None:
-        program = _script_argument(words[1:], family)
-        if program is None:
+        script = _script_argument(words[index + 1:], family)
+        if script is None:
             return None
-    if program.startswith("~/") or program.startswith("~\\"):
+        index += script + 1
+    program = words[index]
+    quote = _quote_of(command, index, len(words))
+    # The shell expands ~ only unquoted and $VAR only outside single quotes; a quoted literal names no real file.
+    if not quote and (program.startswith("~/") or program.startswith("~\\")):
         program = str(home) + program[1:]
-    for var, value in (("HOME", str(home)), ("CLAUDE_PROJECT_DIR", str(project_root or config_dir.parent))):
-        program = program.replace(f"${{{var}}}", value).replace(f"${var}", value)
+    if quote != "'":
+        for var, value in (("HOME", str(home)), ("CLAUDE_PROJECT_DIR", str(project_root or config_dir.parent))):
+            program = program.replace(f"${{{var}}}", value).replace(f"${var}", value)
     path = Path(program)
     if path.is_absolute():
         return path
@@ -224,6 +271,8 @@ def _program_path(command: str, config_dir: Path, project_root: Optional[Path], 
 
 def _is_unbound_hook(command: str, program: Optional[Path], unbound_scripts: Set[Path]) -> bool:
     """Unbound's hook as its installers write it: the unbound-hook binary, or its script at an install location."""
+    if any(op in command for op in _SHELL_CHAINING):
+        return False  # a second command after Unbound's must stay visible
     words = _tokens(command)
     if len(words) >= 2 and Path(words[0]) == _UNBOUND_HOOK_BINARY and words[1] == "hook":
         return True
@@ -240,6 +289,17 @@ def _unbound_scripts(home: Path, project_root: Optional[Path], managed_dirs: Lis
     return {Path(os.path.normpath(str(p))) for p in scripts}
 
 
+def hooks_from_settings(hooks: Dict, source: str) -> List[Dict]:
+    """Managed hooks from a settings object another extractor already loaded (the Claude MDM plist)."""
+    found = []
+    for event, matcher, hook in _iter_commands(hooks if isinstance(hooks, dict) else {}):
+        hook_type, command = _command_of(hook)
+        if command and not _is_unbound_hook(command, None, set()):
+            found.append({"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
+                          "file_path": source, "scope": "managed"})
+    return found
+
+
 def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Path], root: Path,
                    follow_symlinks: bool, unbound_scripts: Set[Path]) -> List[Dict]:
     """Hooks in one config, read contained under ``root``; a script outside ``root`` is not read."""
@@ -251,12 +311,12 @@ def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Pa
         program = _program_path(command, path.parent, project_root, home) if hook_type == "command" else None
         if _is_unbound_hook(command, program, unbound_scripts):
             continue
-        item = {"event": event, "matcher": matcher, "type": hook_type, "command": command,
+        item = {"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
                 "file_path": str(path), "scope": scope}
         script = _read_contained(program, root, follow_symlinks) if program is not None and program.is_file() else None
         if script and "\x00" not in script:
             item["script_path"] = str(program)
-            item["script_content"] = script
+            item["script_content"] = redact_secrets(script)
         found.append(item)
     return found
 
@@ -282,6 +342,14 @@ def _project_roots_with_hook_dirs(home: Path, dir_names: Set[str]) -> Set[str]:
     return roots
 
 
+def _user_config_path(home: Path, pattern: str) -> Path:
+    """A user-scope pattern under ``home``; Copilot's ~/.copilot moves to COPILOT_HOME for the running user."""
+    override = (os.environ.get("COPILOT_HOME") or "").strip()
+    if pattern.startswith(".copilot/") and override and home == Path.home():
+        return Path(os.path.expanduser(os.path.expandvars(override))) / pattern[len(".copilot/"):]
+    return home / pattern
+
+
 def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterable[str]) -> Dict[str, List[Dict]]:
     """{project path: [hook, ...]} for every hook config this tool reads. Never raises."""
     files = hook_files_for(tool_name)
@@ -297,7 +365,7 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
         for home in user_homes:
             unbound = _unbound_scripts(home, None, managed_dirs)
             for pattern in user_files:
-                for path in _expand(home / pattern):
+                for path in _expand(_user_config_path(home, pattern)):
                     by_project.setdefault(str(home), []).extend(
                         _hooks_in_file(path, "user", home, None, home, True, unbound))
             for path in managed_files:

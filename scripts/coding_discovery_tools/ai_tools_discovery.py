@@ -108,7 +108,7 @@ try:
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
-    from .hooks_extractor import extract_hooks
+    from .hooks_extractor import extract_hooks, hooks_from_settings
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .sweep_connectors import run_sweep
@@ -189,7 +189,7 @@ except ImportError:
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
-    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks
+    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hooks_from_settings
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
@@ -1994,9 +1994,19 @@ class AIToolsDetector:
             path = Path(record.get("settings_path", "")) if isinstance(record, dict) else Path()
             if path.parent.name == ".claude" and path.name in ("settings.json", "settings.local.json"):
                 project_paths.add(str(path.parent.parent))
-        hooks_by_project = extract_hooks(tool.get("name", ""), _scan_user_homes(), project_paths)
-        for project_path, hooks in hooks_by_project.items():
+        homes = _scan_user_homes()
+        hooks_by_project = extract_hooks(tool.get("name", ""), homes, project_paths)
+        plist_hooks = [hook for record in tool.get("_settings") or []
+                       if isinstance(record, dict) and record.get("scope") == "managed_plist"
+                       for hook in hooks_from_settings((record.get("raw_settings") or {}).get("hooks"),
+                                                       record.get("settings_path", "plist"))]
+        for home in homes if plist_hooks else []:
+            hooks_by_project.setdefault(str(home), []).extend(plist_hooks)
+        for project_path, hooks in list(hooks_by_project.items()):
             if project_path not in projects_dict:
+                if all(hook.get("scope") == "managed" for hook in hooks):
+                    del hooks_by_project[project_path]
+                    continue  # managed policy alone is not this user's data; a row here would be a phantom install
                 projects_dict[project_path] = {"path": project_path, "rules": [], "skills": [], "mcpServers": []}
                 tool_dict.setdefault("projects", []).append(projects_dict[project_path])
             projects_dict[project_path]["hooks"] = hooks
@@ -2719,8 +2729,9 @@ class AIToolsDetector:
         one chokepoint that every tool routes through."""
         result = self._process_single_tool_raw(tool)
         if isinstance(result, dict):
-            self._merge_hooks_into_projects(tool, result)
+            # Decode first so hooks, found by on-disk path, join the existing project rows.
             _normalize_encoded_paths(result)
+            self._merge_hooks_into_projects(tool, result)
         return result
 
     def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:

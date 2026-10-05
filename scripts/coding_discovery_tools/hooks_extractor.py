@@ -113,7 +113,7 @@ _SECRET_PATTERNS = [
     # Flags: --api-key VALUE, --password='a b', -token=x.
     re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
-    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*[=:]\s*)" + _VALUE),
+    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], ]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # curl -u / --user user:pass
     re.compile(r"((?:^|\s)(?:-u|--user)(?:=|\s+)['\"]?)[^\s'\":]+:[^\s'\"]+"),
     # URL userinfo and credential query parameters.
@@ -248,13 +248,14 @@ def _script_argument(args: List[str], family: str) -> Optional[int]:
 
 
 def _quote_of(command: str, index: int, count: int) -> str:
-    """The quote that opens shell word ``index``: "'", '"' or ''. Unknown counts as single-quoted (no expansion)."""
+    """The quote that opens shell word ``index``: "'", '"' or ''. Unknown: '"' without single quotes, else "'"."""
+    unknown = "'" if "'" in command else '"'  # with no single quotes anywhere, $VAR expands; ~ may be quoted
     try:
         raw = shlex.split(command, posix=False)
     except ValueError:
-        return "'"
+        return unknown
     if len(raw) != count:
-        return "'"
+        return unknown
     return raw[index][0] if raw[index][:1] in ("'", '"') else ""
 
 
@@ -284,8 +285,7 @@ def _program_path(command: str, config_dir: Path, project_root: Optional[Path], 
     if path.is_absolute():
         return path
     # Agents run project hooks from the project root; user-level Cursor/Copilot paths are relative to the config dir.
-    candidates = ([project_root / path] if project_root is not None else []) + [config_dir / path]
-    return next((c for c in candidates if c.is_file()), candidates[0])
+    return (project_root if project_root is not None else config_dir) / path
 
 
 def _is_unbound_hook(command: str, program: Optional[Path], unbound_scripts: Set[Path]) -> bool:

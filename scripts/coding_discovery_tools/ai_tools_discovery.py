@@ -307,7 +307,7 @@ def _scan_user_homes() -> List[Path]:
         users = get_all_users_linux()
     else:
         users = []
-    return [_home_for_user(user) for user in users] or [Path.home()]
+    return [_home_for_user(user) for user in users or [get_user_info()]]  # same fallback as main()
 
 
 def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:

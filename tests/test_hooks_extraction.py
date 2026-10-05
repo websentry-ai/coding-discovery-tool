@@ -91,6 +91,22 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual(Path(hook["script_path"]), self.project / ".claude/hooks/format.py")
 
+    def test_a_project_hook_never_reads_a_config_relative_file_instead(self):
+        _write(self.project / ".claude/audit.py", "print('not what runs')")
+        _write(self.project / ".claude/settings.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "python3 audit.py"}]}]}})
+
+        hook = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))[0]
+
+        self.assertNotIn("script_content", hook)
+
+    def test_a_double_quoted_variable_with_a_suffix_is_expanded(self):
+        _write(self.home / "audit.py", "print('audit')")
+        _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": 'python3 "${HOME}"/audit.py'}]}]}})
+
+        self.assertEqual(_flat(extract_hooks("Codex", [self.home], []))[0]["script_content"], "print('audit')")
+
     def test_a_script_followed_by_a_shell_operator_is_still_read(self):
         _write(self.home / "audit.py", "print('audit')")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
@@ -163,7 +179,7 @@ class TestExtractHooks(unittest.TestCase):
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
                    'headers = {"Authorization": "Bearer dictcred"}', "headers['Authorization'] = 'Bearer subcred'",
-                   "os.environ['API_KEY'] = 'envcred'", 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
+                   "os.environ['API_KEY'] = 'envcred'", 'password = ("paren cred")', 'api_key: str = "typedcred"', 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIcut-off-by-truncation"]
         code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
 

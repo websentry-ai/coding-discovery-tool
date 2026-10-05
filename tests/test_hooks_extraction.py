@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, extract_hooks
+from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, _command_of, extract_hooks
 from scripts.coding_discovery_tools.project_dir_index import clear_cache
 
 # The per-OS project skip rule refuses system temp dirs; tests run the shared index over one.
@@ -99,6 +100,28 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertNotIn("script_content", hook)
 
+    def test_interpreter_option_values_are_never_read_as_scripts(self):
+        _write(self.home / ".ssh/id_rsa", "PRIVATE KEY")
+        _write(self.home / "audit.py", "print('audit')")
+        key, audit = self.home / ".ssh/id_rsa", self.home / "audit.py"
+        _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": f"python3 -W {key} {audit}"},
+            {"type": "command", "command": f"python3 -m {key}"},
+            {"type": "command", "command": f"bash -c 'cat {key}'"},
+            {"type": "command", "command": f"python3 -u {audit}"}]}]}})
+
+        warn, module, inline, unbuffered = _flat(extract_hooks("Codex", [self.home], []))
+
+        for hook in (warn, module, inline):
+            self.assertNotIn("script_content", hook)
+        self.assertEqual(unbuffered["script_content"], "print('audit')")
+
+    def test_a_settings_file_over_50kb_still_yields_its_hooks(self):
+        _write(self.home / ".claude/settings.json", {"permissions": {"allow": ["x" * 100] * 1000},
+                                                     "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo big"}]}]}})
+
+        self.assertEqual([h["command"] for h in _flat(extract_hooks("Claude Code", [self.home], []))], ["echo big"])
+
     def test_long_scripts_are_truncated_and_binaries_skipped(self):
         _write(self.home / "big.py", "x" * (MAX_SCRIPT_SIZE + 500))
         (self.home / "tool.bin").write_bytes(b"\x7fELF\x00\x00binary")
@@ -131,6 +154,30 @@ class TestExtractHooks(unittest.TestCase):
                          ["echo a", "echo b"])
         self.assertEqual(len(_flat(extract_hooks("GitHub Copilot Chat (VS Code)", [self.home], []))), 2)
         self.assertEqual(extract_hooks("GitHub Copilot (JetBrains)", [self.home], []), {})
+
+    def test_only_the_canonical_vs_code_copilot_row_carries_shared_hooks(self):
+        detector = AIToolsDetector.__new__(AIToolsDetector)
+        detector._canonical_vscode_copilot = "github copilot chat (vs code)"
+        found = {str(self.home): [{"event": "Stop", "command": "echo a"}]}
+        rows = {}
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery.extract_hooks", return_value=found), \
+                patch("scripts.coding_discovery_tools.ai_tools_discovery._scan_user_homes", return_value=[self.home]):
+            for name in ("GitHub Copilot Chat (VS Code)", "GitHub Copilot (VS Code)", "GitHub Copilot CLI"):
+                rows[name] = {"projects": []}
+                detector._merge_hooks_into_projects({"name": name}, rows[name])
+
+        self.assertEqual({name: len(row["projects"]) for name, row in rows.items()},
+                         {"GitHub Copilot Chat (VS Code)": 1, "GitHub Copilot (VS Code)": 0, "GitHub Copilot CLI": 1})
+
+    def test_copilot_reports_the_shell_this_platform_runs(self):
+        hook = {"type": "command", "bash": "echo unix", "powershell": "Write-Host windows"}
+
+        with patch("scripts.coding_discovery_tools.hooks_extractor.platform.system", return_value="Windows"):
+            on_windows = _command_of(hook)
+        with patch("scripts.coding_discovery_tools.hooks_extractor.platform.system", return_value="Linux"):
+            on_linux = _command_of(hook)
+
+        self.assertEqual((on_windows, on_linux), (("command", "Write-Host windows"), ("command", "echo unix")))
 
     def test_only_unbound_hooks_at_their_install_location_are_skipped(self):
         _write(self.home / ".cursor/hooks/unbound.py", "# unbound governance hook")

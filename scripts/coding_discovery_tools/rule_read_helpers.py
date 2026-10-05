@@ -383,7 +383,7 @@ def _open_contained(rule_file, root, allow_symlink, *, extra_flags: int = 0) -> 
 
 
 def read_rule_file_contained(
-    rule_file: Path, containment_root, *, allow_symlink: bool = False
+    rule_file: Path, containment_root, *, allow_symlink: bool = False, max_size: int = MAX_CONFIG_FILE_SIZE
 ) -> Optional[Tuple[str, bool, int, str]]:
     """Read a rule file's text through the safe boundary, or None if refused.
 
@@ -419,11 +419,11 @@ def read_rule_file_contained(
             logger.info(f"Refusing rule file {rule_file}: owned by uid {st.st_uid}, root owner differs")
             return None
         size = st.st_size
-        truncated = size > MAX_CONFIG_FILE_SIZE
+        truncated = size > max_size
         last_modified = datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z"
         with os.fdopen(fd, "rb") as handle:
             fd = None
-            data = handle.read(MAX_CONFIG_FILE_SIZE) if truncated else handle.read()
+            data = handle.read(max_size) if truncated else handle.read()
         return data.decode("utf-8", errors="replace"), truncated, size, last_modified
     except OSError as e:
         logger.debug(f"Could not read rule file {rule_file}: {e}")

@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - direct-script execution fallback
 logger = logging.getLogger(__name__)
 
 MAX_SCRIPT_SIZE = 50 * 1024  # same cap as rule/skill content (read_rule_file_contained truncates here)
+MAX_HOOK_CONFIG_SIZE = 2 * 1024 * 1024  # settings.json also holds permissions and MCP config, so it can pass 50KB
 
 _MAC_SUPPORT = Path("/Library/Application Support")
 _WIN_PROGRAM_FILES = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
@@ -78,9 +79,20 @@ _HOOK_FILES: Dict[str, Tuple[List[str], List[str], Dict[str, List[Path]]]] = {
     ),
 }
 
-# Programs that run a script named in their arguments; any other program is the hook itself.
-_INTERPRETERS = {"bash", "sh", "zsh", "dash", "fish", "python", "python3", "node", "deno", "bun",
-                 "ruby", "perl", "pwsh", "powershell", "cmd"}
+# Programs that run a script named in their arguments, by option family; any other program is the hook itself.
+_INTERPRETERS = {"bash": "shell", "sh": "shell", "zsh": "shell", "dash": "shell", "fish": "shell",
+                 "python": "python", "python3": "python", "node": "node", "deno": "node", "bun": "node",
+                 "ruby": "ruby", "perl": "ruby", "pwsh": "powershell", "powershell": "powershell", "cmd": "cmd"}
+# Options that take no value, so the next word may be the script; any other option means no file is read.
+_FLAG_ONLY_OPTIONS = {
+    "shell": {"-e", "-x", "-u", "-l", "-v", "-eu", "-ex", "-xe", "-eux"},
+    "python": {"-u", "-B", "-E", "-I", "-O", "-OO", "-s", "-S", "-q", "-b", "-bb", "-v", "-P"},
+    "node": {"--no-warnings", "--enable-source-maps", "--trace-warnings"},
+    "ruby": {"-w"},
+    "powershell": {"-noprofile", "-nop", "-nologo", "-noninteractive"},
+    "cmd": set(),
+}
+_POWERSHELL_VALUE_OPTIONS = {"-executionpolicy", "-ep"}
 _UNBOUND_HOOK_BINARY = Path("/opt/unbound/current/unbound-hook/unbound-hook")
 
 
@@ -117,7 +129,11 @@ def _read_contained(path: Path, root: Path, follow_symlinks: bool) -> Optional[s
 
 
 def _load_hooks(path: Path, root: Path, follow_symlinks: bool) -> Dict:
-    text = _read_contained(path, root, follow_symlinks)
+    read = read_rule_file_contained(path, root, allow_symlink=follow_symlinks, max_size=MAX_HOOK_CONFIG_SIZE)
+    if read and read[1]:
+        logger.warning(f"  hooks: {path} is over {MAX_HOOK_CONFIG_SIZE} bytes, skipped")
+        return {}
+    text = read[0] if read else None
     try:
         data = json.loads(text) if text else None
     except ValueError as e:
@@ -145,7 +161,9 @@ def _iter_commands(hooks: Dict) -> Iterable[Tuple[str, str, Dict]]:
 def _command_of(hook: Dict) -> Tuple[str, str]:
     """(type, command) of one hook; prompt-type hooks carry their prompt as the command."""
     hook_type = hook.get("type") if isinstance(hook.get("type"), str) else "command"
-    for key in ("command", "bash", "powershell", "prompt"):
+    # Copilot entries can carry both shells; report the one this platform runs.
+    shells = ("powershell", "bash") if platform.system() == "Windows" else ("bash", "powershell")
+    for key in ("command", *shells, "prompt"):
         value = hook.get(key)
         if isinstance(value, str) and value.strip():
             return hook_type, value
@@ -162,17 +180,36 @@ def _tokens(command: str) -> List[str]:
     return words if posix else [w.strip('"\'') for w in words]
 
 
+def _script_argument(args: List[str], family: str) -> Optional[str]:
+    """The script an interpreter runs, or None when an option could be inline code, a module or an option value."""
+    i = 0
+    while i < len(args):
+        word = args[i]
+        if not word.startswith("-"):
+            return word
+        option = word.lower() if family == "powershell" else word
+        if family == "powershell" and option in ("-file", "-f"):
+            return args[i + 1] if i + 1 < len(args) else None
+        if family == "powershell" and option in _POWERSHELL_VALUE_OPTIONS:
+            i += 2
+            continue
+        if option not in _FLAG_ONLY_OPTIONS[family]:
+            return None
+        i += 1
+    return None
+
+
 def _program_path(command: str, config_dir: Path, project_root: Optional[Path], home: Path) -> Optional[Path]:
     """The file the hook runs: its first word, or the script an interpreter is given. Never an argument."""
     words = _tokens(command)
     if not words:
         return None
     program = words[0]
-    if Path(program).name.lower().removesuffix(".exe") in _INTERPRETERS:
-        args = [w for w in words[1:] if not w.startswith("-")]
-        if not args:
+    family = _INTERPRETERS.get(Path(program).name.lower().removesuffix(".exe"))
+    if family is not None:
+        program = _script_argument(words[1:], family)
+        if program is None:
             return None
-        program = args[0]
     if program.startswith("~/") or program.startswith("~\\"):
         program = str(home) + program[1:]
     for var, value in (("HOME", str(home)), ("CLAUDE_PROJECT_DIR", str(project_root or config_dir.parent))):

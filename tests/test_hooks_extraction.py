@@ -152,7 +152,9 @@ class TestExtractHooks(unittest.TestCase):
     def test_redaction_covers_common_hook_credentials_and_keeps_code(self):
         secrets = ['password = "correct horse battery staple"', "PASSWORD='two words'", "token=abc123def",
                    'curl -H "X-Api-Key: hdrkey123"', "curl -u admin:hunter2 https://x.invalid",
-                   "curl https://hooks.slack.com/services/T0/B0/slacksecret"]
+                   "curl https://hooks.slack.com/services/T0/B0/slacksecret",
+                   'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
+                   "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----"]
         code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
 
         for line in secrets:

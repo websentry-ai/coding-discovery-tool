@@ -103,7 +103,9 @@ _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
 _KEY = r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|secret|password|passwd|pwd|credential|private[-_]?key)[A-Za-z0-9_-]*"
-_VALUE = r"""(?:'[^'\n]*'|"[^"\n]*"|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)"""
+_VALUE = ("(?:'''[\\s\\S]*?'''" + '|"""[\\s\\S]*?"""'  # triple-quoted, possibly multi-line
+          + r"""|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*\""""  # quoted, with escaped quotes inside
+          + r"""|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)""")  # unquoted, unless it is code
 _SECRET_PATTERNS = [
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]*(?:key|token|secret|auth)[a-z0-9-]*|[a-z0-9-]*api-key)"
@@ -120,6 +122,8 @@ _SECRET_PATTERNS = [
     # Webhook URLs whose secret is the path.
     re.compile(r"(?i)(https://(?:hooks\.slack\.com/(?:services|workflows|triggers)/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/"
                r"|[a-z0-9.-]*\.webhook\.office\.com/))[^\s'\"]+"),
+    # Private key blocks anywhere.
+    re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(?=-----END [A-Z ]*PRIVATE KEY-----)"),
     # Known token formats anywhere.
     re.compile(r"()\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}"
                r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"),

@@ -349,6 +349,18 @@ def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
         return False
 
 
+def _has_owned_projects(tool_filtered: Dict) -> bool:
+    """Whether the user has projects of their own; a row holding only managed (org policy) hooks is not theirs."""
+    for project in tool_filtered.get("projects") or []:
+        if not isinstance(project, dict):
+            return True
+        hooks = project.get("hooks") or []
+        other = any(value for key, value in project.items() if key not in ("path", "hooks"))
+        if other or not hooks or any(hook.get("scope") != "managed" for hook in hooks):
+            return True
+    return False
+
+
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
@@ -366,7 +378,7 @@ def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     owns_install = bool(own_norm) and (
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
-    has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
+    has_data = _has_owned_projects(tool_filtered) or "permissions" in tool_filtered
     return owns_install or has_data
 
 
@@ -393,7 +405,7 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
 
-    if bool(tool_filtered.get("projects")):
+    if _has_owned_projects(tool_filtered):
         return True
 
     # A permissions block survives filtering for this user iff it is managed
@@ -413,7 +425,7 @@ def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool
         return _copilot_cli_owned_by_user(tool_filtered, user_home)
     if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
         return _augment_owned_by_user(tool_filtered, user_home)
-    if tool_filtered.get("projects"):
+    if _has_owned_projects(tool_filtered):
         return True
     perms = tool_filtered.get("permissions")
     return perms is not None and perms.get("settings_source") != "managed"
@@ -2006,10 +2018,7 @@ class AIToolsDetector:
         for project_path, hooks in list(hooks_by_project.items()):
             key = _normalise_path(project_path)
             if key not in existing:
-                owns_data = any(p.startswith(key + "/") for p in existing)
-                if all(hook.get("scope") == "managed" for hook in hooks) and not owns_data:
-                    del hooks_by_project[project_path]
-                    continue  # managed policy alone is not this user's data; a row here would be a phantom install
+                # A managed-only row is kept: the ownership gates ignore it (_has_owned_projects), so no phantom install.
                 projects_dict[project_path] = {"path": project_path, "rules": [], "skills": [], "mcpServers": []}
                 tool_dict.setdefault("projects", []).append(projects_dict[project_path])
                 existing[key] = project_path

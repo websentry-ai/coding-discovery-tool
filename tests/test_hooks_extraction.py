@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector, _has_user_owned_data
 from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, _command_of, extract_hooks, redact_secrets
 from scripts.coding_discovery_tools.project_dir_index import clear_cache
 
@@ -91,6 +91,13 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual(Path(hook["script_path"]), self.project / ".claude/hooks/format.py")
 
+    def test_a_script_followed_by_a_shell_operator_is_still_read(self):
+        _write(self.home / "audit.py", "print('audit')")
+        _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": f"python3 {self.home / 'audit.py'}; echo done"}]}]}})
+
+        self.assertEqual(_flat(extract_hooks("Codex", [self.home], []))[0]["script_content"], "print('audit')")
+
     def test_files_named_as_arguments_are_never_read(self):
         _write(self.home / ".ssh/id_rsa", "PRIVATE KEY")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
@@ -154,7 +161,8 @@ class TestExtractHooks(unittest.TestCase):
                    'curl -H "X-Api-Key: hdrkey123"', "curl -u admin:hunter2 https://x.invalid",
                    "curl https://hooks.slack.com/services/T0/B0/slacksecret",
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
-                   "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----"]
+                   "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
+                   'headers = {"Authorization": "Bearer dictcred"}']
         code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
 
         for line in secrets:
@@ -228,7 +236,7 @@ class TestExtractHooks(unittest.TestCase):
                          {"GitHub Copilot Chat (VS Code)": 1, "GitHub Copilot (VS Code)": 0, "GitHub Copilot CLI": 1,
                           "GitHub Copilot (JetBrains)": 0})
 
-    def test_managed_hooks_alone_create_no_rows_but_join_existing_ones(self):
+    def test_managed_hooks_are_reported_but_never_count_as_owned_data(self):
         detector = AIToolsDetector.__new__(AIToolsDetector)
         managed = {str(self.home): [{"event": "Stop", "command": "echo policy", "scope": "managed"}]}
         plist = {"scope": "managed_plist", "settings_path": "plist:com.anthropic.claudecode",
@@ -249,7 +257,8 @@ class TestExtractHooks(unittest.TestCase):
             detector._merge_hooks_into_projects({"name": "Claude Code"}, slashed)
 
         self.assertEqual(len(slashed["projects"]), 1)  # a trailing slash still joins the existing row
-        self.assertEqual(bare["projects"], [])
+        self.assertEqual(sorted(h["command"] for h in bare["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
+        self.assertFalse(_has_user_owned_data("Claude Code", bare, self.home))  # no phantom install from org policy
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 

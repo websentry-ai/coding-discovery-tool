@@ -109,7 +109,7 @@ _VALUE = ("(?:'''[\\s\\S]*?'''" + '|"""[\\s\\S]*?"""'  # triple-quoted, possibly
 _SECRET_PATTERNS = [
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]*(?:key|token|secret|auth)[a-z0-9-]*|[a-z0-9-]*api-key)"
-               r"\s*:\s*(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
+               r"['\"]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
     # Flags: --api-key VALUE, --password='a b', -token=x.
     re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
@@ -272,7 +272,7 @@ def _program_path(command: str, config_dir: Path, project_root: Optional[Path], 
         if script is None:
             return None
         index += script + 1
-    program = words[index]
+    program = words[index].rstrip(";&|")  # `script.py;` and `script.py&&next` name script.py
     quote = _quote_of(command, index, len(words))
     # The shell expands ~ only unquoted and $VAR only outside single quotes; a quoted literal names no real file.
     if not quote and (program.startswith("~/") or program.startswith("~\\")):

@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector, _has_user_owned_data
-from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, _command_of, extract_hooks, redact_secrets
+from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, _command_of, _program_path, extract_hooks, redact_secrets
 from scripts.coding_discovery_tools.project_dir_index import clear_cache
 
 # The per-OS project skip rule refuses system temp dirs; tests run the shared index over one.
@@ -108,6 +108,18 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual(_flat(extract_hooks("Codex", [self.home], []))[0]["script_content"], "print('audit')")
 
+    def test_cmd_c_reads_the_batch_file_it_runs(self):
+        bat = _write(self.home / "hooks/run.bat", "@echo off")
+
+        self.assertEqual(_program_path(f"cmd /c {bat}", self.home, None, self.home), bat)
+
+    def test_a_user_hook_on_claude_project_dir_reads_nothing(self):
+        _write(self.home / "x.py", "print('home x')")
+        _write(self.home / ".claude/settings.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "python3 $CLAUDE_PROJECT_DIR/x.py"}]}]}})
+
+        self.assertNotIn("script_content", _flat(extract_hooks("Claude Code", [self.home], []))[0])
+
     def test_a_script_followed_by_a_shell_operator_is_still_read(self):
         _write(self.home / "audit.py", "print('audit')")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
@@ -202,7 +214,8 @@ class TestExtractHooks(unittest.TestCase):
 
     def test_redaction_covers_common_hook_credentials_and_keeps_code(self):
         secrets = ['password = "correct horse battery staple"', "PASSWORD='two words'", "token=abc123def",
-                   'curl -H "X-Api-Key: hdrkey123"', "curl -u admin:hunter2 https://x.invalid", "curl -uadmin:glued https://x", 'requests.post(url, auth=("alice", "tuplecred"))', "curl -u 'admin:correct horse battery'",
+                   'curl -H "X-Api-Key: hdrkey123"', "curl -u admin:hunter2 https://x.invalid", "curl -uadmin:glued https://x", 'requests.post(url, auth=("alice", "tuplecred"))', 'HTTPBasicAuth("alice", "ctorcred")',
+                   'api_key: str | None = "unioncred"', 'curl --api-key ""joinedcred https://x', 'curl --token esc\\ apedcred', "curl -u 'admin:correct horse battery'",
                    "curl https://hooks.slack.com/services/T0/B0/slacksecret",
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
@@ -214,7 +227,10 @@ class TestExtractHooks(unittest.TestCase):
 
         for line in secrets:
             self.assertIn("***REDACTED***", redact_secrets(line), line)
-        self.assertNotIn("tuplecred", redact_secrets('requests.post(url, auth=("alice", "tuplecred"))'))
+        for line, secret in (('requests.post(url, auth=("alice", "tuplecred"))', "tuplecred"),
+                             ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('api_key: str | None = "unioncred"', "unioncred"),
+                             ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl --token esc\\ apedcred", "apedcred")):
+            self.assertNotIn(secret, redact_secrets(line), line)
         for line in code:
             self.assertEqual(redact_secrets(line), line)
 

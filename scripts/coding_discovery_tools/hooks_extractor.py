@@ -104,19 +104,20 @@ _REDACTED = "***REDACTED***"
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
 _KEY = (r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|access[-_]?key|secret|password|passwd|pwd|credential"
         r"|private[-_]?key|auth(?![a-z]))[A-Za-z0-9_-]*")  # auth, but not author
-_VALUE = ("(?:(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
-          + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z)"""  # quoted or backticked, may span lines
-          + r""")|(?![A-Za-z_][\w.]*[\[(])[^\s'"$(`;|&,)}\][]+)""")  # unquoted, unless it is code
+_QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
+           + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z))""")  # may span lines
+# The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index).
+_VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}\][\\]+)+"""
 _SECRET_PATTERNS = [
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]*(?:key|token|secret|auth)[a-z0-9-]*|[a-z0-9-]*api-key)"
                r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
-    # The secret half of a (user, password) auth tuple: auth=("alice", "hunter2").
-    re.compile(r"""(?i)(\bauth\s*=\s*\(\s*(?:'[^']*'|"[^"]*"|[\w.]+)\s*,\s*)(?:'[^']*'|"[^"]*")"""),
+    # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
+    re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:'[^']*'|"[^"]*"|[\w.]+)\s*,\s*)(?:'[^']*'|"[^"]*")"""),
     # Flags: --api-key VALUE, --password='a b', -token=x.
     re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
-    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], ]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
+    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # curl -u / --user user:pass
     re.compile(r"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:=|\s*))" + r"""(?:'[^']*'|"[^"]*"|[^\s'":]+:[^\s'"]+)"""),
     # URL userinfo and credential query parameters.
@@ -236,6 +237,9 @@ def _script_argument(args: List[str], family: str) -> Optional[int]:
     i = 0
     while i < len(args):
         word = args[i]
+        if family == "cmd" and word.lower() in ("/c", "/k", "/q", "/d", "/s"):
+            i += 1  # cmd /c script.bat runs script.bat
+            continue
         if not word.startswith("-"):
             return i
         option = word.lower() if family == "powershell" else word
@@ -279,6 +283,8 @@ def _program_path(command: str, config_dir: Path, project_root: Optional[Path], 
             return None
         index += script + 1
     program = words[index].rstrip(";&|")  # `script.py;` and `script.py&&next` name script.py
+    if project_root is None and "CLAUDE_PROJECT_DIR" in program:
+        return None  # a user hook's project is whichever one is open when it runs; no single file to read
     quote = _quote_of(command, index, len(words))
     # The shell expands ~ only unquoted and $VAR only outside single quotes; a quoted literal names no real file.
     if not quote and (program.startswith("~/") or program.startswith("~\\")):

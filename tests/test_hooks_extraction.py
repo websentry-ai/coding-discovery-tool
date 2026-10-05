@@ -175,11 +175,13 @@ class TestExtractHooks(unittest.TestCase):
         _write(self.home / "audit.py", "print('audit')")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
             {"type": "command", "command": "python3 '$HOME/.ssh/id_rsa'"},
+            {"type": "command", "command": "python3 \\$HOME/.ssh/id_rsa"},
             {"type": "command", "command": 'python3 "$HOME/audit.py"'}]}]}})
 
-        literal, expanded = _flat(extract_hooks("Codex", [self.home], []))
+        literal, escaped, expanded = _flat(extract_hooks("Codex", [self.home], []))
 
         self.assertNotIn("script_content", literal)
+        self.assertNotIn("script_content", escaped)
         self.assertEqual(expanded["script_content"], "print('audit')")
 
     def test_credentials_in_commands_and_scripts_are_redacted(self):
@@ -200,7 +202,7 @@ class TestExtractHooks(unittest.TestCase):
 
     def test_redaction_covers_common_hook_credentials_and_keeps_code(self):
         secrets = ['password = "correct horse battery staple"', "PASSWORD='two words'", "token=abc123def",
-                   'curl -H "X-Api-Key: hdrkey123"', "curl -u admin:hunter2 https://x.invalid", "curl -uadmin:glued https://x", "curl -u 'admin:correct horse battery'",
+                   'curl -H "X-Api-Key: hdrkey123"', "curl -u admin:hunter2 https://x.invalid", "curl -uadmin:glued https://x", 'requests.post(url, auth=("alice", "tuplecred"))', "curl -u 'admin:correct horse battery'",
                    "curl https://hooks.slack.com/services/T0/B0/slacksecret",
                    'password = """triple quoted words"""', 'password = "say \\"hi\\" there"',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
@@ -212,6 +214,7 @@ class TestExtractHooks(unittest.TestCase):
 
         for line in secrets:
             self.assertIn("***REDACTED***", redact_secrets(line), line)
+        self.assertNotIn("tuplecred", redact_secrets('requests.post(url, auth=("alice", "tuplecred"))'))
         for line in code:
             self.assertEqual(redact_secrets(line), line)
 

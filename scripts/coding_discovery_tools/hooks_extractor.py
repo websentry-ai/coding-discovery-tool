@@ -111,6 +111,8 @@ _SECRET_PATTERNS = [
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]*(?:key|token|secret|auth)[a-z0-9-]*|[a-z0-9-]*api-key)"
                r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
+    # The secret half of a (user, password) auth tuple: auth=("alice", "hunter2").
+    re.compile(r"""(?i)(\bauth\s*=\s*\(\s*(?:'[^']*'|"[^"]*"|[\w.]+)\s*,\s*)(?:'[^']*'|"[^"]*")"""),
     # Flags: --api-key VALUE, --password='a b', -token=x.
     re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
@@ -250,6 +252,8 @@ def _script_argument(args: List[str], family: str) -> Optional[int]:
 
 def _quote_of(command: str, index: int, count: int) -> str:
     """The quote that opens shell word ``index``: "'", '"' or ''. Unknown: '"' without single quotes, else "'"."""
+    if "\\$" in command or "\\~" in command:
+        return "'"  # an escaped \$VAR or \~ is literal; shlex has already dropped the backslash
     unknown = "'" if "'" in command else '"'  # with no single quotes anywhere, $VAR expands; ~ may be quoted
     try:
         raw = shlex.split(command, posix=False)

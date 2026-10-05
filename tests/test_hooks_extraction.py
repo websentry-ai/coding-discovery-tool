@@ -136,13 +136,15 @@ class TestExtractHooks(unittest.TestCase):
 
     def test_credentials_in_commands_and_scripts_are_redacted(self):
         _write(self.home / "notify.sh", "curl -H 'Authorization: Bearer abc123' https://hooks.example.com\n"
-                                        "token = open('~/.aws/credentials').read()\nSLACK_TOKEN='xoxq-literal-1'\n")
+                                        "token = open('~/.aws/credentials').read()\nSLACK_TOKEN='xoxq-literal-1'\n"
+                                        "curl https://x.invalid --api-key 'quoted-cred-1' --password \"quoted-cred-2\"\n"
+                                        "cfg = {\"api_key\": \"json-cred-3\"}\n")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
             {"type": "command", "command": f"API_TOKEN=s3cr3t bash {self.home / 'notify.sh'} --api-key=k3y"}]}]}})
 
         hook = _flat(extract_hooks("Codex", [self.home], []))[0]
 
-        for secret in ("s3cr3t", "k3y", "abc123", "xoxq-literal-1"):
+        for secret in ("s3cr3t", "k3y", "abc123", "xoxq-literal-1", "quoted-cred-1", "quoted-cred-2", "json-cred-3"):
             self.assertNotIn(secret, hook["command"] + hook["script_content"])
         self.assertIn("https://hooks.example.com", hook["script_content"])
         self.assertIn("open('~/.aws/credentials')", hook["script_content"])  # code stays visible to the rating
@@ -150,7 +152,7 @@ class TestExtractHooks(unittest.TestCase):
     def test_jsonc_settings_with_comments_still_yield_hooks(self):
         (self.home / ".gemini").mkdir(parents=True)
         (self.home / ".gemini/settings.json").write_text(
-            '{\n  // team hooks\n  "hooks": {"BeforeTool": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}\n}')
+            '{\n  // team hooks\n  "hooks": {"BeforeTool": [{"hooks": [{"type": "command", "command": "echo hi"},]}]},\n}')
 
         self.assertEqual([h["command"] for h in _flat(extract_hooks("Gemini CLI", [self.home], []))], ["echo hi"])
 
@@ -188,14 +190,14 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertNotIn("script_content", hook)
 
-    def test_copilot_hooks_only_attach_to_cli_and_vs_code(self):
+    def test_copilot_hooks_load_for_every_copilot_surface(self):
         _write(self.home / ".copilot/hooks/a.json", {"version": 1, "hooks": {"SessionStart": [{"type": "command", "bash": "echo a"}]}})
         _write(self.home / ".copilot/hooks/b.json", {"version": 1, "hooks": {"Stop": [{"type": "command", "bash": "echo b"}]}})
 
         self.assertEqual(sorted(h["command"] for h in _flat(extract_hooks("GitHub Copilot CLI", [self.home], []))),
                          ["echo a", "echo b"])
         self.assertEqual(len(_flat(extract_hooks("GitHub Copilot Chat (VS Code)", [self.home], []))), 2)
-        self.assertEqual(extract_hooks("GitHub Copilot (JetBrains)", [self.home], []), {})
+        self.assertEqual(len(_flat(extract_hooks("GitHub Copilot (Cursor)", [self.home], []))), 2)
 
     def test_only_the_canonical_vs_code_copilot_row_carries_shared_hooks(self):
         detector = AIToolsDetector.__new__(AIToolsDetector)
@@ -204,12 +206,14 @@ class TestExtractHooks(unittest.TestCase):
         rows = {}
         with patch("scripts.coding_discovery_tools.ai_tools_discovery.extract_hooks", return_value=found), \
                 patch("scripts.coding_discovery_tools.ai_tools_discovery._scan_user_homes", return_value=[self.home]):
-            for name in ("GitHub Copilot Chat (VS Code)", "GitHub Copilot (VS Code)", "GitHub Copilot CLI"):
+            for name in ("GitHub Copilot Chat (VS Code)", "GitHub Copilot (VS Code)", "GitHub Copilot CLI",
+                         "GitHub Copilot (JetBrains)"):
                 rows[name] = {"projects": []}
                 detector._merge_hooks_into_projects({"name": name}, rows[name])
 
         self.assertEqual({name: len(row["projects"]) for name, row in rows.items()},
-                         {"GitHub Copilot Chat (VS Code)": 1, "GitHub Copilot (VS Code)": 0, "GitHub Copilot CLI": 1})
+                         {"GitHub Copilot Chat (VS Code)": 1, "GitHub Copilot (VS Code)": 0, "GitHub Copilot CLI": 1,
+                          "GitHub Copilot (JetBrains)": 0})
 
     def test_managed_hooks_alone_create_no_rows_but_join_existing_ones(self):
         detector = AIToolsDetector.__new__(AIToolsDetector)
@@ -217,14 +221,17 @@ class TestExtractHooks(unittest.TestCase):
         plist = {"scope": "managed_plist", "settings_path": "plist:com.anthropic.claudecode",
                  "raw_settings": {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mdm"}]}]}}}
         bare, owned = {"projects": []}, {"projects": [{"path": str(self.home)}]}
+        augment = {"projects": [{"path": str(self.home / ".augment")}]}  # Augment files user data under ~/.augment
         with patch("scripts.coding_discovery_tools.ai_tools_discovery.extract_hooks",
                    side_effect=lambda *a: {k: list(v) for k, v in managed.items()}), \
                 patch("scripts.coding_discovery_tools.ai_tools_discovery._scan_user_homes", return_value=[self.home]):
             detector._merge_hooks_into_projects({"name": "Claude Code", "_settings": [plist]}, bare)
             detector._merge_hooks_into_projects({"name": "Claude Code", "_settings": [plist]}, owned)
+            detector._merge_hooks_into_projects({"name": "Claude Code"}, augment)
 
         self.assertEqual(bare["projects"], [])
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
+        self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 
     def test_copilot_reports_the_shell_this_platform_runs(self):
         hook = {"type": "command", "bash": "echo unix", "powershell": "Write-Host windows"}

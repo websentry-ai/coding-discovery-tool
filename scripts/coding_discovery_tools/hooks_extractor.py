@@ -27,11 +27,11 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 try:
-    from .mcp_extraction_helpers import _strip_jsonc_comments
+    from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
     from .project_dir_index import dispatch_matches
     from .rule_read_helpers import read_rule_file_contained
 except ImportError:  # pragma: no cover - direct-script execution fallback
-    from mcp_extraction_helpers import _strip_jsonc_comments
+    from mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
     from project_dir_index import dispatch_matches
     from rule_read_helpers import read_rule_file_contained
 
@@ -103,8 +103,8 @@ _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
 _SECRET_PATTERNS = [
     re.compile(r"(?i)(authorization:\s*(?:bearer|basic|token)\s+)[^\s'\"]+"),
-    re.compile(r"(?i)(--?(?:[a-z0-9]+[-_])*(?:token|api[-_]?key|apikey|secret|password|passwd|auth)(?:=|\s+))[^\s'\"]+"),
-    re.compile(r"(?i)(\b[a-z0-9_]*(?:token|api_?key|secret|password|passwd)[a-z0-9_]*\s*[=:]\s*['\"])[^'\"\s]{4,}(?=['\"])"),
+    re.compile(r"(?i)(--?(?:[a-z0-9]+[-_])*(?:token|api[-_]?key|apikey|secret|password|passwd|auth)(?:=|\s+)['\"]?)[^\s'\"]+"),
+    re.compile(r"(?i)(\b[a-z0-9_]*(?:token|api_?key|secret|password|passwd)[a-z0-9_]*['\"]?\s*[=:]\s*['\"])[^'\"\s]{4,}(?=['\"])"),
     re.compile(r"(\b[A-Z0-9_]*(?:TOKEN|API_?KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*=)[^\s'\"$()`;|&]+"),
     re.compile(r"(://)[^/\s:@'\"]+:[^/\s@'\"]+(?=@)"),
     re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth)=)[^&\s'\"]+"),
@@ -126,7 +126,8 @@ def _spec_key(tool_name: str) -> Optional[str]:
     if name.startswith("augment (") or name == "auggie cli":
         return "augment"
     # Copilot's hooks dir is read by the CLI and by Copilot in VS Code; other Copilot surfaces don't run it.
-    if name.startswith("github copilot") and ("cli" in name or "vs code" in name):
+    # Copilot's ~/.copilot hooks: the merge step attaches them to the CLI and the one canonical editor row only.
+    if name.startswith("github copilot"):
         return "github copilot"
     if name == "cursor cli":
         return "cursor"  # cursor-agent reads the same .cursor/hooks.json as the IDE
@@ -164,7 +165,7 @@ def _load_hooks(path: Path, root: Path, follow_symlinks: bool) -> Dict:
         data = json.loads(text) if text else None
     except ValueError:
         try:
-            data = json.loads(_strip_jsonc_comments(text))  # Gemini and Augment settings are JSONC
+            data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(text)))  # Gemini and Augment settings are JSONC
         except ValueError as e:
             logger.debug(f"  hooks: could not parse {path}: {e}")
             return {}

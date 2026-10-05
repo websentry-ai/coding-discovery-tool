@@ -2004,7 +2004,9 @@ class AIToolsDetector:
             hooks_by_project.setdefault(str(home), []).extend(plist_hooks)
         for project_path, hooks in list(hooks_by_project.items()):
             if project_path not in projects_dict:
-                if all(hook.get("scope") == "managed" for hook in hooks):
+                owns_data = any(p == project_path or p.startswith(project_path.rstrip("/\\") + os.sep)
+                                for p in projects_dict if isinstance(p, str))
+                if all(hook.get("scope") == "managed" for hook in hooks) and not owns_data:
                     del hooks_by_project[project_path]
                     continue  # managed policy alone is not this user's data; a row here would be a phantom install
                 projects_dict[project_path] = {"path": project_path, "rules": [], "skills": [], "mcpServers": []}

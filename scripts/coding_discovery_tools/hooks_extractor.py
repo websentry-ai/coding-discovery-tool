@@ -6,85 +6,122 @@ returns one entry per hook command, keyed by the project path the backend
 groups it under: user and managed hooks go under each user's home (so the
 per-user filter keeps them), project hooks under the project root.
 
-When a hook runs a local script, its first 50KB is sent too, so the
-backend can rate what the hook actually does, not only its command line.
+When a hook runs a local script, its first 50KB is sent too, so the backend can
+rate what the hook actually does, not only its command line. Configs and scripts
+are read through the same contained reads as rules (no symlink, hard link or
+foreign-owner escapes), and only the program the hook runs is read, never a file
+it merely names as an argument.
 
 Unbound's own governance hooks are skipped: they are ours, not a risk to rate.
+Only hooks that run Unbound's script from its install location (or the
+unbound-hook binary) count as ours; the same file name anywhere else is rated.
 """
 
 import json
 import logging
+import os
 import platform
 import shlex
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+try:
+    from .project_dir_index import dispatch_matches
+    from .rule_read_helpers import read_rule_file_contained
+except ImportError:  # pragma: no cover - direct-script execution fallback
+    from project_dir_index import dispatch_matches
+    from rule_read_helpers import read_rule_file_contained
 
 logger = logging.getLogger(__name__)
 
-MAX_SCRIPT_SIZE = 50 * 1024  # same cap as rule/skill content
+MAX_SCRIPT_SIZE = 50 * 1024  # same cap as rule/skill content (read_rule_file_contained truncates here)
 
 _MAC_SUPPORT = Path("/Library/Application Support")
+_WIN_PROGRAM_FILES = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+_WIN_PROGRAM_DATA = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
 
-# tool name (lowercased) -> (user-scope files, project-scope files, managed files).
-# Paths in the first two are relative to the user's home / the project root.
-_HOOK_FILES: Dict[str, Tuple[List[str], List[str], Dict[str, List[str]]]] = {
+# tool -> (user-scope files, project-scope files, managed files per OS).
+# User and project patterns are relative to the user's home / the project root.
+_HOOK_FILES: Dict[str, Tuple[List[str], List[str], Dict[str, List[Path]]]] = {
     "claude code": (
         [".claude/settings.json"],
         [".claude/settings.json", ".claude/settings.local.json"],
-        {"Darwin": [str(_MAC_SUPPORT / "ClaudeCode/managed-settings.json"),
-                    str(_MAC_SUPPORT / "ClaudeCode/managed-settings.d/*.json")],
-         "Linux": ["/etc/claude-code/managed-settings.json", "/etc/claude-code/managed-settings.d/*.json"]},
+        {"Darwin": [_MAC_SUPPORT / "ClaudeCode/managed-settings.json", _MAC_SUPPORT / "ClaudeCode/managed-settings.d/*.json"],
+         "Linux": [Path("/etc/claude-code/managed-settings.json"), Path("/etc/claude-code/managed-settings.d/*.json")],
+         "Windows": [_WIN_PROGRAM_FILES / "ClaudeCode/managed-settings.json",
+                     _WIN_PROGRAM_FILES / "ClaudeCode/managed-settings.d/*.json"]},
     ),
     "cursor": (
         [".cursor/hooks.json"],
         [".cursor/hooks.json"],
-        {"Darwin": [str(_MAC_SUPPORT / "Cursor/hooks.json")], "Linux": ["/etc/cursor/hooks.json"]},
+        {"Darwin": [_MAC_SUPPORT / "Cursor/hooks.json"], "Linux": [Path("/etc/cursor/hooks.json")],
+         "Windows": [_WIN_PROGRAM_DATA / "Cursor/hooks.json"]},
     ),
     "codex": (
         [".codex/hooks.json"],
         [".codex/hooks.json"],
-        {"Darwin": [str(_MAC_SUPPORT / "Codex/hooks.json")], "Linux": ["/etc/codex/hooks.json"]},
+        {"Darwin": [_MAC_SUPPORT / "Codex/hooks.json"], "Linux": [Path("/etc/codex/hooks.json")],
+         "Windows": [_WIN_PROGRAM_FILES / "Codex/hooks.json"]},
     ),
     "gemini cli": (
         [".gemini/settings.json"],
         [".gemini/settings.json"],
-        {"Darwin": [str(_MAC_SUPPORT / "GeminiCli/settings.json")], "Linux": ["/etc/gemini-cli/settings.json"]},
+        {"Darwin": [_MAC_SUPPORT / "GeminiCli/settings.json"], "Linux": [Path("/etc/gemini-cli/settings.json")],
+         "Windows": [_WIN_PROGRAM_DATA / "gemini-cli/settings.json"]},
     ),
-    "github copilot cli": ([".copilot/hooks/*.json"], [".github/hooks/*.json"], {}),
-    "auggie cli": (
+    "github copilot": ([".copilot/hooks/*.json"], [".github/hooks/*.json"], {}),
+    "augment": (
         [".augment/settings.json"],
         [],
-        {"Darwin": ["/etc/augment/settings.json"], "Linux": ["/etc/augment/settings.json"]},
+        {"Darwin": [Path("/etc/augment/settings.json")], "Linux": [Path("/etc/augment/settings.json")],
+         "Windows": [_WIN_PROGRAM_DATA / "Augment/settings.json"]},
     ),
 }
 
+# Programs that run a script named in their arguments; any other program is the hook itself.
+_INTERPRETERS = {"bash", "sh", "zsh", "dash", "fish", "python", "python3", "node", "deno", "bun",
+                 "ruby", "perl", "pwsh", "powershell", "cmd"}
+_UNBOUND_HOOK_BINARY = Path("/opt/unbound/current/unbound-hook/unbound-hook")
 
-def hook_files_for(tool_name: str) -> Optional[Tuple[List[str], List[str], List[str]]]:
-    """(user, project, managed) hook file patterns for this tool on this OS, or None."""
+
+def _spec_key(tool_name: str) -> Optional[str]:
+    """The _HOOK_FILES key for a tool row, or None when that product reads no hook files."""
     name = tool_name.lower()
-    if name.startswith("augment ("):
-        name = "auggie cli"
-    if name.startswith("github copilot"):
-        name = "github copilot cli"
-    spec = _HOOK_FILES.get(name)
-    if spec is None:
+    if name.startswith("augment (") or name == "auggie cli":
+        return "augment"
+    # Copilot's hooks dir is read by the CLI and by Copilot in VS Code; other Copilot surfaces don't run it.
+    if name.startswith("github copilot") and ("cli" in name or "vs code" in name):
+        return "github copilot"
+    return name if name in _HOOK_FILES else None
+
+
+def hook_files_for(tool_name: str) -> Optional[Tuple[List[str], List[str], List[Path]]]:
+    """(user, project, managed) hook file patterns for this tool on this OS, or None."""
+    key = _spec_key(tool_name)
+    if key is None:
         return None
-    user, project, managed = spec
+    user, project, managed = _HOOK_FILES[key]
     return user, project, managed.get(platform.system(), [])
 
 
-def _expand(base: Path, pattern: str) -> List[Path]:
-    path = base / pattern
+def _expand(path: Path) -> List[Path]:
+    """The files a (possibly `*.json`) pattern names; existence only, contents are read contained."""
     if "*" in path.name:
         return sorted(path.parent.glob(path.name)) if path.parent.is_dir() else []
     return [path] if path.is_file() else []
 
 
-def _load_hooks(path: Path) -> Dict:
+def _read_contained(path: Path, root: Path, follow_symlinks: bool) -> Optional[str]:
+    read = read_rule_file_contained(path, root, allow_symlink=follow_symlinks)
+    return read[0] if read else None
+
+
+def _load_hooks(path: Path, root: Path, follow_symlinks: bool) -> Dict:
+    text = _read_contained(path, root, follow_symlinks)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        logger.debug(f"  hooks: could not read {path}: {e}")
+        data = json.loads(text) if text else None
+    except ValueError as e:
+        logger.debug(f"  hooks: could not parse {path}: {e}")
         return {}
     hooks = data.get("hooks") if isinstance(data, dict) else None
     return hooks if isinstance(hooks, dict) else {}
@@ -115,64 +152,97 @@ def _command_of(hook: Dict) -> Tuple[str, str]:
     return hook_type, ""
 
 
-def _script_of(command: str, config_dir: Path, project_root: Optional[Path], home: Path) -> Tuple[str, str]:
-    """(path, body) of the local script the command runs, when one exists and is readable text."""
+def _tokens(command: str) -> List[str]:
+    """Shell words; Windows paths keep their backslashes."""
+    posix = platform.system() != "Windows"
     try:
-        tokens = shlex.split(command)
+        words = shlex.split(command, posix=posix)
     except ValueError:
-        return "", ""
-    env = {"HOME": str(home), "CLAUDE_PROJECT_DIR": str(project_root or config_dir.parent)}
-    for token in tokens[:3]:
-        expanded = str(home) + token[1:] if token.startswith("~/") else token
-        for var, value in env.items():
-            expanded = expanded.replace(f"${var}", value).replace(f"${{{var}}}", value)
-        candidate = Path(expanded)
-        if not candidate.is_absolute():
-            candidate = config_dir / candidate
-        try:
-            if not candidate.is_file():
-                continue
-            with open(candidate, "rb") as f:
-                head = f.read(MAX_SCRIPT_SIZE)  # longer scripts are truncated, like rule/skill content
-            if b"\x00" in head:
-                continue  # a compiled binary, not a script
-            return str(candidate), head.decode("utf-8", errors="ignore")
-        except OSError:
-            continue
-    return "", ""
+        words = command.split()
+    return words if posix else [w.strip('"\'') for w in words]
 
 
-def _is_unbound_hook(command: str, script_path: str) -> bool:
-    """Unbound's installed hook: a hooks/unbound.py|.sh script (as the installers match it) or the unbound-hook binary."""
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
-    if len(tokens) >= 2 and Path(tokens[0]).name == "unbound-hook" and tokens[1] == "hook":
+def _program_path(command: str, config_dir: Path, project_root: Optional[Path], home: Path) -> Optional[Path]:
+    """The file the hook runs: its first word, or the script an interpreter is given. Never an argument."""
+    words = _tokens(command)
+    if not words:
+        return None
+    program = words[0]
+    if Path(program).name.lower().removesuffix(".exe") in _INTERPRETERS:
+        args = [w for w in words[1:] if not w.startswith("-")]
+        if not args:
+            return None
+        program = args[0]
+    if program.startswith("~/") or program.startswith("~\\"):
+        program = str(home) + program[1:]
+    for var, value in (("HOME", str(home)), ("CLAUDE_PROJECT_DIR", str(project_root or config_dir.parent))):
+        program = program.replace(f"${{{var}}}", value).replace(f"${var}", value)
+    path = Path(program)
+    if path.is_absolute():
+        return path
+    # Agents run project hooks from the project root; user-level Cursor/Copilot paths are relative to the config dir.
+    candidates = ([project_root / path] if project_root is not None else []) + [config_dir / path]
+    return next((c for c in candidates if c.is_file()), candidates[0])
+
+
+def _is_unbound_hook(command: str, program: Optional[Path], unbound_scripts: Set[Path]) -> bool:
+    """Unbound's hook as its installers write it: the unbound-hook binary, or its script at an install location."""
+    words = _tokens(command)
+    if len(words) >= 2 and Path(words[0]) == _UNBOUND_HOOK_BINARY and words[1] == "hook":
         return True
-    for candidate in [script_path] + tokens[:3]:
-        path = Path(candidate) if candidate else None
-        if path and path.name in ("unbound.py", "unbound.sh") and path.parent.name == "hooks":
-            return True
-    return False
+    return program is not None and Path(os.path.normpath(str(program))) in unbound_scripts
 
 
-def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Path]) -> List[Dict]:
+def _unbound_scripts(home: Path, project_root: Optional[Path], managed_dirs: List[Path]) -> Set[Path]:
+    """Where Unbound's installers put the hook script for this home, project and the managed config dirs."""
+    scripts = {home / tool_dir / "hooks" / name for tool_dir in (".claude", ".cursor", ".codex", ".copilot", ".augment")
+               for name in ("unbound.py", "unbound.sh")}
+    scripts |= {d / "hooks" / "unbound.py" for d in managed_dirs}
+    if project_root is not None:
+        scripts.add(project_root / ".github" / "hooks" / "unbound.sh")
+    return {Path(os.path.normpath(str(p))) for p in scripts}
+
+
+def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Path], root: Path,
+                   follow_symlinks: bool, unbound_scripts: Set[Path]) -> List[Dict]:
+    """Hooks in one config, read contained under ``root``; a script outside ``root`` is not read."""
     found = []
-    for event, matcher, hook in _iter_commands(_load_hooks(path)):
+    for event, matcher, hook in _iter_commands(_load_hooks(path, root, follow_symlinks)):
         hook_type, command = _command_of(hook)
         if not command:
             continue
+        program = _program_path(command, path.parent, project_root, home) if hook_type == "command" else None
+        if _is_unbound_hook(command, program, unbound_scripts):
+            continue
         item = {"event": event, "matcher": matcher, "type": hook_type, "command": command,
                 "file_path": str(path), "scope": scope}
-        script_path, script = _script_of(command, path.parent, project_root, home)
-        if _is_unbound_hook(command, script_path):
-            continue
-        if script:
-            item["script_path"] = script_path
+        script = _read_contained(program, root, follow_symlinks) if program is not None and program.is_file() else None
+        if script and "\x00" not in script:
+            item["script_path"] = str(program)
             item["script_content"] = script
         found.append(item)
     return found
+
+
+def _project_roots_with_hook_dirs(home: Path, dir_names: Set[str]) -> Set[str]:
+    """Repos under ``home`` holding a tool's hook dir, via the scan's shared directory index."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            from .macos_extraction_helpers import _MACOS_PROJECT_SKIP_ID as skip_id, _macos_project_skip as skip
+        elif system == "Linux":
+            from .linux_extraction_helpers import _LINUX_PROJECT_SKIP_ID as skip_id, _linux_project_skip as skip
+        elif system == "Windows":
+            from .windows_extraction_helpers import _WINDOWS_PROJECT_SKIP_ID as skip_id, _windows_project_skip as skip
+        else:
+            return set()
+    except ImportError:  # pragma: no cover - direct-script execution
+        return set()
+    roots: Set[str] = set()
+    dispatch_matches(home, home, skip, skip_id, lambda name: name in dir_names,
+                     lambda found: roots.add(str(found.parent)))
+    roots.discard(str(home))
+    return roots
 
 
 def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterable[str]) -> Dict[str, List[Dict]]:
@@ -180,28 +250,35 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
     files = hook_files_for(tool_name)
     if files is None:
         return {}
-    user_files, project_files, managed_files = files
+    user_files, project_files, managed_patterns = files
     by_project: Dict[str, List[Dict]] = {}
     try:
-        managed = []
-        for pattern in managed_files:
-            for path in _expand(Path("/"), pattern.lstrip("/")):
-                managed.append(path)
+        managed_files = [p for pattern in managed_patterns for p in _expand(pattern)]
+        managed_dirs = sorted({p.parent for p in managed_patterns})
+        project_dir_names = {pattern.split("/")[0] for pattern in project_files}
+        projects = set(project_paths)
         for home in user_homes:
+            unbound = _unbound_scripts(home, None, managed_dirs)
             for pattern in user_files:
-                for path in _expand(home, pattern):
-                    by_project.setdefault(str(home), []).extend(_hooks_in_file(path, "user", home, None))
-            for path in managed:
-                by_project.setdefault(str(home), []).extend(_hooks_in_file(path, "managed", home, None))
-        for project in set(project_paths):
+                for path in _expand(home / pattern):
+                    by_project.setdefault(str(home), []).extend(
+                        _hooks_in_file(path, "user", home, None, home, True, unbound))
+            for path in managed_files:
+                by_project.setdefault(str(home), []).extend(
+                    _hooks_in_file(path, "managed", home, None, path.parent, False, unbound))
+            if project_dir_names:
+                projects |= _project_roots_with_hook_dirs(home, project_dir_names)
+        for project in projects:
             root = Path(project)
-            home = next((h for h in user_homes if root == h or h in root.parents), Path.home())
-            if root == home:
-                continue  # a home dir's .claude/settings.json is the user-scope file read above
+            home = next((h for h in user_homes if root == h or h in root.parents), None)
+            if home is None or root == home:
+                continue  # outside every scanned home, or the home itself (its user-scope file is read above)
+            unbound = _unbound_scripts(home, root, managed_dirs)
             for pattern in project_files:
-                for path in _expand(root, pattern):
+                for path in _expand(root / pattern):
                     scope = "local" if path.name == "settings.local.json" else "project"
-                    by_project.setdefault(project, []).extend(_hooks_in_file(path, scope, home, root))
+                    by_project.setdefault(project, []).extend(
+                        _hooks_in_file(path, scope, home, root, root, False, unbound))
     except Exception as e:
         logger.warning(f"  hooks: extraction failed for {tool_name}: {e}")
     return {path: hooks for path, hooks in by_project.items() if hooks}

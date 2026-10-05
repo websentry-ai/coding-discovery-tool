@@ -128,6 +128,8 @@ def _spec_key(tool_name: str) -> Optional[str]:
     # Copilot's hooks dir is read by the CLI and by Copilot in VS Code; other Copilot surfaces don't run it.
     if name.startswith("github copilot") and ("cli" in name or "vs code" in name):
         return "github copilot"
+    if name == "cursor cli":
+        return "cursor"  # cursor-agent reads the same .cursor/hooks.json as the IDE
     return name if name in _HOOK_FILES else None
 
 
@@ -228,8 +230,6 @@ def _script_argument(args: List[str], family: str) -> Optional[int]:
 
 def _quote_of(command: str, index: int, count: int) -> str:
     """The quote that opens shell word ``index``: "'", '"' or ''. Unknown counts as single-quoted (no expansion)."""
-    if platform.system() == "Windows":
-        return ""
     try:
         raw = shlex.split(command, posix=False)
     except ValueError:
@@ -342,12 +342,13 @@ def _project_roots_with_hook_dirs(home: Path, dir_names: Set[str]) -> Set[str]:
     return roots
 
 
-def _user_config_path(home: Path, pattern: str) -> Path:
-    """A user-scope pattern under ``home``; Copilot's ~/.copilot moves to COPILOT_HOME for the running user."""
+def _user_config_path(home: Path, pattern: str) -> Tuple[Path, Path]:
+    """(path, containment root) of a user-scope pattern; Copilot's ~/.copilot moves to COPILOT_HOME for the running user."""
     override = (os.environ.get("COPILOT_HOME") or "").strip()
     if pattern.startswith(".copilot/") and override and home == Path.home():
-        return Path(os.path.expanduser(os.path.expandvars(override))) / pattern[len(".copilot/"):]
-    return home / pattern
+        config_dir = Path(os.path.expanduser(os.path.expandvars(override)))
+        return config_dir / pattern[len(".copilot/"):], config_dir
+    return home / pattern, home
 
 
 def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterable[str]) -> Dict[str, List[Dict]]:
@@ -365,9 +366,10 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
         for home in user_homes:
             unbound = _unbound_scripts(home, None, managed_dirs)
             for pattern in user_files:
-                for path in _expand(_user_config_path(home, pattern)):
+                pattern_path, root = _user_config_path(home, pattern)
+                for path in _expand(pattern_path):
                     by_project.setdefault(str(home), []).extend(
-                        _hooks_in_file(path, "user", home, None, home, True, unbound))
+                        _hooks_in_file(path, "user", home, None, root, True, unbound))
             for path in managed_files:
                 by_project.setdefault(str(home), []).extend(
                     _hooks_in_file(path, "managed", home, None, path.parent, False, unbound))

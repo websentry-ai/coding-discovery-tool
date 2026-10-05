@@ -19,11 +19,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from typing import Dict, Optional, Tuple
 
-from .utils import normalize_url
+from .utils import normalize_url, report_to_sentry
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +163,8 @@ def try_s3_upload(
         _report_step_failure("upload_url_request", status, body, err, ctx)
         return False, True
     if status != 200:
-        # 503 means S3 not configured on the backend; quietly fall back.
-        # Anything else is logged.
-        if status != 503:
-            _report_step_failure("upload_url_request", status, body, None, ctx)
+        # 503 (S3 not configured) included: where it is, a 503 explains the fallback.
+        _report_step_failure("upload_url_request", status, body, None, ctx)
         return False, True
 
     try:
@@ -173,14 +172,14 @@ def try_s3_upload(
         upload_url = url_response["upload_url"]
         object_key = url_response["object_key"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.warning(f"S3 step 1: malformed upload-url response: {e}; body={body[:200] if body else ''}")
+        _report_step_failure("upload_url_malformed", status, body, str(e), ctx)
         return False, True
 
     # ─── Step 2: PUT to S3 ──────────────────────────────────────────────
     try:
         s3_payload_json = json.dumps(payload)
     except (TypeError, ValueError) as e:
-        logger.warning(f"S3 step 2: failed to serialize payload: {e}")
+        _report_step_failure("payload_serialize", None, None, str(e), ctx)
         return False, True
 
     ok, status, body, err = _curl_put_to_s3(upload_url, s3_payload_json)
@@ -320,8 +319,34 @@ def _parse_curl(result):
     return True, int(status_str), body, None
 
 
+# A presigned URL is a bearer credential; its signature lives in the query string.
+_SIGNED_URL_RE = re.compile(r'(https?://[^\s"\'<>]+?)\?[^\s"\'<>]*')
+
+
+def _redact_signed_urls(text) -> str:
+    return _SIGNED_URL_RE.sub(r"\1?<redacted>", str(text or ""))
+
+
 def _report_step_failure(phase, status, body, err, ctx):
-    """Log-only. Fallback to the legacy endpoint handles recovery; Sentry would just be noise."""
+    """Log and report; a silent fallback looks identical to S3 never being tried."""
+    safe_body = _redact_signed_urls(body)
+    safe_err = _redact_signed_urls(err)
     logger.warning(
-        f"S3 upload step '{phase}' failed: status={status}, err={err}, body={(body or '')[:200]}"
+        f"S3 upload step '{phase}' failed: status={status}, err={safe_err}, body={safe_body[:200]}"
     )
+    detail = f"S3 {phase} failed: status={status}"
+    if err:
+        detail += f", err={safe_err}"
+    try:
+        raise RuntimeError(detail)
+    except RuntimeError as exc:
+        report_to_sentry(
+            exc,
+            {
+                **ctx,
+                "phase": f"s3_{phase}",
+                "http_code": status,
+                "response_body": safe_body[:1024],
+            },
+            level="warning",
+        )

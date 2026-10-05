@@ -116,7 +116,7 @@ _SECRET_PATTERNS = [
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
     re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], ]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # curl -u / --user user:pass
-    re.compile(r"((?:^|\s)(?:-u|--user)(?:=|\s+)['\"]?)[^\s'\":]+:[^\s'\"]+"),
+    re.compile(r"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:=|\s*))" + r"""(?:'[^']*'|"[^"]*"|[^\s'":]+:[^\s'"]+)"""),
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+:[^/\s@'\"]+(?=@)"),
     re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth|password)=)[^&\s'\"]+"),
@@ -340,7 +340,10 @@ def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Pa
             continue
         item = {"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
                 "file_path": str(path), "scope": scope}
-        script = _read_contained(program, root, follow_symlinks) if program is not None and program.is_file() else None
+        try:
+            script = _read_contained(program, root, follow_symlinks) if program is not None and program.is_file() else None
+        except OSError:
+            script = None  # an unreadable script costs only its own content, not the file's other hooks
         if script and "\x00" not in script:
             item["script_path"] = str(program)
             item["script_content"] = redact_secrets(script)

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector, _has_user_owned_data
 from scripts.coding_discovery_tools.hooks_extractor import (MAX_SCRIPT_SIZE, _command_of, _program_path, extract_hooks,
-                                                             hook_files_for, redact_secrets)
+                                                             hook_files_for, redact_secrets, root_owned)
 from scripts.coding_discovery_tools.project_dir_index import clear_cache
 
 # The per-OS project skip rule refuses system temp dirs; tests run the shared index over one.
@@ -486,15 +486,16 @@ class TestExtractHooks(unittest.TestCase):
             {"type": "command", "command": "python3 .claude/hooks/unbound.py"}]}]}})
 
         binary = Path("/opt/unbound/current/unbound-hook/unbound-hook")
-        with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", side_effect=lambda p: Path(p) == binary):
-            cursor = _flat(extract_hooks("Cursor", [self.home], []))
-            repo = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))
-        with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", return_value=False):
-            planted = _flat(extract_hooks("Cursor", [self.home], []))  # a user-made file at the binary's path
+        real = root_owned  # this machine's own managed configs keep their real ownership
+        with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", side_effect=lambda p: Path(p) == binary or real(p)):
+            cursor = sorted(h["command"] for h in _flat(extract_hooks("Cursor", [self.home], [])))
+            repo = [h["command"] for h in _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))]
+        with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", side_effect=lambda p: Path(p) != binary and real(p)):
+            planted = [h["command"] for h in _flat(extract_hooks("Cursor", [self.home], []))]  # a user-made file there
 
-        self.assertEqual(len(planted), 3)
-        self.assertEqual(sorted(h["command"] for h in cursor), ["./hooks/unbound.py", "plannotator"])  # user-writable copy
-        self.assertEqual([h["command"] for h in repo], ["python3 .claude/hooks/unbound.py"])
+        self.assertIn("/opt/unbound/current/unbound-hook/unbound-hook hook cursor stop", planted)
+        self.assertEqual(cursor, ["./hooks/unbound.py", "plannotator"])  # user-writable copy
+        self.assertEqual(repo, ["python3 .claude/hooks/unbound.py"])
 
     @unittest.skipIf(platform.system() == "Windows", "root ownership is POSIX-only")
     def test_only_a_plain_run_of_the_root_owned_managed_unbound_script_is_skipped(self):

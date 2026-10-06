@@ -109,7 +109,7 @@ try:
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
-    from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings
+    from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .sweep_connectors import run_sweep
@@ -190,7 +190,7 @@ except ImportError:
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
-    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings
+    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
@@ -355,17 +355,6 @@ def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
 _UNBOUND_INSTALL_PATH = re.compile(r"[\\/]\.(claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(py|sh)(?=['\"\s]|$)")
 
 
-def _root_owned(path: Path) -> bool:
-    """Owned by root and not group/other-writable: a user cannot have written it. Never true on Windows."""
-    if platform.system() == "Windows":
-        return False
-    try:
-        st = os.stat(path)
-    except OSError:
-        return False
-    return st.st_uid == 0 and not st.st_mode & 0o022
-
-
 def _is_policy_hook(hook: Dict, user_home) -> bool:
     """Org policy, not the user's own data: a managed hook, or Unbound's root-owned install script (still reported).
     A user-written file at that path is the user's own and counts as owned data."""
@@ -382,7 +371,7 @@ def _is_policy_hook(hook: Dict, user_home) -> bool:
     match = re.search(_UNBOUND_INSTALL_PATH.pattern + "$", target)
     if not match:
         return False
-    return _root_owned(Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}")
+    return root_owned(Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}")
 
 
 def _has_owned_projects(tool_filtered: Dict, user_home=None) -> bool:

@@ -181,6 +181,7 @@ def redact_secrets(text: str) -> str:
         text = pattern.sub(lambda m: m.group(1) + _REDACTED, text)
     return _RANDOM_TOKEN.sub(lambda m: _REDACTED if _looks_random(m.group(0)) else m.group(0), text)
 _UNBOUND_HOOK_BINARY = Path("/opt/unbound/current/unbound-hook/unbound-hook")
+_TRUSTED_BIN_DIRS = {"/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"}
 
 
 def _spec_key(tool_name: str) -> Optional[str]:
@@ -315,6 +316,11 @@ def _quote_of(command: str, index: int, count: int) -> str:
     return raw[index][0] if raw[index][:1] in ("'", '"') else ""
 
 
+def _interpreter_family(word: str) -> Optional[str]:
+    """The option family of an interpreter word such as python3.12 or /usr/bin/bash; None for any other program."""
+    return _INTERPRETERS.get(re.sub(r"(?<=[a-z])[\d.]+$", "", Path(word).name.lower().removesuffix(".exe")))
+
+
 def _program_path(command: str, config_dir: Optional[Path], project_root: Optional[Path], home: Path) -> Optional[Path]:
     """The file the hook runs: its first word, or the script an interpreter is given. Never an argument."""
     words = _tokens(command)
@@ -329,7 +335,7 @@ def _program_path(command: str, config_dir: Optional[Path], project_root: Option
             return None  # bare env, or env options that take values (-u NAME, -S ...); don't guess
     while index < len(words) - 1 and _ENV_ASSIGNMENT.match(words[index]):
         index += 1  # `NAME=value cmd` runs cmd
-    family = _INTERPRETERS.get(re.sub(r"(?<=[a-z])[\d.]+$", "", Path(words[index]).name.lower().removesuffix(".exe")))
+    family = _interpreter_family(words[index])
     if family is not None:
         script = _script_argument(words[index + 1:], family)
         if script is None:
@@ -362,7 +368,27 @@ def _is_unbound_hook(command: str, program: Optional[Path], unbound_scripts: Set
     words = _tokens(command)
     if len(words) >= 2 and Path(words[0]) == _UNBOUND_HOOK_BINARY and words[1] == "hook":
         return True
-    return program is not None and Path(os.path.normpath(str(program))) in unbound_scripts
+    if not words or program is None or Path(os.path.normpath(str(program))) not in unbound_scripts:
+        return False
+    # Only `[interpreter] script`: no env prefix, an interpreter from PATH or a system bin dir, a root-owned script.
+    first = words[0]
+    if Path(first).name.lower() == "env" or _ENV_ASSIGNMENT.match(first):
+        return False
+    if _interpreter_family(first) is not None and ("/" in first or "\\" in first) and \
+            os.path.dirname(first) not in _TRUSTED_BIN_DIRS:
+        return False
+    return root_owned(program)
+
+
+def root_owned(path: Path) -> bool:
+    """Owned by root and not group/other-writable: a user cannot have written it. Never true on Windows."""
+    if platform.system() == "Windows":
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_uid == 0 and not st.st_mode & 0o022
 
 
 def _unbound_scripts(home: Path, project_root: Optional[Path], managed_dirs: List[Path]) -> Set[Path]:

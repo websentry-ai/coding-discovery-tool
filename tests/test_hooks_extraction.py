@@ -127,6 +127,8 @@ class TestExtractHooks(unittest.TestCase):
         self.assertEqual(cursor["script_content"], "echo cursor")
         self.assertIsNone(_program_path("cmd /c npm test", self.home, None, self.home))
         self.assertIsNone(_program_path("bun test", self.home, None, self.home))
+        self.assertEqual(_program_path("/usr/bin/env -i DEBUG=1 python3 ./hooks/a.py", self.home, None, self.home),
+                         self.home / "hooks/a.py")
         self.assertEqual(_program_path("bash ./hooks/a.sh>/tmp/log", self.home, None, self.home), self.home / "hooks/a.sh")
         self.assertEqual(_program_path('bash "./hooks/a;b.sh"', self.home, None, self.home), self.home / "hooks/a;b.sh")
         self.assertEqual(_program_path("deno run --allow-read ./hooks/check.ts", self.home, None, self.home),

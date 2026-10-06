@@ -288,6 +288,12 @@ def _program_path(command: str, config_dir: Optional[Path], project_root: Option
     if not words:
         return None
     index = 0
+    if Path(words[0]).name.lower() == "env":
+        index = 1  # `/usr/bin/env [-i] [NAME=value] cmd` runs cmd
+        while index < len(words) - 1 and words[index] in ("-i", "--ignore-environment", "-"):
+            index += 1
+        if index < len(words) and words[index].startswith("-"):
+            return None  # other env options (-u NAME, -S ...) take values; don't guess
     while index < len(words) - 1 and _ENV_ASSIGNMENT.match(words[index]):
         index += 1  # `NAME=value cmd` runs cmd
     family = _INTERPRETERS.get(re.sub(r"(?<=[a-z])[\d.]+$", "", Path(words[index]).name.lower().removesuffix(".exe")))

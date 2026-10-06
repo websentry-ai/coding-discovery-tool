@@ -242,13 +242,36 @@ class TestCoworkSessionEvidence(unittest.TestCase):
         claude.symlink_to(other, target_is_directory=True)
         self.assertIsNone(self.detect())
 
+    def _unlistable(self, path):
+        os.chmod(path, 0o300)
+        self.addCleanup(os.chmod, path, 0o700)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
     def test_unlistable_sessions_in_our_own_home_raise_so_nothing_is_pruned(self):
         self._session()
-        os.chmod(self.sessions, 0o300)
-        self.addCleanup(os.chmod, self.sessions, 0o700)
+        self._unlistable(self.sessions)
+        self._assert_unknown_raises()
+
+    def _assert_unknown_raises(self):
         with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
             with self.assertRaises(PermissionError):
                 self.detect()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    def test_unlistable_account_raises_so_nothing_is_pruned(self):
+        self._unlistable(self._session().parent.parent)
+        self._assert_unknown_raises()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    def test_unlistable_org_raises_so_nothing_is_pruned(self):
+        self._unlistable(self._session().parent)
+        self._assert_unknown_raises()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    def test_a_readable_recent_session_wins_over_an_unreadable_sibling(self):
+        self._unlistable(self._session(account="acct-locked").parent)
+        self._session(account="acct-open")
+        self.assertEqual(self.detect()["version"], "unknown")
 
     def test_a_found_bundle_still_wins(self):
         self._session()

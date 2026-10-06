@@ -557,8 +557,9 @@ def claude_code_sessions_recent(claude_dir: Path,
 
 
 def cowork_sessions_recent(user_home: Path, sessions_dir: Path,
-                           max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> bool:
-    """True when Claude Desktop wrote a Cowork session under ``sessions_dir`` recently.
+                           max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> Optional[bool]:
+    """Whether Claude Desktop wrote a Cowork session under ``sessions_dir`` recently;
+    None when a folder or file on the way could not be read, which is not absence.
 
     ``<account>/<org>/local_<id>.json`` is written by the app for each session, so a
     fresh one proves Cowork ran even when its bundle is somewhere we do not probe. The
@@ -571,11 +572,31 @@ def cowork_sessions_recent(user_home: Path, sessions_dir: Path,
     if sessions_dir is None:
         return False
     cutoff = time.time() - (max_age_days * 86400)
+    unknown = _listable_state(sessions_dir) == "unreadable"
     for account in _newest_dirs_first(sessions_dir):
+        if _listable_state(account) == "unreadable":
+            unknown = True
+            continue
         for org in _newest_dirs_first(account):
-            if _has_recent_file(org, "local_*.json", cutoff):
-                return True
-    return False
+            try:
+                with os.scandir(org) as entries:
+                    for entry in entries:
+                        if not (entry.name.startswith("local_") and entry.name.endswith(".json")):
+                            continue
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            unknown = True
+                            continue
+                        if stat.S_ISREG(st.st_mode) and st.st_mtime >= cutoff:
+                            return True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                unknown = True
+    return None if unknown else False
 
 
 def dir_state(path) -> str:

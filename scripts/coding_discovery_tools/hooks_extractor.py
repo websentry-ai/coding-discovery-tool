@@ -122,11 +122,13 @@ _HEADER_WORD = r"""(?:[^\s'"\\;|&<>()`]|\\(?!['"](?:[\s,;)}\]]|$))\S|['"]{2})+""
 _SHELL_WORD = r"""(?:""" + _QUOTED + r"""|[^\s'"\\;|&<>()`]|\\[^\n])+"""
 # Header names whose whole value is the credential.
 _WHOLE_VALUE_HEADER = r"(?:(?:proxy-)?authorization|(?:set-)?cookie)"
+# A bare suffix joined to a header string's closing quote ("Basic "abc==) is still that header's value.
+_JOINED_SUFFIX = r"""(?:['"](?![\s,;:)}\]'"])""" + _SHELL_WORD + r""")?"""
 _SECRET_PATTERNS = [
     # Authorization and Cookie headers: the whole value, whatever the scheme (Bearer, ApiKey, Digest, a session).
     # In a string ({"Authorization": "x"} or -H "Authorization: x") the value runs to the end of that string.
-    re.compile(r"(?i)(\b" + _WHOLE_VALUE_HEADER + r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"])" + _HEADER_VALUE),
-    re.compile(r"(?i)(['\"]\s*" + _WHOLE_VALUE_HEADER + r"\s*[:=]\s*)" + _HEADER_VALUE),
+    re.compile(r"(?i)(\b" + _WHOLE_VALUE_HEADER + r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"])" + _HEADER_VALUE + _JOINED_SUFFIX),
+    re.compile(r"(?i)(['\"]\s*" + _WHOLE_VALUE_HEADER + r"\s*[:=]\s*)" + _HEADER_VALUE + _JOINED_SUFFIX),
     # Unquoted (-H Authorization:x), the value is one shell word, so `| sh` after it is kept.
     re.compile(r"(?i)(\b" + _WHOLE_VALUE_HEADER + r"\s*[:=]\s*(?!['\"]|\*\*\*REDACTED)(?:(?:bearer|basic|token|digest|apikey)\s+)?)" + _SHELL_WORD),
     # A bearer or basic credential wherever it appears, e.g. HDR="Bearer abc123".
@@ -260,11 +262,11 @@ def _iter_commands(hooks: Dict) -> Iterable[Tuple[str, str, Dict]]:
 
 
 def _command_of(hook: Dict) -> Tuple[str, str]:
-    """(type, command) of one hook; prompt-type hooks carry their prompt as the command."""
+    """(type, command) of one hook; prompt and agent hooks carry their prompt, http hooks their URL, as the command."""
     hook_type = hook.get("type") if isinstance(hook.get("type"), str) else "command"
     # Copilot entries can carry both shells; report the one this platform runs.
     shells = ("powershell", "bash") if platform.system() == "Windows" else ("bash", "powershell")
-    for key in ("command", *shells, "prompt"):
+    for key in ("command", *shells, "prompt", "url"):
         value = hook.get(key)
         if isinstance(value, str) and value.strip():
             return hook_type, value

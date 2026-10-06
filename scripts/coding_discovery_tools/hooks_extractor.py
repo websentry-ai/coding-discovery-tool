@@ -126,11 +126,11 @@ _IN_HEADER_STRING = (r"""(?:(?!\2)[^\\\n]|\\(?!\2(?:[\s,;)}\]]|$))[^\n])*"""
                      r"""(?:\2(?![\s,;:)}\]])""" + _SHELL_WORD + r"""|\2(?:\s*\+\s*""" + _QUOTED + r""")+)?""")
 _SECRET_PATTERNS = [
     # Credential headers (Authorization, Cookie, X-Api-Key ...): the whole value, whatever the scheme.
-    # In a string ({"Authorization": "x"} or -H 'Cookie: a="b"') the value runs to that string's own closing quote.
-    re.compile(r"(?i)(\b" + _SECRET_HEADER + r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?(['\"]))" + _IN_HEADER_STRING),
-    re.compile(r"(?i)((['\"])\s*" + _SECRET_HEADER + r"\s*[:=]\s*)" + _IN_HEADER_STRING),
+    # In a string ({"Authorization": "x"}, -H 'Cookie: a="b"', a JS `template`) the value runs to that string's own closing quote.
+    re.compile(r"(?i)(\b" + _SECRET_HEADER + r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?(['\"`]))" + _IN_HEADER_STRING),
+    re.compile(r"(?i)((['\"`])\s*" + _SECRET_HEADER + r"\s*[:=]\s*)" + _IN_HEADER_STRING),
     # Unquoted (-H Authorization:x), the value is one shell word, so `| sh` after it is kept.
-    re.compile(r"(?i)(\b" + _SECRET_HEADER + r"\s*[:=]\s*(?!['\"]|\*\*\*REDACTED)(?:(?:bearer|basic|token|digest|apikey)\s+)?)"
+    re.compile(r"(?i)(\b" + _SECRET_HEADER + r"\s*[:=]\s*(?!['\"`]|\*\*\*REDACTED)(?:(?:bearer|basic|token|digest|apikey)\s+)?)"
                + _SHELL_WORD),
     # A bearer or basic credential wherever it appears, e.g. HDR="Bearer abc123".
     re.compile(r"(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"),

@@ -317,6 +317,8 @@ class TestExtractHooks(unittest.TestCase):
                              ('curl -H "X-Api-Key: two words" https://x', "words"),
                              ("""curl -H 'Cookie: sid="quotedcookie"' https://x""", "quotedcookie"),
                              ('headers = {"Authorization": "Bearer " + "plusjoined"}', "plusjoined"),
+                             ("fetch(u, {headers: {'Authorization': `Bearer templatecred`}})", "templatecred"),
+                             ("fetch(u, {headers: {Authorization: `Bearer ${'baretemplate'}`}})", "baretemplate"),
                              ('curl -H "Authorization: Digest user=a, response=digeststr" https://x', "digeststr"),
                              ("GPG_PASSPHRASE=passphrasecred", "passphrasecred"), ('db_creds = "credscred"', "credscred"),
                              ('CONN_STR="Server=x;Password=connstrcred"', "connstrcred")):

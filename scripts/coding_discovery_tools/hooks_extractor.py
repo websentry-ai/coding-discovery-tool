@@ -291,7 +291,8 @@ def _quote_of(command: str, index: int, count: int) -> str:
     """The quote that opens shell word ``index``: "'", '"' or ''. Unknown: '"' without single quotes, else "'"."""
     if "\\$" in command or "\\~" in command:
         return "'"  # an escaped \$VAR or \~ is literal; shlex has already dropped the backslash
-    unknown = "'" if "'" in command else '"'  # with no single quotes anywhere, $VAR expands; ~ may be quoted
+    # Unknown word boundaries: no quotes at all means unquoted; only double quotes means $VAR still expands.
+    unknown = "'" if "'" in command else ('"' if '"' in command else "")
     try:
         lexer = shlex.shlex(command, posix=False, punctuation_chars=True)  # same word boundaries as _tokens
         lexer.whitespace_split = True

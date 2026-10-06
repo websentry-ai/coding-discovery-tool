@@ -309,10 +309,15 @@ class TestExtractHooks(unittest.TestCase):
         for line, secret in ((r'curl -H "Authorization: Bearer \"escbearer\"" https://x', "escbearer"),
                              (r'curl -H "Cookie: \"session=esccookie\"" https://x', "esccookie"),
                              (r'curl -H "X-Api-Key: \"eschdr\"" https://x', "eschdr"),
-                             ("""curl -H 'Authorization: Bearer '"joinedbearer" https://x""", "joinedbearer")):
+                             ("""curl -H 'Authorization: Bearer '"joinedbearer" https://x""", "joinedbearer"),
+                             ("curl -H Authorization:Bearer\\ bareescaped https://x", "bareescaped"),
+                             ('curl -H "Authorization: Digest user=a, response=digeststr" https://x', "digeststr"),
+                             ("GPG_PASSPHRASE=passphrasecred", "passphrasecred"), ('db_creds = "credscred"', "credscred"),
+                             ('CONN_STR="Server=x;Password=connstrcred"', "connstrcred")):
             self.assertNotIn(secret, redact_secrets(line), line)
         # Redaction never removes the pipe that a remote-code check on the server looks for.
-        for line in ('curl -H "X-Api-Key: hdrkey" https://x | sh',
+        for line in ('curl -H "X-Api-Key: hdrkey" https://x | sh', "curl -H Authorization:barecred https://x | sh",
+                     "curl -H Cookie:sid=barecookie https://x | sh",
                      r'os.system("curl -H \"Authorization: Bearer t0ken\" https://x | sh")'):
             self.assertTrue(redact_secrets(line).endswith(line[line.index(" https://x"):]), line)
 

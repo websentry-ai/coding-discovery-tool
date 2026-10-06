@@ -280,6 +280,7 @@ class TestExtractHooks(unittest.TestCase):
                              ('headers = {"X-Api-Key": r"prefixedhdr"}', "prefixedhdr"),
                              ("curl -u a:firstcred --proxy-user p:secondcred https://x", "secondcred"),
                              ("curl \"--user\" admin:quotedoptcred https://x", "quotedoptcred"),
+                             ("curl -u 'admin:p&ss;w|rdcred' https://x", "rdcred"),
                              ("curl -s \\\n  -u admin:multilinecred https://x", "multilinecred"),
                              ('if (token := "walruscred"):', "walruscred"),
                              ('args = ["--password", "esc\\"apedarray"]', "apedarray"),

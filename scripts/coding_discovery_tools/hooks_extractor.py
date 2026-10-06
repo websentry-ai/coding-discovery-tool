@@ -163,7 +163,8 @@ def _looks_random(token: str) -> bool:
 
 
 # curl/wget -u, --user, --proxy-user, -U: every occurrence within each curl or wget command (not --user-agent).
-_DOWNLOAD_COMMAND = re.compile(r"\b(?:curl|wget)\b(?:\\\r?\n|[^\n|;&])*")  # follows \ line continuations
+# One curl/wget command: quoted text (which may hold & | ;) and \ line continuations stay inside it.
+_DOWNLOAD_COMMAND = re.compile(r"""\b(?:curl|wget)\b(?:\\\r?\n|'[^']*'|"(?:[^"\\]|\\.)*"|[^\n|;&'"])*""")
 _USER_OPTION = re.compile(r"""(\s['"]?(?:--user|--proxy-user|-[uU])['"]?(?![\w-])(?:=|\s*))""" + _VALUE
                           + r"""|(\s['"]?-[uU])(?=[^\s'"=])""" + _VALUE)  # quoted option names; glued -uuser:pw
 

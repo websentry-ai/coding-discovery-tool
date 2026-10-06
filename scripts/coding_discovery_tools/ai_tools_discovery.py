@@ -353,11 +353,15 @@ def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
 
 # Unbound's onboarding writes its hook script here in every onboarded user's home.
 _UNBOUND_INSTALL_SCRIPT = re.compile(r"[\\/]\.(?:claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(?:py|sh)$")
+_UNBOUND_INSTALL_COMMAND = re.compile(r"[\\/]\.(?:claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(?:py|sh)(?=['\"\s]|$)")
 
 
 def _is_policy_hook(hook: Dict) -> bool:
     """Org policy, not the user's own data: a managed hook, or Unbound's hook at its install path (still reported)."""
-    return hook.get("scope") == "managed" or bool(_UNBOUND_INSTALL_SCRIPT.search(hook.get("script_path") or ""))
+    if hook.get("scope") == "managed" or _UNBOUND_INSTALL_SCRIPT.search(hook.get("script_path") or ""):
+        return True
+    # The script may not have been readable (no script_path); the command still names it.
+    return bool(_UNBOUND_INSTALL_COMMAND.search(hook.get("command") or ""))
 
 
 def _has_owned_projects(tool_filtered: Dict) -> bool:

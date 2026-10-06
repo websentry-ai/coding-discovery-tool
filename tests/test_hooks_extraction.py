@@ -279,6 +279,8 @@ class TestExtractHooks(unittest.TestCase):
                              ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ("curl --user-agent bot/1 -u admin:afteragent https://x", "afteragent"),
                              ('headers = {"X-Api-Key": r"prefixedhdr"}', "prefixedhdr"),
                              ("curl -u a:firstcred --proxy-user p:secondcred https://x", "secondcred"),
+                             ("curl \"--user\" admin:quotedoptcred https://x", "quotedoptcred"),
+                             ("curl -s \\\n  -u admin:multilinecred https://x", "multilinecred"),
                              ('if (token := "walruscred"):', "walruscred"),
                              ('args = ["--password", "esc\\"apedarray"]', "apedarray"),
                              ('HDR="Bearer standalonebearer1"', "standalonebearer1"), ("--data '{\"pw\":\"jsonpwcred\"}'", "jsonpwcred"),
@@ -411,6 +413,9 @@ class TestExtractHooks(unittest.TestCase):
             {"command": "python3 ~/.copilot/hooks/unbound.py", "scope": "user",
              "script_path": str(self.home / ".copilot/hooks/unbound.py")}]}]}
         self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", onboarded, self.home))  # Unbound's own hook only
+        unread = {"projects": [{"path": str(self.home), "hooks": [
+            {"command": "python3 ~/.copilot/hooks/unbound.py", "scope": "user"}]}]}  # script not readable
+        self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", unread, self.home))
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 

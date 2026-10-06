@@ -163,13 +163,15 @@ def _looks_random(token: str) -> bool:
 
 
 # curl/wget -u, --user, --proxy-user, -U: every occurrence within each curl or wget command (not --user-agent).
-_DOWNLOAD_COMMAND = re.compile(r"\b(?:curl|wget)\b[^\n|;&]*")
-_USER_OPTION = re.compile(r"((?:\s(?:--user|--proxy-user)(?![\w-])|\s-[uU])(?:=|\s*))" + _VALUE)
+_DOWNLOAD_COMMAND = re.compile(r"\b(?:curl|wget)\b(?:\\\r?\n|[^\n|;&])*")  # follows \ line continuations
+_USER_OPTION = re.compile(r"""(\s['"]?(?:--user|--proxy-user|-[uU])['"]?(?![\w-])(?:=|\s*))""" + _VALUE
+                          + r"""|(\s['"]?-[uU])(?=[^\s'"=])""" + _VALUE)  # quoted option names; glued -uuser:pw
 
 
 def redact_secrets(text: str) -> str:
     """Hook command or script with inline credentials replaced; the code around them is kept."""
-    text = _DOWNLOAD_COMMAND.sub(lambda c: _USER_OPTION.sub(lambda m: m.group(1) + _REDACTED, c.group(0)), text)
+    text = _DOWNLOAD_COMMAND.sub(
+        lambda c: _USER_OPTION.sub(lambda m: (m.group(1) or m.group(2)) + _REDACTED, c.group(0)), text)
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(lambda m: m.group(1) + _REDACTED, text)
     return _RANDOM_TOKEN.sub(lambda m: _REDACTED if _looks_random(m.group(0)) else m.group(0), text)

@@ -19,6 +19,7 @@ unbound-hook binary) count as ours; the same file name anywhere else is rated.
 
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -106,7 +107,7 @@ _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
 _KEY = (r"[A-Za-z0-9_-]{0,64}(?:token|api[-_]?key|apikey|access[-_]?key|secret|password|passwd|pwd|credential"
-        r"|private[-_]?key|auth(?![a-z])|dsn|[-_]key(?![a-z])|[-_]pass(?![a-z])|[-_]pwd)[A-Za-z0-9_-]{0,64}")  # not author or keyboard
+        r"|private[-_]?key|auth(?![a-z])|dsn|[-_]key(?![a-z])|[-_]pass(?![a-z])|[-_]pwd|pw(?![a-z]))[A-Za-z0-9_-]{0,64}")  # not author or keyboard
 _QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
            + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z))""")  # may span lines
 # The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index).
@@ -114,6 +115,8 @@ _VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}
 _SECRET_PATTERNS = [
     # Cookie and session headers carry the session itself; redact the whole value.
     re.compile(r"(?i)(\b(?:set-)?cookie['\"]?\s*[:=]\s*['\"]?)[^'\"\n]+"),
+    # A bearer or basic credential wherever it appears, e.g. HDR="Bearer abc123".
+    re.compile(r"(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"),
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth|session)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
                r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
@@ -126,7 +129,7 @@ _SECRET_PATTERNS = [
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
     re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # curl -u / --user user:pass
-    re.compile(r"(\b(?:curl|wget)\b[^\n|;&]*?\s(?:-u|--user|--proxy-user|-U)(?:=|\s*))" + _VALUE),  # the whole word
+    re.compile(r"(\b(?:curl|wget)\b[^\n|;&]*?(?:\s(?:--user|--proxy-user)(?![\w-])|\s-[uU])(?:=|\s*))" + _VALUE),  # the whole word; not --user-agent
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+(?::[^/\s@'\"]+)?(?=@)"),  # user:pass@ and key-only userinfo (Sentry DSNs)
     # mysql -pSECRET, sshpass -p SECRET
@@ -149,11 +152,23 @@ _SECRET_PATTERNS = [
 ]
 
 
+# Fallback for secrets under any name: a long random-looking token (letters and digits, high entropy).
+_RANDOM_TOKEN = re.compile(r"(?<![\w/.-])[A-Za-z0-9+/_-]{32,}={0,2}(?![\w/.-])")
+
+
+def _looks_random(token: str) -> bool:
+    if not (re.search(r"[A-Za-z]", token) and re.search(r"\d", token)):
+        return False
+    counts = {c: token.count(c) for c in set(token)}
+    entropy = -sum(n / len(token) * math.log2(n / len(token)) for n in counts.values())
+    return entropy >= 4.0
+
+
 def redact_secrets(text: str) -> str:
     """Hook command or script with inline credentials replaced; the code around them is kept."""
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(lambda m: m.group(1) + _REDACTED, text)
-    return text
+    return _RANDOM_TOKEN.sub(lambda m: _REDACTED if _looks_random(m.group(0)) else m.group(0), text)
 _UNBOUND_HOOK_BINARY = Path("/opt/unbound/current/unbound-hook/unbound-hook")
 
 

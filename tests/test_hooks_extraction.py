@@ -265,14 +265,18 @@ class TestExtractHooks(unittest.TestCase):
                    "os.environ['API_KEY'] = 'envcred'", 'password = ("paren cred")', 'api_key: str = "typedcred"', "export AWS_SECRET_ACCESS_KEY=awssecret", "ACCESS_KEY=accesscred",
                    "AUTH='authcred'", "ASIAABCDEFGHIJKLMNOP", "const api_key = `backtickcred`;", 'API_TOKEN="multi\nline-cred"', 'password = r"rawcred"', "PASSWORD=$'ansicred'", 'PASSWORD="cut-off-by-truncation',
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIcut-off-by-truncation"]
-        code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()"]
+        code = ["secret = os.environ['MY_SECRET']", "token = open('~/.aws/credentials').read()",
+                "git checkout 3f4a9c2b1e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a", "curl --user-agent bot/1.0 https://x",
+                "run_test_redaction_covers_common_hook_credentials_and_keeps_code"]
 
         for line in secrets:
             self.assertIn("***REDACTED***", redact_secrets(line), line)
         for line, secret in (('requests.post(url, auth=("alice", "tuplecred"))', "tuplecred"),
                              ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('HTTPBasicAuth("alice", r"rawtuple")', "rawtuple"),
                              ('auth=("alice", "esc\\"apedtuple")', "apedtuple"), ('api_key: str | None = "unioncred"', "unioncred"),
-                             ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ('curl --user ""curluser:joinedpw https://x', "joinedpw"),
+                             ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ("curl --user-agent bot/1 -u admin:afteragent https://x", "afteragent"),
+                             ('HDR="Bearer standalonebearer1"', "standalonebearer1"), ("--data '{\"pw\":\"jsonpwcred\"}'", "jsonpwcred"),
+                             ('curl -H "X-Custom: 9fK2mQ7xL4pR8vT1nB6cW3yZ5aD0eG2h" x', "9fK2mQ7xL4pR8vT1nB6cW3yZ5aD0eG2h"), ('curl --user ""curluser:joinedpw https://x', "joinedpw"),
                              ('curl -u "admin":quotedname https://x', "quotedname"),
                              ("curl -H 'Cookie: session=cookiecred; theme=dark' https://x", "cookiecred"),
                              ('requests.get(u, headers={"X-Session-Token": "sesscred"})', "sesscred"), ('args = ["--api-key", "arraycred"]', "arraycred"), ("STRIPE_KEY=rk_live_stripecred", "stripecred"),

@@ -371,8 +371,11 @@ def _is_policy_hook(hook: Dict, user_home) -> bool:
     A user-written file at that path is the user's own and counts as owned data."""
     if hook.get("scope") == "managed":
         return True
-    match = _UNBOUND_INSTALL_PATH.search(hook.get("script_path") or "") or _UNBOUND_INSTALL_PATH.search(hook.get("command") or "")
-    if not match or user_home is None:
+    command = hook.get("command") or ""
+    if hook.get("scope") != "user" or user_home is None or any(op in command for op in (";", "&", "|", "`", "$(", "\n")):
+        return False  # a repo hook, or anything chained after Unbound's script, is the user's own
+    match = _UNBOUND_INSTALL_PATH.search(hook.get("script_path") or "") or _UNBOUND_INSTALL_PATH.search(command)
+    if not match:
         return False
     return _root_owned(Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}")
 

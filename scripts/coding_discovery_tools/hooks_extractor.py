@@ -127,7 +127,9 @@ _SECRET_PATTERNS = [
     # Flags: --api-key VALUE, --password='a b', -token=x.
     re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
-    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::=|:\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
+    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::=|=>|:\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
+    # Setter calls: setPassword("x"), set_api_key('x'), client.setToken(r"x").
+    re.compile(r"(?i)(\bset_?" + _KEY + r"\s*\(\s*)" + _QUOTED),
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+(?::[^/\s@'\"]+)?(?=@)"),  # user:pass@ and key-only userinfo (Sentry DSNs)
     # mysql -pSECRET, sshpass -p SECRET

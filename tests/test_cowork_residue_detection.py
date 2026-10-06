@@ -18,6 +18,7 @@ Both routing entry points are covered:
 
 import os
 import plistlib
+import sys
 import tempfile
 import time
 import unittest
@@ -294,7 +295,7 @@ class TestCoworkSessionEvidence(unittest.TestCase):
         self.assertEqual(self.detect()["version"], "1.4.2")
 
 
-@unittest.skipIf(os.name == "nt", "POSIX-only: macOS bundle paths")
+@unittest.skipUnless(sys.platform == "darwin", "drives the real macOS detector set")
 class TestCoworkFallbackReachesTheReport(unittest.TestCase):
     """The whole per-user pipeline a scan runs — detect, process, build the report —
     with Claude.app missing: the Cowork row goes out carrying the user's skills."""

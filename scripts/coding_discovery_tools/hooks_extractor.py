@@ -135,11 +135,16 @@ _SECRET_PATTERNS = [
     # Webhook URLs whose secret is the path.
     re.compile(r"(?i)(https://(?:hooks\.slack\.com/(?:services|workflows|triggers)/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/"
                r"|[a-z0-9.-]*\.webhook\.office\.com/))[^\s'\"]+"),
+    # Azure connection strings and SAS signatures, JWTs, netrc-style "password value".
+    re.compile(r"(?i)(\b(?:AccountKey|SharedAccessKey|SharedAccessSignature)=)[^;\s'\"]+"),
+    re.compile(r"(?i)(\bsig=)[^&;\s'\"]+"),
+    re.compile(r"()\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}"),
+    re.compile(r"(?i)(\b(?:password|passwd)[ \t]+)(?![=:])[^\s'\"]+"),
     # Private key blocks anywhere.
     re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(?=-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
     # Known token formats anywhere.
     re.compile(r"()\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}"
-               r"|A[KS]IA[0-9A-Z]{16}|npm_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})"),
+               r"|[sr]k_(?:live|test)_[A-Za-z0-9]{10,}|A[KS]IA[0-9A-Z]{16}|npm_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})"),
 ]
 
 
@@ -355,6 +360,22 @@ def hooks_from_settings(hooks: Dict, source: str, tool_name: str = "Claude Code"
     return found
 
 
+# Files a hook can run that are scripts; anything else (a dotfile, a config) is never attached.
+_SCRIPT_SUFFIXES = {".sh", ".bash", ".zsh", ".fish", ".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".rb", ".pl",
+                    ".ps1", ".psm1", ".bat", ".cmd", ".php", ".lua"}
+_CREDENTIAL_DIRS = {".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".gcloud"}
+_CREDENTIAL_FILES = {".netrc", ".pgpass", ".git-credentials", ".npmrc", ".pypirc"}
+
+
+def _looks_like_script(path: Path, text: str) -> bool:
+    """A script by extension, shebang or executable bit, and never a file from a credential folder."""
+    parts = {part.lower() for part in path.parts}
+    if parts & _CREDENTIAL_DIRS or path.name.lower() in _CREDENTIAL_FILES or "gh" in parts and ".config" in parts:
+        return False
+    executable = platform.system() != "Windows" and os.access(path, os.X_OK)  # Windows reports X_OK for any file
+    return path.suffix.lower() in _SCRIPT_SUFFIXES or text.startswith("#!") or executable
+
+
 def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Path], root: Path,
                    follow_symlinks: bool, unbound_scripts: Set[Path], config_relative: bool = True) -> List[Dict]:
     """Hooks in one config, read contained under ``root``; a script outside ``root`` is not read."""
@@ -374,7 +395,7 @@ def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Pa
                     if program is not None and program.is_file() else None)
         except OSError:
             read = None  # an unreadable script costs only its own content, not the file's other hooks
-        if read and read[0] and "\x00" not in read[0]:
+        if read and read[0] and "\x00" not in read[0] and _looks_like_script(program, read[0]):
             item["script_path"] = str(program)
             item["script_content"] = redact_secrets(read[0])
         if len(command) > MAX_COMMAND_SIZE or (read and read[1]):

@@ -181,6 +181,17 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual([h["command"] for h in hooks], ["echo bob"])
 
+    def test_only_script_files_are_attached_never_dotfiles(self):
+        _write(self.home / ".netrc", "machine x login me password p")
+        _write(self.home / ".config/gh/hosts.yml", "oauth_token: t")
+        _write(self.home / "notes.txt", "hello")
+        _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": f"bash {self.home / '.netrc'}"},
+            {"type": "command", "command": str(self.home / ".config/gh/hosts.yml")},
+            {"type": "command", "command": f"python3 {self.home / 'notes.txt'}"}]}]}})
+
+        self.assertEqual([h.get("script_content") for h in _flat(extract_hooks("Codex", [self.home], []))], [None, None, None])
+
     def test_files_named_as_arguments_are_never_read(self):
         _write(self.home / ".ssh/id_rsa", "PRIVATE KEY")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
@@ -262,6 +273,11 @@ class TestExtractHooks(unittest.TestCase):
                              ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ('args = ["--api-key", "arraycred"]', "arraycred"), ("STRIPE_KEY=rk_live_stripecred", "stripecred"),
                              ("SENTRY_DSN=https://dsnkey123@o1.ingest.sentry.io/1", "dsnkey123"), ("mysql -u root -pmysqlcred db", "mysqlcred"), ('mysql -u root -p"quoted mysql" db', "quoted mysql"),
                              ("sshpass -p 'quoted ssh' ssh host", "quoted ssh"),
+                             ("DefaultEndpointsProtocol=https;AccountName=a;AccountKey=azurecred==;", "azurecred"),
+                             ("https://a.blob.core.windows.net/c?sv=1&sig=sascred%3D", "sascred"),
+                             ("token eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2Q", "SflKxwRJSMeKKF2Q"),
+                             ("machine api.example.com login me password netrccred", "netrccred"),
+                             ("stripe.api_key_x = 1; charge(sk_live_" + "c" * 24 + ")", "c" * 24),
                              ("sshpass -p sshcred ssh host", "sshcred"), ("DB_PASS=dbpasscred", "dbpasscred"),
                              ("npm_" + "a" * 36, "a" * 36), ("glpat-" + "b" * 20, "b" * 20), ("curl --token esc\\ apedcred", "apedcred")):
             self.assertNotIn(secret, redact_secrets(line), line)

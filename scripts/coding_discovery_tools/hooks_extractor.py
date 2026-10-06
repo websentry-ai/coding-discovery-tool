@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover - direct-script execution fallback
 logger = logging.getLogger(__name__)
 
 MAX_SCRIPT_SIZE = 50 * 1024  # same cap as rule/skill content (read_rule_file_contained truncates here)
+MAX_COMMAND_SIZE = 10240  # the backend's command cap; longer commands are cut (and flagged) before redaction
 MAX_HOOK_CONFIG_SIZE = 2 * 1024 * 1024  # settings.json also holds permissions and MCP config, so it can pass 50KB
 
 _MAC_SUPPORT = Path("/Library/Application Support")
@@ -104,15 +105,15 @@ _SHELL_CHAINING = (";", "&", "|", "`", "$(", "\n", ">", "<")
 _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
-_KEY = (r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|access[-_]?key|secret|password|passwd|pwd|credential"
-        r"|private[-_]?key|auth(?![a-z])|dsn|[-_]key(?![a-z])|[-_]pass(?![a-z])|[-_]pwd)[A-Za-z0-9_-]*")  # not author or keyboard
+_KEY = (r"[A-Za-z0-9_-]{0,64}(?:token|api[-_]?key|apikey|access[-_]?key|secret|password|passwd|pwd|credential"
+        r"|private[-_]?key|auth(?![a-z])|dsn|[-_]key(?![a-z])|[-_]pass(?![a-z])|[-_]pwd)[A-Za-z0-9_-]{0,64}")  # not author or keyboard
 _QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
            + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z))""")  # may span lines
 # The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index).
 _VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}\][\\]+)+"""
 _SECRET_PATTERNS = [
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
-    re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]*(?:key|token|secret|auth)[a-z0-9-]*|[a-z0-9-]*api-key)"
+    re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
                r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
     re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:'[^']*'|"[^"]*"|[\w.]+)\s*,\s*)(?:'[^']*'|"[^"]*")"""),
@@ -178,11 +179,6 @@ def _expand(path: Path) -> List[Path]:
     if "*" in path.name:
         return sorted(path.parent.glob(path.name)) if path.parent.is_dir() else []
     return [path] if path.is_file() else []
-
-
-def _read_contained(path: Path, root: Path, follow_symlinks: bool) -> Optional[str]:
-    read = read_rule_file_contained(path, root, allow_symlink=follow_symlinks)
-    return read[0] if read else None
 
 
 def _load_hooks(path: Path, root: Path, follow_symlinks: bool) -> Dict:
@@ -339,8 +335,6 @@ def _unbound_scripts(home: Path, project_root: Optional[Path], managed_dirs: Lis
     scripts = {home / tool_dir / "hooks" / name for tool_dir in (".claude", ".cursor", ".codex", ".copilot", ".augment")
                for name in ("unbound.py", "unbound.sh")}
     scripts |= {d / "hooks" / "unbound.py" for d in managed_dirs}
-    if project_root is not None:
-        scripts.add(project_root / ".github" / "hooks" / "unbound.sh")
     return {Path(os.path.normpath(str(p))) for p in scripts}
 
 
@@ -355,8 +349,11 @@ def hooks_from_settings(hooks: Dict, source: str, tool_name: str = "Claude Code"
         hook_type, command = _command_of(hook)
         program = _program_path(command, None, None, home) if command else None
         if command and not _is_unbound_hook(command, program, unbound):
-            found.append({"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
-                          "file_path": source, "scope": "managed"})
+            item = {"event": event, "matcher": matcher, "type": hook_type,
+                    "command": redact_secrets(command[:MAX_COMMAND_SIZE]), "file_path": source, "scope": "managed"}
+            if len(command) > MAX_COMMAND_SIZE:
+                item["truncated"] = True
+            found.append(item)
     return found
 
 
@@ -372,15 +369,18 @@ def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Pa
         program = _program_path(command, config_dir, project_root, home) if hook_type == "command" else None
         if _is_unbound_hook(command, program, unbound_scripts):
             continue
-        item = {"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
-                "file_path": str(path), "scope": scope}
+        item = {"event": event, "matcher": matcher, "type": hook_type,
+                "command": redact_secrets(command[:MAX_COMMAND_SIZE]), "file_path": str(path), "scope": scope}
         try:
-            script = _read_contained(program, root, follow_symlinks) if program is not None and program.is_file() else None
+            read = (read_rule_file_contained(program, root, allow_symlink=follow_symlinks)
+                    if program is not None and program.is_file() else None)
         except OSError:
-            script = None  # an unreadable script costs only its own content, not the file's other hooks
-        if script and "\x00" not in script:
+            read = None  # an unreadable script costs only its own content, not the file's other hooks
+        if read and read[0] and "\x00" not in read[0]:
             item["script_path"] = str(program)
-            item["script_content"] = redact_secrets(script)
+            item["script_content"] = redact_secrets(read[0])
+        if len(command) > MAX_COMMAND_SIZE or (read and read[1]):
+            item["truncated"] = True  # the backend floors what it cannot see in full
         found.append(item)
     return found
 

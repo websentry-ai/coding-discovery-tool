@@ -105,7 +105,7 @@ _REDACTED = "***REDACTED***"
 # Credentials as they appear in shell commands and scripts, redacted before anything leaves the machine.
 # A name that marks a credential; values after it are redacted, code after it (calls, attribute reads) is kept.
 _KEY = (r"[A-Za-z0-9_-]*(?:token|api[-_]?key|apikey|access[-_]?key|secret|password|passwd|pwd|credential"
-        r"|private[-_]?key|auth(?![a-z]))[A-Za-z0-9_-]*")  # auth, but not author
+        r"|private[-_]?key|auth(?![a-z])|dsn|[-_]key(?![a-z])|[-_]pass(?![a-z])|[-_]pwd)[A-Za-z0-9_-]*")  # not author or keyboard
 _QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
            + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z))""")  # may span lines
 # The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index).
@@ -126,7 +126,10 @@ _SECRET_PATTERNS = [
     re.compile(r"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:=|\s*))"
                + r"""(?:'[^']*'|"[^"]*"|[^\s'":]+:(?:""" + _QUOTED + r"""|\\.|[^\s'"`$;|&]+)+)"""),
     # URL userinfo and credential query parameters.
-    re.compile(r"(://)[^/\s:@'\"]+:[^/\s@'\"]+(?=@)"),
+    re.compile(r"(://)[^/\s:@'\"]+(?::[^/\s@'\"]+)?(?=@)"),  # user:pass@ and key-only userinfo (Sentry DSNs)
+    # mysql -pSECRET, sshpass -p SECRET
+    re.compile(r"(\b(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)(?!\s)[^\s'\"]+"),
+    re.compile(r"(\bsshpass\s+-p\s*)[^\s'\"]+"),
     re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth|password)=)[^&\s'\"]+"),
     # Webhook URLs whose secret is the path.
     re.compile(r"(?i)(https://(?:hooks\.slack\.com/(?:services|workflows|triggers)/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/"
@@ -135,7 +138,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(?=-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
     # Known token formats anywhere.
     re.compile(r"()\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}"
-               r"|A[KS]IA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"),
+               r"|A[KS]IA[0-9A-Z]{16}|npm_[A-Za-z0-9]{30,}|glpat-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})"),
 ]
 
 

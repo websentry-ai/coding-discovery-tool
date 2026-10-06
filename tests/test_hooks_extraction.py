@@ -250,7 +250,10 @@ class TestExtractHooks(unittest.TestCase):
             self.assertIn("***REDACTED***", redact_secrets(line), line)
         for line, secret in (('requests.post(url, auth=("alice", "tuplecred"))', "tuplecred"),
                              ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('api_key: str | None = "unioncred"', "unioncred"),
-                             ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ('args = ["--api-key", "arraycred"]', "arraycred"), ("curl --token esc\\ apedcred", "apedcred")):
+                             ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ('args = ["--api-key", "arraycred"]', "arraycred"), ("STRIPE_KEY=rk_live_stripecred", "stripecred"),
+                             ("SENTRY_DSN=https://dsnkey123@o1.ingest.sentry.io/1", "dsnkey123"), ("mysql -u root -pmysqlcred db", "mysqlcred"),
+                             ("sshpass -p sshcred ssh host", "sshcred"), ("DB_PASS=dbpasscred", "dbpasscred"),
+                             ("npm_" + "a" * 36, "a" * 36), ("glpat-" + "b" * 20, "b" * 20), ("curl --token esc\\ apedcred", "apedcred")):
             self.assertNotIn(secret, redact_secrets(line), line)
         for line in code:
             self.assertEqual(redact_secrets(line), line)

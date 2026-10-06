@@ -231,6 +231,17 @@ class TestCoworkSessionEvidence(unittest.TestCase):
         (self.sessions / "acct-1").symlink_to(elsewhere, target_is_directory=True)
         self.assertIsNone(self.detect())
 
+    def test_session_behind_a_redirected_ancestor_is_not_evidence(self):
+        other = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "Claude"
+        org = other / COWORK_SESSIONS_DIR / "acct-1" / "org-1"
+        org.mkdir(parents=True)
+        (org / "local_abc.json").write_text("{}")
+        claude = self.sessions.parent
+        self.sessions.rmdir()
+        claude.rmdir()
+        claude.symlink_to(other, target_is_directory=True)
+        self.assertIsNone(self.detect())
+
     def test_a_found_bundle_still_wins(self):
         self._session()
         app = self.home / "Applications" / "Claude.app"

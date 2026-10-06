@@ -494,7 +494,7 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
             fail_if_anomalous(user_home, str(e))
             return None
         if app_install is None:
-            if not cowork_sessions_recent(sessions_dir):
+            if not cowork_sessions_recent(user_home, sessions_dir):
                 return None
             return {
                 "name": detector.tool_name,

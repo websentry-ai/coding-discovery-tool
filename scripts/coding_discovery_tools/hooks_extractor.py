@@ -116,7 +116,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
                r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
-    re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:'[^']*'|"[^"]*"|[\w.]+)\s*,\s*)(?:'[^']*'|"[^"]*")"""),
+    re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:""" + _QUOTED + r"""|[\w.]+)\s*,\s*)""" + _QUOTED),
     # Argument arrays: ["--api-key", "VALUE"].
     re.compile(r"""(?i)(['"]--?""" + _KEY + r"""['"]\s*,\s*)(?:'[^']*'|"[^"]*")"""),
     # Flags: --api-key VALUE, --password='a b', -token=x.
@@ -295,8 +295,8 @@ def _program_path(command: str, config_dir: Optional[Path], project_root: Option
         index = 1  # `/usr/bin/env [-i] [NAME=value] cmd` runs cmd
         while index < len(words) - 1 and words[index] in ("-i", "--ignore-environment", "-"):
             index += 1
-        if index < len(words) and words[index].startswith("-"):
-            return None  # other env options (-u NAME, -S ...) take values; don't guess
+        if index >= len(words) or words[index].startswith("-"):
+            return None  # bare env, or env options that take values (-u NAME, -S ...); don't guess
     while index < len(words) - 1 and _ENV_ASSIGNMENT.match(words[index]):
         index += 1  # `NAME=value cmd` runs cmd
     family = _INTERPRETERS.get(re.sub(r"(?<=[a-z])[\d.]+$", "", Path(words[index]).name.lower().removesuffix(".exe")))

@@ -128,6 +128,7 @@ class TestExtractHooks(unittest.TestCase):
         self.assertEqual(cursor["script_content"], "echo cursor")
         self.assertIsNone(_program_path("cmd /c npm test", self.home, None, self.home))
         self.assertIsNone(_program_path("bun test", self.home, None, self.home))
+        self.assertIsNone(_program_path("/usr/bin/env", self.home, None, self.home))
         self.assertEqual(_program_path("/usr/bin/env -i DEBUG=1 python3 ./hooks/a.py", self.home, None, self.home),
                          self.home / "hooks/a.py")
         self.assertEqual(_program_path("bash ./hooks/a.sh>/tmp/log", self.home, None, self.home), self.home / "hooks/a.sh")
@@ -269,7 +270,8 @@ class TestExtractHooks(unittest.TestCase):
         for line in secrets:
             self.assertIn("***REDACTED***", redact_secrets(line), line)
         for line, secret in (('requests.post(url, auth=("alice", "tuplecred"))', "tuplecred"),
-                             ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('api_key: str | None = "unioncred"', "unioncred"),
+                             ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('HTTPBasicAuth("alice", r"rawtuple")', "rawtuple"),
+                             ('auth=("alice", "esc\\"apedtuple")', "apedtuple"), ('api_key: str | None = "unioncred"', "unioncred"),
                              ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ('args = ["--api-key", "arraycred"]', "arraycred"), ("STRIPE_KEY=rk_live_stripecred", "stripecred"),
                              ("SENTRY_DSN=https://dsnkey123@o1.ingest.sentry.io/1", "dsnkey123"), ("mysql -u root -pmysqlcred db", "mysqlcred"), ('mysql -u root -p"quoted mysql" db', "quoted mysql"),
                              ("sshpass -p 'quoted ssh' ssh host", "quoted ssh"),

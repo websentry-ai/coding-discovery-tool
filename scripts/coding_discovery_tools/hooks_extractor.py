@@ -123,13 +123,11 @@ _SECRET_PATTERNS = [
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
     re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:""" + _QUOTED + r"""|[\w.]+)\s*,\s*)""" + _QUOTED),
     # Argument arrays: ["--api-key", "VALUE"].
-    re.compile(r"""(?i)(['"]--?""" + _KEY + r"""['"]\s*,\s*)(?:'[^']*'|"[^"]*")"""),
+    re.compile(r"""(?i)(['"]--?""" + _KEY + r"""['"]\s*,\s*)""" + _QUOTED),
     # Flags: --api-key VALUE, --password='a b', -token=x.
     re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
-    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
-    # curl -u / --user user:pass
-    re.compile(r"(\b(?:curl|wget)\b[^\n|;&]*?(?:\s(?:--user|--proxy-user)(?![\w-])|\s-[uU])(?:=|\s*))" + _VALUE),  # the whole word; not --user-agent
+    re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::=|:\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+(?::[^/\s@'\"]+)?(?=@)"),  # user:pass@ and key-only userinfo (Sentry DSNs)
     # mysql -pSECRET, sshpass -p SECRET
@@ -164,8 +162,14 @@ def _looks_random(token: str) -> bool:
     return entropy >= 4.0
 
 
+# curl/wget -u, --user, --proxy-user, -U: every occurrence within each curl or wget command (not --user-agent).
+_DOWNLOAD_COMMAND = re.compile(r"\b(?:curl|wget)\b[^\n|;&]*")
+_USER_OPTION = re.compile(r"((?:\s(?:--user|--proxy-user)(?![\w-])|\s-[uU])(?:=|\s*))" + _VALUE)
+
+
 def redact_secrets(text: str) -> str:
     """Hook command or script with inline credentials replaced; the code around them is kept."""
+    text = _DOWNLOAD_COMMAND.sub(lambda c: _USER_OPTION.sub(lambda m: m.group(1) + _REDACTED, c.group(0)), text)
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(lambda m: m.group(1) + _REDACTED, text)
     return _RANDOM_TOKEN.sub(lambda m: _REDACTED if _looks_random(m.group(0)) else m.group(0), text)

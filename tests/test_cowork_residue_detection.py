@@ -294,6 +294,58 @@ class TestCoworkSessionEvidence(unittest.TestCase):
         self.assertEqual(self.detect()["version"], "1.4.2")
 
 
+@unittest.skipIf(os.name == "nt", "POSIX-only: macOS bundle paths")
+class TestCoworkFallbackReachesTheReport(unittest.TestCase):
+    """The whole per-user pipeline a scan runs — detect, process, build the report —
+    with Claude.app missing: the Cowork row goes out carrying the user's skills."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve()
+        self.sessions = self.home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        for target, value in (
+            (f"{_BUNDLE_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app"),
+            (f"{_BUNDLE_MOD}.run_command_status", Mock(return_value=("", True))),
+            ("os.environ", {**os.environ, "HOME": str(self.home)}),
+        ):
+            patcher = patch(target, value) if target != "os.environ" else patch.dict(os.environ, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _write(self, path, text, age_days=0):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        stamp = time.time() - age_days * 86400
+        os.utime(path, (stamp, stamp))
+
+    def _cowork_report(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        detector = AIToolsDetector()
+        tools = [t for t in detector.detect_all_tools(user_home=self.home) if t["name"] == "Claude Cowork"]
+        if not tools:
+            return None
+        return detector.generate_single_tool_report(
+            detector.process_single_tool(tools[0]), "dev-1", self.home.name)
+
+    def test_recent_session_sends_cowork_with_its_skills(self):
+        self._write(self.sessions / "acct" / "org" / "local_a.json", "{}")
+        self._write(self.sessions / "skills-plugin" / "b" / "b" / "skills" / "xlsx" / "SKILL.md",
+                    "---\nname: xlsx\n---\nSheets.\n")
+        report = self._cowork_report()
+        self.assertIsNotNone(report)
+        (tool,) = report["tools"]
+        self.assertEqual(tool["version"], "unknown")
+        skills = [s["skill_name"] for p in tool.get("projects", []) for s in p.get("skills", [])]
+        self.assertEqual(skills, ["xlsx"])
+
+    def test_stale_sessions_send_no_cowork_row(self):
+        self._write(self.sessions / "acct" / "org" / "local_a.json", "{}", age_days=40)
+        self._write(self.sessions / "skills-plugin" / "b" / "b" / "skills" / "xlsx" / "SKILL.md", "# xlsx")
+        self.assertIsNone(self._cowork_report())
+
+
 class TestCoworkProbeTelemetry(unittest.TestCase):
     """Both halves of the gate returned a bare None, so absent, denied and
     never-installed were one answer. The probe says which."""

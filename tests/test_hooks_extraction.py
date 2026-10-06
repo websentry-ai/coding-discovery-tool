@@ -257,6 +257,7 @@ class TestExtractHooks(unittest.TestCase):
             self.assertNotIn(secret, redact_secrets(line), line)
         for line in code:
             self.assertEqual(redact_secrets(line), line)
+        self.assertEqual(redact_secrets(r"python -u C:\hooks\audit.py"), r"python -u C:\hooks\audit.py")
 
     def test_jsonc_settings_with_comments_still_yield_hooks(self):
         (self.home / ".gemini").mkdir(parents=True)

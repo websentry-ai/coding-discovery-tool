@@ -123,7 +123,7 @@ _SECRET_PATTERNS = [
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
     re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # curl -u / --user user:pass
-    re.compile(r"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:=|\s*))"
+    re.compile(r"(\b(?:curl|wget)\b[^\n|;&]*?\s(?:-u|--user|--proxy-user|-U)(?:=|\s*))"
                + r"""(?:'[^']*'|"[^"]*"|[^\s'":]+:(?:""" + _QUOTED + r"""|\\.|[^\s'"`$;|&]+)+)"""),
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+(?::[^/\s@'\"]+)?(?=@)"),  # user:pass@ and key-only userinfo (Sentry DSNs)

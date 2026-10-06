@@ -112,8 +112,10 @@ _QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]
 # The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index).
 _VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}\][\\]+)+"""
 _SECRET_PATTERNS = [
+    # Cookie and session headers carry the session itself; redact the whole value.
+    re.compile(r"(?i)(\b(?:set-)?cookie['\"]?\s*[:=]\s*['\"]?)[^'\"\n]+"),
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
-    re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
+    re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth|session)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
                r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
     re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:""" + _QUOTED + r"""|[\w.]+)\s*,\s*)""" + _QUOTED),
@@ -124,8 +126,7 @@ _SECRET_PATTERNS = [
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
     re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # curl -u / --user user:pass
-    re.compile(r"(\b(?:curl|wget)\b[^\n|;&]*?\s(?:-u|--user|--proxy-user|-U)(?:=|\s*))"
-               + r"""(?:'[^']*'|"[^"]*"|[^\s'":]+:(?:""" + _QUOTED + r"""|\\.|[^\s'"`$;|&]+)+)"""),
+    re.compile(r"(\b(?:curl|wget)\b[^\n|;&]*?\s(?:-u|--user|--proxy-user|-U)(?:=|\s*))" + _VALUE),  # the whole word
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+(?::[^/\s@'\"]+)?(?=@)"),  # user:pass@ and key-only userinfo (Sentry DSNs)
     # mysql -pSECRET, sshpass -p SECRET

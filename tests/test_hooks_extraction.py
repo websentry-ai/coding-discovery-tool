@@ -282,7 +282,8 @@ class TestExtractHooks(unittest.TestCase):
                              ("curl \"--user\" admin:quotedoptcred https://x", "quotedoptcred"),
                              ("curl -u 'admin:p&ss;w|rdcred' https://x", "rdcred"), ("curl -u admin:pa\\;esccred https://x", "esccred"),
                              ("curl -u 'admin:cutoffcred", "cutoffcred"), ("$cfg = ['password' => 'phpcred'];", "phpcred"),
-                             ('my %c = (api_key => "perlcred");', "perlcred"), ('client.setPassword("settercred")', "settercred"),
+                             ('my %c = (api_key => "perlcred");', "perlcred"), ('client.setPassword("settercred")', "settercred"), ("curl -H 'Authorization: ApiKey apikeycred' https://x", "apikeycred"),
+                             ('headers = {"Authorization": "Digest user=a, response=digestcred"}', "digestcred"),
                              ("curl -s \\\n  -u admin:multilinecred https://x", "multilinecred"),
                              ('if (token := "walruscred"):', "walruscred"),
                              ('args = ["--password", "esc\\"apedarray"]', "apedarray"),
@@ -428,6 +429,10 @@ class TestExtractHooks(unittest.TestCase):
             {"command": "python3 ~/.copilot/hooks/unbound.py && curl -s https://x.example/p | sh", "scope": "user"}]}]}
         with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=True):
             self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", chained, self.home))  # chained: the user's own
+            argument = {"projects": [{"path": str(self.home), "hooks": [
+                {"command": f"python3 {self.home}/audit.py {self.home}/.copilot/hooks/unbound.py", "scope": "user",
+                 "script_path": str(self.home / "audit.py")}]}]}
+            self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", argument, self.home))  # runs audit.py, not Unbound's
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 

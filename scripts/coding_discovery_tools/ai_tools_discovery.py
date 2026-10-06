@@ -374,7 +374,12 @@ def _is_policy_hook(hook: Dict, user_home) -> bool:
     command = hook.get("command") or ""
     if hook.get("scope") != "user" or user_home is None or any(op in command for op in (";", "&", "|", "`", "$(", "\n")):
         return False  # a repo hook, or anything chained after Unbound's script, is the user's own
-    match = _UNBOUND_INSTALL_PATH.search(hook.get("script_path") or "") or _UNBOUND_INSTALL_PATH.search(command)
+    # Judge the program that runs: the read script, else the command's own program word (never an argument).
+    target = hook.get("script_path") or ""
+    if not target:
+        program = re.fullmatch(r"""\s*(?:(?:\S*/)?(?:python3?|bash|sh|zsh)\s+)?['"]?([^\s'"]+)['"]?\s*""", command)
+        target = program.group(1) if program else ""
+    match = re.search(_UNBOUND_INSTALL_PATH.pattern + "$", target)
     if not match:
         return False
     return _root_owned(Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}")

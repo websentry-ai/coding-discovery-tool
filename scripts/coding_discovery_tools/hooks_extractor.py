@@ -113,6 +113,8 @@ _QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]
 # The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index).
 _VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}\][\\]+)+"""
 _SECRET_PATTERNS = [
+    # Authorization headers: the whole value, whatever the scheme (Bearer, ApiKey, Digest ...).
+    re.compile(r"(?i)(\b(?:proxy-)?authorization['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"]?)[^'\"\n]+"),
     # Cookie and session headers carry the session itself; redact the whole value.
     re.compile(r"(?i)(\b(?:set-)?cookie['\"]?\s*[:=]\s*['\"]?)[^'\"\n]+"),
     # A bearer or basic credential wherever it appears, e.g. HDR="Bearer abc123".

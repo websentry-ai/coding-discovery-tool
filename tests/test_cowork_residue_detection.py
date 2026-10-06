@@ -242,6 +242,14 @@ class TestCoworkSessionEvidence(unittest.TestCase):
         claude.symlink_to(other, target_is_directory=True)
         self.assertIsNone(self.detect())
 
+    def test_unlistable_sessions_in_our_own_home_raise_so_nothing_is_pruned(self):
+        self._session()
+        os.chmod(self.sessions, 0o300)
+        self.addCleanup(os.chmod, self.sessions, 0o700)
+        with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                self.detect()
+
     def test_a_found_bundle_still_wins(self):
         self._session()
         app = self.home / "Applications" / "Claude.app"

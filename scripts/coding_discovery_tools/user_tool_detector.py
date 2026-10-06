@@ -19,6 +19,7 @@ from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
     _is_scanning_users_own_home,
+    _listable_state,
     _read_own_regular_file,
     claude_code_sessions_recent,
     cowork_sessions_recent,
@@ -494,6 +495,10 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
             fail_if_anomalous(user_home, str(e))
             return None
         if app_install is None:
+            # Unlistable leaves the evidence unknown, which must not read as absent.
+            if _listable_state(sessions_dir) == "unreadable":
+                fail_if_anomalous(user_home, f"Cowork sessions dir unlistable: {sessions_dir}")
+                return None
             if not cowork_sessions_recent(user_home, sessions_dir):
                 return None
             return {

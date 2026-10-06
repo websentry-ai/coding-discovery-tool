@@ -127,6 +127,8 @@ class TestExtractHooks(unittest.TestCase):
         self.assertEqual(cursor["script_content"], "echo cursor")
         self.assertIsNone(_program_path("cmd /c npm test", self.home, None, self.home))
         self.assertIsNone(_program_path("bun test", self.home, None, self.home))
+        self.assertEqual(_program_path("bash ./hooks/a.sh>/tmp/log", self.home, None, self.home), self.home / "hooks/a.sh")
+        self.assertEqual(_program_path('bash "./hooks/a;b.sh"', self.home, None, self.home), self.home / "hooks/a;b.sh")
         self.assertEqual(_program_path("deno run --allow-read ./hooks/check.ts", self.home, None, self.home),
                          self.home / "hooks/check.ts")
 
@@ -254,7 +256,8 @@ class TestExtractHooks(unittest.TestCase):
         for line, secret in (('requests.post(url, auth=("alice", "tuplecred"))', "tuplecred"),
                              ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('api_key: str | None = "unioncred"', "unioncred"),
                              ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ('args = ["--api-key", "arraycred"]', "arraycred"), ("STRIPE_KEY=rk_live_stripecred", "stripecred"),
-                             ("SENTRY_DSN=https://dsnkey123@o1.ingest.sentry.io/1", "dsnkey123"), ("mysql -u root -pmysqlcred db", "mysqlcred"),
+                             ("SENTRY_DSN=https://dsnkey123@o1.ingest.sentry.io/1", "dsnkey123"), ("mysql -u root -pmysqlcred db", "mysqlcred"), ('mysql -u root -p"quoted mysql" db', "quoted mysql"),
+                             ("sshpass -p 'quoted ssh' ssh host", "quoted ssh"),
                              ("sshpass -p sshcred ssh host", "sshcred"), ("DB_PASS=dbpasscred", "dbpasscred"),
                              ("npm_" + "a" * 36, "a" * 36), ("glpat-" + "b" * 20, "b" * 20), ("curl --token esc\\ apedcred", "apedcred")):
             self.assertNotIn(secret, redact_secrets(line), line)

@@ -128,8 +128,8 @@ _SECRET_PATTERNS = [
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+(?::[^/\s@'\"]+)?(?=@)"),  # user:pass@ and key-only userinfo (Sentry DSNs)
     # mysql -pSECRET, sshpass -p SECRET
-    re.compile(r"(\b(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)(?!\s)[^\s'\"]+"),
-    re.compile(r"(\bsshpass\s+-p\s*)[^\s'\"]+"),
+    re.compile(r"(\b(?:mysql|mysqldump|mariadb)\b[^\n]*?\s-p)(?!\s)(?:" + _QUOTED + r"""|\\.|[^\s'"`$;|&]+)+"""),
+    re.compile(r"(\bsshpass\s+-p\s*)(?:" + _QUOTED + r"""|\\.|[^\s'"`$;|&]+)+"""),
     re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth|password)=)[^&\s'\"]+"),
     # Webhook URLs whose secret is the path.
     re.compile(r"(?i)(https://(?:hooks\.slack\.com/(?:services|workflows|triggers)/|(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/"
@@ -296,10 +296,12 @@ def _program_path(command: str, config_dir: Optional[Path], project_root: Option
         if script is None:
             return None
         index += script + 1
-    program = re.split(r"&&|\|\||[;&|]", words[index])[0]  # `script.py;next` and `script.py&&next` name script.py
+    quote = _quote_of(command, index, len(words))
+    program = words[index]
+    if not quote:
+        program = re.split(r"&&|\|\||[;&|<>]", program)[0]  # `script.py;next`, `script.py>log` name script.py
     if project_root is None and "CLAUDE_PROJECT_DIR" in program:
         return None  # a user hook's project is whichever one is open when it runs; no single file to read
-    quote = _quote_of(command, index, len(words))
     # The shell expands ~ only unquoted and $VAR only outside single quotes; a quoted literal names no real file.
     if not quote and (program.startswith("~/") or program.startswith("~\\")):
         program = str(home) + program[1:]

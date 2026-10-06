@@ -279,7 +279,7 @@ def _program_path(command: str, config_dir: Optional[Path], project_root: Option
     index = 0
     while index < len(words) - 1 and _ENV_ASSIGNMENT.match(words[index]):
         index += 1  # `NAME=value cmd` runs cmd
-    family = _INTERPRETERS.get(Path(words[index]).name.lower().removesuffix(".exe"))
+    family = _INTERPRETERS.get(re.sub(r"(?<=[a-z])[\d.]+$", "", Path(words[index]).name.lower().removesuffix(".exe")))
     if family is not None:
         script = _script_argument(words[index + 1:], family)
         if script is None:
@@ -415,20 +415,26 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
             logger.debug(f"  hooks: skipped managed {pattern}: {e}")
     # One unreadable home or project never hides the hooks of the others.
     for home in user_homes:
-        try:
-            unbound = _unbound_scripts(home, None, managed_dirs)
-            for pattern in user_files:
+        unbound = _unbound_scripts(home, None, managed_dirs)
+        for pattern in user_files:
+            try:
                 pattern_path, root = _user_config_path(home, pattern)
                 for path in _expand(pattern_path):
                     by_project.setdefault(str(home), []).extend(
                         _hooks_in_file(path, "user", home, None, root, True, unbound, config_relative))
-            for path in managed_files:
+            except Exception as e:
+                logger.warning(f"  hooks: skipped {home}/{pattern} for {tool_name}: {e}")
+        for path in managed_files:
+            try:
                 by_project.setdefault(str(home), []).extend(
                     _hooks_in_file(path, "managed", home, None, path.parent, False, unbound, config_relative))
-            if project_dir_names:
+            except Exception as e:
+                logger.warning(f"  hooks: skipped {path} for {tool_name}: {e}")
+        if project_dir_names:
+            try:
                 projects |= _project_roots_with_hook_dirs(home, project_dir_names)
-        except Exception as e:
-            logger.warning(f"  hooks: skipped {home} for {tool_name}: {e}")
+            except Exception as e:
+                logger.warning(f"  hooks: skipped project discovery under {home} for {tool_name}: {e}")
     for project in projects:
         try:
             root = Path(project)

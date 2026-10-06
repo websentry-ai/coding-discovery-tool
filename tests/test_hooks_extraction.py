@@ -134,6 +134,13 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertNotIn("script_content", _flat(extract_hooks("Claude Code", [self.home], []))[0])
 
+    def test_a_versioned_interpreter_still_reads_its_script(self):
+        _write(self.home / "audit.py", "print('audit')")
+        _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": f"python3.12 {self.home / 'audit.py'}"}]}]}})
+
+        self.assertEqual(_flat(extract_hooks("Codex", [self.home], []))[0]["script_content"], "print('audit')")
+
     def test_a_script_followed_by_a_shell_operator_is_still_read(self):
         _write(self.home / "audit.py", "print('audit')")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [

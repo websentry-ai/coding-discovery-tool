@@ -108,6 +108,8 @@ def _strip_ephemeral(tool: Dict) -> Dict:
             project["skills"] = _sorted_by(project["skills"], lambda s: s.get("file_path", s.get("file_name", "")))
         if isinstance(project.get("mcpServers"), list):
             project["mcpServers"] = _sorted_by(project["mcpServers"], lambda m: m.get("name", ""))
+        if isinstance(project.get("hooks"), list):
+            project["hooks"] = _sorted_by(project["hooks"], lambda h: (h.get("file_path", ""), h.get("event", ""), h.get("command", "")))
 
     return cleaned
 

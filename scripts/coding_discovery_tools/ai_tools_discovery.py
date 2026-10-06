@@ -7,6 +7,7 @@ on macOS and Windows
 
 import argparse
 import copy
+import functools
 import json
 import logging
 import os
@@ -108,6 +109,7 @@ try:
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
+    from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .sweep_connectors import run_sweep
@@ -188,6 +190,7 @@ except ImportError:
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
+    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
@@ -295,6 +298,20 @@ def _home_for_user(user: str):
     return Path.home()
 
 
+@functools.lru_cache(maxsize=1)
+def _scan_user_homes() -> List[Path]:
+    """Every enumerated user's home, as main() scans them; the current user when none are found. Once per run."""
+    if platform.system() == "Darwin":
+        users = get_all_users_macos()
+    elif platform.system() == "Windows":
+        users = get_all_users_windows()
+    elif platform.system() == "Linux":
+        users = get_all_users_linux()
+    else:
+        users = []
+    return [_home_for_user(user) for user in users or [get_user_info()]]  # same fallback as main()
+
+
 def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
     """Whether this install sits inside a DIFFERENT enumerated user's home."""
     # install_path only: ``tool`` is globally deduped by name+install_path, so its
@@ -334,6 +351,44 @@ def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
         return False
 
 
+# Unbound's onboarding installs its hook script here, root-owned, in every onboarded user's home.
+_UNBOUND_INSTALL_PATH = re.compile(r"[\\/]\.(claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(py|sh)(?=['\"\s]|$)")
+
+
+def _is_policy_hook(hook: Dict, user_home) -> bool:
+    """Org policy, not the user's own data: a managed hook, or Unbound's root-owned install script (still reported).
+    A user-written file at that path is the user's own and counts as owned data."""
+    if hook.get("scope") == "managed":
+        return True
+    command = hook.get("command") or ""
+    if hook.get("scope") != "user" or user_home is None or any(op in command for op in (";", "&", "|", "`", "$(", "\n")):
+        return False  # a repo hook, or anything chained after Unbound's script, is the user's own
+    # Only `[interpreter] script`: no env prefix, an interpreter from PATH or a system bin dir.
+    program = re.fullmatch(r"""\s*(?:(?:/usr/bin/|/bin/|/usr/local/bin/|/opt/homebrew/bin/)?(?:python3?|bash|sh|zsh)\s+)?"""
+                           r"""['"]?([^\s'"]+)['"]?\s*""", command)
+    if not program:
+        return False
+    # The file that runs (the read script, else the program word) must be the install path itself, root-owned.
+    target = hook.get("script_path") or re.sub(r"^(~|\$HOME|\$\{HOME\})(?=/)", lambda _: str(user_home), program.group(1))
+    match = re.search(_UNBOUND_INSTALL_PATH.pattern + "$", target)
+    if not match:
+        return False
+    expected = Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}"
+    return Path(os.path.normpath(target)) == expected and root_owned(expected)
+
+
+def _has_owned_projects(tool_filtered: Dict, user_home=None) -> bool:
+    """Whether the user has projects of their own; a row holding only policy hooks (managed or Unbound's) is not theirs."""
+    for project in tool_filtered.get("projects") or []:
+        if not isinstance(project, dict):
+            return True
+        hooks = project.get("hooks") or []
+        other = any(value for key, value in project.items() if key not in ("path", "hooks"))
+        if other or not hooks or not all(_is_policy_hook(hook, user_home) for hook in hooks):
+            return True
+    return False
+
+
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
@@ -351,7 +406,7 @@ def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     owns_install = bool(own_norm) and (
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
-    has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
+    has_data = _has_owned_projects(tool_filtered, user_home) or "permissions" in tool_filtered
     return owns_install or has_data
 
 
@@ -378,7 +433,7 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
 
-    if bool(tool_filtered.get("projects")):
+    if _has_owned_projects(tool_filtered, user_home):
         return True
 
     # A permissions block survives filtering for this user iff it is managed
@@ -398,7 +453,7 @@ def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool
         return _copilot_cli_owned_by_user(tool_filtered, user_home)
     if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
         return _augment_owned_by_user(tool_filtered, user_home)
-    if tool_filtered.get("projects"):
+    if _has_owned_projects(tool_filtered, user_home):
         return True
     perms = tool_filtered.get("permissions")
     return perms is not None and perms.get("settings_source") != "managed"
@@ -1964,6 +2019,44 @@ class AIToolsDetector:
         skills = project.get("skills", [])
         return len(mcp_servers) == 0 and len(rules) == 0 and len(skills) == 0
 
+    def _merge_hooks_into_projects(self, tool: Dict, tool_dict: Dict) -> None:
+        """Attach the hooks this tool runs: user and managed hooks under each home, project hooks under the project."""
+        routing = _routing_name(tool)
+        if (routing == "auggie cli" or routing.startswith("augment (")) \
+                and routing != self._canonical_augment_surface_by_config.get(tool.get("_config_path") or ""):
+            return  # non-canonical Augment surfaces share the canonical row's ~/.augment config
+        if routing.startswith("github copilot") and not routing.endswith(" cli") \
+                and (tool.get("name") or "").lower() != self._canonical_vscode_copilot:
+            return  # only the canonical VS Code Copilot row carries the shared ~/.copilot hooks
+        projects_dict = {p.get("path"): p for p in tool_dict.get("projects") or [] if isinstance(p, dict)}
+        project_paths = set(projects_dict)
+        for record in tool.get("_settings") or []:
+            path = Path(record.get("settings_path", "")) if isinstance(record, dict) else Path()
+            if path.parent.name == ".claude" and path.name in ("settings.json", "settings.local.json"):
+                project_paths.add(str(path.parent.parent))
+        if hook_files_for(tool.get("name", "")) is None:
+            return  # this product reads no hook files; skip the home scan
+        homes = _scan_user_homes()
+        hooks_by_project = extract_hooks(tool.get("name", ""), homes, project_paths)
+        plist_hooks = [hook for record in tool.get("_settings") or []
+                       if isinstance(record, dict) and record.get("scope") == "managed_plist"
+                       for hook in hooks_from_settings((record.get("raw_settings") or {}).get("hooks"),
+                                                       record.get("settings_path", "plist"))]
+        for home in homes if plist_hooks else []:
+            hooks_by_project.setdefault(str(home), []).extend(plist_hooks)
+        existing = {_normalise_path(p): p for p in projects_dict if isinstance(p, str)}
+        for project_path, hooks in list(hooks_by_project.items()):
+            key = _normalise_path(project_path)
+            if key not in existing:
+                # A managed-only row is kept: the ownership gates ignore it (_has_owned_projects), so no phantom install.
+                projects_dict[project_path] = {"path": project_path, "rules": [], "skills": [], "mcpServers": []}
+                tool_dict.setdefault("projects", []).append(projects_dict[project_path])
+                existing[key] = project_path
+            projects_dict[existing[key]]["hooks"] = hooks
+        if hooks_by_project:
+            count = sum(len(hooks) for hooks in hooks_by_project.values())
+            logger.info(f"  ✓ Found {count} hook(s) in {len(hooks_by_project)} project(s)")
+
     @staticmethod
     def _deduplicate_project_items(items: List[Dict]) -> List[Dict]:
         """Remove duplicate items by file_path, keeping the first occurrence."""
@@ -2679,7 +2772,9 @@ class AIToolsDetector:
         one chokepoint that every tool routes through."""
         result = self._process_single_tool_raw(tool)
         if isinstance(result, dict):
+            # Decode first so hooks, found by on-disk path, join the existing project rows.
             _normalize_encoded_paths(result)
+            self._merge_hooks_into_projects(tool, result)
         return result
 
     def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:

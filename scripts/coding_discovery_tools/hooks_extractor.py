@@ -110,18 +110,23 @@ _KEY = (r"[A-Za-z0-9_-]{0,64}(?:token|api[-_]?key|apikey|access[-_]?key|secret|p
         r"|private[-_]?key|auth(?![a-z])|dsn|[-_]key(?![a-z])|[-_]pass(?![a-z])|[-_]pwd|pw(?![a-z]))[A-Za-z0-9_-]{0,64}")  # not author or keyboard
 _QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]*?(?:"""|\\Z)'  # triple-quoted; a cut-off file ends it
            + r"""|'(?:[^'\\]|\\.)*(?:'|\Z)|"(?:[^"\\]|\\.)*(?:"|\Z)|`(?:[^`\\]|\\.)*(?:`|\Z))""")  # may span lines
-# The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index).
-_VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}\][\\]+)+"""
+# The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index)
+# or was already redacted (re-matching it would swallow the rest of the line from its closing quote).
+_VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?!\*\*\*REDACTED\*\*\*)(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}\][\\]+)+"""
+# A header value to the end of its string: escaped quotes inside it (\"tok\") and joined quotes ('a '"b") stay in it.
+# An escaped quote before a space or a closing bracket ends it, as in "curl -H \"Authorization: x\" https://...".
+_HEADER_VALUE = r"""(?:[^'"\\\n]|\\(?!['"](?:[\s,;)}\]]|$))[^\n]|['"]{2})+"""
+_HEADER_WORD = r"""(?:[^\s'"\\]|\\(?!['"](?:[\s,;)}\]]|$))\S|['"]{2})+"""
 _SECRET_PATTERNS = [
     # Authorization headers: the whole value, whatever the scheme (Bearer, ApiKey, Digest ...).
-    re.compile(r"(?i)(\b(?:proxy-)?authorization['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"]?)[^'\"\n]+"),
+    re.compile(r"(?i)(\b(?:proxy-)?authorization['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"]?)" + _HEADER_VALUE),
     # Cookie and session headers carry the session itself; redact the whole value.
-    re.compile(r"(?i)(\b(?:set-)?cookie['\"]?\s*[:=]\s*['\"]?)[^'\"\n]+"),
+    re.compile(r"(?i)(\b(?:set-)?cookie['\"]?\s*[:=]\s*['\"]?)" + _HEADER_VALUE),
     # A bearer or basic credential wherever it appears, e.g. HDR="Bearer abc123".
     re.compile(r"(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"),
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth|session)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
-               r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
+               r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"]?(?:(?:bearer|basic|token)\s+)?)" + _HEADER_WORD),
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
     re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:""" + _QUOTED + r"""|[\w.]+)\s*,\s*)""" + _QUOTED),
     # Argument arrays: ["--api-key", "VALUE"].

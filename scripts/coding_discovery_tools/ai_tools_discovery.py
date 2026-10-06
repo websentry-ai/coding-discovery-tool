@@ -363,15 +363,18 @@ def _is_policy_hook(hook: Dict, user_home) -> bool:
     command = hook.get("command") or ""
     if hook.get("scope") != "user" or user_home is None or any(op in command for op in (";", "&", "|", "`", "$(", "\n")):
         return False  # a repo hook, or anything chained after Unbound's script, is the user's own
-    # Judge the program that runs: the read script, else the command's own program word (never an argument).
-    target = hook.get("script_path") or ""
-    if not target:
-        program = re.fullmatch(r"""\s*(?:(?:\S*/)?(?:python3?|bash|sh|zsh)\s+)?['"]?([^\s'"]+)['"]?\s*""", command)
-        target = program.group(1) if program else ""
+    # Only `[interpreter] script`: no env prefix, an interpreter from PATH or a system bin dir.
+    program = re.fullmatch(r"""\s*(?:(?:/usr/bin/|/bin/|/usr/local/bin/|/opt/homebrew/bin/)?(?:python3?|bash|sh|zsh)\s+)?"""
+                           r"""['"]?([^\s'"]+)['"]?\s*""", command)
+    if not program:
+        return False
+    # The file that runs (the read script, else the program word) must be the install path itself, root-owned.
+    target = hook.get("script_path") or re.sub(r"^(~|\$HOME|\$\{HOME\})(?=/)", lambda _: str(user_home), program.group(1))
     match = re.search(_UNBOUND_INSTALL_PATH.pattern + "$", target)
     if not match:
         return False
-    return root_owned(Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}")
+    expected = Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}"
+    return Path(os.path.normpath(target)) == expected and root_owned(expected)
 
 
 def _has_owned_projects(tool_filtered: Dict, user_home=None) -> bool:

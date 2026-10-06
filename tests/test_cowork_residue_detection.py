@@ -242,8 +242,8 @@ class TestCoworkSessionEvidence(unittest.TestCase):
         claude.symlink_to(other, target_is_directory=True)
         self.assertIsNone(self.detect())
 
-    def _unlistable(self, path):
-        os.chmod(path, 0o300)
+    def _unlistable(self, path, mode=0o300):
+        os.chmod(path, mode)
         self.addCleanup(os.chmod, path, 0o700)
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
@@ -265,6 +265,18 @@ class TestCoworkSessionEvidence(unittest.TestCase):
     @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
     def test_unlistable_org_raises_so_nothing_is_pruned(self):
         self._unlistable(self._session().parent)
+        self._assert_unknown_raises()
+
+    # Read without search (0o400): the names list, but nothing under them can be looked at.
+    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    def test_unsearchable_sessions_dir_raises_so_nothing_is_pruned(self):
+        self._session()
+        self._unlistable(self.sessions, 0o400)
+        self._assert_unknown_raises()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    def test_unsearchable_account_raises_so_nothing_is_pruned(self):
+        self._unlistable(self._session().parent.parent, 0o400)
         self._assert_unknown_raises()
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")

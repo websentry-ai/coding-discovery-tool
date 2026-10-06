@@ -556,6 +556,29 @@ def claude_code_sessions_recent(claude_dir: Path,
     return False
 
 
+def _real_subdirs(directory: Path) -> Tuple[List[Path], bool]:
+    """``(subdirectories, unreadable)``: links skipped, and any entry or listing we
+    could not read reported rather than dropped. Never raises."""
+    found, unreadable = [], False
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    os.lstat(entry.path)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    unreadable = True
+                    continue
+                if not is_symlink_or_junction(entry.path) and entry.is_dir(follow_symlinks=False):
+                    found.append(Path(entry.path))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        unreadable = True
+    return found, unreadable
+
+
 def cowork_sessions_recent(user_home: Path, sessions_dir: Path,
                            max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> Optional[bool]:
     """Whether Claude Desktop wrote a Cowork session under ``sessions_dir`` recently;
@@ -572,12 +595,11 @@ def cowork_sessions_recent(user_home: Path, sessions_dir: Path,
     if sessions_dir is None:
         return False
     cutoff = time.time() - (max_age_days * 86400)
-    unknown = _listable_state(sessions_dir) == "unreadable"
-    for account in _newest_dirs_first(sessions_dir):
-        if _listable_state(account) == "unreadable":
-            unknown = True
-            continue
-        for org in _newest_dirs_first(account):
+    accounts, unknown = _real_subdirs(sessions_dir)
+    for account in accounts:
+        orgs, denied = _real_subdirs(account)
+        unknown = unknown or denied
+        for org in orgs:
             try:
                 with os.scandir(org) as entries:
                     for entry in entries:

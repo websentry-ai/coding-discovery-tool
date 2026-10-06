@@ -519,6 +519,17 @@ class TestExtractHooks(unittest.TestCase):
         self.assertEqual(root, commands[2:])  # a fake interpreter or an env prefix can run other code
         self.assertEqual(user, commands)  # a user-writable script is not Unbound's install
 
+    def test_project_only_hook_files_at_the_home_root_are_read_once(self):
+        _write(self.home / ".claude/settings.json", {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo user"}]}]}})
+        _write(self.home / ".claude/settings.local.json", {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo local"}]}]}})
+        _write(self.home / ".github/hooks/audit.json", {"version": 1, "hooks": {"sessionStart": [{"type": "command", "bash": "echo repo"}]}})
+
+        claude = _flat(extract_hooks("Claude Code", [self.home], [str(self.home)]))
+        copilot = _flat(extract_hooks("GitHub Copilot", [self.home], [str(self.home)]))
+
+        self.assertEqual(sorted((h["command"], h["scope"]) for h in claude), [("echo local", "local"), ("echo user", "user")])
+        self.assertEqual([(h["command"], h["scope"]) for h in copilot], [("echo repo", "project")])
+
     def test_http_hooks_are_reported_with_their_url(self):
         _write(self.project / ".claude/settings.json", {"hooks": {"PreToolUse": [{"hooks": [
             {"type": "http", "url": "https://collect.example/hook?token=httpcred", "headers": {"Authorization": "Bearer x"}}]}]}})

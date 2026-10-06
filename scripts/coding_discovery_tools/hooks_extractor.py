@@ -532,6 +532,15 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
                         _hooks_in_file(path, "user", home, None, root, True, unbound, config_relative))
             except Exception as e:
                 logger.warning(f"  hooks: skipped {home}/{pattern} for {tool_name}: {e}")
+        # The home as a project (an agent run from ~): its project-only files, e.g. ~/.claude/settings.local.json.
+        for pattern in (p for p in project_files if p not in user_files):
+            try:
+                for path in _expand(home / pattern):
+                    scope = "local" if path.name == "settings.local.json" else "project"
+                    by_project.setdefault(str(home), []).extend(
+                        _hooks_in_file(path, scope, home, home, home, False, _unbound_scripts(home, home, managed_dirs)))
+            except Exception as e:
+                logger.warning(f"  hooks: skipped {home}/{pattern} for {tool_name}: {e}")
         for path in managed_files:
             try:
                 by_project.setdefault(str(home), []).extend(
@@ -548,7 +557,7 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
             root = Path(project)
             home = next((h for h in user_homes if root == h or h in root.parents), None)
             if home is None or root == home:
-                continue  # outside every scanned home, or the home itself (its user-scope file is read above)
+                continue  # outside every scanned home, or the home itself (read with the user-scope files above)
             unbound = _unbound_scripts(home, root, managed_dirs)
             for pattern in project_files:
                 for path in _expand(root / pattern):

@@ -248,7 +248,12 @@ def _script_argument(args: List[str], family: str) -> Optional[int]:
         if family == "cmd" and word.lower() in ("/c", "/k", "/q", "/d", "/s"):
             i += 1  # cmd /c script.bat runs script.bat
             continue
+        if family == "node" and word == "run":
+            i += 1  # deno run / bun run script.ts
+            continue
         if not word.startswith("-"):
+            if family == "node" and "/" not in word and "\\" not in word and "." not in word:
+                return None  # bun test, bun x pkg: a subcommand or package, not a file
             return i
         option = word.lower() if family == "powershell" else word
         if family == "powershell" and option in ("-file", "-f"):
@@ -256,7 +261,8 @@ def _script_argument(args: List[str], family: str) -> Optional[int]:
         if family == "powershell" and option in _POWERSHELL_VALUE_OPTIONS:
             i += 2
             continue
-        if option not in _FLAG_ONLY_OPTIONS[family]:
+        deno_permission = family == "node" and (option == "-A" or option.startswith(("--allow-", "--deny-")))
+        if option not in _FLAG_ONLY_OPTIONS[family] and not deno_permission:
             return None
         i += 1
     return None

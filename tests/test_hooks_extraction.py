@@ -126,6 +126,9 @@ class TestExtractHooks(unittest.TestCase):
         self.assertNotIn("script_content", claude)  # Claude runs it in whichever project is open
         self.assertEqual(cursor["script_content"], "echo cursor")
         self.assertIsNone(_program_path("cmd /c npm test", self.home, None, self.home))
+        self.assertIsNone(_program_path("bun test", self.home, None, self.home))
+        self.assertEqual(_program_path("deno run --allow-read ./hooks/check.ts", self.home, None, self.home),
+                         self.home / "hooks/check.ts")
 
     def test_a_user_hook_on_claude_project_dir_reads_nothing(self):
         _write(self.home / "x.py", "print('home x')")

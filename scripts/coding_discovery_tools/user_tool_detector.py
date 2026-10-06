@@ -21,6 +21,7 @@ from .utils import (
     _is_scanning_users_own_home,
     _read_own_regular_file,
     claude_code_sessions_recent,
+    cowork_sessions_recent,
     dir_state,
     fail_if_anomalous,
     extract_version_number,
@@ -455,6 +456,9 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     dir alone produced false positives. All three OSes AND-require an install dir
     resolved by the OS detector's ``_find_install_dir`` (keeping the install-dir
     candidate lists in the OS modules — one source of truth).
+
+    When the bundle is somewhere we do not probe, a session the app wrote recently
+    stands in for it, as the session files do for Claude Code.
     """
     system = platform.system()
     if system == "Darwin":
@@ -490,7 +494,13 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
             fail_if_anomalous(user_home, str(e))
             return None
         if app_install is None:
-            return None
+            if not cowork_sessions_recent(sessions_dir):
+                return None
+            return {
+                "name": detector.tool_name,
+                "version": "unknown",
+                "install_path": str(sessions_dir),
+            }
 
     return {
         "name": detector.tool_name,

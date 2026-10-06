@@ -19,6 +19,7 @@ Both routing entry points are covered:
 import os
 import plistlib
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -165,6 +166,78 @@ class TestCentralCoworkMac(unittest.TestCase):
             result = _detect_claude_cowork(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(sdir))
+
+
+@unittest.skipIf(os.name == "nt", "POSIX-only: macOS bundle paths")
+class TestCoworkSessionEvidence(unittest.TestCase):
+    """Claude.app installed somewhere we do not probe, Spotlight finding nothing: a
+    session the app wrote recently is what proves Cowork is in use, through the real
+    detector and the scan's own per-user entry point."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve()
+        self.sessions = self.home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        self.sessions.mkdir(parents=True)
+        for target, value in (
+            (f"{_BUNDLE_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app"),
+            (f"{_BUNDLE_MOD}.run_command_status", Mock(return_value=("", True))),
+            (f"{_MOD}.platform.system", Mock(return_value="Darwin")),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.detector = MacOSClaudeCoworkDetector()
+
+    def _session(self, account="acct-1", age_days=0):
+        org = self.sessions / account / "org-1"
+        (org / "local_abc" / "outputs").mkdir(parents=True)
+        path = org / "local_abc.json"
+        path.write_text("{}")
+        stamp = time.time() - age_days * 86400
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def detect(self):
+        from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
+        return detect_tool_for_user(self.detector, self.home)
+
+    def test_recent_session_reports_cowork_without_the_bundle(self):
+        self._session()
+        self.assertEqual(self.detect(), {
+            "name": "Claude Cowork", "version": "unknown", "install_path": str(self.sessions),
+        })
+
+    def test_stale_session_is_uninstall_residue(self):
+        self._session(age_days=45)
+        self.assertIsNone(self.detect())
+
+    def test_skills_bundle_alone_is_not_a_session(self):
+        skill = self.sessions / "skills-plugin" / "b1" / "b1" / "skills" / "xlsx" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# xlsx")
+        self.assertIsNone(self.detect())
+
+    def test_session_behind_a_redirected_account_dir_is_not_evidence(self):
+        elsewhere = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        org = elsewhere / "org-1"
+        org.mkdir()
+        (org / "local_abc.json").write_text("{}")
+        (self.sessions / "acct-1").symlink_to(elsewhere, target_is_directory=True)
+        self.assertIsNone(self.detect())
+
+    def test_a_found_bundle_still_wins(self):
+        self._session()
+        app = self.home / "Applications" / "Claude.app"
+        (app / "Contents").mkdir(parents=True)
+        with (app / "Contents" / "Info.plist").open("wb") as fh:
+            plistlib.dump({"CFBundleShortVersionString": "1.4.2"}, fh)
+        self.assertEqual(self.detect()["version"], "1.4.2")
 
 
 class TestCoworkProbeTelemetry(unittest.TestCase):

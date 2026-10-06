@@ -556,6 +556,24 @@ def claude_code_sessions_recent(claude_dir: Path,
     return False
 
 
+def cowork_sessions_recent(sessions_dir: Path,
+                           max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> bool:
+    """True when Claude Desktop wrote a Cowork session under ``sessions_dir`` recently.
+
+    ``<account>/<org>/local_<id>.json`` is written by the app for each session, so a
+    fresh one proves Cowork ran even when its bundle is somewhere we do not probe. The
+    sessions tree alone is not evidence: it survives an uninstall.
+    """
+    if is_symlink_or_junction(sessions_dir):
+        return False
+    cutoff = time.time() - (max_age_days * 86400)
+    for account in _newest_dirs_first(sessions_dir):
+        for org in _newest_dirs_first(account):
+            if _has_recent_file(org, "local_*.json", cutoff):
+                return True
+    return False
+
+
 def dir_state(path) -> str:
     """``present``, ``absent`` or ``unreadable`` for a directory. Never raises.
 

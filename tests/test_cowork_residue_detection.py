@@ -246,7 +246,7 @@ class TestCoworkSessionEvidence(unittest.TestCase):
         os.chmod(path, mode)
         self.addCleanup(os.chmod, path, 0o700)
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unlistable_sessions_in_our_own_home_raise_so_nothing_is_pruned(self):
         self._session()
         self._unlistable(self.sessions)
@@ -257,29 +257,29 @@ class TestCoworkSessionEvidence(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 self.detect()
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unlistable_account_raises_so_nothing_is_pruned(self):
         self._unlistable(self._session().parent.parent)
         self._assert_unknown_raises()
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unlistable_org_raises_so_nothing_is_pruned(self):
         self._unlistable(self._session().parent)
         self._assert_unknown_raises()
 
     # Read without search (0o400): the names list, but nothing under them can be looked at.
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unsearchable_sessions_dir_raises_so_nothing_is_pruned(self):
         self._session()
         self._unlistable(self.sessions, 0o400)
         self._assert_unknown_raises()
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unsearchable_account_raises_so_nothing_is_pruned(self):
         self._unlistable(self._session().parent.parent, 0o400)
         self._assert_unknown_raises()
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_a_readable_recent_session_wins_over_an_unreadable_sibling(self):
         self._unlistable(self._session(account="acct-locked").parent)
         self._session(account="acct-open")

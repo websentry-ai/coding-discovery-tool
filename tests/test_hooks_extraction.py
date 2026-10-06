@@ -316,6 +316,7 @@ class TestExtractHooks(unittest.TestCase):
                              ("""curl -H "X-Api-Key: Key "eGhlYWRlcg== https://x""", "eGhlYWRlcg=="),
                              ('curl -H "X-Api-Key: two words" https://x', "words"),
                              ("""curl -H 'Cookie: sid="quotedcookie"' https://x""", "quotedcookie"),
+                             ('headers = {"Authorization": "Bearer " + "plusjoined"}', "plusjoined"),
                              ('curl -H "Authorization: Digest user=a, response=digeststr" https://x', "digeststr"),
                              ("GPG_PASSPHRASE=passphrasecred", "passphrasecred"), ('db_creds = "credscred"', "credscred"),
                              ('CONN_STR="Server=x;Password=connstrcred"', "connstrcred")):
@@ -484,9 +485,14 @@ class TestExtractHooks(unittest.TestCase):
         _write(self.project / ".claude/settings.json", {"hooks": {"SessionStart": [{"hooks": [
             {"type": "command", "command": "python3 .claude/hooks/unbound.py"}]}]}})
 
-        cursor = _flat(extract_hooks("Cursor", [self.home], []))
-        repo = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))
+        binary = Path("/opt/unbound/current/unbound-hook/unbound-hook")
+        with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", side_effect=lambda p: Path(p) == binary):
+            cursor = _flat(extract_hooks("Cursor", [self.home], []))
+            repo = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))
+        with patch("scripts.coding_discovery_tools.hooks_extractor.root_owned", return_value=False):
+            planted = _flat(extract_hooks("Cursor", [self.home], []))  # a user-made file at the binary's path
 
+        self.assertEqual(len(planted), 3)
         self.assertEqual(sorted(h["command"] for h in cursor), ["./hooks/unbound.py", "plannotator"])  # user-writable copy
         self.assertEqual([h["command"] for h in repo], ["python3 .claude/hooks/unbound.py"])
 

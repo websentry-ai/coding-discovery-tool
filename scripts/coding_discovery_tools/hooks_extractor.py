@@ -121,9 +121,9 @@ _SECRET_HEADER = (r"(?:(?:proxy-)?authorization|(?:set-)?cookie|x-[a-z0-9-]{0,64
                   r"|[a-z0-9-]{0,64}api-key)")
 # The rest of a header string opened by quote group 2: the other quote and escapes stay in it; an escaped closing
 # quote before a space ends it (curl -H \"Authorization: x\" https://...). A word joined to the closing quote
-# ('Bearer '"abc", "Basic "abc==) is part of the value too.
+# ('Bearer '"abc", "Basic "abc==), and literals added to it ("Bearer " + "abc"), are part of the value too.
 _IN_HEADER_STRING = (r"""(?:(?!\2)[^\\\n]|\\(?!\2(?:[\s,;)}\]]|$))[^\n])*"""
-                     r"""(?:\2(?![\s,;:)}\]])""" + _SHELL_WORD + r""")?""")
+                     r"""(?:\2(?![\s,;:)}\]])""" + _SHELL_WORD + r"""|\2(?:\s*\+\s*""" + _QUOTED + r""")+)?""")
 _SECRET_PATTERNS = [
     # Credential headers (Authorization, Cookie, X-Api-Key ...): the whole value, whatever the scheme.
     # In a string ({"Authorization": "x"} or -H 'Cookie: a="b"') the value runs to that string's own closing quote.
@@ -379,7 +379,7 @@ def _is_unbound_hook(command: str, program: Optional[Path], unbound_scripts: Set
         return False  # a second command after Unbound's must stay visible
     words = _tokens(command)
     if len(words) >= 2 and Path(words[0]) == _UNBOUND_HOOK_BINARY and words[1] == "hook":
-        return True
+        return root_owned(_UNBOUND_HOOK_BINARY)
     if not words or program is None or Path(os.path.normpath(str(program))) not in unbound_scripts:
         return False
     # Only `[interpreter] script`: no env prefix, an interpreter from PATH or a system bin dir, a root-owned script.

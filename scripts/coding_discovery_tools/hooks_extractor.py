@@ -127,6 +127,8 @@ _IN_HEADER_STRING = (r"""(?:(?!\2)[^\\\n]|\\(?!\2(?:[\s,;)}\]]|$))[^\n])*"""
 _SECRET_PATTERNS = [
     # Credential headers (Authorization, Cookie, X-Api-Key ...): the whole value, whatever the scheme.
     # In a string ({"Authorization": "x"}, -H 'Cookie: a="b"', a JS `template`) the value runs to that string's own closing quote.
+    # A JS template can span lines; it runs to its closing backtick (or the end of a cut-off file).
+    re.compile(r"(?i)(\b" + _SECRET_HEADER + r"['\"]?\]?\s*[:=]\s*`)(?:[^`\\]|\\[\s\S])+(?=`|\Z)"),
     re.compile(r"(?i)(\b" + _SECRET_HEADER + r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?(['\"`]))" + _IN_HEADER_STRING),
     re.compile(r"(?i)((['\"`])\s*" + _SECRET_HEADER + r"\s*[:=]\s*)" + _IN_HEADER_STRING),
     # Unquoted (-H Authorization:x), the value is one shell word, so `| sh` after it is kept.

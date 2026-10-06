@@ -319,6 +319,7 @@ class TestExtractHooks(unittest.TestCase):
                              ('headers = {"Authorization": "Bearer " + "plusjoined"}', "plusjoined"),
                              ("fetch(u, {headers: {'Authorization': `Bearer templatecred`}})", "templatecred"),
                              ("fetch(u, {headers: {Authorization: `Bearer ${'baretemplate'}`}})", "baretemplate"),
+                             ("fetch(u, {headers: {Authorization: `Bearer ${\n  'multilinetemplate'}`}})", "multilinetemplate"),
                              ('curl -H "Authorization: Digest user=a, response=digeststr" https://x', "digeststr"),
                              ("GPG_PASSPHRASE=passphrasecred", "passphrasecred"), ('db_creds = "credscred"', "credscred"),
                              ('CONN_STR="Server=x;Password=connstrcred"', "connstrcred")):

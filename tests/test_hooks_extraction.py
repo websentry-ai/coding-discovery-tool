@@ -280,7 +280,8 @@ class TestExtractHooks(unittest.TestCase):
                              ('headers = {"X-Api-Key": r"prefixedhdr"}', "prefixedhdr"),
                              ("curl -u a:firstcred --proxy-user p:secondcred https://x", "secondcred"),
                              ("curl \"--user\" admin:quotedoptcred https://x", "quotedoptcred"),
-                             ("curl -u 'admin:p&ss;w|rdcred' https://x", "rdcred"),
+                             ("curl -u 'admin:p&ss;w|rdcred' https://x", "rdcred"), ("curl -u admin:pa\\;esccred https://x", "esccred"),
+                             ("curl -u 'admin:cutoffcred", "cutoffcred"),
                              ("curl -s \\\n  -u admin:multilinecred https://x", "multilinecred"),
                              ('if (token := "walruscred"):', "walruscred"),
                              ('args = ["--password", "esc\\"apedarray"]', "apedarray"),
@@ -413,10 +414,15 @@ class TestExtractHooks(unittest.TestCase):
         onboarded = {"projects": [{"path": str(self.home), "hooks": [
             {"command": "python3 ~/.copilot/hooks/unbound.py", "scope": "user",
              "script_path": str(self.home / ".copilot/hooks/unbound.py")}]}]}
-        self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", onboarded, self.home))  # Unbound's own hook only
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=True):
+            self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", onboarded, self.home))  # Unbound's root-owned hook
         unread = {"projects": [{"path": str(self.home), "hooks": [
             {"command": "python3 ~/.copilot/hooks/unbound.py", "scope": "user"}]}]}  # script not readable
-        self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", unread, self.home))
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=True):
+            self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", unread, self.home))
+        _write(self.home / ".copilot/hooks/unbound.py", "print('user wrote this')")  # user-owned, not Unbound's install
+        with patch("scripts.coding_discovery_tools.ai_tools_discovery._root_owned", return_value=False):
+            self.assertTrue(_has_user_owned_data("GitHub Copilot CLI", unread, self.home))
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 

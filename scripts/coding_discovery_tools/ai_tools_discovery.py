@@ -351,27 +351,40 @@ def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
         return False
 
 
-# Unbound's onboarding writes its hook script here in every onboarded user's home.
-_UNBOUND_INSTALL_SCRIPT = re.compile(r"[\\/]\.(?:claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(?:py|sh)$")
-_UNBOUND_INSTALL_COMMAND = re.compile(r"[\\/]\.(?:claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(?:py|sh)(?=['\"\s]|$)")
+# Unbound's onboarding installs its hook script here, root-owned, in every onboarded user's home.
+_UNBOUND_INSTALL_PATH = re.compile(r"[\\/]\.(claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(py|sh)(?=['\"\s]|$)")
 
 
-def _is_policy_hook(hook: Dict) -> bool:
-    """Org policy, not the user's own data: a managed hook, or Unbound's hook at its install path (still reported)."""
-    if hook.get("scope") == "managed" or _UNBOUND_INSTALL_SCRIPT.search(hook.get("script_path") or ""):
+def _root_owned(path: Path) -> bool:
+    """Owned by root and not group/other-writable: a user cannot have written it. Never true on Windows."""
+    if platform.system() == "Windows":
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_uid == 0 and not st.st_mode & 0o022
+
+
+def _is_policy_hook(hook: Dict, user_home) -> bool:
+    """Org policy, not the user's own data: a managed hook, or Unbound's root-owned install script (still reported).
+    A user-written file at that path is the user's own and counts as owned data."""
+    if hook.get("scope") == "managed":
         return True
-    # The script may not have been readable (no script_path); the command still names it.
-    return bool(_UNBOUND_INSTALL_COMMAND.search(hook.get("command") or ""))
+    match = _UNBOUND_INSTALL_PATH.search(hook.get("script_path") or "") or _UNBOUND_INSTALL_PATH.search(hook.get("command") or "")
+    if not match or user_home is None:
+        return False
+    return _root_owned(Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}")
 
 
-def _has_owned_projects(tool_filtered: Dict) -> bool:
+def _has_owned_projects(tool_filtered: Dict, user_home=None) -> bool:
     """Whether the user has projects of their own; a row holding only policy hooks (managed or Unbound's) is not theirs."""
     for project in tool_filtered.get("projects") or []:
         if not isinstance(project, dict):
             return True
         hooks = project.get("hooks") or []
         other = any(value for key, value in project.items() if key not in ("path", "hooks"))
-        if other or not hooks or not all(_is_policy_hook(hook) for hook in hooks):
+        if other or not hooks or not all(_is_policy_hook(hook, user_home) for hook in hooks):
             return True
     return False
 
@@ -393,7 +406,7 @@ def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     owns_install = bool(own_norm) and (
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
-    has_data = _has_owned_projects(tool_filtered) or "permissions" in tool_filtered
+    has_data = _has_owned_projects(tool_filtered, user_home) or "permissions" in tool_filtered
     return owns_install or has_data
 
 
@@ -420,7 +433,7 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
 
-    if _has_owned_projects(tool_filtered):
+    if _has_owned_projects(tool_filtered, user_home):
         return True
 
     # A permissions block survives filtering for this user iff it is managed
@@ -440,7 +453,7 @@ def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool
         return _copilot_cli_owned_by_user(tool_filtered, user_home)
     if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
         return _augment_owned_by_user(tool_filtered, user_home)
-    if _has_owned_projects(tool_filtered):
+    if _has_owned_projects(tool_filtered, user_home):
         return True
     perms = tool_filtered.get("permissions")
     return perms is not None and perms.get("settings_source") != "managed"

@@ -132,6 +132,7 @@ class TestExtractHooks(unittest.TestCase):
                          self.home / "hooks/a.py")
         self.assertEqual(_program_path("bash ./hooks/a.sh>/tmp/log", self.home, None, self.home), self.home / "hooks/a.sh")
         self.assertEqual(_program_path('bash "./hooks/a;b.sh"', self.home, None, self.home), self.home / "hooks/a;b.sh")
+        self.assertEqual(_program_path('bash "./hooks/a.sh"&&echo done', self.home, None, self.home), self.home / "hooks/a.sh")
         self.assertEqual(_program_path("deno run --allow-read ./hooks/check.ts", self.home, None, self.home),
                          self.home / "hooks/check.ts")
 
@@ -388,7 +389,7 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual((on_windows, on_linux), (("command", "Write-Host windows"), ("command", "echo unix")))
 
-    def test_only_unbound_hooks_at_their_install_location_are_skipped(self):
+    def test_only_the_root_owned_unbound_binary_is_skipped(self):
         _write(self.home / ".cursor/hooks/unbound.py", "# unbound governance hook")
         _write(self.home / ".cursor/hooks.json", {"version": 1, "hooks": {
             "preToolUse": [{"command": "./hooks/unbound.py"}],
@@ -401,7 +402,7 @@ class TestExtractHooks(unittest.TestCase):
         cursor = _flat(extract_hooks("Cursor", [self.home], []))
         repo = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))
 
-        self.assertEqual([h["command"] for h in cursor], ["plannotator"])
+        self.assertEqual(sorted(h["command"] for h in cursor), ["./hooks/unbound.py", "plannotator"])  # user-writable copy
         self.assertEqual([h["command"] for h in repo], ["python3 .claude/hooks/unbound.py"])
 
     def test_a_command_chained_after_unbounds_hook_is_reported(self):

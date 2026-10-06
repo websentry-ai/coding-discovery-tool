@@ -227,10 +227,12 @@ def _command_of(hook: Dict) -> Tuple[str, str]:
 
 
 def _tokens(command: str) -> List[str]:
-    """Shell words; Windows paths keep their backslashes."""
+    """Shell words, with ; & | < > ( ) as their own tokens outside quotes; Windows paths keep their backslashes."""
     posix = platform.system() != "Windows"
     try:
-        words = shlex.split(command, posix=posix)
+        lexer = shlex.shlex(command, posix=posix, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
     except ValueError:
         words = command.split()
     return words if posix else [w.strip('"\'') for w in words]
@@ -300,8 +302,6 @@ def _program_path(command: str, config_dir: Optional[Path], project_root: Option
         index += script + 1
     quote = _quote_of(command, index, len(words))
     program = words[index]
-    if not quote:
-        program = re.split(r"&&|\|\||[;&|<>]", program)[0]  # `script.py;next`, `script.py>log` name script.py
     if project_root is None and "CLAUDE_PROJECT_DIR" in program:
         return None  # a user hook's project is whichever one is open when it runs; no single file to read
     # The shell expands ~ only unquoted and $VAR only outside single quotes; a quoted literal names no real file.
@@ -331,11 +331,9 @@ def _is_unbound_hook(command: str, program: Optional[Path], unbound_scripts: Set
 
 
 def _unbound_scripts(home: Path, project_root: Optional[Path], managed_dirs: List[Path]) -> Set[Path]:
-    """Where Unbound's installers put the hook script for this home, project and the managed config dirs."""
-    scripts = {home / tool_dir / "hooks" / name for tool_dir in (".claude", ".cursor", ".codex", ".copilot", ".augment")
-               for name in ("unbound.py", "unbound.sh")}
-    scripts |= {d / "hooks" / "unbound.py" for d in managed_dirs}
-    return {Path(os.path.normpath(str(p))) for p in scripts}
+    """Unbound's hook script in the root-owned managed config dirs. A copy under a user's home is user-writable,
+    so it is reported and the backend decides from its content whether it is Unbound's."""
+    return {Path(os.path.normpath(str(d / "hooks" / "unbound.py"))) for d in managed_dirs}
 
 
 def hooks_from_settings(hooks: Dict, source: str, tool_name: str = "Claude Code") -> List[Dict]:

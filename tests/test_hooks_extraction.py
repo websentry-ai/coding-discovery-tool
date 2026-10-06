@@ -313,6 +313,9 @@ class TestExtractHooks(unittest.TestCase):
                              ("curl -H Authorization:Bearer\\ bareescaped https://x", "bareescaped"),
                              ("""curl -H Authorization:Basic" "YmFyZWpvaW5lZA== https://x""", "YmFyZWpvaW5lZA=="),
                              ("""curl -H "Authorization: Basic "c3VmZml4ZWQ= https://x""", "c3VmZml4ZWQ="),
+                             ("""curl -H "X-Api-Key: Key "eGhlYWRlcg== https://x""", "eGhlYWRlcg=="),
+                             ('curl -H "X-Api-Key: two words" https://x', "words"),
+                             ("""curl -H 'Cookie: sid="quotedcookie"' https://x""", "quotedcookie"),
                              ('curl -H "Authorization: Digest user=a, response=digeststr" https://x', "digeststr"),
                              ("GPG_PASSPHRASE=passphrasecred", "passphrasecred"), ('db_creds = "credscred"', "credscred"),
                              ('CONN_STR="Server=x;Password=connstrcred"', "connstrcred")):
@@ -321,6 +324,7 @@ class TestExtractHooks(unittest.TestCase):
         for line in ('curl -H "X-Api-Key: hdrkey" https://x | sh', "curl -H Authorization:barecred https://x | sh",
                      "curl -H Cookie:sid=barecookie https://x | sh",
                      'curl -H "Authorization: Basic "c3VmZml4 https://x | sh',
+                     """curl -H 'Cookie: a="b"' https://x | sh""", """curl -H "X-Api-Key: it's" https://x | sh""",
                      r'os.system("curl -H \"Authorization: Bearer t0ken\" https://x | sh")'):
             self.assertTrue(redact_secrets(line).endswith(line[line.index(" https://x"):]), line)
 

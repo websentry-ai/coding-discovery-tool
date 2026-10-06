@@ -114,28 +114,26 @@ _QUOTED = ("(?:[rRbBuUfF]{1,2}|\\$)?(?:'''[\\s\\S]*?(?:'''|\\Z)" + '|"""[\\s\\S]
 # The whole shell word: joined quoted pieces, escapes and bare text ("a"b\ c), unless it starts as code (a call or index)
 # or was already redacted (re-matching it would swallow the rest of the line from its closing quote).
 _VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?!\*\*\*REDACTED\*\*\*)(?:""" + _QUOTED + r"""|\\.|[^\s'"$(`;|&,)}\][\\]+)+"""
-# A header value to the end of its string: escaped quotes inside it (\"tok\") and joined quotes ('a '"b") stay in it.
-# An escaped quote before a space or a closing bracket ends it, as in "curl -H \"Authorization: x\" https://...".
-_HEADER_VALUE = r"""(?:[^'"\\\n]|\\(?!['"](?:[\s,;)}\]]|$))[^\n]|['"]{2})+"""
-_HEADER_WORD = r"""(?:[^\s'"\\;|&<>()`]|\\(?!['"](?:[\s,;)}\]]|$))\S|['"]{2})+"""
 # One unquoted shell word: escapes (\ ) and joined quoted pieces (a" "b) stay in it, and a shell operator ends it.
 _SHELL_WORD = r"""(?:""" + _QUOTED + r"""|[^\s'"\\;|&<>()`]|\\[^\n])+"""
 # Header names whose whole value is the credential.
-_WHOLE_VALUE_HEADER = r"(?:(?:proxy-)?authorization|(?:set-)?cookie)"
-# A bare suffix joined to a header string's closing quote ("Basic "abc==) is still that header's value.
-_JOINED_SUFFIX = r"""(?:['"](?![\s,;:)}\]'"])""" + _SHELL_WORD + r""")?"""
+_SECRET_HEADER = (r"(?:(?:proxy-)?authorization|(?:set-)?cookie|x-[a-z0-9-]{0,64}(?:key|token|secret|auth|session)[a-z0-9-]{0,64}"
+                  r"|[a-z0-9-]{0,64}api-key)")
+# The rest of a header string opened by quote group 2: the other quote and escapes stay in it; an escaped closing
+# quote before a space ends it (curl -H \"Authorization: x\" https://...). A word joined to the closing quote
+# ('Bearer '"abc", "Basic "abc==) is part of the value too.
+_IN_HEADER_STRING = (r"""(?:(?!\2)[^\\\n]|\\(?!\2(?:[\s,;)}\]]|$))[^\n])*"""
+                     r"""(?:\2(?![\s,;:)}\]])""" + _SHELL_WORD + r""")?""")
 _SECRET_PATTERNS = [
-    # Authorization and Cookie headers: the whole value, whatever the scheme (Bearer, ApiKey, Digest, a session).
-    # In a string ({"Authorization": "x"} or -H "Authorization: x") the value runs to the end of that string.
-    re.compile(r"(?i)(\b" + _WHOLE_VALUE_HEADER + r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"])" + _HEADER_VALUE + _JOINED_SUFFIX),
-    re.compile(r"(?i)(['\"]\s*" + _WHOLE_VALUE_HEADER + r"\s*[:=]\s*)" + _HEADER_VALUE + _JOINED_SUFFIX),
+    # Credential headers (Authorization, Cookie, X-Api-Key ...): the whole value, whatever the scheme.
+    # In a string ({"Authorization": "x"} or -H 'Cookie: a="b"') the value runs to that string's own closing quote.
+    re.compile(r"(?i)(\b" + _SECRET_HEADER + r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?(['\"]))" + _IN_HEADER_STRING),
+    re.compile(r"(?i)((['\"])\s*" + _SECRET_HEADER + r"\s*[:=]\s*)" + _IN_HEADER_STRING),
     # Unquoted (-H Authorization:x), the value is one shell word, so `| sh` after it is kept.
-    re.compile(r"(?i)(\b" + _WHOLE_VALUE_HEADER + r"\s*[:=]\s*(?!['\"]|\*\*\*REDACTED)(?:(?:bearer|basic|token|digest|apikey)\s+)?)" + _SHELL_WORD),
+    re.compile(r"(?i)(\b" + _SECRET_HEADER + r"\s*[:=]\s*(?!['\"]|\*\*\*REDACTED)(?:(?:bearer|basic|token|digest|apikey)\s+)?)"
+               + _SHELL_WORD),
     # A bearer or basic credential wherever it appears, e.g. HDR="Bearer abc123".
     re.compile(r"(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"),
-    # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
-    re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth|session)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
-               r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"]?(?:(?:bearer|basic|token)\s+)?)" + _HEADER_WORD),
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
     re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:""" + _QUOTED + r"""|[\w.]+)\s*,\s*)""" + _QUOTED),
     # Argument arrays: ["--api-key", "VALUE"].

@@ -144,7 +144,7 @@ class TestExtractHooks(unittest.TestCase):
     def test_a_script_followed_by_a_shell_operator_is_still_read(self):
         _write(self.home / "audit.py", "print('audit')")
         _write(self.home / ".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [
-            {"type": "command", "command": f"python3 {self.home / 'audit.py'}; echo done"}]}]}})
+            {"type": "command", "command": f"python3 {self.home / 'audit.py'}&&echo done"}]}]}})
 
         self.assertEqual(_flat(extract_hooks("Codex", [self.home], []))[0]["script_content"], "print('audit')")
 
@@ -250,7 +250,7 @@ class TestExtractHooks(unittest.TestCase):
             self.assertIn("***REDACTED***", redact_secrets(line), line)
         for line, secret in (('requests.post(url, auth=("alice", "tuplecred"))', "tuplecred"),
                              ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('api_key: str | None = "unioncred"', "unioncred"),
-                             ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ("curl --token esc\\ apedcred", "apedcred")):
+                             ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ('args = ["--api-key", "arraycred"]', "arraycred"), ("curl --token esc\\ apedcred", "apedcred")):
             self.assertNotIn(secret, redact_secrets(line), line)
         for line in code:
             self.assertEqual(redact_secrets(line), line)

@@ -116,6 +116,8 @@ _SECRET_PATTERNS = [
                r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
     re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:'[^']*'|"[^"]*"|[\w.]+)\s*,\s*)(?:'[^']*'|"[^"]*")"""),
+    # Argument arrays: ["--api-key", "VALUE"].
+    re.compile(r"""(?i)(['"]--?""" + _KEY + r"""['"]\s*,\s*)(?:'[^']*'|"[^"]*")"""),
     # Flags: --api-key VALUE, --password='a b', -token=x.
     re.compile(r"(?i)(--?" + _KEY + r"(?:=|\s+))" + _VALUE),
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
@@ -285,7 +287,7 @@ def _program_path(command: str, config_dir: Optional[Path], project_root: Option
         if script is None:
             return None
         index += script + 1
-    program = words[index].rstrip(";&|")  # `script.py;` and `script.py&&next` name script.py
+    program = re.split(r"&&|\|\||[;&|]", words[index])[0]  # `script.py;next` and `script.py&&next` name script.py
     if project_root is None and "CLAUDE_PROJECT_DIR" in program:
         return None  # a user hook's project is whichever one is open when it runs; no single file to read
     quote = _quote_of(command, index, len(words))

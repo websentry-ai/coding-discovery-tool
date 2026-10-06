@@ -119,7 +119,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"),
     # Headers: Authorization, X-Api-Key, X-Auth-Token and friends.
     re.compile(r"(?i)(\b(?:authorization|proxy-authorization|x-[a-z0-9-]{0,64}(?:key|token|secret|auth|session)[a-z0-9-]{0,64}|[a-z0-9-]{0,64}api-key)"
-               r"['\"]?\]?\s*[:=]\s*['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
+               r"['\"]?\]?\s*[:=]\s*(?:[rRbBuUfF]{1,2}(?=['\"]))?['\"]?(?:(?:bearer|basic|token)\s+)?)[^\s'\"]+"),
     # The password of a (user, password) pair: auth=("alice", "pw"), HTTPBasicAuth("alice", "pw").
     re.compile(r"""((?:\b\w*Auth\s*\(|(?i:\bauth)\s*=\s*\()\s*(?:""" + _QUOTED + r"""|[\w.]+)\s*,\s*)""" + _QUOTED),
     # Argument arrays: ["--api-key", "VALUE"].
@@ -293,7 +293,9 @@ def _quote_of(command: str, index: int, count: int) -> str:
         return "'"  # an escaped \$VAR or \~ is literal; shlex has already dropped the backslash
     unknown = "'" if "'" in command else '"'  # with no single quotes anywhere, $VAR expands; ~ may be quoted
     try:
-        raw = shlex.split(command, posix=False)
+        lexer = shlex.shlex(command, posix=False, punctuation_chars=True)  # same word boundaries as _tokens
+        lexer.whitespace_split = True
+        raw = list(lexer)
     except ValueError:
         return unknown
     if len(raw) != count:

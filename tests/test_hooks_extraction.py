@@ -132,6 +132,7 @@ class TestExtractHooks(unittest.TestCase):
         self.assertEqual(_program_path("/usr/bin/env -i DEBUG=1 python3 ./hooks/a.py", self.home, None, self.home),
                          self.home / "hooks/a.py")
         self.assertEqual(_program_path("bash ./hooks/a.sh>/tmp/log", self.home, None, self.home), self.home / "hooks/a.sh")
+        self.assertEqual(_program_path("bash $HOME/hooks/a.sh&&echo done", self.home, None, self.home), self.home / "hooks/a.sh")
         self.assertEqual(_program_path('bash "./hooks/a;b.sh"', self.home, None, self.home), self.home / "hooks/a;b.sh")
         self.assertEqual(_program_path('bash "./hooks/a.sh"&&echo done', self.home, None, self.home), self.home / "hooks/a.sh")
         self.assertEqual(_program_path("deno run --allow-read ./hooks/check.ts", self.home, None, self.home),
@@ -275,6 +276,7 @@ class TestExtractHooks(unittest.TestCase):
                              ('HTTPBasicAuth("alice", "ctorcred")', "ctorcred"), ('HTTPBasicAuth("alice", r"rawtuple")', "rawtuple"),
                              ('auth=("alice", "esc\\"apedtuple")', "apedtuple"), ('api_key: str | None = "unioncred"', "unioncred"),
                              ('curl --api-key ""joinedcred https://x', "joinedcred"), ("curl -u admin:'quoted pass'", "quoted pass"), ("curl --user-agent bot/1 -u admin:afteragent https://x", "afteragent"),
+                             ('headers = {"X-Api-Key": r"prefixedhdr"}', "prefixedhdr"),
                              ('HDR="Bearer standalonebearer1"', "standalonebearer1"), ("--data '{\"pw\":\"jsonpwcred\"}'", "jsonpwcred"),
                              ('curl -H "X-Custom: 9fK2mQ7xL4pR8vT1nB6cW3yZ5aD0eG2h" x', "9fK2mQ7xL4pR8vT1nB6cW3yZ5aD0eG2h"), ('curl --user ""curluser:joinedpw https://x', "joinedpw"),
                              ('curl -u "admin":quotedname https://x', "quotedname"),

@@ -7,6 +7,7 @@ on macOS and Windows
 
 import argparse
 import copy
+import functools
 import json
 import logging
 import os
@@ -108,7 +109,7 @@ try:
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
-    from .hooks_extractor import extract_hooks, hooks_from_settings
+    from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .sweep_connectors import run_sweep
@@ -189,7 +190,7 @@ except ImportError:
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
-    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hooks_from_settings
+    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
@@ -297,8 +298,9 @@ def _home_for_user(user: str):
     return Path.home()
 
 
+@functools.lru_cache(maxsize=1)
 def _scan_user_homes() -> List[Path]:
-    """Every enumerated user's home, as main() scans them; the current user when none are found."""
+    """Every enumerated user's home, as main() scans them; the current user when none are found. Once per run."""
     if platform.system() == "Darwin":
         users = get_all_users_macos()
     elif platform.system() == "Windows":
@@ -2006,6 +2008,8 @@ class AIToolsDetector:
             path = Path(record.get("settings_path", "")) if isinstance(record, dict) else Path()
             if path.parent.name == ".claude" and path.name in ("settings.json", "settings.local.json"):
                 project_paths.add(str(path.parent.parent))
+        if hook_files_for(tool.get("name", "")) is None:
+            return  # this product reads no hook files; skip the home scan
         homes = _scan_user_homes()
         hooks_by_project = extract_hooks(tool.get("name", ""), homes, project_paths)
         plist_hooks = [hook for record in tool.get("_settings") or []

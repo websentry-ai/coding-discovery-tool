@@ -82,6 +82,8 @@ _HOOK_FILES: Dict[str, Tuple[List[str], List[str], Dict[str, List[Path]]]] = {
     ),
 }
 
+# Tools whose user and managed hooks resolve relative paths against the config file's folder.
+_CONFIG_RELATIVE_TOOLS = {"cursor", "github copilot"}
 # Programs that run a script named in their arguments, by option family; any other program is the hook itself.
 _INTERPRETERS = {"bash": "shell", "sh": "shell", "zsh": "shell", "dash": "shell", "fish": "shell",
                  "python": "python", "python3": "python", "node": "node", "deno": "node", "bun": "node",
@@ -119,7 +121,8 @@ _SECRET_PATTERNS = [
     # Assignments in any case and quoting: token=x, password = "a b", "api_key": "x", PASSWORD='a b'.
     re.compile(r"(?i)(\b" + _KEY + r"['\"]?\]?\s*(?::\s*[\w.\[\], |]+?\s*=|[=:])\s*\(?\s*)" + _VALUE),
     # curl -u / --user user:pass
-    re.compile(r"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:=|\s*))" + r"""(?:'[^']*'|"[^"]*"|[^\s'":]+:[^\s'"]+)"""),
+    re.compile(r"((?:^|\s)(?:-u|--user|--proxy-user|-U)(?:=|\s*))"
+               + r"""(?:'[^']*'|"[^"]*"|[^\s'":]+:(?:""" + _QUOTED + r"""|\\.|[^\s'"`$;|&]+)+)"""),
     # URL userinfo and credential query parameters.
     re.compile(r"(://)[^/\s:@'\"]+:[^/\s@'\"]+(?=@)"),
     re.compile(r"(?i)([?&](?:token|key|api_key|apikey|secret|sig|signature|access_token|auth|password)=)[^&\s'\"]+"),
@@ -268,7 +271,7 @@ def _quote_of(command: str, index: int, count: int) -> str:
     return raw[index][0] if raw[index][:1] in ("'", '"') else ""
 
 
-def _program_path(command: str, config_dir: Path, project_root: Optional[Path], home: Path) -> Optional[Path]:
+def _program_path(command: str, config_dir: Optional[Path], project_root: Optional[Path], home: Path) -> Optional[Path]:
     """The file the hook runs: its first word, or the script an interpreter is given. Never an argument."""
     words = _tokens(command)
     if not words:
@@ -290,15 +293,16 @@ def _program_path(command: str, config_dir: Path, project_root: Optional[Path], 
     if not quote and (program.startswith("~/") or program.startswith("~\\")):
         program = str(home) + program[1:]
     if quote != "'":
-        for var, value in (("HOME", str(home)), ("CLAUDE_PROJECT_DIR", str(project_root or config_dir.parent))):
+        for var, value in (("HOME", str(home)), ("CLAUDE_PROJECT_DIR", str(project_root or home))):
             program = program.replace(f"${{{var}}}", value).replace(f"${var}", value)
     path = Path(program)
-    if family is None and "/" not in program and "\\" not in program:
+    if family in (None, "cmd") and "/" not in program and "\\" not in program:
         return None  # a bare command name is found through PATH, never a local file of that name
     if path.is_absolute():
         return path
-    # Agents run project hooks from the project root; user-level Cursor/Copilot paths are relative to the config dir.
-    return (project_root if project_root is not None else config_dir) / path
+    # Project hooks run from the project root; Cursor and Copilot user hooks from their config dir. Others: unknown.
+    base = project_root if project_root is not None else config_dir
+    return base / path if base is not None else None
 
 
 def _is_unbound_hook(command: str, program: Optional[Path], unbound_scripts: Set[Path]) -> bool:
@@ -330,7 +334,7 @@ def hooks_from_settings(hooks: Dict, source: str, tool_name: str = "Claude Code"
     found = []
     for event, matcher, hook in _iter_commands(hooks if isinstance(hooks, dict) else {}):
         hook_type, command = _command_of(hook)
-        program = _program_path(command, managed_dirs[0] if managed_dirs else home, None, home) if command else None
+        program = _program_path(command, None, None, home) if command else None
         if command and not _is_unbound_hook(command, program, unbound):
             found.append({"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
                           "file_path": source, "scope": "managed"})
@@ -338,14 +342,15 @@ def hooks_from_settings(hooks: Dict, source: str, tool_name: str = "Claude Code"
 
 
 def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Path], root: Path,
-                   follow_symlinks: bool, unbound_scripts: Set[Path]) -> List[Dict]:
+                   follow_symlinks: bool, unbound_scripts: Set[Path], config_relative: bool = True) -> List[Dict]:
     """Hooks in one config, read contained under ``root``; a script outside ``root`` is not read."""
     found = []
     for event, matcher, hook in _iter_commands(_load_hooks(path, root, follow_symlinks)):
         hook_type, command = _command_of(hook)
         if not command:
             continue
-        program = _program_path(command, path.parent, project_root, home) if hook_type == "command" else None
+        config_dir = path.parent if config_relative else None
+        program = _program_path(command, config_dir, project_root, home) if hook_type == "command" else None
         if _is_unbound_hook(command, program, unbound_scripts):
             continue
         item = {"event": event, "matcher": matcher, "type": hook_type, "command": redact_secrets(command),
@@ -397,6 +402,7 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
     if files is None:
         return {}
     user_files, project_files, managed_patterns = files
+    config_relative = _spec_key(tool_name) in _CONFIG_RELATIVE_TOOLS
     by_project: Dict[str, List[Dict]] = {}
     managed_dirs = sorted({p.parent for p in managed_patterns})
     project_dir_names = {pattern.split("/")[0] for pattern in project_files}
@@ -415,10 +421,10 @@ def extract_hooks(tool_name: str, user_homes: List[Path], project_paths: Iterabl
                 pattern_path, root = _user_config_path(home, pattern)
                 for path in _expand(pattern_path):
                     by_project.setdefault(str(home), []).extend(
-                        _hooks_in_file(path, "user", home, None, root, True, unbound))
+                        _hooks_in_file(path, "user", home, None, root, True, unbound, config_relative))
             for path in managed_files:
                 by_project.setdefault(str(home), []).extend(
-                    _hooks_in_file(path, "managed", home, None, path.parent, False, unbound))
+                    _hooks_in_file(path, "managed", home, None, path.parent, False, unbound, config_relative))
             if project_dir_names:
                 projects |= _project_roots_with_hook_dirs(home, project_dir_names)
         except Exception as e:

@@ -118,8 +118,8 @@ _VALUE = r"""(?![A-Za-z_][\w.]*[\[(])(?!\*\*\*REDACTED\*\*\*)(?:""" + _QUOTED + 
 # An escaped quote before a space or a closing bracket ends it, as in "curl -H \"Authorization: x\" https://...".
 _HEADER_VALUE = r"""(?:[^'"\\\n]|\\(?!['"](?:[\s,;)}\]]|$))[^\n]|['"]{2})+"""
 _HEADER_WORD = r"""(?:[^\s'"\\;|&<>()`]|\\(?!['"](?:[\s,;)}\]]|$))\S|['"]{2})+"""
-# One unquoted shell word: escapes (\ ) stay in it, and a shell operator ends it.
-_SHELL_WORD = r"""(?:[^\s'"\\;|&<>()`]|\\[^\n])+"""
+# One unquoted shell word: escapes (\ ) and joined quoted pieces (a" "b) stay in it, and a shell operator ends it.
+_SHELL_WORD = r"""(?:""" + _QUOTED + r"""|[^\s'"\\;|&<>()`]|\\[^\n])+"""
 # Header names whose whole value is the credential.
 _WHOLE_VALUE_HEADER = r"(?:(?:proxy-)?authorization|(?:set-)?cookie)"
 _SECRET_PATTERNS = [

@@ -311,6 +311,7 @@ class TestExtractHooks(unittest.TestCase):
                              (r'curl -H "X-Api-Key: \"eschdr\"" https://x', "eschdr"),
                              ("""curl -H 'Authorization: Bearer '"joinedbearer" https://x""", "joinedbearer"),
                              ("curl -H Authorization:Bearer\\ bareescaped https://x", "bareescaped"),
+                             ("""curl -H Authorization:Basic" "YmFyZWpvaW5lZA== https://x""", "YmFyZWpvaW5lZA=="),
                              ('curl -H "Authorization: Digest user=a, response=digeststr" https://x', "digeststr"),
                              ("GPG_PASSPHRASE=passphrasecred", "passphrasecred"), ('db_creds = "credscred"', "credscred"),
                              ('CONN_STR="Server=x;Password=connstrcred"', "connstrcred")):

@@ -404,6 +404,10 @@ class TestExtractHooks(unittest.TestCase):
         self.assertEqual(len(slashed["projects"]), 1)  # a trailing slash still joins the existing row
         self.assertEqual(sorted(h["command"] for h in bare["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertFalse(_has_user_owned_data("Claude Code", bare, self.home))  # no phantom install from org policy
+        onboarded = {"projects": [{"path": str(self.home), "hooks": [
+            {"command": "python3 ~/.copilot/hooks/unbound.py", "scope": "user",
+             "script_path": str(self.home / ".copilot/hooks/unbound.py")}]}]}
+        self.assertFalse(_has_user_owned_data("GitHub Copilot CLI", onboarded, self.home))  # Unbound's own hook only
         self.assertEqual(sorted(h["command"] for h in owned["projects"][0]["hooks"]), ["echo mdm", "echo policy"])
         self.assertEqual([h["command"] for p in augment["projects"] for h in p.get("hooks", [])], ["echo policy"])
 

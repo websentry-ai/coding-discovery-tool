@@ -106,6 +106,7 @@ try:
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from .install_path_version import is_unknown_version, version_from_install_path
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
@@ -187,6 +188,7 @@ except ImportError:
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from scripts.coding_discovery_tools.install_path_version import is_unknown_version, version_from_install_path
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
@@ -490,6 +492,20 @@ def _normalize_encoded_paths(obj):
             _normalize_encoded_paths(item)
 
 
+def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
+    """Fill an unknown version from what the install records on disk. Never
+    raises: a missing version must not cost the tool its detection."""
+    for info in tool_info if isinstance(tool_info, list) else [tool_info]:
+        try:
+            if isinstance(info, dict) and info.get("install_path") \
+                    and is_unknown_version(info.get("version")):
+                version = version_from_install_path(info["install_path"], user_home)
+                if version:
+                    info["version"] = version
+        except Exception as e:
+            logger.debug(f"Version fallback failed for {info}: {e}")
+
+
 class AIToolsDetector:
     """
     Detector for AI coding tools on macOS and Windows.
@@ -689,6 +705,7 @@ class AIToolsDetector:
                     tool_info = detector.detect()
                 
                 if tool_info:
+                    _fill_version_from_install_path(tool_info, user_home or Path.home())
                     # Handle detectors that return a list (like JetBrains)
                     if isinstance(tool_info, list):
                         tools.extend(tool_info)

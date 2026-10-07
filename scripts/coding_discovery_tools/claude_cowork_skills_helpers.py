@@ -170,6 +170,26 @@ def is_ephemeral_session_path(md_path: Path) -> bool:
     )
 
 
+# Claude Desktop keeps each marketplace's whole catalog here; installed plugins are
+# copied to cowork_plugins/cache, and the user's own uploads live in this folder.
+COWORK_PLUGINS_DIR = "cowork_plugins"
+MARKETPLACES_DIR = "marketplaces"
+LOCAL_UPLOADS_MARKETPLACE = "local-desktop-app-uploads"
+
+
+def is_marketplace_catalog_path(md_path: Path) -> bool:
+    """
+    Return True if the file sits in a Cowork marketplace catalog rather than an
+    installed plugin. The catalog lists every plugin a marketplace offers, installed
+    or not, so its skills are not on the device in any usable sense.
+    """
+    parts = md_path.parts
+    for i in range(len(parts) - 2):
+        if parts[i] == COWORK_PLUGINS_DIR and parts[i + 1] == MARKETPLACES_DIR:
+            return parts[i + 2] != LOCAL_UPLOADS_MARKETPLACE
+    return False
+
+
 def is_claude_code_path(md_path: Path) -> bool:
     """
     Return True if the resolved path lives under the user's home-level
@@ -273,6 +293,7 @@ def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> 
 
 # Re-export so callers don't have to reach into constants.
 __all__ = [
+    "is_marketplace_catalog_path",
     "COWORK_SESSIONS_DIR",
     "SKILLS_PLUGIN_DIR",
     "SKILL_FILE_NAME_LOWER",

@@ -72,20 +72,32 @@ def is_unknown_version(version) -> bool:
 def version_from_install_path(install_path, user_home: Path) -> Optional[str]:
     """The version recorded by the install at ``install_path``, or None."""
     try:
-        path = Path(install_path)
-        resolved = _resolve_links(path)
-        package_dir = _npm_package_dir(resolved) or _shim_package_dir(path, user_home)
-        name = version = None
-        if package_dir is not None:
-            name, version = _package_json(package_dir, user_home)
-            name = name or _package_name(package_dir)
-        version = _clean(version) or _version_from_path(resolved)
-        if name:
-            version = _newest_self_update(name, user_home, version)
-        return version
+        resolved, package_dir = _locate(install_path, user_home)
+        version = _package_json(package_dir, user_home)[1] if package_dir is not None else None
+        return _clean(version) or _version_from_path(resolved)
     except (OSError, ValueError) as e:
         logger.debug(f"Could not read a version from {install_path}: {e}")
     return None
+
+
+def runtime_version(install_path, user_home: Path, installed) -> Optional[str]:
+    """The newer runtime this user's self-updating CLI downloaded, or None."""
+    try:
+        _, package_dir = _locate(install_path, user_home)
+        if package_dir is None:
+            return None
+        name = _package_json(package_dir, user_home)[0] or _package_name(package_dir)
+        return _newest_self_update(name, user_home, extract_version_number(installed or ""))
+    except (OSError, ValueError) as e:
+        logger.debug(f"Could not read a runtime for {install_path}: {e}")
+    return None
+
+
+def _locate(install_path, user_home: Path):
+    """(the resolved binary, the npm package that provides it or None)."""
+    path = Path(install_path)
+    resolved = _resolve_links(path)
+    return resolved, _npm_package_dir(resolved) or _shim_package_dir(path, user_home)
 
 
 def _version_from_path(resolved: Path) -> Optional[str]:
@@ -158,16 +170,19 @@ def _read_package_file(path: Path, user_home: Path) -> Optional[str]:
     (every folder above it root-owned and not group/world-writable): a shared
     Homebrew or system npm prefix."""
     text = _read_own_regular_file(path, user_home, MAX_CONFIG_FILE_SIZE)
-    if text is not None or os.name == "nt" or not _is_safe_exec_path(str(path)):
+    if text is not None or os.name == "nt":
         return text
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    real = os.path.realpath(str(path))  # open what was checked, not a link that can move
+    if not _is_safe_exec_path(real):
+        return None
     try:
-        fd = os.open(str(path), flags)
+        fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_CONFIG_FILE_SIZE:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                or info.st_size > MAX_CONFIG_FILE_SIZE):
             return None
         return os.read(fd, MAX_CONFIG_FILE_SIZE).decode("utf-8", errors="replace")
     finally:
@@ -208,26 +223,42 @@ def _any_redirect(base: Path, path: Path) -> bool:
 
 def _newest_self_update(package_name, user_home: Path, installed: Optional[str]) -> Optional[str]:
     """The newest runtime a self-updating CLI downloaded for this machine's platform,
-    when newer than the package. Every component is refused if it is a redirect, and
+    when newer than ``installed``. Every component is refused if it is a redirect, and
     the listing is capped, since the scan reads a user-controlled tree as root."""
     best = _SEMVER.match(installed or "")
     best_key = tuple(int(n) for n in best.groups()) if best else None
-    result = installed
+    result = None
     for root in _SELF_UPDATE_ROOTS.get(package_name, ()):
-        runtime_dir = user_home / root / _platform_dir()
-        if _any_redirect(user_home, runtime_dir):
-            continue
         try:
-            with os.scandir(runtime_dir) as entries:
-                for count, entry in enumerate(entries):
-                    if count >= _MAX_CACHE_ENTRIES:
-                        break
-                    match = _SEMVER.match(entry.name)
-                    if not match or not _clean(entry.name) or not entry.is_dir(follow_symlinks=False):
-                        continue
-                    key = tuple(int(n) for n in match.groups())
-                    if best_key is None or key > best_key:
-                        best_key, result = key, entry.name
+            names = _runtime_dirs(user_home, root / _platform_dir())
         except OSError:
             continue
+        for name in names:
+            match = _SEMVER.match(name)
+            if not match or not _clean(name):
+                continue
+            key = tuple(int(n) for n in match.groups())
+            if best_key is None or key > best_key:
+                best_key, result = key, name
     return result
+
+
+def _runtime_dirs(user_home: Path, rel: Path) -> list:
+    """Up to the cap of real subdirectory names in user_home/rel, refusing a redirect
+    anywhere below the home. On POSIX the walk holds each directory open, so a
+    component swapped for a link mid-walk is refused rather than followed."""
+    if os.name == "nt":
+        if _any_redirect(user_home, user_home / rel):
+            return []
+        with os.scandir(user_home / rel) as entries:
+            return [e.name for _, e in zip(range(_MAX_CACHE_ENTRIES), entries) if e.is_dir(follow_symlinks=False)]
+    fd = os.open(str(user_home), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in rel.parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        with os.scandir(fd) as entries:
+            return [e.name for _, e in zip(range(_MAX_CACHE_ENTRIES), entries) if e.is_dir(follow_symlinks=False)]
+    finally:
+        os.close(fd)

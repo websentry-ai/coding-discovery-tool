@@ -106,7 +106,8 @@ try:
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
-    from .install_path_version import is_unknown_version, version_from_install_path
+    from .install_path_version import (
+        is_unknown_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
@@ -188,7 +189,8 @@ except ImportError:
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
-    from scripts.coding_discovery_tools.install_path_version import is_unknown_version, version_from_install_path
+    from scripts.coding_discovery_tools.install_path_version import (
+        is_unknown_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
@@ -493,28 +495,39 @@ def _normalize_encoded_paths(obj):
 
 
 def _keep_user_version(kept: Dict, detected: Dict, user_home: Path) -> None:
-    """One row per shared install, but a self-updating CLI can run a different
-    version per user: remember this user's when it differs from the kept row's."""
-    version = detected.get("version")
-    if version != kept.get("version") and not is_unknown_version(version):
-        kept.setdefault("_version_by_home", {})[str(user_home)] = version
+    """One row per shared install, but a self-updating CLI runs a version per user:
+    record every user's, and the install's own from whichever user could read it."""
+    if is_unknown_version(kept.get("_install_version")):
+        kept["_install_version"] = detected.get("_install_version")
+    kept.setdefault("_version_by_home", {})[str(user_home)] = detected.get("version")
 
 
 def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
-    version = tool.get("_version_by_home", {}).get(str(user_home))
-    return {**report, "version": version} if version else report
+    """This user's version; if theirs is unknown, the install's, never another user's runtime."""
+    by_home = tool.get("_version_by_home", {})
+    if str(user_home) not in by_home:
+        return report
+    version = by_home[str(user_home)]
+    if is_unknown_version(version) and not is_unknown_version(tool.get("_install_version")):
+        version = tool["_install_version"]
+    return {**report, "version": version}
 
 
 def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
-    """Fill an unknown version from what the install records on disk. Never
-    raises: a missing version must not cost the tool its detection."""
+    """Fill an unknown version from what the install records on disk, then raise it
+    to this user's newer self-updated runtime. Never raises: a missing version must
+    not cost the tool its detection."""
     for info in tool_info if isinstance(tool_info, list) else [tool_info]:
         try:
-            if isinstance(info, dict) and info.get("install_path") \
-                    and is_unknown_version(info.get("version")):
-                version = version_from_install_path(info["install_path"], user_home)
-                if version:
-                    info["version"] = version
+            if isinstance(info, dict) and info.get("install_path"):
+                path = info["install_path"]
+                if is_unknown_version(info.get("version")):
+                    info["version"] = version_from_install_path(path, user_home) or info.get("version")
+                if not is_unknown_version(info.get("version")):
+                    info["_install_version"] = info["version"]
+                runtime = runtime_version(path, user_home, info.get("_install_version"))
+                if runtime:
+                    info["version"] = runtime
         except Exception as e:
             logger.debug(f"Version fallback failed for {info}: {e}")
 
@@ -4037,8 +4050,7 @@ def main():
                     if tool_key not in tools_by_user:
                         tools_by_user[tool_key] = tool
                         all_tools.append(tool)
-                    else:
-                        _keep_user_version(tools_by_user[tool_key], tool, user_home)
+                    _keep_user_version(tools_by_user[tool_key], tool, user_home)
             else:
                 logger.info(f"    No tools found for {user}")
             logger.info("")

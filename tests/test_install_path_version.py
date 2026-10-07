@@ -14,11 +14,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools import ai_tools_discovery
 from scripts.coding_discovery_tools.install_path_version import (
     is_unknown_version,
+    runtime_version,
     version_from_install_path,
 )
+
+utils_mod._SENTRY_DSN = ""
 
 
 class _Layout(unittest.TestCase):
@@ -157,6 +161,12 @@ class TestSelfUpdatingCli(_Layout):
         self.file(f"{prefix}/npm-loader.js")
         return self.link("opt/homebrew/bin/copilot", "../lib/node_modules/@github/copilot/npm-loader.js")
 
+    def version(self, path, home=None):
+        """What discovery reports for one user: their newer runtime, else the package."""
+        home = home or self.home
+        installed = version_from_install_path(path, home)
+        return runtime_version(path, home, installed) or installed
+
     def _cache(self, root="Library/Caches/copilot/pkg", platform_dir=None):
         from scripts.coding_discovery_tools.install_path_version import _platform_dir
         return self.home / root / (platform_dir or _platform_dir())
@@ -211,7 +221,25 @@ class TestSelfUpdatingCli(_Layout):
         (self._cache() / "1.0.63").mkdir(parents=True)
         (other / "Library/Caches/copilot/pkg" / _platform_dir() / "1.0.70").mkdir(parents=True)
         self.assertEqual(self.version(link), "1.0.63")
-        self.assertEqual(version_from_install_path(link, other), "1.0.70")
+        self.assertEqual(self.version(link, other), "1.0.70")
+
+    def test_a_known_package_version_still_rises_to_the_runtime(self):
+        """Windows' detector reads the npm package version itself; the user still
+        runs the newer runtime in their cache."""
+        link = self._copilot("1.0.56")
+        (self._cache() / "1.0.63").mkdir(parents=True)
+        self.assertEqual(runtime_version(link, self.home, "1.0.56"), "1.0.63")
+        self.assertIsNone(runtime_version(link, self.home, "1.0.63"))
+
+    def test_a_cache_dir_swapped_for_a_link_is_not_followed(self):
+        from scripts.coding_discovery_tools import install_path_version as mod
+        link = self._copilot("1.0.56")
+        elsewhere = self.root / "elsewhere"
+        (elsewhere / "9.9.9").mkdir(parents=True)
+        self._cache().parent.mkdir(parents=True)
+        os.symlink(str(elsewhere), self._cache())
+        with patch.object(mod, "_any_redirect", return_value=False):  # the check passed; then the swap
+            self.assertEqual(self.version(link), "1.0.56")
 
     def test_a_root_owned_shared_install_still_reports_its_package(self):
         """The owner check refuses root's package.json; a prefix no other account can
@@ -324,16 +352,43 @@ class TestPerUserVersionThroughDedup(unittest.TestCase):
     """main() keeps one row per (tool, install path); a user whose recovered version
     differs gets theirs in their own report."""
 
-    def test_a_differing_user_version_is_kept_and_applied(self):
-        kept = {"name": "GitHub Copilot CLI", "version": "1.0.63", "install_path": "/opt/homebrew/bin/copilot"}
-        alice, bob = Path("/Users/alice"), Path("/Users/bob")
-        ai_tools_discovery._keep_user_version(kept, dict(kept, version="1.0.70"), bob)
-        ai_tools_discovery._keep_user_version(kept, dict(kept, version="Unknown"), Path("/Users/carol"))
-        report = {"name": "GitHub Copilot CLI", "version": "1.0.63", "projects": []}
-        self.assertEqual(ai_tools_discovery._with_user_version(kept, report, bob)["version"], "1.0.70")
-        self.assertEqual(ai_tools_discovery._with_user_version(kept, report, alice)["version"], "1.0.63")
-        self.assertEqual(ai_tools_discovery._with_user_version(kept, report, Path("/Users/carol"))["version"], "1.0.63")
-        self.assertEqual(report["version"], "1.0.63")  # the shared report dict isn't mutated
+    def _dedup(self, *users):
+        """main()'s loop: the first user's row is kept, every user is recorded."""
+        kept = None
+        for home, version, install_version in users:
+            detected = {"name": "GitHub Copilot CLI", "install_path": "/opt/homebrew/bin/copilot",
+                        "version": version, "_install_version": install_version}
+            kept = kept or detected
+            ai_tools_discovery._keep_user_version(kept, detected, Path(home))
+        report = {"name": "GitHub Copilot CLI", "version": kept["version"], "projects": []}
+        return {home: ai_tools_discovery._with_user_version(kept, report, Path(home))["version"]
+                for home, _, _ in users}
+
+    def test_each_user_reports_their_own_runtime(self):
+        self.assertEqual(
+            self._dedup(("/Users/alice", "1.0.63", "1.0.56"), ("/Users/bob", "1.0.70", "1.0.56")),
+            {"/Users/alice": "1.0.63", "/Users/bob": "1.0.70"})
+
+    def test_a_user_without_a_runtime_never_inherits_anothers(self):
+        """Either scan order: Carol's unreadable install falls back to the package
+        version someone could read, not Alice's runtime."""
+        alice = ("/Users/alice", "1.0.63", "1.0.56")
+        carol = ("/Users/carol", "Unknown", None)
+        expected = {"/Users/alice": "1.0.63", "/Users/carol": "1.0.56"}
+        self.assertEqual(self._dedup(alice, carol), expected)
+        self.assertEqual(self._dedup(carol, alice), expected)
+
+    def test_unknown_everywhere_stays_unknown(self):
+        self.assertEqual(self._dedup(("/Users/carol", "Unknown", None), ("/Users/dan", "Unknown", None)),
+                         {"/Users/carol": "Unknown", "/Users/dan": "Unknown"})
+
+    def test_the_per_user_map_never_reaches_the_report(self):
+        kept = {"name": "GitHub Copilot CLI", "install_path": "/x", "version": "1.0.63"}
+        ai_tools_discovery._keep_user_version(kept, dict(kept, _install_version="1.0.56"), Path("/Users/alice"))
+        detector = object.__new__(ai_tools_discovery.AIToolsDetector)
+        with patch.object(ai_tools_discovery, "in_container", return_value=False):
+            report = detector.generate_single_tool_report(kept, "dev", "alice")
+        self.assertEqual([k for k in report["tools"][0] if k.startswith("_")], [])
 
 
 @unittest.skipIf(os.name == "nt", "POSIX symlink layouts")

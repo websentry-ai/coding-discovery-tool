@@ -10,6 +10,8 @@ Stdlib only — this module runs on customer machines and may not have third-
 party packages installed.
 """
 
+import functools
+import json
 import logging
 import re
 from datetime import datetime
@@ -177,16 +179,43 @@ MARKETPLACES_DIR = "marketplaces"
 LOCAL_UPLOADS_MARKETPLACE = "local-desktop-app-uploads"
 
 
+@functools.lru_cache(maxsize=64)
+def _recorded_install_dirs(plugins_root: Path) -> Tuple[Path, ...]:
+    """Install dirs installed_plugins.json records, re-rooted under ``plugins_root`` (the
+    app may record its VM's view of the path). Empty when it is missing or unreadable."""
+    registry = plugins_root / "installed_plugins.json"
+    try:
+        if registry.stat().st_size > MAX_CONFIG_FILE_SIZE:
+            return ()
+        plugins = json.loads(registry.read_text(encoding="utf-8")).get("plugins") or {}
+    except (OSError, ValueError, AttributeError):
+        return ()
+    dirs = []
+    for entries in plugins.values() if isinstance(plugins, dict) else []:
+        for entry in entries if isinstance(entries, list) else []:
+            raw = entry.get("installPath") if isinstance(entry, dict) else None
+            parts = re.split(r"[\\/]+", raw) if isinstance(raw, str) else []
+            if COWORK_PLUGINS_DIR not in parts:
+                continue
+            tail = parts[len(parts) - parts[::-1].index(COWORK_PLUGINS_DIR):]
+            if tail and not any(p in ("", ".", "..") for p in tail):
+                dirs.append(plugins_root.joinpath(*tail))
+    return tuple(dirs)
+
+
 def is_marketplace_catalog_path(md_path: Path) -> bool:
     """
     Return True if the file sits in a Cowork marketplace catalog rather than an
-    installed plugin. The catalog lists every plugin a marketplace offers, installed
-    or not, so its skills are not on the device in any usable sense.
+    installed plugin. The catalog lists every plugin a marketplace offers; only the
+    user's uploads and what installed_plugins.json points at are on the device to use.
     """
     parts = md_path.parts
     for i in range(len(parts) - 2):
         if parts[i] == COWORK_PLUGINS_DIR and parts[i + 1] == MARKETPLACES_DIR:
-            return parts[i + 2] != LOCAL_UPLOADS_MARKETPLACE
+            if parts[i + 2] == LOCAL_UPLOADS_MARKETPLACE:
+                return False
+            recorded = _recorded_install_dirs(Path(*parts[: i + 1]))
+            return not any(d == md_path or d in md_path.parents for d in recorded)
     return False
 
 

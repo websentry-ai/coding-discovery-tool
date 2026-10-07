@@ -338,9 +338,6 @@ class TestMacOSClaudeCoworkSkillsExtractor(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestCoworkMarketplaceCatalogSkipped(unittest.TestCase):
     """Only plugins on the device count: a marketplace catalog lists plugins the user
@@ -350,6 +347,7 @@ class TestCoworkMarketplaceCatalogSkipped(unittest.TestCase):
         "rpm/plugin_01/skills/call-summary": "call-summary",
         "cowork_plugins/cache/claude-plugins-official/plugin-dev/2cd88e7947b7/skills/skill-development": "skill-development",
         "cowork_plugins/marketplaces/local-desktop-app-uploads/my-kit/skills/deck-review": "deck-review",
+        "cowork_plugins/marketplaces/team-plugins/release-kit/skills/cut-release": "cut-release",
     }
     SKIPPED = {
         "cowork_plugins/marketplaces/knowledge-work-plugins/sales/skills/call-prep": "call-prep",
@@ -365,6 +363,11 @@ class TestCoworkMarketplaceCatalogSkipped(unittest.TestCase):
                 d = org / rel
                 d.mkdir(parents=True)
                 (d / "SKILL.md").write_text(f"---\nname: {name}\n---\nbody\n", encoding="utf-8")
+            # A plugin installed in its marketplace clone is recorded there, as Cowork records it.
+            (org / "cowork_plugins" / "installed_plugins.json").write_text(
+                '{"version": 2, "plugins": {"release-kit@team-plugins": [{"scope": "user", '
+                '"installPath": "/sessions/vm/mnt/.claude/cowork_plugins/marketplaces/team-plugins/release-kit"}]}}',
+                encoding="utf-8")
             bundle = sessions / _SP / "org-1" / "acct-1" / "skills" / "xlsx"
             bundle.mkdir(parents=True)
             (bundle / "SKILL.md").write_text("---\nname: xlsx\n---\nbody\n", encoding="utf-8")
@@ -379,3 +382,7 @@ class TestCoworkMarketplaceCatalogSkipped(unittest.TestCase):
             with self.subTest(extractor=extractor_cls.__name__):
                 names = self._names(extractor_cls)
                 self.assertEqual(names, set(self.KEPT.values()) | {"xlsx"})
+
+
+if __name__ == "__main__":
+    unittest.main()

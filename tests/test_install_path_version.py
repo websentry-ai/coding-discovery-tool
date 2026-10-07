@@ -72,13 +72,46 @@ class TestPathLayouts(_Layout):
     def test_cursor_agent_native_installer(self):
         target = self.file("home/.local/share/cursor-agent/versions/2025.09.18-7ae6800/cursor-agent")
         link = self.link("home/.local/bin/cursor-agent", str(target))
-        self.assertEqual(self.version(link), "2025.09.18-7ae6800")
+        # Same shape `--version` stores (extract_version_number drops the build hash).
+        self.assertEqual(self.version(link), "2025.09.18")
 
     def test_a_link_chain_is_followed(self):
         self.file("opt/homebrew/Caskroom/codex/0.140.1/bin/codex")
         middle = self.link("opt/homebrew/bin/codex", "../Caskroom/codex/0.140.1/bin/codex")
         outer = self.link("home/bin/codex", str(middle))
         self.assertEqual(self.version(outer), "0.140.1")
+
+    def test_an_npm_cli_under_homebrew_node_reports_the_package_not_node(self):
+        prefix = "opt/homebrew/Cellar/node/22.11.0/lib/node_modules/@google/gemini-cli"
+        self.package(prefix, "0.9.0")
+        self.file(f"{prefix}/dist/index.js")
+        link = self.link("opt/homebrew/bin/gemini",
+                         "../Cellar/node/22.11.0/lib/node_modules/@google/gemini-cli/dist/index.js")
+        self.assertEqual(self.version(link), "0.9.0")
+
+    def test_an_npm_cli_under_homebrew_node_without_package_json_is_unknown(self):
+        self.file("opt/homebrew/Cellar/node/22.11.0/lib/node_modules/@google/gemini-cli/dist/index.js")
+        link = self.link("opt/homebrew/bin/gemini",
+                         "../Cellar/node/22.11.0/lib/node_modules/@google/gemini-cli/dist/index.js")
+        self.assertIsNone(self.version(link))  # never node's 22.11.0
+
+    def test_homebrew_revision_and_build_suffixes_are_dropped(self):
+        for keg, expected in (("Cellar/opencode/0.15.2_1", "0.15.2"), ("Caskroom/codex/1.2.3,4567", "1.2.3")):
+            with self.subTest(keg=keg):
+                self.file(f"opt/homebrew/{keg}/bin/tool")
+                self.assertEqual(self.version(self.root / f"opt/homebrew/{keg}/bin/tool"), expected)
+
+    def test_windows_native_cursor_agent(self):
+        path = self.file("home/AppData/Local/cursor-agent/versions/2026.05.28-7ae6800/cursor-agent.exe")
+        self.assertEqual(self.version(path), "2026.05.28")
+
+    def test_prerelease_extension_and_a_path_ending_at_the_folder(self):
+        for rel, expected in ((".vscode/extensions/github.copilot-chat-1.2.3-alpha.1/dist/x", "1.2.3"),
+                              (".vscode/extensions/anthropic.claude-code-2.0.5", "2.0.5")):
+            with self.subTest(rel=rel):
+                path = self.home / rel
+                path.mkdir(parents=True, exist_ok=True)
+                self.assertEqual(self.version(path), expected)
 
     def test_editor_extension_binary(self):
         path = self.file("home/.vscode/extensions/anthropic.claude-code-2.0.5-darwin-arm64"
@@ -109,23 +142,54 @@ class TestSelfUpdatingCli(_Layout):
         self.file(f"{prefix}/npm-loader.js")
         return self.link("opt/homebrew/bin/copilot", "../lib/node_modules/@github/copilot/npm-loader.js")
 
+    def _cache(self, root="Library/Caches/copilot/pkg", platform_dir=None):
+        from scripts.coding_discovery_tools.install_path_version import _platform_dir
+        return self.home / root / (platform_dir or _platform_dir())
+
     def test_newest_cached_runtime_wins(self):
         link = self._copilot("1.0.56")
         for version in ("1.0.57", "1.0.63", "1.0.9"):
-            (self.home / "Library/Caches/copilot/pkg/darwin-arm64" / version).mkdir(parents=True)
-        (self.home / "Library/Caches/copilot/pkg/tmp").mkdir()
+            (self._cache() / version).mkdir(parents=True)
+        (self._cache().parent / "tmp").mkdir()
         self.assertEqual(self.version(link), "1.0.63")
+
+    def test_the_copilot_home_pkg_dir_counts_too(self):
+        link = self._copilot("1.0.56")
+        (self._cache(".copilot/pkg") / "1.0.70").mkdir(parents=True)
+        self.assertEqual(self.version(link), "1.0.70")
+
+    def test_another_platforms_runtime_is_ignored(self):
+        link = self._copilot("1.0.56")
+        (self._cache(platform_dir="plan9-mips") / "9.9.9").mkdir(parents=True)
+        self.assertEqual(self.version(link), "1.0.56")
+
+    def test_a_symlinked_cache_is_not_walked(self):
+        link = self._copilot("1.0.56")
+        elsewhere = self.root / "elsewhere"
+        (elsewhere / self._cache().name / "9.9.9").mkdir(parents=True)
+        (self.home / "Library/Caches/copilot").mkdir(parents=True)
+        os.symlink(str(elsewhere), self.home / "Library/Caches/copilot/pkg")
+        self.assertEqual(self.version(link), "1.0.56")
+
+    def test_an_unreadable_package_json_still_uses_the_cache(self):
+        """A root-owned Homebrew npm prefix fails the owner check; the package name
+        is still in the path."""
+        link = self._copilot("1.0.56")
+        (self._cache() / "1.0.63").mkdir(parents=True)
+        from scripts.coding_discovery_tools import install_path_version as mod
+        with patch.object(mod, "_read_own_regular_file", return_value=None):
+            self.assertEqual(self.version(link), "1.0.63")
 
     def test_no_cache_falls_back_to_the_package(self):
         self.assertEqual(self.version(self._copilot("1.0.56")), "1.0.56")
 
     def test_an_older_cache_never_lowers_the_version(self):
         link = self._copilot("1.0.56")
-        (self.home / "Library/Caches/copilot/pkg/darwin-arm64/1.0.40").mkdir(parents=True)
+        (self._cache() / "1.0.40").mkdir(parents=True)
         self.assertEqual(self.version(link), "1.0.56")
 
     def test_other_packages_ignore_the_copilot_cache(self):
-        (self.home / "Library/Caches/copilot/pkg/darwin-arm64/9.9.9").mkdir(parents=True)
+        (self.home / "Library/Caches/copilot/pkg" / "x" / "9.9.9").mkdir(parents=True)
         self.package("home/.nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex", "0.141.0",
                      name="@openai/codex")
         self.file("home/.nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex/bin/codex.js")

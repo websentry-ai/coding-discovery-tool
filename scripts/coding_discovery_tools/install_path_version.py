@@ -14,11 +14,12 @@ import logging
 import os
 import platform
 import re
+import stat
 from pathlib import Path
 from typing import Optional
 
 from .constants import MAX_CONFIG_FILE_SIZE
-from .utils import _is_symlink_or_reparse, _read_own_regular_file, extract_version_number
+from .utils import _is_safe_exec_path, _is_symlink_or_reparse, _read_own_regular_file, extract_version_number
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,10 @@ _SELF_UPDATE_ROOTS = {
     ),
 }
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)")  # a prefix: 1.0.70-rc.1 compares as 1.0.70
+# What a version may look like once reported: these names come from user-writable
+# folders and files, and the value is rendered in the dashboard.
+_CLEAN_VERSION = re.compile(r"\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.]+)?")
+_MAX_VERSION_LENGTH = 64
 
 # An npm .cmd / .ps1 shim names the package it runs: "%dp0%\node_modules\@openai\codex\bin\codex.js".
 _SHIM_PACKAGE = re.compile(r"node_modules[\\/]((?:@[^\\/\"']+[\\/])?[^\\/\"']+)[\\/]")
@@ -74,8 +79,8 @@ def version_from_install_path(install_path, user_home: Path) -> Optional[str]:
         if package_dir is not None:
             name, version = _package_json(package_dir, user_home)
             name = name or _package_name(package_dir)
-        version = version or _version_from_path(resolved)
-        if name and _owned_by_user(package_dir, user_home):
+        version = _clean(version) or _version_from_path(resolved)
+        if name:
             version = _newest_self_update(name, user_home, version)
         return version
     except (OSError, ValueError) as e:
@@ -89,24 +94,20 @@ def _version_from_path(resolved: Path) -> Optional[str]:
     if keg:
         if keg.group(1).split("@")[0].lower() in _RUNTIME_KEGS:
             return None
-        return extract_version_number(keg.group(2))
+        return _clean(extract_version_number(keg.group(2)))
     for pattern in _PATH_VERSION_PATTERNS:
         match = pattern.search(posix)
         if match:
-            return extract_version_number(match.group(1))
+            return _clean(extract_version_number(match.group(1)))
     return None
 
 
-def _owned_by_user(package_dir: Path, user_home: Path) -> bool:
-    """A per-user runtime cache describes only that user's own install. A shared
-    install (root-owned, outside the home) reports one version for everyone, since
-    discovery keeps a single row per install path."""
-    try:
-        if Path(os.path.abspath(str(package_dir))).is_relative_to(Path(os.path.abspath(str(user_home)))):
-            return True
-        return os.name != "nt" and os.stat(package_dir).st_uid == os.stat(user_home).st_uid
-    except (OSError, ValueError, AttributeError):
-        return False
+def _clean(version) -> Optional[str]:
+    """A version safe to report, or None: plain x.y[.z][-pre], at most 64 chars."""
+    if not isinstance(version, str) or len(version) > _MAX_VERSION_LENGTH:
+        return None
+    version = version.strip()
+    return version if _CLEAN_VERSION.fullmatch(version) else None
 
 
 def _resolve_links(path: Path) -> Path:
@@ -152,9 +153,30 @@ def _shim_package_dir(shim: Path, user_home: Path) -> Optional[Path]:
     return base.joinpath(*re.split(r"[\\/]", match.group(1)))
 
 
+def _read_package_file(path: Path, user_home: Path) -> Optional[str]:
+    """The user's own file, or a root-owned one no other account can have planted
+    (every folder above it root-owned and not group/world-writable): a shared
+    Homebrew or system npm prefix."""
+    text = _read_own_regular_file(path, user_home, MAX_CONFIG_FILE_SIZE)
+    if text is not None or os.name == "nt" or not _is_safe_exec_path(str(path)):
+        return text
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_CONFIG_FILE_SIZE:
+            return None
+        return os.read(fd, MAX_CONFIG_FILE_SIZE).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+
+
 def _package_json(package_dir: Path, user_home: Path):
     """(name, version) from the package's package.json, either may be None."""
-    raw = _read_own_regular_file(package_dir / "package.json", user_home, MAX_CONFIG_FILE_SIZE)
+    raw = _read_package_file(package_dir / "package.json", user_home)
     try:
         data = json.loads(raw) if raw else None
     except ValueError:
@@ -201,7 +223,7 @@ def _newest_self_update(package_name, user_home: Path, installed: Optional[str])
                     if count >= _MAX_CACHE_ENTRIES:
                         break
                     match = _SEMVER.match(entry.name)
-                    if not match or not entry.is_dir(follow_symlinks=False):
+                    if not match or not _clean(entry.name) or not entry.is_dir(follow_symlinks=False):
                         continue
                     key = tuple(int(n) for n in match.groups())
                     if best_key is None or key > best_key:

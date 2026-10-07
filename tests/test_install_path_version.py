@@ -202,23 +202,34 @@ class TestSelfUpdatingCli(_Layout):
         (self._cache() / "1.0.80").mkdir()
         self.assertEqual(self.version(link), "1.0.80")
 
-    def test_a_shared_install_ignores_one_users_cache(self):
-        """Discovery keeps one row per install path, so a root-owned install shared
-        by several users reports its package version, not one user's runtime."""
+    def test_each_user_gets_their_own_runtime_from_a_shared_install(self):
+        """Two users share one Copilot install; each runs the newest runtime in
+        their own cache."""
         link = self._copilot("1.0.56")
+        from scripts.coding_discovery_tools.install_path_version import _platform_dir
+        other = self.root / "other"
         (self._cache() / "1.0.63").mkdir(parents=True)
-        from scripts.coding_discovery_tools import install_path_version as mod
-        real_stat = os.stat
-        prefix = str(self.root / "opt")
+        (other / "Library/Caches/copilot/pkg" / _platform_dir() / "1.0.70").mkdir(parents=True)
+        self.assertEqual(self.version(link), "1.0.63")
+        self.assertEqual(version_from_install_path(link, other), "1.0.70")
 
-        def stat(path, *a, **k):
-            result = real_stat(path, *a, **k)
-            if str(path).startswith(prefix):
-                return os.stat_result((result.st_mode, result.st_ino, result.st_dev, result.st_nlink,
-                                       0, 0, result.st_size, 0, 0, 0))
-            return result
-        with patch.object(mod.os, "stat", side_effect=stat):
+    def test_a_root_owned_shared_install_still_reports_its_package(self):
+        """The owner check refuses root's package.json; a prefix no other account can
+        write is read anyway, so a shared install isn't left unknown."""
+        link = self._copilot("1.0.56")
+        from scripts.coding_discovery_tools import install_path_version as mod
+        with patch.object(mod, "_read_own_regular_file", return_value=None), \
+                patch.object(mod, "_is_safe_exec_path", return_value=True):
             self.assertEqual(self.version(link), "1.0.56")
+
+    def test_a_hostile_cache_folder_name_is_not_reported(self):
+        link = self._copilot("1.0.56")
+        for name in ('1.0.999<img src=x onerror=alert(1)>', "1.0.99\nforged", "1.0.98" + "x" * 80):
+            try:
+                (self._cache() / name).mkdir(parents=True)
+            except OSError:
+                pass
+        self.assertEqual(self.version(link), "1.0.56")
 
     def test_no_cache_falls_back_to_the_package(self):
         self.assertEqual(self.version(self._copilot("1.0.56")), "1.0.56")
@@ -271,9 +282,11 @@ class TestNeverMistakesAnotherVersion(_Layout):
                          "../lib/node_modules/@openai/codex/bin/codex.js")
         from scripts.coding_discovery_tools import install_path_version as mod
         with patch.object(mod, "_read_own_regular_file", return_value=None) as reader, \
+                patch.object(mod, "_is_safe_exec_path", return_value=False) as planted_proof, \
                 patch("builtins.open", side_effect=AssertionError("unchecked read")):
             self.assertIsNone(self.version(link))
         self.assertEqual(reader.call_args.args[1], self.home)
+        planted_proof.assert_called()
 
 
 class TestWindowsShim(_Layout):
@@ -304,6 +317,23 @@ class TestIsUnknownVersion(unittest.TestCase):
             self.assertTrue(is_unknown_version(value), value)
         for value in ("0.139.0", "codex-cli 0.139.0"):
             self.assertFalse(is_unknown_version(value), value)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX symlink layouts")
+class TestPerUserVersionThroughDedup(unittest.TestCase):
+    """main() keeps one row per (tool, install path); a user whose recovered version
+    differs gets theirs in their own report."""
+
+    def test_a_differing_user_version_is_kept_and_applied(self):
+        kept = {"name": "GitHub Copilot CLI", "version": "1.0.63", "install_path": "/opt/homebrew/bin/copilot"}
+        alice, bob = Path("/Users/alice"), Path("/Users/bob")
+        ai_tools_discovery._keep_user_version(kept, dict(kept, version="1.0.70"), bob)
+        ai_tools_discovery._keep_user_version(kept, dict(kept, version="Unknown"), Path("/Users/carol"))
+        report = {"name": "GitHub Copilot CLI", "version": "1.0.63", "projects": []}
+        self.assertEqual(ai_tools_discovery._with_user_version(kept, report, bob)["version"], "1.0.70")
+        self.assertEqual(ai_tools_discovery._with_user_version(kept, report, alice)["version"], "1.0.63")
+        self.assertEqual(ai_tools_discovery._with_user_version(kept, report, Path("/Users/carol"))["version"], "1.0.63")
+        self.assertEqual(report["version"], "1.0.63")  # the shared report dict isn't mutated
 
 
 @unittest.skipIf(os.name == "nt", "POSIX symlink layouts")

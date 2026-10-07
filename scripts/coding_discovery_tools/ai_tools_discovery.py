@@ -492,6 +492,19 @@ def _normalize_encoded_paths(obj):
             _normalize_encoded_paths(item)
 
 
+def _keep_user_version(kept: Dict, detected: Dict, user_home: Path) -> None:
+    """One row per shared install, but a self-updating CLI can run a different
+    version per user: remember this user's when it differs from the kept row's."""
+    version = detected.get("version")
+    if version != kept.get("version") and not is_unknown_version(version):
+        kept.setdefault("_version_by_home", {})[str(user_home)] = version
+
+
+def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
+    version = tool.get("_version_by_home", {}).get(str(user_home))
+    return {**report, "version": version} if version else report
+
+
 def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
     """Fill an unknown version from what the install records on disk. Never
     raises: a missing version must not cost the tool its detection."""
@@ -4024,6 +4037,8 @@ def main():
                     if tool_key not in tools_by_user:
                         tools_by_user[tool_key] = tool
                         all_tools.append(tool)
+                    else:
+                        _keep_user_version(tools_by_user[tool_key], tool, user_home)
             else:
                 logger.info(f"    No tools found for {user}")
             logger.info("")
@@ -4111,6 +4126,7 @@ def main():
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+                        tool_filtered = _with_user_version(tool, tool_filtered, user_home)
 
                         # Owned by someone else, unless this user has their own data
                         # for it: Copilot's install_path is the shared binary.

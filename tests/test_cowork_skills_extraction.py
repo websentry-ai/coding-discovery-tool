@@ -352,6 +352,7 @@ class TestCoworkMarketplaceCatalogSkipped(unittest.TestCase):
     SKIPPED = {
         "cowork_plugins/marketplaces/knowledge-work-plugins/sales/skills/call-prep": "call-prep",
         "cowork_plugins/marketplaces/claude-plugins-official/plugin-dev/skills/hook-development": "hook-development",
+        "cowork_plugins/marketplaces/team-plugins/other-plugin/skills/not-installed": "not-installed",
     }
 
     def _names(self, extractor_cls):
@@ -363,11 +364,16 @@ class TestCoworkMarketplaceCatalogSkipped(unittest.TestCase):
                 d = org / rel
                 d.mkdir(parents=True)
                 (d / "SKILL.md").write_text(f"---\nname: {name}\n---\nbody\n", encoding="utf-8")
-            # A plugin installed in its marketplace clone is recorded there, as Cowork records it.
-            (org / "cowork_plugins" / "installed_plugins.json").write_text(
-                '{"version": 2, "plugins": {"release-kit@team-plugins": [{"scope": "user", '
-                '"installPath": "/sessions/vm/mnt/.claude/cowork_plugins/marketplaces/team-plugins/release-kit"}]}}',
-                encoding="utf-8")
+            # A plugin installed in its marketplace clone is recorded there, as Cowork records it,
+            # in a registry long enough that a size cap would have dropped it.
+            import json
+            plugins = {"release-kit@team-plugins": [{"scope": "user", "installPath":
+                       "/sessions/vm/mnt/.claude/cowork_plugins/marketplaces/team-plugins/release-kit/"}]}
+            plugins.update({f"filler-{i}@cache": [{"scope": "user", "installPath": f"/x/cowork_plugins/cache/m/filler-{i}/1.0"}]
+                            for i in range(800)})
+            registry = org / "cowork_plugins" / "installed_plugins.json"
+            registry.write_text(json.dumps({"version": 2, "plugins": plugins}), encoding="utf-8")
+            assert registry.stat().st_size > 50 * 1024
             bundle = sessions / _SP / "org-1" / "acct-1" / "skills" / "xlsx"
             bundle.mkdir(parents=True)
             (bundle / "SKILL.md").write_text("---\nname: xlsx\n---\nbody\n", encoding="utf-8")

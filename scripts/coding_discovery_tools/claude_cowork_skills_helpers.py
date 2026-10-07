@@ -185,8 +185,6 @@ def _recorded_install_dirs(plugins_root: Path) -> Tuple[Path, ...]:
     app may record its VM's view of the path). Empty when it is missing or unreadable."""
     registry = plugins_root / "installed_plugins.json"
     try:
-        if registry.stat().st_size > MAX_CONFIG_FILE_SIZE:
-            return ()
         plugins = json.loads(registry.read_text(encoding="utf-8")).get("plugins") or {}
     except (OSError, ValueError, AttributeError):
         return ()
@@ -194,11 +192,11 @@ def _recorded_install_dirs(plugins_root: Path) -> Tuple[Path, ...]:
     for entries in plugins.values() if isinstance(plugins, dict) else []:
         for entry in entries if isinstance(entries, list) else []:
             raw = entry.get("installPath") if isinstance(entry, dict) else None
-            parts = re.split(r"[\\/]+", raw) if isinstance(raw, str) else []
+            parts = [p for p in re.split(r"[\\/]+", raw) if p] if isinstance(raw, str) else []
             if COWORK_PLUGINS_DIR not in parts:
                 continue
             tail = parts[len(parts) - parts[::-1].index(COWORK_PLUGINS_DIR):]
-            if tail and not any(p in ("", ".", "..") for p in tail):
+            if tail and not any(p in (".", "..") for p in tail):
                 dirs.append(plugins_root.joinpath(*tail))
     return tuple(dirs)
 

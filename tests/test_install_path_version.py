@@ -95,6 +95,21 @@ class TestPathLayouts(_Layout):
                          "../Cellar/node/22.11.0/lib/node_modules/@google/gemini-cli/dist/index.js")
         self.assertIsNone(self.version(link))  # never node's 22.11.0
 
+    def test_the_tools_own_keg_backs_up_an_unreadable_package_json(self):
+        """A root-owned formula fails the owner check on package.json; its own keg
+        still names the version."""
+        prefix = "opt/homebrew/Cellar/gemini-cli/0.9.0/libexec/lib/node_modules/@google/gemini-cli"
+        self.file(f"{prefix}/dist/index.js")
+        link = self.link("opt/homebrew/bin/gemini",
+                         "../Cellar/gemini-cli/0.9.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js")
+        self.assertEqual(self.version(link), "0.9.0")
+
+    def test_a_runtime_keg_is_never_the_tools_version(self):
+        for keg in ("node/22.11.0", "node@20/20.18.1", "python@3.12/3.12.7"):
+            with self.subTest(keg=keg):
+                path = self.file(f"opt/homebrew/Cellar/{keg}/bin/gemini")
+                self.assertIsNone(self.version(path))
+
     def test_homebrew_revision_and_build_suffixes_are_dropped(self):
         for keg, expected in (("Cellar/opencode/0.15.2_1", "0.15.2"), ("Caskroom/codex/1.2.3,4567", "1.2.3")):
             with self.subTest(keg=keg):
@@ -180,6 +195,31 @@ class TestSelfUpdatingCli(_Layout):
         with patch.object(mod, "_read_own_regular_file", return_value=None):
             self.assertEqual(self.version(link), "1.0.63")
 
+    def test_a_prerelease_package_beats_an_older_cache(self):
+        link = self._copilot("1.0.70-rc.1")
+        (self._cache() / "1.0.40").mkdir(parents=True)
+        self.assertEqual(self.version(link), "1.0.70-rc.1")
+        (self._cache() / "1.0.80").mkdir()
+        self.assertEqual(self.version(link), "1.0.80")
+
+    def test_a_shared_install_ignores_one_users_cache(self):
+        """Discovery keeps one row per install path, so a root-owned install shared
+        by several users reports its package version, not one user's runtime."""
+        link = self._copilot("1.0.56")
+        (self._cache() / "1.0.63").mkdir(parents=True)
+        from scripts.coding_discovery_tools import install_path_version as mod
+        real_stat = os.stat
+        prefix = str(self.root / "opt")
+
+        def stat(path, *a, **k):
+            result = real_stat(path, *a, **k)
+            if str(path).startswith(prefix):
+                return os.stat_result((result.st_mode, result.st_ino, result.st_dev, result.st_nlink,
+                                       0, 0, result.st_size, 0, 0, 0))
+            return result
+        with patch.object(mod.os, "stat", side_effect=stat):
+            self.assertEqual(self.version(link), "1.0.56")
+
     def test_no_cache_falls_back_to_the_package(self):
         self.assertEqual(self.version(self._copilot("1.0.56")), "1.0.56")
 
@@ -243,6 +283,15 @@ class TestWindowsShim(_Layout):
         shim = self.file(f"{npm}/codex.cmd",
                          '@ECHO off\r\n"%_prog%" "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n')
         self.assertEqual(self.version(shim), "0.142.0")
+
+    def test_a_shim_under_node_modules_bin_is_read_as_a_shim(self):
+        """The legacy local install is ~/.claude/local/node_modules/.bin/claude.cmd;
+        .bin is not a package."""
+        base = "home/.claude/local/node_modules"
+        self.package(f"{base}/@anthropic-ai/claude-code", "1.0.98")
+        shim = self.file(f"{base}/.bin/claude.cmd",
+                         '@ECHO off\r\n"%_prog%" "%dp0%\\..\\@anthropic-ai\\claude-code\\cli.js" %*\r\n')
+        self.assertEqual(self.version(shim), "1.0.98")
 
     def test_a_shim_without_a_package_is_unknown(self):
         shim = self.file("home/AppData/Roaming/npm/tool.cmd", "@ECHO off\r\necho hi\r\n")

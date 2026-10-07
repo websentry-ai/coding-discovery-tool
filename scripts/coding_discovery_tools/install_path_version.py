@@ -28,9 +28,10 @@ _UNKNOWN_VERSIONS = {"", "unknown"}
 
 # Matched against the resolved path with forward slashes, only when the path is not
 # inside an npm package (a keg there is node's, e.g. Cellar/node/22.11.0/lib/node_modules).
+# A runtime's keg (Cellar/node/22.11.0/bin/gemini) carries the runtime's version.
+_RUNTIME_KEGS = {"node", "python", "ruby", "deno", "bun", "go", "openjdk"}
+_KEG = re.compile(r"/(?:Caskroom|Cellar)/([^/]+)/(\d+(?:\.\d+)+[^/]*)/")
 _PATH_VERSION_PATTERNS = (
-    # Homebrew cask / formula keg: .../Caskroom/codex/0.139.0/bin/codex
-    re.compile(r"/(?:Caskroom|Cellar)/[^/]+/(\d+(?:\.\d+)+[^/]*)/"),
     # Native installers keep one entry per version: ~/.local/share/claude/versions/2.0.14,
     # AppData/Local/cursor-agent/versions/2026.05.28-7ae6800/cursor-agent.exe. Scoped to
     # those roots so pyenv-style ~/.pyenv/versions/3.12.1 never matches.
@@ -51,10 +52,12 @@ _SELF_UPDATE_ROOTS = {
         Path("AppData/Local/copilot/pkg"),
     ),
 }
-_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)")  # a prefix: 1.0.70-rc.1 compares as 1.0.70
 
 # An npm .cmd / .ps1 shim names the package it runs: "%dp0%\node_modules\@openai\codex\bin\codex.js".
 _SHIM_PACKAGE = re.compile(r"node_modules[\\/]((?:@[^\\/\"']+[\\/])?[^\\/\"']+)[\\/]")
+# A node_modules/.bin shim names its package relative to .bin: "%dp0%\..\@scope\pkg\cli.js".
+_BIN_SHIM_PACKAGE = re.compile(r"%dp0%[\\/]\.\.[\\/]((?:@[^\\/\"']+[\\/])?[^\\/\"']+)[\\/]")
 
 
 def is_unknown_version(version) -> bool:
@@ -67,17 +70,43 @@ def version_from_install_path(install_path, user_home: Path) -> Optional[str]:
         path = Path(install_path)
         resolved = _resolve_links(path)
         package_dir = _npm_package_dir(resolved) or _shim_package_dir(path, user_home)
+        name = version = None
         if package_dir is not None:
             name, version = _package_json(package_dir, user_home)
-            return _newest_self_update(name or _package_name(package_dir), user_home, version)
-        posix = str(resolved).replace("\\", "/")
-        for pattern in _PATH_VERSION_PATTERNS:
-            match = pattern.search(posix)
-            if match:
-                return extract_version_number(match.group(1))
+            name = name or _package_name(package_dir)
+        version = version or _version_from_path(resolved)
+        if name and _owned_by_user(package_dir, user_home):
+            version = _newest_self_update(name, user_home, version)
+        return version
     except (OSError, ValueError) as e:
         logger.debug(f"Could not read a version from {install_path}: {e}")
     return None
+
+
+def _version_from_path(resolved: Path) -> Optional[str]:
+    posix = str(resolved).replace("\\", "/")
+    keg = _KEG.search(posix)
+    if keg:
+        if keg.group(1).split("@")[0].lower() in _RUNTIME_KEGS:
+            return None
+        return extract_version_number(keg.group(2))
+    for pattern in _PATH_VERSION_PATTERNS:
+        match = pattern.search(posix)
+        if match:
+            return extract_version_number(match.group(1))
+    return None
+
+
+def _owned_by_user(package_dir: Path, user_home: Path) -> bool:
+    """A per-user runtime cache describes only that user's own install. A shared
+    install (root-owned, outside the home) reports one version for everyone, since
+    discovery keeps a single row per install path."""
+    try:
+        if Path(os.path.abspath(str(package_dir))).is_relative_to(Path(os.path.abspath(str(user_home)))):
+            return True
+        return os.name != "nt" and os.stat(package_dir).st_uid == os.stat(user_home).st_uid
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _resolve_links(path: Path) -> Path:
@@ -96,7 +125,7 @@ def _npm_package_dir(resolved: Path) -> Optional[Path]:
     """The npm package directory containing ``resolved``, if it sits in node_modules."""
     for ancestor in resolved.parents:
         parent = ancestor.parent
-        if parent.name == "node_modules" and not ancestor.name.startswith("@"):
+        if parent.name == "node_modules" and not ancestor.name.startswith(("@", ".")):
             return ancestor
         if parent.parent.name == "node_modules" and parent.name.startswith("@"):
             return ancestor
@@ -113,11 +142,14 @@ def _shim_package_dir(shim: Path, user_home: Path) -> Optional[Path]:
     """The package an npm Windows shim (.cmd / .ps1) runs, from the shim's text."""
     if shim.suffix.lower() not in (".cmd", ".ps1"):
         return None
-    text = _read_own_regular_file(shim, user_home, MAX_CONFIG_FILE_SIZE)
-    match = _SHIM_PACKAGE.search(text or "")
+    text = _read_own_regular_file(shim, user_home, MAX_CONFIG_FILE_SIZE) or ""
+    if shim.parent.name == ".bin" and shim.parent.parent.name == "node_modules":
+        match, base = _BIN_SHIM_PACKAGE.search(text), shim.parent.parent
+    else:
+        match, base = _SHIM_PACKAGE.search(text), shim.parent / "node_modules"
     if not match:
         return None
-    return shim.parent.joinpath("node_modules", *re.split(r"[\\/]", match.group(1)))
+    return base.joinpath(*re.split(r"[\\/]", match.group(1)))
 
 
 def _package_json(package_dir: Path, user_home: Path):

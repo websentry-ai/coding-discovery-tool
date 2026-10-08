@@ -56,7 +56,7 @@ _SELF_UPDATE_ROOTS = {
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)")  # a prefix: 1.0.70-rc.1 compares as 1.0.70
 # What a version may look like once reported: these names come from user-writable
 # folders and files, and the value is rendered in the dashboard.
-_CLEAN_VERSION = re.compile(r"\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?")
+_CLEAN_VERSION = re.compile(r"\d+(?:\.\d+)+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
 _MAX_VERSION_LENGTH = 64
 
 # An npm .cmd / .ps1 shim names the package it runs: "%dp0%\node_modules\@openai\codex\bin\codex.js".

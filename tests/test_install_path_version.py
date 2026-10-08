@@ -274,7 +274,7 @@ class TestSelfUpdatingCli(_Layout):
                 patch.object(mod, "_is_safe_exec_path", return_value=False):
             self.assertEqual(version_from_install_path(link, self.home), "1.0.70-rc.1")
             for folder, expected in (("1.0.70-rc.1_1", "1.0.70-rc.1"), ("1.0.70-rc.1,123", "1.0.70-rc.1"),
-                                     ("1.0.70-rc.1,2024-01-01", "1.0.70-rc.1"),
+                                     ("1.0.70-rc.1,2024-01-01", "1.0.70-rc.1"), ("1.0.70-rc-1", "1.0.70-rc-1"),
                                      ("0.15.2_1", "0.15.2"), ("1.2.3,4567", "1.2.3")):
                 path = self.root / "opt/homebrew/Cellar/copilot" / folder / "bin/copilot"
                 self.assertEqual(mod._version_from_path(path), expected, folder)

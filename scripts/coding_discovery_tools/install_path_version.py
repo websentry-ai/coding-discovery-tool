@@ -140,7 +140,7 @@ def _version_from_path(resolved: Path) -> Optional[str]:
     if keg:
         if keg.group(1).split("@")[0].lower() in _RUNTIME_KEGS:
             return None
-        return _clean(extract_version_number(keg.group(2)))
+        return _clean(keg.group(2)) or _clean(extract_version_number(keg.group(2)))  # keep a prerelease
     for pattern in _PATH_VERSION_PATTERNS:
         match = pattern.search(posix)
         if match:

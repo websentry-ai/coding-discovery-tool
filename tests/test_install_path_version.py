@@ -262,6 +262,24 @@ class TestSelfUpdatingCli(_Layout):
         self.assertEqual(ai_tools_discovery._with_user_version(kept, report, self.home)["version"], "1.0.63")
         self.assertTrue(is_unknown_version(ai_tools_discovery._with_user_version(kept, report, carol)["version"]))
 
+    def test_a_prerelease_keg_keeps_its_tag(self):
+        """With package.json unreadable the keg folder is the install version; a
+        stripped tag would read as the release and outrank a newer prerelease cache."""
+        from scripts.coding_discovery_tools import install_path_version as mod
+        self.file("opt/homebrew/Cellar/copilot/1.0.70-rc.1/libexec/lib/node_modules/@github/copilot/npm-loader.js")
+        link = self.link("opt/homebrew/bin/copilot",
+                         "../Cellar/copilot/1.0.70-rc.1/libexec/lib/node_modules/@github/copilot/npm-loader.js")
+        (self._cache() / "1.0.70-rc.2").mkdir(parents=True)
+        with patch.object(mod, "_read_own_regular_file", return_value=None), \
+                patch.object(mod, "_is_safe_exec_path", return_value=False):
+            self.assertEqual(version_from_install_path(link, self.home), "1.0.70-rc.1")
+            info = {"name": "GitHub Copilot CLI", "version": "Unknown", "install_path": str(link)}
+            ai_tools_discovery._fill_version_from_install_path(info, self.home)
+        kept = dict(info)
+        ai_tools_discovery._keep_user_version(kept, info, self.home)
+        report = ai_tools_discovery._with_user_version(kept, {"version": kept["version"]}, self.home)
+        self.assertEqual(report["version"], "1.0.70-rc.2")
+
     def test_a_non_updating_cli_keeps_its_detected_version(self):
         self.package("opt/homebrew/lib/node_modules/@openai/codex", "0.139.0", name="@openai/codex")
         self.file("opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js")

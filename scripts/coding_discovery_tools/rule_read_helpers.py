@@ -20,6 +20,7 @@ The walks separately refuse to descend a symlinked/junctioned directory before
 reaching this reader.
 """
 
+import hashlib
 import logging
 import os
 import platform
@@ -382,6 +383,54 @@ def _open_contained(rule_file, root, allow_symlink, *, extra_flags: int = 0) -> 
     return fd
 
 
+def _open_checked(rule_file: Path, containment_root, allow_symlink: bool):
+    """(fd, stat) of a contained regular file owned by the root's owner, or None. The caller closes fd."""
+    if containment_root is None:
+        logger.info(f"Refusing rule file {rule_file}: no containment root")
+        return None
+    fd = _open_contained(rule_file, containment_root, allow_symlink)
+    if fd is None:
+        logger.info(f"Refusing rule file {rule_file}: not contained under {containment_root}")
+        return None
+    try:
+        st = os.fstat(fd)
+        refuse = not stat.S_ISREG(st.st_mode)
+        # Strict mode: a hard link (even same-uid) passes containment and the owner check; only nlink > 1 refuses it.
+        if not refuse and not allow_symlink and st.st_nlink > 1:
+            logger.info(f"Refusing rule file {rule_file}: multiply-linked (nlink={st.st_nlink})")
+            refuse = True
+        # A file owned by a different uid is not this owner's, even in-tree.
+        if not refuse and st.st_uid != os.stat(str(containment_root)).st_uid:
+            logger.info(f"Refusing rule file {rule_file}: owned by uid {st.st_uid}, root owner differs")
+            refuse = True
+    except OSError:
+        refuse = True
+    if refuse:
+        os.close(fd)
+        return None
+    return fd, st
+
+
+def sha256_file_contained(rule_file: Path, containment_root, *, allow_symlink: bool = False,
+                          max_size: int = 8 * 1024 * 1024) -> Optional[str]:
+    """sha256 hex of the whole file through the same boundary as read_rule_file_contained; None if refused or too big."""
+    try:
+        opened = _open_checked(rule_file, containment_root, allow_symlink)
+        if opened is None:
+            return None
+        fd, st = opened
+        with os.fdopen(fd, "rb") as handle:
+            if st.st_size > max_size:
+                return None
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError as e:
+        logger.debug(f"Could not hash {rule_file}: {e}")
+        return None
+
+
 def read_rule_file_contained(
     rule_file: Path, containment_root, *, allow_symlink: bool = False, max_size: int = MAX_CONFIG_FILE_SIZE
 ) -> Optional[Tuple[str, bool, int, str]]:
@@ -394,30 +443,12 @@ def read_rule_file_contained(
     manager works, then contains the resolved descriptor to the home. The file must be
     a regular file owned by the root's owner. Never raises.
     """
-    if containment_root is None:
-        logger.info(f"Refusing rule file {rule_file}: no containment root")
-        return None
     fd = None
     try:
-        fd = _open_contained(rule_file, containment_root, allow_symlink)
-        if fd is None:
-            logger.info(f"Refusing rule file {rule_file}: not contained under {containment_root}")
+        opened = _open_checked(rule_file, containment_root, allow_symlink)
+        if opened is None:
             return None
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return None
-        # Strict mode: a hard link (even same-uid) passes containment and the owner check; only nlink > 1 refuses it.
-        if not allow_symlink and st.st_nlink > 1:
-            logger.info(f"Refusing rule file {rule_file}: multiply-linked (nlink={st.st_nlink})")
-            return None
-        try:
-            owner = os.stat(str(containment_root)).st_uid
-        except OSError:
-            return None
-        # A file owned by a different uid is not this owner's, even in-tree.
-        if st.st_uid != owner:
-            logger.info(f"Refusing rule file {rule_file}: owned by uid {st.st_uid}, root owner differs")
-            return None
+        fd, st = opened
         size = st.st_size
         truncated = size > max_size
         last_modified = datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z"

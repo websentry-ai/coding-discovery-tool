@@ -2,6 +2,7 @@
 Tests for hooks discovery: reading each coding agent's hook configs from real files on disk.
 """
 
+import hashlib
 import json
 import os
 import platform
@@ -529,6 +530,17 @@ class TestExtractHooks(unittest.TestCase):
 
         self.assertEqual(sorted((h["command"], h["scope"]) for h in claude), [("echo local", "local"), ("echo user", "user")])
         self.assertEqual([(h["command"], h["scope"]) for h in copilot], [("echo repo", "project")])
+
+    def test_an_attached_script_carries_the_sha256_of_the_whole_file(self):
+        body = "#!/usr/bin/env python3\nAPI_KEY = None\n" + "# pad\n" * (MAX_SCRIPT_SIZE // 4)  # past the 50 KB cut
+        script = _write(self.project / ".claude/hooks/big.py", body)
+        _write(self.project / ".claude/settings.json", {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "python3 .claude/hooks/big.py"}]}]}})
+
+        hook = _flat(extract_hooks("Claude Code", [self.home], [str(self.project)]))[0]
+
+        self.assertEqual(hook["script_sha256"], hashlib.sha256(script.read_bytes()).hexdigest())
+        self.assertLess(len(hook["script_content"]), len(body))  # content is cut and redacted; the hash is not
 
     def test_http_hooks_are_reported_with_their_url(self):
         _write(self.project / ".claude/settings.json", {"hooks": {"PreToolUse": [{"hooks": [

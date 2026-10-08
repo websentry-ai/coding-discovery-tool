@@ -23,7 +23,7 @@ from .utils import _is_safe_exec_path, _is_symlink_or_reparse, _read_own_regular
 
 logger = logging.getLogger(__name__)
 
-_MAX_LINK_HOPS = 16
+_MAX_LINK_HOPS = 40
 _MAX_CACHE_ENTRIES = 256
 _UNKNOWN_VERSIONS = {"", "unknown"}
 
@@ -158,14 +158,28 @@ def _clean(version) -> Optional[str]:
 
 
 def _resolve_links(path: Path) -> Path:
-    """Follow the symlink chain by reading link targets only (never opening them)."""
-    current = Path(os.path.abspath(str(path)))
-    for _ in range(_MAX_LINK_HOPS):
+    """The path with every symlink in it followed, folders included (Homebrew's
+    opt/<tool> -> Cellar/<tool>/<version>), by reading link targets only."""
+    parts = list(Path(os.path.abspath(str(path))).parts)
+    current, pending, hops = Path(parts[0]), parts[1:], 0
+    while pending:
+        part = pending.pop(0)
+        if part == "..":
+            current = current.parent  # current has no links left, so this is the real parent
+            continue
+        candidate = current / part
         try:
-            target = os.readlink(str(current))
+            target = Path(os.readlink(str(candidate)))
         except OSError:
-            return current
-        current = Path(os.path.normpath(os.path.join(str(current.parent), target)))
+            current = candidate
+            continue
+        hops += 1
+        if hops > _MAX_LINK_HOPS:
+            return candidate.joinpath(*pending)
+        if target.is_absolute():
+            current, pending = Path(target.parts[0]), list(target.parts[1:]) + pending
+        else:
+            pending = list(target.parts) + pending
     return current
 
 

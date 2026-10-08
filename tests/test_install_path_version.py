@@ -373,6 +373,23 @@ class TestNeverMistakesAnotherVersion(_Layout):
         (self.home / ".claude").mkdir()
         self.assertIsNone(self.version(self.home / ".claude"))
 
+    def test_a_folder_symlink_in_the_middle_is_followed(self):
+        """~/.local/bin/opencode -> /opt/homebrew/opt/opencode/bin/opencode, where
+        opt/opencode -> ../Cellar/opencode/0.15.2."""
+        self.file("opt/homebrew/Cellar/opencode/0.15.2/bin/opencode")
+        self.link("opt/homebrew/opt/opencode", "../Cellar/opencode/0.15.2")
+        link = self.link("home/.local/bin/opencode", str(self.root / "opt/homebrew/opt/opencode/bin/opencode"))
+        self.assertEqual(self.version(link), "0.15.2")
+
+    def test_a_relative_link_inside_a_symlinked_folder_resolves_from_the_real_folder(self):
+        """~/bin -> /opt/homebrew/bin, and bin/codex -> ../lib/node_modules/...: '..'
+        is the real folder's parent, not the home's."""
+        self.package("opt/homebrew/lib/node_modules/@openai/codex", "0.141.0")
+        self.file("opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js")
+        self.link("opt/homebrew/bin/codex", "../lib/node_modules/@openai/codex/bin/codex.js")
+        self.link("home/bin", str(self.root / "opt/homebrew/bin"))
+        self.assertEqual(self.version(self.root / "home/bin/codex"), "0.141.0")
+
     def test_a_link_loop_ends(self):
         a = self.root / "home/bin/a"
         a.parent.mkdir(parents=True)

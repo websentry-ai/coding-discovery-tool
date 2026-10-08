@@ -406,6 +406,13 @@ class TestWindowsShim(_Layout):
                          '@ECHO off\r\n"%_prog%" "%dp0%\\..\\@anthropic-ai\\claude-code\\cli.js" %*\r\n')
         self.assertEqual(self.version(shim), "1.0.98")
 
+    def test_an_install_path_that_is_the_package_directory(self):
+        """Windows records an npm install of Claude Code as the package folder itself."""
+        for package_dir in ("home/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code",
+                            "home/AppData/Roaming/npm/node_modules/opencode"):
+            self.package(package_dir, "2.1.278")
+            self.assertEqual(self.version(self.root / package_dir), "2.1.278", package_dir)
+
     def test_a_shim_without_a_package_is_unknown(self):
         shim = self.file("home/AppData/Roaming/npm/tool.cmd", "@ECHO off\r\necho hi\r\n")
         self.assertIsNone(self.version(shim))

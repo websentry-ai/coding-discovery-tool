@@ -171,7 +171,7 @@ def _resolve_links(path: Path) -> Path:
 
 def _npm_package_dir(resolved: Path) -> Optional[Path]:
     """The npm package directory containing ``resolved``, if it sits in node_modules."""
-    for ancestor in resolved.parents:
+    for ancestor in (resolved, *resolved.parents):  # the path may be the package dir itself
         parent = ancestor.parent
         if parent.name == "node_modules" and not ancestor.name.startswith(("@", ".")):
             return ancestor

@@ -529,7 +529,9 @@ def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
                 elif not updating and not is_unknown_version(info.get("version")):
                     info["_install_version"] = info["version"]
                 if updating:
-                    info["version"] = runtime_version(path, user_home) or install or "Unknown"
+                    # Run as root, the detector probed the shared binary, not what this user runs.
+                    probe = info.get("version") if getattr(os, "geteuid", lambda: 1)() != 0 else None
+                    info["version"] = runtime_version(path, user_home) or install or probe or "Unknown"
                 elif is_unknown_version(info.get("version")) and install:
                     info["version"] = install
         except Exception as e:

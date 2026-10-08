@@ -171,7 +171,7 @@ def _resolve_links(path: Path) -> Path:
 
 def _npm_package_dir(resolved: Path) -> Optional[Path]:
     """The npm package directory containing ``resolved``, if it sits in node_modules."""
-    for ancestor in (resolved, *resolved.parents):  # the path may be the package dir itself
+    for ancestor in ((resolved, *resolved.parents) if resolved.is_dir() else resolved.parents):
         parent = ancestor.parent
         if parent.name == "node_modules" and not ancestor.name.startswith(("@", ".")):
             return ancestor
@@ -195,20 +195,21 @@ def _shim_package_dir(shim: Path, user_home: Path) -> Optional[Path]:
         match, base = _BIN_SHIM_PACKAGE.search(text), shim.parent.parent
     else:
         match, base = _SHIM_PACKAGE.search(text), shim.parent / "node_modules"
-    if not match:
+    parts = re.split(r"[\\/]", match.group(1)) if match else []
+    if not parts or any(part in (".", "..") for part in parts):
         return None
-    return base.joinpath(*re.split(r"[\\/]", match.group(1)))
+    return base.joinpath(*parts)
 
 
 def _read_package_file(path: Path, user_home: Path) -> Optional[str]:
     """The user's own file, or a root-owned one no other account can have planted
-    (every folder above it root-owned and not group/world-writable): a shared
-    Homebrew or system npm prefix."""
+    (every folder above it root-owned and not group/world-writable) and any user can
+    read: a shared Homebrew or system npm prefix, never a root-private file."""
     text = _read_own_regular_file(path, user_home, MAX_CONFIG_FILE_SIZE)
     if text is not None or os.name == "nt":
         return text
     real = os.path.realpath(str(path))  # open what was checked, not a link that can move
-    if not _is_safe_exec_path(real):
+    if not _is_safe_exec_path(real) or not _world_traversable(Path(real).parent):
         return None
     try:
         fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -217,11 +218,20 @@ def _read_package_file(path: Path, user_home: Path) -> Optional[str]:
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.geteuid())
-                or info.st_size > MAX_CONFIG_FILE_SIZE):
+                or not info.st_mode & stat.S_IROTH or info.st_size > MAX_CONFIG_FILE_SIZE):
             return None
         return os.read(fd, MAX_CONFIG_FILE_SIZE).decode("utf-8", errors="replace")
     finally:
         os.close(fd)
+
+
+def _world_traversable(directory: Path) -> bool:
+    """Whether every folder down to ``directory`` lets any user list into it."""
+    try:
+        return all(os.stat(d).st_mode & (stat.S_IROTH | stat.S_IXOTH) == stat.S_IROTH | stat.S_IXOTH
+                   for d in (directory, *directory.parents))
+    except OSError:
+        return False
 
 
 def _package_json(package_dir: Path, user_home: Path):

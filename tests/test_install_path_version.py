@@ -248,7 +248,8 @@ class TestSelfUpdatingCli(_Layout):
         (self._cache() / "1.0.63").mkdir(parents=True)
         rows = {}
         with patch.object(mod, "_read_own_regular_file", return_value=None), \
-                patch.object(mod, "_is_safe_exec_path", return_value=False):
+                patch.object(mod, "_is_safe_exec_path", return_value=False), \
+                patch.object(ai_tools_discovery.os, "geteuid", return_value=0):
             for name, home in (("alice", self.home), ("carol", carol)):
                 rows[name] = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
                 ai_tools_discovery._fill_version_from_install_path(rows[name], home)
@@ -311,8 +312,23 @@ class TestSelfUpdatingCli(_Layout):
         link = self._copilot("1.0.56")
         from scripts.coding_discovery_tools import install_path_version as mod
         with patch.object(mod, "_read_own_regular_file", return_value=None), \
-                patch.object(mod, "_is_safe_exec_path", return_value=True):
+                patch.object(mod, "_is_safe_exec_path", return_value=True), \
+                patch.object(mod, "_world_traversable", return_value=True):
             self.assertEqual(self.version(link), "1.0.56")
+        with patch.object(mod, "_read_own_regular_file", return_value=None), \
+                patch.object(mod, "_is_safe_exec_path", return_value=True), \
+                patch.object(mod, "_world_traversable", return_value=False):
+            self.assertIsNone(version_from_install_path(link, self.home))  # never a root-private file
+
+    def test_a_probe_by_a_non_root_scan_is_what_the_user_runs(self):
+        from scripts.coding_discovery_tools import install_path_version as mod
+        link = self._copilot("1.0.56")
+        info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
+        with patch.object(mod, "_read_own_regular_file", return_value=None), \
+                patch.object(mod, "_is_safe_exec_path", return_value=False), \
+                patch.object(ai_tools_discovery.os, "geteuid", return_value=501):
+            ai_tools_discovery._fill_version_from_install_path(info, self.root / "nocache")
+        self.assertEqual(info["version"], "1.0.90")
 
     def test_a_hostile_cache_folder_name_is_not_reported(self):
         link = self._copilot("1.0.56")
@@ -405,6 +421,17 @@ class TestWindowsShim(_Layout):
         shim = self.file(f"{base}/.bin/claude.cmd",
                          '@ECHO off\r\n"%_prog%" "%dp0%\\..\\@anthropic-ai\\claude-code\\cli.js" %*\r\n')
         self.assertEqual(self.version(shim), "1.0.98")
+
+    def test_a_shim_naming_a_parent_folder_is_refused(self):
+        self.package("home/AppData/Roaming/npm", "9.9.9")  # what ".." would reach
+        shim = self.file("home/AppData/Roaming/npm/x.cmd", '@ECHO off\r\n"%dp0%\\node_modules\\..\\cli.js" %*\r\n')
+        self.assertIsNone(self.version(shim))
+
+    def test_a_file_directly_in_node_modules_belongs_to_the_enclosing_package(self):
+        pkg = "home/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code"
+        self.package(pkg, "2.1.278")
+        helper = self.file(f"{pkg}/node_modules/helper.js")
+        self.assertEqual(self.version(helper), "2.1.278")
 
     def test_an_install_path_that_is_the_package_directory(self):
         """Windows records an npm install of Claude Code as the package folder itself."""

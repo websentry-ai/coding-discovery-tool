@@ -80,6 +80,16 @@ def version_from_install_path(install_path, user_home: Path) -> Optional[str]:
     return None
 
 
+def is_self_updating(install_path, user_home: Path) -> bool:
+    """Whether the install is a CLI that runs runtimes it downloads per user."""
+    try:
+        _, package_dir = _locate(install_path, user_home)
+        return package_dir is not None and (
+            _package_json(package_dir, user_home)[0] or _package_name(package_dir)) in _SELF_UPDATE_ROOTS
+    except (OSError, ValueError):
+        return False
+
+
 def runtime_version(install_path, user_home: Path) -> Optional[str]:
     """What a self-updating CLI runs for this user: the newer of its package (when this
     user can read it) and the runtimes they downloaded. None for any other CLI."""
@@ -98,10 +108,20 @@ def runtime_version(install_path, user_home: Path) -> Optional[str]:
 
 
 def newest_version(a, b):
-    """The newer of two versions by major.minor.patch; one that doesn't parse loses."""
-    keys = [(_SEMVER.match(extract_version_number(v) or "") if isinstance(v, str) else None, v) for v in (a, b)]
-    parsed = [(tuple(int(n) for n in m.groups()), v) for m, v in keys if m]
-    return max(parsed, key=lambda kv: kv[0])[1] if parsed else a
+    """The newer of two versions; one that doesn't parse loses, and a tie keeps ``a``."""
+    key_a, key_b = _version_key(a), _version_key(b)
+    return b if key_b is not None and (key_a is None or key_b > key_a) else a
+
+
+def _version_key(version):
+    """(major, minor, patch, 1 for a release or 0 for a prerelease of it), or None."""
+    if not isinstance(version, str):
+        return None
+    match = _SEMVER.match(version) or _SEMVER.match(extract_version_number(version) or "")
+    if not match:
+        return None
+    rest = match.string[match.end():]
+    return tuple(int(n) for n in match.groups()) + (0 if rest.startswith("-") else 1,)
 
 
 def _locate(install_path, user_home: Path):
@@ -236,8 +256,7 @@ def _newest_self_update(package_name, user_home: Path, installed: Optional[str])
     """The newest runtime a self-updating CLI downloaded for this machine's platform,
     when newer than ``installed``. Every component is refused if it is a redirect, and
     the listing is capped, since the scan reads a user-controlled tree as root."""
-    best = _SEMVER.match(installed or "")
-    best_key = tuple(int(n) for n in best.groups()) if best else None
+    best_key = _version_key(installed)
     result = None
     for root in _SELF_UPDATE_ROOTS.get(package_name, ()):
         try:
@@ -245,10 +264,9 @@ def _newest_self_update(package_name, user_home: Path, installed: Optional[str])
         except OSError:
             continue
         for name in names:
-            match = _SEMVER.match(name)
-            if not match or not _clean(name):
+            key = _version_key(name) if _SEMVER.match(name) and _clean(name) else None
+            if key is None:
                 continue
-            key = tuple(int(n) for n in match.groups())
             if best_key is None or key > best_key:
                 best_key, result = key, name
     return result

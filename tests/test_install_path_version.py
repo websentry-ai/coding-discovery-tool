@@ -208,6 +208,8 @@ class TestSelfUpdatingCli(_Layout):
         link = self._copilot("1.0.70-rc.1")
         (self._cache() / "1.0.40").mkdir(parents=True)
         self.assertEqual(self.version(link), "1.0.70-rc.1")
+        (self._cache() / "1.0.70").mkdir()
+        self.assertEqual(self.version(link), "1.0.70")  # the release beats its own prerelease
         (self._cache() / "1.0.80").mkdir()
         self.assertEqual(self.version(link), "1.0.80")
 
@@ -231,6 +233,29 @@ class TestSelfUpdatingCli(_Layout):
             info = {"name": "GitHub Copilot CLI", "version": detected, "install_path": str(link)}
             ai_tools_discovery._fill_version_from_install_path(info, self.home)
             self.assertEqual((info["version"], info["_install_version"]), ("1.0.63", "1.0.56"), detected)
+
+    def test_a_root_probe_never_stands_in_for_an_unreadable_package(self):
+        """Nobody can read package.json; the scanner's probe of the shared binary is
+        not what Carol runs, and must not become anyone's floor."""
+        from scripts.coding_discovery_tools import install_path_version as mod
+        link = self._copilot("1.0.56")
+        carol = self.root / "carol"
+        (self._cache() / "1.0.63").mkdir(parents=True)
+        rows = {}
+        with patch.object(mod, "_read_own_regular_file", return_value=None), \
+                patch.object(mod, "_is_safe_exec_path", return_value=False):
+            for name, home in (("alice", self.home), ("carol", carol)):
+                rows[name] = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
+                ai_tools_discovery._fill_version_from_install_path(rows[name], home)
+        self.assertEqual(rows["alice"]["version"], "1.0.63")
+        self.assertTrue(is_unknown_version(rows["carol"]["version"]))
+        self.assertNotIn("_install_version", rows["carol"])
+        kept = rows["carol"]
+        for name, home in (("carol", carol), ("alice", self.home)):
+            ai_tools_discovery._keep_user_version(kept, rows[name], home)
+        report = {"version": kept["version"]}
+        self.assertEqual(ai_tools_discovery._with_user_version(kept, report, self.home)["version"], "1.0.63")
+        self.assertTrue(is_unknown_version(ai_tools_discovery._with_user_version(kept, report, carol)["version"]))
 
     def test_a_non_updating_cli_keeps_its_detected_version(self):
         self.package("opt/homebrew/lib/node_modules/@openai/codex", "0.139.0", name="@openai/codex")

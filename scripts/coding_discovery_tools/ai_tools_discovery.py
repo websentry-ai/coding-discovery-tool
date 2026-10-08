@@ -107,7 +107,7 @@ try:
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from .install_path_version import (
-        is_unknown_version, newest_version, runtime_version, version_from_install_path)
+        is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
@@ -190,7 +190,7 @@ except ImportError:
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from scripts.coding_discovery_tools.install_path_version import (
-        is_unknown_version, newest_version, runtime_version, version_from_install_path)
+        is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
@@ -516,20 +516,20 @@ def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
 
 def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
     """Fill an unknown version from what the install records on disk. A self-updating
-    CLI reports what this user runs instead of a probe of the shared binary. Never
-    raises: a missing version must not cost the tool its detection."""
+    CLI reports what this user runs, never a probe of the shared binary run as the
+    scanner. Never raises: a missing version must not cost the tool its detection."""
     for info in tool_info if isinstance(tool_info, list) else [tool_info]:
         try:
             if isinstance(info, dict) and info.get("install_path"):
                 path = info["install_path"]
                 install = version_from_install_path(path, user_home)
-                own = runtime_version(path, user_home)
+                updating = is_self_updating(path, user_home)
                 if install:
                     info["_install_version"] = install
-                elif not own and not is_unknown_version(info.get("version")):
+                elif not updating and not is_unknown_version(info.get("version")):
                     info["_install_version"] = info["version"]
-                if own:
-                    info["version"] = own
+                if updating:
+                    info["version"] = runtime_version(path, user_home) or install or "Unknown"
                 elif is_unknown_version(info.get("version")) and install:
                     info["version"] = install
         except Exception as e:

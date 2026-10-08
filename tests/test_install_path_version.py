@@ -390,6 +390,14 @@ class TestNeverMistakesAnotherVersion(_Layout):
         self.link("home/bin", str(self.root / "opt/homebrew/bin"))
         self.assertEqual(self.version(self.root / "home/bin/codex"), "0.141.0")
 
+    def test_a_native_version_survives_a_symlinked_dotfolder(self):
+        """~/.local -> elsewhere, ~/.local/bin/claude -> ../share/claude/versions/2.1.278/claude:
+        the version lives only in the logical path."""
+        self.file("elsewhere/share/claude/versions/2.1.278/claude")
+        self.link("home/.local", str(self.root / "elsewhere"))
+        link = self.link("elsewhere/bin/claude", "../share/claude/versions/2.1.278/claude")
+        self.assertEqual(self.version(self.root / "home/.local/bin/claude"), "2.1.278")
+
     def test_a_link_loop_ends(self):
         a = self.root / "home/bin/a"
         a.parent.mkdir(parents=True)

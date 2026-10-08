@@ -74,7 +74,8 @@ def version_from_install_path(install_path, user_home: Path) -> Optional[str]:
     try:
         resolved, package_dir = _locate(install_path, user_home)
         version = _package_json(package_dir, user_home)[1] if package_dir is not None else None
-        return _clean(version) or _version_from_path(resolved)
+        return (_clean(version) or _version_from_path(resolved)
+                or _version_from_path(_follow_leaf(install_path)))
     except (OSError, ValueError) as e:
         logger.debug(f"Could not read a version from {install_path}: {e}")
     return None
@@ -155,6 +156,19 @@ def _clean(version) -> Optional[str]:
         return None
     version = version.strip()
     return version if _CLEAN_VERSION.fullmatch(version) else None
+
+
+def _follow_leaf(path) -> Path:
+    """Only the final link chain followed, keeping a native installer's logical
+    .local/share/<tool>/versions/<v> even when a folder above it is a symlink."""
+    current = Path(os.path.abspath(str(path)))
+    for _ in range(_MAX_LINK_HOPS):
+        try:
+            target = os.readlink(str(current))
+        except OSError:
+            break
+        current = Path(os.path.normpath(os.path.join(str(current.parent), target)))
+    return current
 
 
 def _resolve_links(path: Path) -> Path:

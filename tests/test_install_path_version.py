@@ -164,8 +164,7 @@ class TestSelfUpdatingCli(_Layout):
     def version(self, path, home=None):
         """What discovery reports for one user: their newer runtime, else the package."""
         home = home or self.home
-        installed = version_from_install_path(path, home)
-        return runtime_version(path, home, installed) or installed
+        return runtime_version(path, home) or version_from_install_path(path, home)
 
     def _cache(self, root="Library/Caches/copilot/pkg", platform_dir=None):
         from scripts.coding_discovery_tools.install_path_version import _platform_dir
@@ -223,13 +222,24 @@ class TestSelfUpdatingCli(_Layout):
         self.assertEqual(self.version(link), "1.0.63")
         self.assertEqual(self.version(link, other), "1.0.70")
 
-    def test_a_known_package_version_still_rises_to_the_runtime(self):
-        """Windows' detector reads the npm package version itself; the user still
-        runs the newer runtime in their cache."""
+    def test_a_detector_version_gives_way_to_what_the_user_runs(self):
+        """Windows' detector reports the npm package version, and macOS probes the shared
+        binary as root; either way the user runs the newer of package and their cache."""
         link = self._copilot("1.0.56")
         (self._cache() / "1.0.63").mkdir(parents=True)
-        self.assertEqual(runtime_version(link, self.home, "1.0.56"), "1.0.63")
-        self.assertIsNone(runtime_version(link, self.home, "1.0.63"))
+        for detected in ("1.0.56", "1.0.90", "Unknown"):
+            info = {"name": "GitHub Copilot CLI", "version": detected, "install_path": str(link)}
+            ai_tools_discovery._fill_version_from_install_path(info, self.home)
+            self.assertEqual((info["version"], info["_install_version"]), ("1.0.63", "1.0.56"), detected)
+
+    def test_a_non_updating_cli_keeps_its_detected_version(self):
+        self.package("opt/homebrew/lib/node_modules/@openai/codex", "0.139.0", name="@openai/codex")
+        self.file("opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js")
+        link = self.link("opt/homebrew/bin/codex", "../lib/node_modules/@openai/codex/bin/codex.js")
+        self.assertIsNone(runtime_version(link, self.home))
+        info = {"name": "Codex", "version": "0.140.0", "install_path": str(link)}
+        ai_tools_discovery._fill_version_from_install_path(info, self.home)
+        self.assertEqual(info["version"], "0.140.0")
 
     def test_a_cache_dir_swapped_for_a_link_is_not_followed(self):
         from scripts.coding_discovery_tools import install_path_version as mod
@@ -309,9 +319,17 @@ class TestNeverMistakesAnotherVersion(_Layout):
         link = self.link("home/.nvm/versions/node/v22.11.0/bin/codex",
                          "../lib/node_modules/@openai/codex/bin/codex.js")
         from scripts.coding_discovery_tools import install_path_version as mod
+        real_open = os.open
+
+        def no_package_open(path, *args, **kwargs):
+            if str(path).endswith("package.json"):
+                raise AssertionError("unchecked read")
+            return real_open(path, *args, **kwargs)
+
         with patch.object(mod, "_read_own_regular_file", return_value=None) as reader, \
                 patch.object(mod, "_is_safe_exec_path", return_value=False) as planted_proof, \
-                patch("builtins.open", side_effect=AssertionError("unchecked read")):
+                patch("builtins.open", side_effect=AssertionError("unchecked read")), \
+                patch.object(mod.os, "open", no_package_open):
             self.assertIsNone(self.version(link))
         self.assertEqual(reader.call_args.args[1], self.home)
         planted_proof.assert_called()
@@ -377,6 +395,13 @@ class TestPerUserVersionThroughDedup(unittest.TestCase):
         expected = {"/Users/alice": "1.0.63", "/Users/carol": "1.0.56"}
         self.assertEqual(self._dedup(alice, carol), expected)
         self.assertEqual(self._dedup(carol, alice), expected)
+
+    def test_an_older_cache_never_lowers_a_user_below_the_package(self):
+        """Bob can't read the shared package; his stale cache is older than the loader
+        he runs, which Alice could read."""
+        self.assertEqual(
+            self._dedup(("/Users/bob", "1.0.40", None), ("/Users/alice", "1.0.63", "1.0.56")),
+            {"/Users/bob": "1.0.56", "/Users/alice": "1.0.63"})
 
     def test_unknown_everywhere_stays_unknown(self):
         self.assertEqual(self._dedup(("/Users/carol", "Unknown", None), ("/Users/dan", "Unknown", None)),

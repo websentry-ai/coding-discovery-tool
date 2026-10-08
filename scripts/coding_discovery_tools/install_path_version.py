@@ -80,17 +80,28 @@ def version_from_install_path(install_path, user_home: Path) -> Optional[str]:
     return None
 
 
-def runtime_version(install_path, user_home: Path, installed) -> Optional[str]:
-    """The newer runtime this user's self-updating CLI downloaded, or None."""
+def runtime_version(install_path, user_home: Path) -> Optional[str]:
+    """What a self-updating CLI runs for this user: the newer of its package (when this
+    user can read it) and the runtimes they downloaded. None for any other CLI."""
     try:
         _, package_dir = _locate(install_path, user_home)
         if package_dir is None:
             return None
-        name = _package_json(package_dir, user_home)[0] or _package_name(package_dir)
-        return _newest_self_update(name, user_home, extract_version_number(installed or ""))
+        name, version = _package_json(package_dir, user_home)
+        name = name or _package_name(package_dir)
+        if name not in _SELF_UPDATE_ROOTS:
+            return None
+        return _newest_self_update(name, user_home, _clean(version)) or _clean(version)
     except (OSError, ValueError) as e:
         logger.debug(f"Could not read a runtime for {install_path}: {e}")
     return None
+
+
+def newest_version(a, b):
+    """The newer of two versions by major.minor.patch; one that doesn't parse loses."""
+    keys = [(_SEMVER.match(extract_version_number(v) or "") if isinstance(v, str) else None, v) for v in (a, b)]
+    parsed = [(tuple(int(n) for n in m.groups()), v) for m, v in keys if m]
+    return max(parsed, key=lambda kv: kv[0])[1] if parsed else a
 
 
 def _locate(install_path, user_home: Path):

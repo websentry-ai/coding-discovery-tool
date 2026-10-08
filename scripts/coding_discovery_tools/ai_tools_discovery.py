@@ -107,7 +107,7 @@ try:
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from .install_path_version import (
-        is_unknown_version, runtime_version, version_from_install_path)
+        is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
@@ -190,7 +190,7 @@ except ImportError:
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from scripts.coding_discovery_tools.install_path_version import (
-        is_unknown_version, runtime_version, version_from_install_path)
+        is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
@@ -503,31 +503,35 @@ def _keep_user_version(kept: Dict, detected: Dict, user_home: Path) -> None:
 
 
 def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
-    """This user's version; if theirs is unknown, the install's, never another user's runtime."""
+    """This user's version, never below the install's (read by any user), and never
+    another user's runtime."""
     by_home = tool.get("_version_by_home", {})
     if str(user_home) not in by_home:
         return report
-    version = by_home[str(user_home)]
-    if is_unknown_version(version) and not is_unknown_version(tool.get("_install_version")):
-        version = tool["_install_version"]
+    version, install = by_home[str(user_home)], tool.get("_install_version")
+    if not is_unknown_version(install):
+        version = install if is_unknown_version(version) else newest_version(version, install)
     return {**report, "version": version}
 
 
 def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
-    """Fill an unknown version from what the install records on disk, then raise it
-    to this user's newer self-updated runtime. Never raises: a missing version must
-    not cost the tool its detection."""
+    """Fill an unknown version from what the install records on disk. A self-updating
+    CLI reports what this user runs instead of a probe of the shared binary. Never
+    raises: a missing version must not cost the tool its detection."""
     for info in tool_info if isinstance(tool_info, list) else [tool_info]:
         try:
             if isinstance(info, dict) and info.get("install_path"):
                 path = info["install_path"]
-                if is_unknown_version(info.get("version")):
-                    info["version"] = version_from_install_path(path, user_home) or info.get("version")
-                if not is_unknown_version(info.get("version")):
+                install = version_from_install_path(path, user_home)
+                own = runtime_version(path, user_home)
+                if install:
+                    info["_install_version"] = install
+                elif not own and not is_unknown_version(info.get("version")):
                     info["_install_version"] = info["version"]
-                runtime = runtime_version(path, user_home, info.get("_install_version"))
-                if runtime:
-                    info["version"] = runtime
+                if own:
+                    info["version"] = own
+                elif is_unknown_version(info.get("version")) and install:
+                    info["version"] = install
         except Exception as e:
             logger.debug(f"Version fallback failed for {info}: {e}")
 

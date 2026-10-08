@@ -114,14 +114,17 @@ def newest_version(a, b):
 
 
 def _version_key(version):
-    """(major, minor, patch, 1 for a release or 0 for a prerelease of it), or None."""
+    """A semver precedence key (a release above its prereleases, which compare by
+    identifier, numbers numerically), or None."""
     if not isinstance(version, str):
         return None
     match = _SEMVER.match(version) or _SEMVER.match(extract_version_number(version) or "")
     if not match:
         return None
     rest = match.string[match.end():]
-    return tuple(int(n) for n in match.groups()) + (0 if rest.startswith("-") else 1,)
+    pre = rest[1:].split("+")[0].split(".") if rest.startswith("-") else []
+    ids = tuple((0, int(i), "") if i.isdigit() else (1, 0, i) for i in pre)
+    return tuple(int(n) for n in match.groups()) + (0 if pre else 1, ids)
 
 
 def _locate(install_path, user_home: Path):

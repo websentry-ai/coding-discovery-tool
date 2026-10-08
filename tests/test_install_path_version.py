@@ -208,6 +208,11 @@ class TestSelfUpdatingCli(_Layout):
         link = self._copilot("1.0.70-rc.1")
         (self._cache() / "1.0.40").mkdir(parents=True)
         self.assertEqual(self.version(link), "1.0.70-rc.1")
+        for later in ("1.0.70-rc.2", "1.0.70-rc.10"):  # identifiers compare numerically
+            (self._cache() / later).mkdir()
+            self.assertEqual(self.version(link), later)
+        (self._cache() / "1.0.70-rc.9").mkdir()
+        self.assertEqual(self.version(link), "1.0.70-rc.10")
         (self._cache() / "1.0.70").mkdir()
         self.assertEqual(self.version(link), "1.0.70")  # the release beats its own prerelease
         (self._cache() / "1.0.80").mkdir()

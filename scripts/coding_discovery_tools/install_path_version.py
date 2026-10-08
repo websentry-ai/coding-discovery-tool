@@ -140,7 +140,8 @@ def _version_from_path(resolved: Path) -> Optional[str]:
     if keg:
         if keg.group(1).split("@")[0].lower() in _RUNTIME_KEGS:
             return None
-        return _clean(keg.group(2)) or _clean(extract_version_number(keg.group(2)))  # keep a prerelease
+        folder = re.sub(r"(_\d+|,[0-9A-Za-z.]+)$", "", keg.group(2))  # a brew revision or cask build
+        return _clean(folder) or _clean(extract_version_number(folder))  # keeps a prerelease
     for pattern in _PATH_VERSION_PATTERNS:
         match = pattern.search(posix)
         if match:

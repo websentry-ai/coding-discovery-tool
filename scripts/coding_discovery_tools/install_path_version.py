@@ -1,13 +1,5 @@
-"""
-Recover a CLI's version from where it is installed, without running it.
-
-Discovery runs as root under MDM, so ``<tool> --version`` on a user-writable
-binary is refused (``_is_safe_exec_path``) and PATH lookups resolve the
-scanner's PATH, not the user's. Most installs still say their version on disk:
-the npm package, the Homebrew keg, the native installer's ``versions/``
-directory, or the editor extension folder. Only link targets, directory names
-and user-owned regular files are read; nothing is executed.
-"""
+"""Recover a CLI's version from where it is installed, since a root MDM scan can't run user binaries.
+Only link targets, folder names and user-owned files are read; nothing is executed."""
 
 import json
 import logging
@@ -27,24 +19,21 @@ _MAX_LINK_HOPS = 40
 _MAX_CACHE_ENTRIES = 256
 _UNKNOWN_VERSIONS = {"", "unknown"}
 
-# Matched against the resolved path with forward slashes, only when the path is not
-# inside an npm package (a keg there is node's, e.g. Cellar/node/22.11.0/lib/node_modules).
-# A runtime's keg (Cellar/node/22.11.0/bin/gemini) carries the runtime's version.
+# Read only outside an npm package: a runtime's keg (Cellar/node/22.11.0/bin/gemini) holds the
+# runtime's version, not the tool's.
 _RUNTIME_KEGS = {"node", "python", "ruby", "deno", "bun", "go", "openjdk"}
 _KEG = re.compile(r"/(?:Caskroom|Cellar)/([^/]+)/(\d+(?:\.\d+)+[^/]*)/")
 _PATH_VERSION_PATTERNS = (
-    # Native installers keep one entry per version: ~/.local/share/claude/versions/2.0.14,
-    # AppData/Local/cursor-agent/versions/2026.05.28-7ae6800/cursor-agent.exe. Scoped to
-    # those roots so pyenv-style ~/.pyenv/versions/3.12.1 never matches.
+    # Native installers' versions/<v> (~/.local/share/claude/versions/2.0.14), scoped to those
+    # roots so ~/.pyenv/versions/3.12.1 never matches.
     re.compile(r"/(?:\.local/share|AppData/Local)/[^/]+/versions/(\d+(?:\.\d+)+[^/]*)(?:/|$)",
                re.IGNORECASE),
     # Editor extension folder: .../extensions/anthropic.claude-code-2.0.5-darwin-arm64[/...]
     re.compile(r"/extensions/[a-z0-9-]+\.[a-z0-9-]+-(\d+\.\d+\.\d+[^/]*)(?:/|$)", re.IGNORECASE),
 )
 
-# Self-updating CLIs run the newest runtime they downloaded rather than the npm
-# package's version: Copilot CLI keeps one directory per runtime under
-# <root>/<platform>/<version>/.
+# Self-updating CLIs run the newest runtime they downloaded, kept under <root>/<platform>/<version>/,
+# not the npm package's version.
 _SELF_UPDATE_ROOTS = {
     "@github/copilot": (
         Path(".copilot/pkg"),
@@ -230,9 +219,8 @@ def _shim_package_dir(shim: Path, user_home: Path) -> Optional[Path]:
 
 
 def _read_package_file(path: Path, user_home: Path) -> Optional[str]:
-    """The user's own file, or a root-owned one no other account can have planted
-    (every folder above it root-owned and not group/world-writable) and any user can
-    read: a shared Homebrew or system npm prefix, never a root-private file."""
+    """The user's own file, or a world-readable root-owned one under root-owned folders nobody else can write
+    (a shared Homebrew or npm prefix), never a root-private file."""
     text = _read_own_regular_file(path, user_home, MAX_CONFIG_FILE_SIZE)
     if text is not None or os.name == "nt":
         return text
@@ -295,9 +283,8 @@ def _any_redirect(base: Path, path: Path) -> bool:
 
 
 def _newest_self_update(package_name, user_home: Path, installed: Optional[str]) -> Optional[str]:
-    """The newest runtime a self-updating CLI downloaded for this machine's platform,
-    when newer than ``installed``. Every component is refused if it is a redirect, and
-    the listing is capped, since the scan reads a user-controlled tree as root."""
+    """The newest runtime a self-updating CLI downloaded for this platform, when newer than ``installed``.
+    Redirects are refused and listings capped, since root reads a user-controlled tree here."""
     best_key = _version_key(installed)
     result = None
     for root in _SELF_UPDATE_ROOTS.get(package_name, ()):
@@ -315,9 +302,8 @@ def _newest_self_update(package_name, user_home: Path, installed: Optional[str])
 
 
 def _runtime_dirs(user_home: Path, rel: Path) -> list:
-    """Up to the cap of real subdirectory names in user_home/rel, refusing a redirect
-    anywhere below the home. On POSIX the walk holds each directory open, so a
-    component swapped for a link mid-walk is refused rather than followed."""
+    """Up to the cap of real subdirectory names in user_home/rel, refusing a redirect anywhere below the home.
+    On POSIX each directory stays open, so one swapped for a link mid-walk is refused, not followed."""
     if os.name == "nt":
         if _any_redirect(user_home, user_home / rel):
             return []

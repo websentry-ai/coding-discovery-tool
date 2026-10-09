@@ -515,9 +515,8 @@ def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
 
 
 def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
-    """Fill an unknown version from what the install records on disk. A self-updating
-    CLI reports what this user runs, never a probe of the shared binary run as the
-    scanner. Never raises: a missing version must not cost the tool its detection."""
+    """Fill an unknown version from the install's files on disk, never from a probe run as the scanner.
+    Never raises: a missing version must not cost the tool its detection."""
     for info in tool_info if isinstance(tool_info, list) else [tool_info]:
         try:
             if isinstance(info, dict) and info.get("install_path"):

@@ -1,11 +1,5 @@
-"""A CLI's version recovered from its install path when discovery can't run it.
-
-Under an MDM scan (root) ``<tool> --version`` is refused for user-writable
-binaries and PATH is the scanner's, so most CLIs came back "Unknown". These build
-the real on-disk layouts (Homebrew keg, native installer, editor extension, npm
-via nvm, a Windows npm shim) and pin that the version is read without executing
-anything, and that a tool's other versions (node, python) are never mistaken for it.
-"""
+"""A CLI's version read from real on-disk install layouts without running anything, and never mistaken
+for a runtime's (node, python) version."""
 
 import json
 import os
@@ -406,9 +400,8 @@ class TestNeverMistakesAnotherVersion(_Layout):
         self.assertIsNone(self.version(a))
 
     def test_files_are_read_only_through_the_owner_checked_reader(self):
-        """Every read goes through the hardened reader, which requires the opened
-        file to belong to the scanned home's owner, so the root scan can't be
-        pointed at another account's files."""
+        """Every read goes through the hardened reader, which requires the home owner's file, so the root
+        scan can't be pointed at another account's files."""
         self.package("home/.nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex", "0.141.0")
         self.file("home/.nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex/bin/codex.js")
         link = self.link("home/.nvm/versions/node/v22.11.0/bin/codex",

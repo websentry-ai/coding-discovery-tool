@@ -295,7 +295,8 @@ def _newest_self_update(package_name, user_home: Path, installed: Optional[str])
         except OSError:
             continue
         for name in names:
-            key = _version_key(name) if _SEMVER.match(name) and _clean(name) else None
+            name = _clean(name)  # the folder name is user-chosen; report only the cleaned value
+            key = _version_key(name) if name and _SEMVER.match(name) else None
             if key is None:
                 continue
             if best_key is None or key > best_key:

@@ -360,6 +360,12 @@ class TestSelfUpdatingCli(_Layout):
         (self._cache() / ("1.0.999-" + "a" * 43)).mkdir(parents=True)
         self.assertEqual(self.version(link), "1.0.56")
 
+    def test_a_cache_folder_with_a_trailing_newline_reports_the_clean_version(self):
+        """A newline in the reported version breaks ingestion, like the multi-line --version banner."""
+        link = self._copilot("1.0.56")
+        (self._cache() / "1.0.99\n").mkdir(parents=True)
+        self.assertEqual(self.version(link), "1.0.99")
+
     def test_a_hostile_cache_folder_name_is_not_reported(self):
         link = self._copilot("1.0.56")
         for name in ('1.0.999<img src=x onerror=alert(1)>', "1.0.99\nforged", "1.0.98" + "x" * 80):

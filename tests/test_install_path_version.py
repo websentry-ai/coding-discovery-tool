@@ -224,14 +224,24 @@ class TestSelfUpdatingCli(_Layout):
         self.assertEqual(self.version(link, other), "1.0.70")
 
     def test_a_detector_version_gives_way_to_what_the_user_runs(self):
-        """Windows' detector reports the npm package version, and macOS probes the shared
-        binary as root; either way the user runs the newer of package and their cache."""
+        """The user runs the newest of package, cache and their own probe; a root probe of the
+        shared binary is ignored."""
         link = self._copilot("1.0.56")
         (self._cache() / "1.0.63").mkdir(parents=True)
-        for detected in ("1.0.56", "1.0.90", "Unknown"):
+        for detected, root, expected in (("1.0.56", False, "1.0.63"), ("Unknown", False, "1.0.63"),
+                                         ("1.0.90", False, "1.0.90"), ("1.0.90", True, "1.0.63")):
             info = {"name": "GitHub Copilot CLI", "version": detected, "install_path": str(link)}
+            with patch.object(ai_tools_discovery.os, "geteuid", return_value=0 if root else 501, create=True):
+                ai_tools_discovery._fill_version_from_install_path(info, self.home)
+            self.assertEqual((info["version"], info["_install_version"]), (expected, "1.0.56"), (detected, root))
+
+    def test_a_user_probe_beats_a_package_with_no_cached_runtime(self):
+        """With Copilot's cache somewhere discovery doesn't look, the user's own probe still wins."""
+        link = self._copilot("1.0.56")
+        info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
+        with patch.object(ai_tools_discovery.os, "geteuid", return_value=501, create=True):
             ai_tools_discovery._fill_version_from_install_path(info, self.home)
-            self.assertEqual((info["version"], info["_install_version"]), ("1.0.63", "1.0.56"), detected)
+        self.assertEqual(info["version"], "1.0.90")
 
     def test_a_root_probe_never_stands_in_for_an_unreadable_package(self):
         """Nobody can read package.json; the scanner's probe of the shared binary is

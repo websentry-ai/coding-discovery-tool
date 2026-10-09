@@ -231,7 +231,8 @@ class TestSelfUpdatingCli(_Layout):
         for detected, root, expected in (("1.0.56", False, "1.0.63"), ("Unknown", False, "1.0.63"),
                                          ("1.0.90", False, "1.0.90"), ("1.0.90", True, "1.0.63")):
             info = {"name": "GitHub Copilot CLI", "version": detected, "install_path": str(link)}
-            with patch.object(ai_tools_discovery.os, "geteuid", return_value=0 if root else 501, create=True):
+            with patch.object(ai_tools_discovery, "_running_as_root", return_value=root), \
+                    patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
                 ai_tools_discovery._fill_version_from_install_path(info, self.home)
             self.assertEqual((info["version"], info["_install_version"]), (expected, "1.0.56"), (detected, root))
 
@@ -239,9 +240,31 @@ class TestSelfUpdatingCli(_Layout):
         """With Copilot's cache somewhere discovery doesn't look, the user's own probe still wins."""
         link = self._copilot("1.0.56")
         info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
-        with patch.object(ai_tools_discovery.os, "geteuid", return_value=501, create=True):
+        with patch.object(ai_tools_discovery, "_running_as_root", return_value=False), \
+                patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
             ai_tools_discovery._fill_version_from_install_path(info, self.home)
         self.assertEqual(info["version"], "1.0.90")
+
+    def test_a_probe_never_reaches_another_users_home(self):
+        """A non-root scan probes the binary as its own user, so Bob keeps his own cache."""
+        from scripts.coding_discovery_tools.install_path_version import _platform_dir
+        link = self._copilot("1.0.56")
+        bob = self.root / "bob"
+        (bob / "Library/Caches/copilot/pkg" / _platform_dir() / "1.0.63").mkdir(parents=True)
+        info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
+        with patch.object(ai_tools_discovery, "_running_as_root", return_value=False), \
+                patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
+            ai_tools_discovery._fill_version_from_install_path(info, bob)
+        self.assertEqual(info["version"], "1.0.63")
+
+    def test_an_elevated_probe_is_ignored(self):
+        """An elevated scan (root, or SYSTEM on Windows) probed the shared binary, not this user's."""
+        link = self._copilot("1.0.56")
+        info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
+        with patch.object(ai_tools_discovery, "_running_as_root", return_value=True), \
+                patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
+            ai_tools_discovery._fill_version_from_install_path(info, self.home)
+        self.assertEqual(info["version"], "1.0.56")
 
     def test_a_root_probe_never_stands_in_for_an_unreadable_package(self):
         """Nobody can read package.json; the scanner's probe of the shared binary is
@@ -328,10 +351,12 @@ class TestSelfUpdatingCli(_Layout):
         from scripts.coding_discovery_tools import install_path_version as mod
         link = self._copilot("1.0.56")
         info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
+        own = self.root / "nocache"
         with patch.object(mod, "_read_own_regular_file", return_value=None), \
                 patch.object(mod, "_is_safe_exec_path", return_value=False), \
-                patch.object(ai_tools_discovery.os, "geteuid", return_value=501):
-            ai_tools_discovery._fill_version_from_install_path(info, self.root / "nocache")
+                patch.object(ai_tools_discovery, "_running_as_root", return_value=False), \
+                patch.object(ai_tools_discovery.Path, "home", return_value=own):
+            ai_tools_discovery._fill_version_from_install_path(info, own)
         self.assertEqual(info["version"], "1.0.90")
 
     def test_a_hostile_cache_folder_name_is_not_reported(self):

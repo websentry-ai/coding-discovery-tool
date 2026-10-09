@@ -46,7 +46,7 @@ _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)")  # a prefix: 1.0.70-rc.1 compares 
 # What a version may look like once reported: these names come from user-writable
 # folders and files, and the value is rendered in the dashboard.
 _CLEAN_VERSION = re.compile(r"\d+(?:\.\d+)+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
-_MAX_VERSION_LENGTH = 64
+_MAX_VERSION_LENGTH = 50  # the backend's version column is varchar(50)
 
 # An npm .cmd / .ps1 shim names the package it runs: "%dp0%\node_modules\@openai\codex\bin\codex.js".
 _SHIM_PACKAGE = re.compile(r"node_modules[\\/]((?:@[^\\/\"']+[\\/])?[^\\/\"']+)[\\/]")
@@ -140,7 +140,7 @@ def _version_from_path(resolved: Path) -> Optional[str]:
 
 
 def _clean(version) -> Optional[str]:
-    """A version safe to report, or None: plain x.y[.z][-pre], at most 64 chars."""
+    """A version safe to report, or None: plain x.y[.z][-pre], short enough for the backend column."""
     if not isinstance(version, str) or len(version) > _MAX_VERSION_LENGTH:
         return None
     version = version.strip()

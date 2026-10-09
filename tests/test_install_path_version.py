@@ -354,6 +354,12 @@ class TestSelfUpdatingCli(_Layout):
             ai_tools_discovery._fill_version_from_install_path(info, own)
         self.assertEqual(info["version"], "1.0.90")
 
+    def test_a_version_too_long_for_the_backend_is_not_reported(self):
+        """The backend's version column is varchar(50); a longer value would fail the whole report."""
+        link = self._copilot("1.0.56")
+        (self._cache() / ("1.0.999-" + "a" * 43)).mkdir(parents=True)
+        self.assertEqual(self.version(link), "1.0.56")
+
     def test_a_hostile_cache_folder_name_is_not_reported(self):
         link = self._copilot("1.0.56")
         for name in ('1.0.999<img src=x onerror=alert(1)>', "1.0.99\nforged", "1.0.98" + "x" * 80):

@@ -231,8 +231,7 @@ class TestSelfUpdatingCli(_Layout):
         for detected, root, expected in (("1.0.56", False, "1.0.63"), ("Unknown", False, "1.0.63"),
                                          ("1.0.90", False, "1.0.90"), ("1.0.90", True, "1.0.63")):
             info = {"name": "GitHub Copilot CLI", "version": detected, "install_path": str(link)}
-            with patch.object(ai_tools_discovery, "_running_as_root", return_value=root), \
-                    patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
+            with patch.object(ai_tools_discovery, "_is_scanning_users_own_home", return_value=not root):
                 ai_tools_discovery._fill_version_from_install_path(info, self.home)
             self.assertEqual((info["version"], info["_install_version"]), (expected, "1.0.56"), (detected, root))
 
@@ -240,8 +239,7 @@ class TestSelfUpdatingCli(_Layout):
         """With Copilot's cache somewhere discovery doesn't look, the user's own probe still wins."""
         link = self._copilot("1.0.56")
         info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
-        with patch.object(ai_tools_discovery, "_running_as_root", return_value=False), \
-                patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
+        with patch.object(ai_tools_discovery, "_is_scanning_users_own_home", return_value=True):
             ai_tools_discovery._fill_version_from_install_path(info, self.home)
         self.assertEqual(info["version"], "1.0.90")
 
@@ -252,8 +250,7 @@ class TestSelfUpdatingCli(_Layout):
         bob = self.root / "bob"
         (bob / "Library/Caches/copilot/pkg" / _platform_dir() / "1.0.63").mkdir(parents=True)
         info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
-        with patch.object(ai_tools_discovery, "_running_as_root", return_value=False), \
-                patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
+        with patch.object(ai_tools_discovery, "_is_scanning_users_own_home", side_effect=lambda h: h == self.home):
             ai_tools_discovery._fill_version_from_install_path(info, bob)
         self.assertEqual(info["version"], "1.0.63")
 
@@ -261,8 +258,7 @@ class TestSelfUpdatingCli(_Layout):
         """An elevated scan (root, or SYSTEM on Windows) probed the shared binary, not this user's."""
         link = self._copilot("1.0.56")
         info = {"name": "GitHub Copilot CLI", "version": "1.0.90", "install_path": str(link)}
-        with patch.object(ai_tools_discovery, "_running_as_root", return_value=True), \
-                patch.object(ai_tools_discovery.Path, "home", return_value=self.home):
+        with patch.object(ai_tools_discovery, "_is_scanning_users_own_home", return_value=False):
             ai_tools_discovery._fill_version_from_install_path(info, self.home)
         self.assertEqual(info["version"], "1.0.56")
 
@@ -354,8 +350,7 @@ class TestSelfUpdatingCli(_Layout):
         own = self.root / "nocache"
         with patch.object(mod, "_read_own_regular_file", return_value=None), \
                 patch.object(mod, "_is_safe_exec_path", return_value=False), \
-                patch.object(ai_tools_discovery, "_running_as_root", return_value=False), \
-                patch.object(ai_tools_discovery.Path, "home", return_value=own):
+                patch.object(ai_tools_discovery, "_is_scanning_users_own_home", side_effect=lambda h: h == own):
             ai_tools_discovery._fill_version_from_install_path(info, own)
         self.assertEqual(info["version"], "1.0.90")
 

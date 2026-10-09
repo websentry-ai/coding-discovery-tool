@@ -353,6 +353,23 @@ class TestSelfUpdatingCli(_Layout):
 
 @unittest.skipIf(os.name == "nt", "POSIX symlink layouts")
 class TestNeverMistakesAnotherVersion(_Layout):
+    @unittest.skipIf(os.name == "nt", "the shared-prefix read is POSIX-only")
+    def test_the_root_read_never_opens_a_device_or_fifo(self):
+        """A package.json linked to a FIFO or device is refused before root opens it."""
+        from scripts.coding_discovery_tools import install_path_version as mod
+        pipe = self.root / "shared" / "pipe"
+        pipe.parent.mkdir(parents=True)
+        os.mkfifo(pipe)
+        package = self.link("home/.npm-global/lib/node_modules/@github/copilot/package.json", str(pipe))
+        opened = []
+        real_open = os.open
+        with patch.object(mod, "_read_own_regular_file", return_value=None), \
+                patch.object(mod, "_is_safe_exec_path", return_value=True), \
+                patch.object(mod, "_world_traversable", return_value=True), \
+                patch.object(mod.os, "open", side_effect=lambda p, *a: opened.append(p) or real_open(p, *a)):
+            self.assertIsNone(mod._read_package_file(Path(package), self.home))
+        self.assertEqual(opened, [])
+
     def test_node_version_in_an_nvm_path_is_not_the_tool_version(self):
         self.file("home/.nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex/bin/codex.js")
         link = self.link("home/.nvm/versions/node/v22.11.0/bin/codex",

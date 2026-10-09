@@ -228,6 +228,8 @@ def _read_package_file(path: Path, user_home: Path) -> Optional[str]:
     if not _is_safe_exec_path(real) or not _world_traversable(Path(real).parent):
         return None
     try:
+        if not stat.S_ISREG(os.stat(real).st_mode):
+            return None  # never open a device or FIFO as root: opening one can have side effects
         fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None

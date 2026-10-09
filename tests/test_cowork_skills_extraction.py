@@ -338,5 +338,57 @@ class TestMacOSClaudeCoworkSkillsExtractor(unittest.TestCase):
             )
 
 
+
+class TestCoworkMarketplaceCatalogSkipped(unittest.TestCase):
+    """Only plugins on the device count: a marketplace catalog lists plugins the user
+    never installed. Laid out as Claude Desktop keeps it, run through every OS's extractor."""
+
+    KEPT = {
+        "rpm/plugin_01/skills/call-summary": "call-summary",
+        "cowork_plugins/cache/claude-plugins-official/plugin-dev/2cd88e7947b7/skills/skill-development": "skill-development",
+        "cowork_plugins/marketplaces/local-desktop-app-uploads/my-kit/skills/deck-review": "deck-review",
+        "cowork_plugins/marketplaces/team-plugins/release-kit/skills/cut-release": "cut-release",
+    }
+    SKIPPED = {
+        "cowork_plugins/marketplaces/knowledge-work-plugins/sales/skills/call-prep": "call-prep",
+        "cowork_plugins/marketplaces/claude-plugins-official/plugin-dev/skills/hook-development": "hook-development",
+        "cowork_plugins/marketplaces/team-plugins/other-plugin/skills/not-installed": "not-installed",
+    }
+
+    def _names(self, extractor_cls):
+        from scripts.coding_discovery_tools.claude_cowork_skills_helpers import SKILLS_PLUGIN_DIR as _SP
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / COWORK_SESSIONS_DIR
+            org = sessions / "acct-1" / "org-1"
+            for rel, name in {**self.KEPT, **self.SKIPPED}.items():
+                d = org / rel
+                d.mkdir(parents=True)
+                (d / "SKILL.md").write_text(f"---\nname: {name}\n---\nbody\n", encoding="utf-8")
+            # A plugin installed in its marketplace clone is recorded there, as Cowork records it,
+            # in a registry long enough that a size cap would have dropped it.
+            import json
+            plugins = {"release-kit@team-plugins": [{"scope": "user", "installPath":
+                       "/sessions/vm/mnt/.claude/cowork_plugins/marketplaces/team-plugins/release-kit/"}]}
+            plugins.update({f"filler-{i}@cache": [{"scope": "user", "installPath": f"/x/cowork_plugins/cache/m/filler-{i}/1.0"}]
+                            for i in range(800)})
+            registry = org / "cowork_plugins" / "installed_plugins.json"
+            registry.write_text(json.dumps({"version": 2, "plugins": plugins}), encoding="utf-8")
+            assert registry.stat().st_size > 50 * 1024
+            bundle = sessions / _SP / "org-1" / "acct-1" / "skills" / "xlsx"
+            bundle.mkdir(parents=True)
+            (bundle / "SKILL.md").write_text("---\nname: xlsx\n---\nbody\n", encoding="utf-8")
+            result = extractor_cls(sessions_root=sessions).extract_all_skills()
+        return {s["skill_name"] for s in result["user_skills"]}
+
+    def test_every_os_reports_installed_skills_and_not_the_catalog(self):
+        from scripts.coding_discovery_tools.linux.claude_cowork.skills_extractor import LinuxClaudeCoworkSkillsExtractor
+        from scripts.coding_discovery_tools.windows.claude_cowork.skills_extractor import WindowsClaudeCoworkSkillsExtractor
+        for extractor_cls in (MacOSClaudeCoworkSkillsExtractor, LinuxClaudeCoworkSkillsExtractor,
+                              WindowsClaudeCoworkSkillsExtractor):
+            with self.subTest(extractor=extractor_cls.__name__):
+                names = self._names(extractor_cls)
+                self.assertEqual(names, set(self.KEPT.values()) | {"xlsx"})
+
+
 if __name__ == "__main__":
     unittest.main()

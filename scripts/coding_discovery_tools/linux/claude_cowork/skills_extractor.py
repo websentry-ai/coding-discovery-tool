@@ -19,6 +19,7 @@ from ...claude_cowork_skills_helpers import (
     deduplicate_skills,
     is_claude_code_path,
     is_ephemeral_session_path,
+    is_marketplace_catalog_path,
 )
 from ...linux_extraction_helpers import get_linux_user_homes
 
@@ -75,6 +76,8 @@ class LinuxClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
                     if candidate.name.lower() != SKILL_FILE_NAME_LOWER:
                         continue
                     if is_ephemeral_session_path(candidate):
+                        continue
+                    if is_marketplace_catalog_path(candidate):
                         continue
                     if is_claude_code_path(candidate):
                         continue

@@ -556,6 +556,71 @@ def claude_code_sessions_recent(claude_dir: Path,
     return False
 
 
+def _real_subdirs(directory: Path) -> Tuple[List[Path], bool]:
+    """``(subdirectories, unreadable)``: links skipped, and any entry or listing we
+    could not read reported rather than dropped. Never raises."""
+    found, unreadable = [], False
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    os.lstat(entry.path)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    unreadable = True
+                    continue
+                if not is_symlink_or_junction(entry.path) and entry.is_dir(follow_symlinks=False):
+                    found.append(Path(entry.path))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        unreadable = True
+    return found, unreadable
+
+
+def cowork_sessions_recent(user_home: Path, sessions_dir: Path,
+                           max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> Optional[bool]:
+    """Whether Claude Desktop wrote a Cowork session under ``sessions_dir`` recently;
+    None when a folder or file on the way could not be read, which is not absence.
+
+    ``<account>/<org>/local_<id>.json`` is written by the app for each session, so a
+    fresh one proves Cowork ran even when its bundle is somewhere we do not probe. The
+    sessions tree alone is not evidence: it survives an uninstall.
+    """
+    try:
+        sessions_dir = _descend_without_redirect(user_home, *sessions_dir.relative_to(user_home).parts)
+    except ValueError:
+        return False
+    if sessions_dir is None:
+        return False
+    cutoff = time.time() - (max_age_days * 86400)
+    accounts, unknown = _real_subdirs(sessions_dir)
+    for account in accounts:
+        orgs, denied = _real_subdirs(account)
+        unknown = unknown or denied
+        for org in orgs:
+            try:
+                with os.scandir(org) as entries:
+                    for entry in entries:
+                        if not (entry.name.startswith("local_") and entry.name.endswith(".json")):
+                            continue
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            unknown = True
+                            continue
+                        if stat.S_ISREG(st.st_mode) and st.st_mtime >= cutoff:
+                            return True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                unknown = True
+    return None if unknown else False
+
+
 def dir_state(path) -> str:
     """``present``, ``absent`` or ``unreadable`` for a directory. Never raises.
 

@@ -101,11 +101,13 @@ try:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from .install_path_version import (
+        is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .s3_uploader import compute_payload_hash
@@ -182,11 +184,13 @@ except ImportError:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from scripts.coding_discovery_tools.install_path_version import (
+        is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
@@ -490,6 +494,50 @@ def _normalize_encoded_paths(obj):
             _normalize_encoded_paths(item)
 
 
+def _keep_user_version(kept: Dict, detected: Dict, user_home: Path) -> None:
+    """One row per shared install, but a self-updating CLI runs a version per user:
+    record every user's, and the install's own from whichever user could read it."""
+    if is_unknown_version(kept.get("_install_version")):
+        kept["_install_version"] = detected.get("_install_version")
+    kept.setdefault("_version_by_home", {})[str(user_home)] = detected.get("version")
+
+
+def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
+    """This user's version, never below the install's (read by any user), and never
+    another user's runtime."""
+    by_home = tool.get("_version_by_home", {})
+    if str(user_home) not in by_home:
+        return report
+    version, install = by_home[str(user_home)], tool.get("_install_version")
+    if not is_unknown_version(install):
+        version = install if is_unknown_version(version) else newest_version(version, install)
+    return {**report, "version": version}
+
+
+def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
+    """Fill an unknown version from the install's files on disk; a self-updating CLI reports what this user runs.
+    Never raises: a missing version must not cost the tool its detection."""
+    for info in tool_info if isinstance(tool_info, list) else [tool_info]:
+        try:
+            if isinstance(info, dict) and info.get("install_path"):
+                path = info["install_path"]
+                install = version_from_install_path(path, user_home)
+                updating = is_self_updating(path, user_home)
+                if install:
+                    info["_install_version"] = install
+                elif not updating and not is_unknown_version(info.get("version")):
+                    info["_install_version"] = info["version"]
+                if updating:
+                    # Only a probe the home's own user ran counts; root or another user probed someone else's binary.
+                    probe = info.get("version") if _is_scanning_users_own_home(user_home) else None
+                    on_disk = runtime_version(path, user_home) or install
+                    info["version"] = newest_version(on_disk, probe) or "Unknown"
+                elif is_unknown_version(info.get("version")) and install:
+                    info["version"] = install
+        except Exception as e:
+            logger.debug(f"Version fallback failed for {info}: {e}")
+
+
 class AIToolsDetector:
     """
     Detector for AI coding tools on macOS and Windows.
@@ -689,6 +737,7 @@ class AIToolsDetector:
                     tool_info = detector.detect()
                 
                 if tool_info:
+                    _fill_version_from_install_path(tool_info, user_home or Path.home())
                     # Handle detectors that return a list (like JetBrains)
                     if isinstance(tool_info, list):
                         tools.extend(tool_info)
@@ -4007,6 +4056,7 @@ def main():
                     if tool_key not in tools_by_user:
                         tools_by_user[tool_key] = tool
                         all_tools.append(tool)
+                    _keep_user_version(tools_by_user[tool_key], tool, user_home)
             else:
                 logger.info(f"    No tools found for {user}")
             logger.info("")
@@ -4094,6 +4144,7 @@ def main():
                         # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
                             tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
+                        tool_filtered = _with_user_version(tool, tool_filtered, user_home)
 
                         # Owned by someone else, unless this user has their own data
                         # for it: Copilot's install_path is the shared binary.

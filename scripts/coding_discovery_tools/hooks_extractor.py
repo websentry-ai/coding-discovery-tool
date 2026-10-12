@@ -30,11 +30,11 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 try:
     from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
     from .project_dir_index import dispatch_matches
-    from .rule_read_helpers import read_rule_file_contained
+    from .rule_read_helpers import read_rule_file_contained, sha256_file_contained
 except ImportError:  # pragma: no cover - direct-script execution fallback
     from mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
     from project_dir_index import dispatch_matches
-    from rule_read_helpers import read_rule_file_contained
+    from rule_read_helpers import read_rule_file_contained, sha256_file_contained
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +468,12 @@ def _hooks_in_file(path: Path, scope: str, home: Path, project_root: Optional[Pa
         if read and read[0] and "\x00" not in read[0] and _looks_like_script(program, read[0]):
             item["script_path"] = str(program)
             item["script_content"] = redact_secrets(read[0])
+            # Hash of the whole raw file, so the backend can recognise Unbound's own script exactly. Only for that
+            # name: next to the redacted text, a raw hash would let a reader confirm guesses of a short secret.
+            digest = (sha256_file_contained(program, root, allow_symlink=follow_symlinks)
+                      if program.name in ("unbound.py", "unbound.sh") else None)
+            if digest:
+                item["script_sha256"] = digest
         if len(command) > MAX_COMMAND_SIZE or (read and read[1]):
             item["truncated"] = True  # the backend floors what it cannot see in full
         found.append(item)

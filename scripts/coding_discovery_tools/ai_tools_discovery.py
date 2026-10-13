@@ -2891,11 +2891,9 @@ class AIToolsDetector:
             for key, value in governance.items():
                 if key not in ("settings_source", "settings_path", "raw_settings"):
                     existing.setdefault(key, value)
-            logger.info(f"  ✓ Added VS Code MCP governance to {tool.get('name')} (merged)")
-            return
-
-        result["permissions"] = governance
-        logger.info(f"  ✓ Added VS Code MCP governance to {tool.get('name')}")
+        else:
+            result["permissions"] = governance
+        logger.info(f"  ✓ Added VS Code MCP Governance to {tool.get('name')}")
 
     def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:
         """Workspace ``.github`` config Copilot for Xcode reads, per project root:

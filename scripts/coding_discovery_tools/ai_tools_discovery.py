@@ -10,6 +10,7 @@ import copy
 import functools
 import json
 import logging
+from .vscode_mcp_governance import GOVERNANCE_KEYS, governance_from_settings
 import os
 import platform
 import re
@@ -209,6 +210,7 @@ configure_logger()
 # "not yet computed" marker — otherwise the expensive whole-disk walk re-runs on
 # every accessor call whenever the real result is ``None``.
 _AUGMENT_CACHE_UNSET = object()
+_VSCODE_GOV_CACHE_UNSET = object()
 
 # Sentry metric keys must match [a-zA-Z_][a-zA-Z0-9_.\-]* — tool names like
 # "Gemini CLI" / "Roo Code" carry spaces, so they cannot be used verbatim.
@@ -680,6 +682,7 @@ class AIToolsDetector:
             self._augment_rules_cache = _AUGMENT_CACHE_UNSET
             self._augment_skills_cache = _AUGMENT_CACHE_UNSET
             self._augment_mcp_cache = _AUGMENT_CACHE_UNSET
+            self._vscode_mcp_governance_cache = _VSCODE_GOV_CACHE_UNSET
             self._augment_settings_cache = _AUGMENT_CACHE_UNSET
             # Per-user canonical Augment surface: maps each user's ``_config_path``
             # (their ~/.augment) -> the chosen surface name (lowercased) that
@@ -2561,6 +2564,36 @@ class AIToolsDetector:
                     return
         self._canonical_vscode_copilot = None
 
+    def _vscode_mcp_governance(self):
+        """The editor's MCP access settings as a permissions record, or None.
+
+        Read from VS Code's own settings.json via the Copilot settings
+        extractor, which walks the editor's profiles rather than anything
+        Copilot owns -- so this resolves whether or not Copilot is installed.
+        Memoized: every VS Code-hosted row asks for the same answer.
+        """
+        if self._vscode_mcp_governance_cache is not _VSCODE_GOV_CACHE_UNSET:
+            return self._vscode_mcp_governance_cache
+
+        record = None
+        try:
+            for rec in self._github_copilot_settings_extractor.extract_settings_by_user() or []:
+                governance = governance_from_settings(rec.get("raw_settings") or {})
+                if governance:
+                    governance["settings_source"] = "vscode_mcp_governance"
+                    governance["settings_path"] = rec.get("settings_path")
+                    governance["raw_settings"] = {
+                        k: v for k, v in (rec.get("raw_settings") or {}).items()
+                        if k in GOVERNANCE_KEYS
+                    }
+                    record = governance
+                    break  # riskiest-first ordering already applied by the extractor
+        except Exception as e:
+            logger.debug(f"VS Code MCP governance unavailable: {e}")
+
+        self._vscode_mcp_governance_cache = record
+        return record
+
     # -- Augment Code: memoized shared-config accessors -----------------------
 
     def _get_augment_rules(self) -> List[Dict]:
@@ -2824,7 +2857,45 @@ class AIToolsDetector:
             # Decode first so hooks, found by on-disk path, join the existing project rows.
             _normalize_encoded_paths(result)
             self._merge_hooks_into_projects(tool, result)
+            self._attach_vscode_mcp_governance(tool, result)
         return result
+
+    def _attach_vscode_mcp_governance(self, tool: Dict, result: Dict) -> None:
+        """Give a VS Code-hosted row the editor's MCP access decision.
+
+        VS Code registers these settings itself, so they bind every agent in the
+        window rather than the one whose extractor happens to read them. Applied
+        here because this is the one path every tool routes through -- each
+        agent's own branch builds its dict differently, and only the Copilot
+        family's knows about editor settings at all.
+
+        A row that already carries a permissions record -- the canonical Copilot
+        row, whose record is the whole editor posture -- keeps it and gains the
+        derived fields on top. Replacing it would drop its terminal and sandbox
+        settings; leaving it alone would keep this decision where the ticket
+        found it, readable only by digging through ``raw_settings``.
+
+        Rows without a record get the MCP subset alone, so a Roo Code row never
+        claims Copilot's terminal auto-approve posture.
+        """
+        if not (tool.get("name") or "").lower().endswith("(vs code)"):
+            return
+        governance = self._vscode_mcp_governance()
+        if not governance:
+            return
+
+        existing = result.get("permissions")
+        if isinstance(existing, dict):
+            # Derived fields only: its own settings_source and raw_settings
+            # describe the full posture and must survive.
+            for key, value in governance.items():
+                if key not in ("settings_source", "settings_path", "raw_settings"):
+                    existing.setdefault(key, value)
+            logger.info(f"  ✓ Added VS Code MCP governance to {tool.get('name')} (merged)")
+            return
+
+        result["permissions"] = governance
+        logger.info(f"  ✓ Added VS Code MCP governance to {tool.get('name')}")
 
     def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:
         """Workspace ``.github`` config Copilot for Xcode reads, per project root:

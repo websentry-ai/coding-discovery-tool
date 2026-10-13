@@ -70,50 +70,95 @@ class TheDecisionReachesEveryVSCodeRow(unittest.TestCase):
         "scope": "vscode", "access": "registry", "access_is_known": True,
         "allowed_servers": ["github-mcp"], "denied_servers": ["evil-mcp"],
         "settings_source": "vscode_mcp_governance",
-        "settings_path": "/gov/settings.json",
+        "settings_path": "/home/alice/Code/User/settings.json",
         "raw_settings": {"chat.mcp.access": "registry"},
     }
 
-    def _attach(self, name, existing=None):
+    def _detector(self, records=None):
         from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
         detector = AIToolsDetector.__new__(AIToolsDetector)
-        detector._vscode_mcp_governance_cache = dict(self.GOV)
-        result = {"name": name}
-        if existing is not None:
-            result["permissions"] = existing
-        detector._attach_vscode_mcp_governance({"name": name}, result)
-        return result.get("permissions") or {}
+        detector._vscode_mcp_governance_cache = (
+            [dict(self.GOV)] if records is None else records)
+        return detector
 
-    def test_an_agent_with_no_record_gets_one(self):
-        perms = self._attach("Roo Code (VS Code)")
-        self.assertEqual("vscode_mcp_governance", perms["settings_source"])
-        self.assertEqual("registry", perms["access"])
+    def _attach(self, name, result=None, records=None):
+        result = result if result is not None else {"name": name}
+        self._detector(records)._attach_vscode_mcp_governance({"name": name}, result)
+        return result
 
-    def test_copilots_own_record_survives_and_gains_the_decision(self):
-        """Replacing it would drop the terminal posture; skipping it would leave
-        the decision readable only by digging through raw_settings."""
-        own = {
-            "settings_source": "vscode",
-            "settings_path": "/real/settings.json",
-            "permission_mode": "auto",
-            "raw_settings": {"chat.tools.terminal.autoApprove": {"rm": True}},
-        }
-        perms = self._attach("GitHub Copilot Chat (VS Code)", own)
-        self.assertEqual("vscode", perms["settings_source"])
-        self.assertEqual("/real/settings.json", perms["settings_path"])
-        self.assertEqual("auto", perms["permission_mode"])
-        self.assertEqual(["chat.tools.terminal.autoApprove"], list(perms["raw_settings"]))
-        self.assertEqual("registry", perms["access"])
-        self.assertEqual(["evil-mcp"], perms["denied_servers"])
+    def test_an_agent_with_no_record_reports_per_user(self):
+        """The record carries its own file's path, which is what the per-user
+        report filter matches against a home directory."""
+        res = self._attach("Roo Code (VS Code)")
+        self.assertEqual("registry", res["permissions"]["access"])
+        self.assertEqual(
+            ["/home/alice/Code/User/settings.json"],
+            [r["settings_path"] for r in res["_permissions_by_user"]])
+
+    def test_each_user_keeps_their_own_decision(self):
+        """An elevated scan must not credit one account's policy to another."""
+        alice = dict(self.GOV)
+        bob = dict(self.GOV, access="none",
+                   settings_path="/home/bob/Code/User/settings.json",
+                   raw_settings={"chat.mcp.access": "none"})
+        res = self._attach("Roo Code (VS Code)", records=[alice, bob])
+        by_path = {r["settings_path"]: r["access"] for r in res["_permissions_by_user"]}
+        self.assertEqual("registry", by_path["/home/alice/Code/User/settings.json"])
+        self.assertEqual("none", by_path["/home/bob/Code/User/settings.json"])
+
+    def test_each_profile_stays_its_own_posture(self):
+        """A union of a locked default and a permissive profile is a policy
+        neither file declares, so they are reported separately."""
+        default = dict(self.GOV, access="registry",
+                       settings_path="/home/alice/Code/User/settings.json",
+                       raw_settings={"chat.mcp.access": "registry"})
+        named = dict(self.GOV, access="all",
+                    settings_path="/home/alice/Code/User/profiles/x/settings.json",
+                    raw_settings={"chat.mcp.access": "all"})
+        res = self._attach("Roo Code (VS Code)", records=[default, named])
+        self.assertEqual(["registry", "all"],
+                         [r["access"] for r in res["_permissions_by_user"]])
+
+    def test_an_existing_record_is_enriched_from_its_own_settings(self):
+        """Copilot's records keep their fuller posture and gain the derived
+        fields, each from the file it came from -- never another user's."""
+        alice = {"settings_source": "vscode",
+                 "settings_path": "/home/alice/Code/User/settings.json",
+                 "permission_mode": "auto",
+                 "raw_settings": {"chat.mcp.access": "registry",
+                                  "chat.tools.terminal.autoApprove": {"rm": True}}}
+        bob = {"settings_source": "vscode",
+               "settings_path": "/home/bob/Code/User/settings.json",
+               "raw_settings": {"chat.mcp.access": "none"}}
+        res = self._attach("GitHub Copilot Chat (VS Code)",
+                           result={"name": "GitHub Copilot Chat (VS Code)",
+                                   "_permissions_by_user": [alice, bob],
+                                   "permissions": alice})
+        self.assertEqual("registry", alice["access"])
+        self.assertEqual("none", bob["access"], "bob keeps his own decision")
+        self.assertEqual("auto", alice["permission_mode"])
+        self.assertIn("chat.tools.terminal.autoApprove", alice["raw_settings"])
+        self.assertEqual("vscode", alice["settings_source"])
+        self.assertEqual([alice, bob], res["_permissions_by_user"])
 
     def test_an_existing_value_is_not_clobbered(self):
-        """If the editor's own extractor ever derives these, its answer wins."""
-        perms = self._attach("GitHub Copilot Chat (VS Code)",
-                             {"settings_source": "vscode", "access": "none"})
-        self.assertEqual("none", perms["access"])
+        rec = {"settings_source": "vscode", "access": "all",
+               "raw_settings": {"chat.mcp.access": "none"}}
+        self._attach("GitHub Copilot Chat (VS Code)",
+                     result={"name": "GitHub Copilot Chat (VS Code)",
+                             "_permissions_by_user": [rec]})
+        self.assertEqual("all", rec["access"])
 
     def test_another_editors_row_is_untouched(self):
         """These settings belong to one editor; Cursor has its own."""
-        self.assertEqual({}, self._attach("Roo Code (Cursor)"))
-        self.assertEqual({}, self._attach("Cursor"))
-        self.assertEqual({}, self._attach("Claude Code"))
+        for name in ("Roo Code (Cursor)", "Cursor", "Claude Code"):
+            with self.subTest(name=name):
+                self.assertNotIn("permissions", self._attach(name))
+
+    def test_no_governance_anywhere_adds_nothing(self):
+        self.assertNotIn("permissions",
+                         self._attach("Roo Code (VS Code)", records=[]))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

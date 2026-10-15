@@ -369,7 +369,7 @@ class NoLookupBypassesTheFilter(unittest.TestCase):
         self.assertTrue(root.is_dir(), f"cannot find the tree at {root}")
         unfiltered = []
         for f in sorted(root.rglob("*.py")):
-            text = f.read_text()
+            text = f.read_text(encoding="utf-8", errors="replace")
             for m in re.finditer(r'run_command\(\s*\["which"', text):
                 start = text.rfind("\n", 0, m.start()) + 1
                 end = text.find("\n", m.start())
@@ -434,6 +434,7 @@ class AShimDoesNotEndTheSearch(unittest.TestCase):
             self.assertEqual(str(self.real_dir / "codex"),
                              install_from_lookup(str(self.shim_dir / "codex")))
 
+    @unittest.skipIf(os.name == "nt", "no executable bit on Windows")
     def test_a_non_executable_file_is_not_an_install(self):
         plain = Path(self.root) / "notbin"
         plain.mkdir()
@@ -453,6 +454,7 @@ class AShimDoesNotEndTheSearch(unittest.TestCase):
                              mod.MacOSCodexDetector()._check_codex_command())
 
 
+@unittest.skipIf(os.name == "nt", "the login-shell lookup is POSIX-only")
 class TheLoginShellLookupRefusesAShim(unittest.TestCase):
     """The root scan asks each user's login shell for ``command -v <tool>``.
     That is the same kind of lookup as ``which`` and can answer with the same
@@ -487,8 +489,10 @@ class TheLoginShellLookupRefusesAShim(unittest.TestCase):
             # Granted for real install locations only -- never for the shim.
             # A blanket True would also vouch for the shim, and then a check
             # that still described the shim instead of the recovered path
-            # would look correct.
-            return str(self.real_dir) in str(candidate)
+            # would look correct. Compared through realpath, since a temp dir
+            # can be handed back in a form realpath expands.
+            return (os.path.realpath(str(candidate))
+                    .startswith(os.path.realpath(str(self.real_dir))))
 
         with patch.object(self.utils, "_login_shell_owner", return_value=Entry()), \
                 patch.object(self.utils, "_safe_helper", return_value="/usr/bin/sudo"), \

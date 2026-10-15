@@ -2510,21 +2510,15 @@ _SESSION_SHIM_UUID = re.compile(
 def is_session_temp_path(path) -> bool:
     """True when ``path`` is a per-session shim rather than an installation.
 
-    Tools that wrap other tools write throwaway shims into the temp directory --
-    cmux puts a ``codex`` under ``$TMPDIR/cmux-cli-shims/<uuid>/`` and prepends
-    it to PATH -- so a ``which`` lookup answers with the wrapper. Recording it
-    reports an install that never existed, carries no version, and comes back
-    under a new UUID next session, so the rows accumulate indefinitely.
+    A tool that wraps other tools writes throwaway shims into the temp dir and
+    prepends them to PATH, so a ``which`` lookup answers with the wrapper: an
+    install that never existed, with no version, under a new UUID each session.
 
-    Being under a temp directory is necessary but not sufficient: this repo's
-    tests root synthetic filesystems at ``mkdtemp()``, so ``<tmp>/home/alice/...``
-    is an ordinary fixture. The distinguishing marks are a shim directory in the
-    path or a machine-generated UUID naming the parent, which neither a fixture
-    nor a real install has.
-
-    Says nothing about whether the file is safe to execute: a per-user temp dir
-    is owned by that user at mode 700, so it passes ``_is_safe_exec_path`` and
-    still has to be refused here.
+    Under a temp dir is necessary but not sufficient -- tests root synthetic
+    filesystems at ``mkdtemp()``, so ``<tmp>/home/alice/...`` is an ordinary
+    fixture. A shim-named directory or a UUID-named parent is what separates
+    them. Ownership says nothing here: a per-user temp dir is mode 700 and so
+    passes ``_is_safe_exec_path``.
     """
     if not path:
         return False
@@ -2538,10 +2532,9 @@ def is_session_temp_path(path) -> bool:
         roots.append(tempfile.gettempdir())
     except Exception:
         pass
-    # macOS gives each user a per-boot dir under /var/folders, which realpath
-    # reports under /private; Linux and containers use /tmp.
-    roots.extend(["/tmp", "/var/tmp", "/var/folders",
-                  "/private/tmp", "/private/var/folders"])
+    # TMPDIR is per-user on macOS, so the shared temp dirs are listed too.
+    # _path_within resolves each root, which collapses the macOS /private forms.
+    roots.extend(["/tmp", "/var/tmp", "/var/folders"])
 
     if not any(_path_within(resolved, root) for root in roots):
         return False

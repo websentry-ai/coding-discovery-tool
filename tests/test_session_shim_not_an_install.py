@@ -63,20 +63,40 @@ class AnOrdinaryInstallIsKept(unittest.TestCase):
 
 
 class TheRuleHoldsOnEveryPlatform(unittest.TestCase):
+    """The rule reads paths with ``os.path``, so each platform's shape has to be
+    checked on that platform.
 
+    A Windows path cannot be judged on POSIX: ``realpath`` treats ``C:\\...`` as a
+    relative name and the backslashes as part of one filename. Patching
+    ``gettempdir`` to a Windows string does not change that -- it only makes the
+    answer depend on whether the checkout itself happens to sit under a temp
+    directory, which passes on one machine and fails on the next. So the Windows
+    cases run on Windows, where the CI matrix covers them.
+    """
+
+    @unittest.skipUnless(os.name == "nt", "Windows path grammar")
     def test_a_windows_temp_shim_is_refused(self):
-        """Windows has no /var/folders; the rule leans on gettempdir() there, so
-        the shape has to be checked on its own."""
-        with patch("tempfile.gettempdir",
-                   return_value=r"C:\Users\dev\AppData\Local\Temp"):
-            self.assertTrue(is_session_temp_path(
-                r"C:\Users\dev\AppData\Local\Temp\cmux-cli-shims\abc\codex"))
+        shim = (Path(tempfile.gettempdir()) / "cmux-cli-shims"
+                / str(uuid.uuid4()) / "codex.exe")
+        self.assertTrue(is_session_temp_path(str(shim)))
 
+    @unittest.skipUnless(os.name == "nt", "Windows path grammar")
     def test_a_windows_install_is_kept(self):
-        with patch("tempfile.gettempdir",
-                   return_value=r"C:\Users\dev\AppData\Local\Temp"):
-            self.assertFalse(is_session_temp_path(
-                r"C:\Users\dev\AppData\Roaming\npm\codex.cmd"))
+        home = Path(os.environ.get("USERPROFILE") or r"C:\Users\dev")
+        self.assertFalse(is_session_temp_path(
+            str(home / "AppData" / "Roaming" / "npm" / "codex.cmd")))
+
+    @unittest.skipIf(os.name == "nt", "POSIX temp layout")
+    def test_every_posix_temp_root_is_covered(self):
+        """The macOS per-user layout and the Linux ones answer the same way."""
+        for root in ("/tmp", "/var/tmp", "/var/folders/ab/T"):
+            with self.subTest(root=root):
+                self.assertTrue(is_session_temp_path(
+                    f"{root}/cmux-cli-shims/{uuid.uuid4()}/codex"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX temp layout")
+    def test_a_posix_install_outside_temp_is_kept(self):
+        self.assertFalse(is_session_temp_path("/usr/local/bin/codex"))
 
     def test_a_symlink_out_of_temp_follows_to_the_real_file(self):
         """A shim directory holding a symlink to the real binary is not a shim
@@ -333,7 +353,11 @@ class NoLookupBypassesTheFilter(unittest.TestCase):
     for detectors added later: every ``which`` lookup in the tree is filtered."""
 
     def test_every_which_lookup_is_filtered(self):
-        root = Path("scripts/coding_discovery_tools")
+        # Anchored to this file, not the working directory: the suite is run
+        # from the repo root in CI and from elsewhere by hand, and a relative
+        # path would quietly scan nothing and pass.
+        root = Path(__file__).resolve().parent.parent / "scripts" / "coding_discovery_tools"
+        self.assertTrue(root.is_dir(), f"cannot find the tree at {root}")
         unfiltered = []
         for f in sorted(root.rglob("*.py")):
             text = f.read_text()

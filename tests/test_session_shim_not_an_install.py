@@ -453,58 +453,85 @@ class AShimDoesNotEndTheSearch(unittest.TestCase):
 
 
 class TheLoginShellLookupRefusesAShim(unittest.TestCase):
-    """The root/MDM scan asks each user's login shell for ``command -v <tool>``.
+    """The root scan asks each user's login shell for ``command -v <tool>``.
     That is the same kind of lookup as ``which`` and can answer with the same
-    shim, so it carries the same rule."""
+    shim, so it carries the same rule -- including the recovery, walking the
+    user's own PATH rather than the scanner's, which would name a different
+    owner for the install.
+    """
 
-    def test_a_shim_from_the_login_shell_is_not_stored(self):
+    def setUp(self):
         from scripts.coding_discovery_tools import utils
-        root = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, root, True)
-        home = Path(root) / "Users" / "dev"
-        home.mkdir(parents=True)
-        shim = Path(root) / "cmux-cli-shims" / str(uuid.uuid4()) / "codex"
-        shim.parent.mkdir(parents=True)
-        shim.write_text("#!/bin/sh\n")
-        shim.chmod(0o755)
+        self.utils = utils
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.home = Path(self.root) / "Users" / "dev"
+        self.home.mkdir(parents=True)
+        self.shim_dir = Path(self.root) / "cmux-cli-shims" / str(uuid.uuid4())
+        self.real_dir = Path(self.root) / "custom" / "prefix" / "bin"
+        for d in (self.shim_dir, self.real_dir):
+            d.mkdir(parents=True)
+            f = d / "codex"
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
 
+    def _resolve(self, answer, user_path):
         class Entry:
             pw_name = "dev"
+        stdout = (f"{self.utils._MARKER}PATH\t{user_path}\n"
+                  f"{self.utils._MARKER}codex\t{answer}\n")
+        completed = types.SimpleNamespace(stdout=stdout, returncode=0)
 
-        completed = types.SimpleNamespace(
-            stdout=f"{utils._MARKER}codex\t{shim}\n", returncode=0)
-        with patch.object(utils, "_login_shell_owner", return_value=Entry()), \
-                patch.object(utils, "_safe_helper", return_value="/usr/bin/sudo"), \
-                patch.object(utils.subprocess, "run", return_value=completed), \
-                patch.object(utils, "machine_global_binary_owned_by_user",
-                             return_value=True):
-            self.assertEqual({}, utils._resolve_login_shell_tools(home))
+        def owned(candidate, home):
+            # Granted for real install locations only -- never for the shim.
+            # A blanket True would also vouch for the shim, and then a check
+            # that still described the shim instead of the recovered path
+            # would look correct.
+            return str(self.real_dir) in str(candidate)
 
-    def test_a_real_path_from_the_login_shell_is_still_stored(self):
-        """Proves the case above is the rule acting, not the lookup failing."""
-        from scripts.coding_discovery_tools import utils
-        root = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, root, True)
-        home = Path(root) / "Users" / "dev"
-        home.mkdir(parents=True)
-        real = Path(root) / "usr" / "local" / "bin" / "codex"
-        real.parent.mkdir(parents=True)
-        real.write_text("#!/bin/sh\n")
-        real.chmod(0o755)
+        with patch.object(self.utils, "_login_shell_owner", return_value=Entry()), \
+                patch.object(self.utils, "_safe_helper", return_value="/usr/bin/sudo"), \
+                patch.object(self.utils.subprocess, "run", return_value=completed), \
+                patch.object(self.utils, "machine_global_binary_owned_by_user",
+                             side_effect=owned):
+            return self.utils._resolve_login_shell_tools(self.home)
 
-        class Entry:
-            pw_name = "dev"
+    def test_a_shim_answer_recovers_the_install_behind_it(self):
+        found = self._resolve(
+            str(self.shim_dir / "codex"),
+            os.pathsep.join([str(self.shim_dir), str(self.real_dir)]))
+        self.assertEqual({"codex": str(self.real_dir / "codex")}, found)
 
-        completed = types.SimpleNamespace(
-            stdout=f"{utils._MARKER}codex\t{real}\n", returncode=0)
-        with patch.object(utils, "_login_shell_owner", return_value=Entry()), \
-                patch.object(utils, "_safe_helper", return_value="/usr/bin/sudo"), \
-                patch.object(utils.subprocess, "run", return_value=completed), \
-                patch.object(utils, "machine_global_binary_owned_by_user",
-                             return_value=True):
-            self.assertEqual({"codex": str(real)},
-                             utils._resolve_login_shell_tools(home))
+    def test_a_shim_with_nothing_behind_it_stores_nothing(self):
+        found = self._resolve(str(self.shim_dir / "codex"), str(self.shim_dir))
+        self.assertEqual({}, found)
 
+    def test_a_real_answer_is_stored_unchanged(self):
+        """Proves the cases above are the rule acting, not the lookup failing."""
+        found = self._resolve(str(self.real_dir / "codex"), str(self.real_dir))
+        self.assertEqual({"codex": str(self.real_dir / "codex")}, found)
+
+    def test_a_non_executable_candidate_behind_the_shim_is_not_stored(self):
+        """The walk requires the executable bit, so a plain file of the right
+        name does not become an install."""
+        dud_dir = Path(self.root) / "dud" / "bin"
+        dud_dir.mkdir(parents=True)
+        (dud_dir / "codex").write_text("not executable\n")  # no exec bit
+        found = self._resolve(
+            str(self.shim_dir / "codex"),
+            os.pathsep.join([str(self.shim_dir), str(dud_dir)]))
+        self.assertEqual({}, found)
+
+    def test_the_scanners_own_path_is_not_consulted(self):
+        """A root scan walks the scanned user's PATH. Falling back to the
+        scanner's would pin the scanner's install on that user."""
+        scanner_only = Path(self.root) / "scanner" / "bin"
+        scanner_only.mkdir(parents=True)
+        (scanner_only / "codex").write_text("#!/bin/sh\n")
+        (scanner_only / "codex").chmod(0o755)
+        with patch.dict(os.environ, {"PATH": str(scanner_only)}):
+            found = self._resolve(str(self.shim_dir / "codex"), str(self.shim_dir))
+        self.assertEqual({}, found)
 
 
 class AListingWithSeveralHitsIsReadInOrder(unittest.TestCase):

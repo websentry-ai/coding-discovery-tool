@@ -213,9 +213,12 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         return {}
 
     # Marker-prefixed so profile banner output cannot be mistaken for a path.
+    # PATH first: when a tool resolves to a shim, that PATH is what gets walked
+    # for the real install -- the scanner's own PATH would name the wrong owner.
     script = "; ".join(
-        f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
-        for tool in LOGIN_SHELL_TOOLS
+        [f'printf "{_MARKER}PATH\\t%s\\n" "$PATH"']
+        + [f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
+           for tool in LOGIN_SHELL_TOOLS]
     )
     try:
         result = subprocess.run(
@@ -228,22 +231,32 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         return {}
 
     found: Dict[str, str] = {}
+    user_path = ""
     for line in result.stdout.splitlines():
         if not line.startswith(_MARKER) or "\t" not in line:
             continue
         tool, _, path = line[len(_MARKER):].partition("\t")
+        if tool == "PATH":
+            user_path = path.strip()
+            continue
         resolved = Path(path.strip())
         # The name as given, so a profile cannot rename another binary as a tool.
         if resolved.name != tool:
             logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
             continue
         try:
-            # Ownership on the target, not the link: the candidate loops reject
-            # another account's install and this must not add it back.
-            real = Path(os.path.realpath(str(resolved)))
             if is_session_temp_path(str(resolved)):
-                logger.debug(f"Login shell answered {tool} with a session shim; ignoring")
-                continue
+                # A shim first on the user's PATH hides the real install behind
+                # it, so keep walking that PATH rather than losing the tool.
+                recovered = _next_real_install_on_path(tool, user_path)
+                if not recovered:
+                    logger.debug(f"Login shell answered {tool} with a session shim")
+                    continue
+                resolved = Path(recovered)
+            # Ownership on the target, not the link: the candidate loops reject
+            # another account's install and this must not add it back. Resolved
+            # after any shim recovery, so it describes what gets stored.
+            real = Path(os.path.realpath(str(resolved)))
             if (resolved.is_absolute() and real.is_file() and os.access(str(real), os.X_OK)
                     and machine_global_binary_owned_by_user(real, user_home)):
                 found[tool] = str(resolved)
@@ -2581,8 +2594,12 @@ def install_from_lookup(found):
     return _next_real_install_on_path(shim_name) if shim_name else None
 
 
-def _next_real_install_on_path(name) -> Optional[str]:
-    """The first executable ``name`` on PATH that is not a per-session shim.
+def _next_real_install_on_path(name, path_env=None) -> Optional[str]:
+    """The first executable ``name`` on ``path_env`` that is not a session shim.
+
+    ``path_env`` defaults to this process's PATH. A root scan must pass the
+    scanned user's own PATH instead, or the scanner's install gets attributed
+    to a user who only has a shim.
 
     Deliberately not ``_which_no_cwd``: that refuses a group-writable directory,
     and ``/opt/homebrew/bin`` is group-writable by design, so it would drop the
@@ -2590,7 +2607,9 @@ def _next_real_install_on_path(name) -> Optional[str]:
     """
     if not name:
         return None
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
+    if path_env is None:
+        path_env = os.environ.get("PATH", "")
+    for entry in path_env.split(os.pathsep):
         if not entry:
             continue
         candidate = os.path.join(entry, name)

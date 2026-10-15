@@ -201,34 +201,54 @@ class TheRootScanOverTheUserHomesRefusesAShim(unittest.TestCase):
                           return_value=None):
             return getattr(self.mod, fn_name)(self.home)
 
-    def test_a_shim_on_path_is_not_attributed_to_the_user(self):
+    def _what_answers_without_a_path_hit(self, fn_name, as_root=False):
+        """The path this host reports when the lookup finds nothing.
+
+        Not every host can exercise the backstop: a machine-global install
+        (``/usr/bin/<tool>`` from a system package) is answered from the
+        candidate list before the lookup runs, and is attributed to every user
+        by design. Where that happens the backstop never executes, so a case
+        built on it would prove nothing and says so instead of asserting.
+        """
+        return self._run(fn_name, "", as_root=as_root)
+
+    def test_a_shim_on_path_is_never_attributed_to_the_user(self):
+        """Unconditional, on every host and privilege level: whatever else the
+        scan knows, a shim path may never be the answer."""
         for fn_name, tool in self.BACKSTOPS:
-            with self.subTest(backstop=fn_name):
-                shim = str(self.shim_dir / tool)
-                self.assertIsNone(self._run(fn_name, shim + "\n", as_root=False))
+            for as_root in (False, True):
+                with self.subTest(backstop=fn_name, root=as_root):
+                    found = self._run(
+                        fn_name, str(self.shim_dir / tool) + "\n", as_root=as_root)
+                    if found is not None:
+                        self.assertNotIn(str(self.shim_dir), found)
 
     def test_a_real_install_on_path_is_still_attributed(self):
-        """Proves the backstop is reachable in this setup -- without this the
-        test above would pass on a gate that never ran the rule."""
+        """Proves the backstop is reachable and that refusing shims costs
+        nothing. Without this, the case above could pass on a host where the
+        lookup never ran at all."""
+        reached = 0
         for fn_name, tool in self.BACKSTOPS:
             with self.subTest(backstop=fn_name):
+                other = self._what_answers_without_a_path_hit(fn_name)
+                if other is not None:
+                    self.skipTest(f"answered before the lookup: {other}")
                 real = str(self.real_dir / tool)
                 self.assertEqual(
                     real, self._run(fn_name, real + "\n", as_root=False))
+                reached += 1
+        self.assertGreater(reached, 0,
+                           "no backstop was reachable here; this host proves nothing")
 
     def test_under_root_the_lookup_is_skipped_altogether(self):
         """The pre-existing gate: under root ``which`` resolves the scanner's
-        PATH, so neither a shim nor a real hit may be attributed to a user."""
+        PATH, so a hit there -- shim or real -- may not be pinned on a user."""
         for fn_name, tool in self.BACKSTOPS:
             with self.subTest(backstop=fn_name):
-                for answer in (str(self.shim_dir / tool),
-                               str(self.real_dir / tool)):
-                    self.assertIsNone(
-                        self._run(fn_name, answer + "\n", as_root=True))
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+                if self._what_answers_without_a_path_hit(fn_name, as_root=True):
+                    self.skipTest("a machine-global install answers under root")
+                for answer in (str(self.shim_dir / tool), str(self.real_dir / tool)):
+                    self.assertIsNone(self._run(fn_name, answer + "\n", as_root=True))
 
 
 class EveryToolThatResolvesOnPathRefusesAShim(unittest.TestCase):

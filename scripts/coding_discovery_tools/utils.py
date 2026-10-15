@@ -2610,7 +2610,10 @@ def _next_real_install_on_path(name, path_env=None) -> Optional[str]:
     if path_env is None:
         path_env = os.environ.get("PATH", "")
     for entry in path_env.split(os.pathsep):
-        if not entry:
+        # Absolute only: PATH may hold "." or another relative entry, and a
+        # match found through one would be recorded as a path relative to
+        # wherever the scan happened to be running.
+        if not entry or not os.path.isabs(entry):
             continue
         candidate = os.path.join(entry, name)
         try:

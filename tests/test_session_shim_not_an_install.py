@@ -183,6 +183,7 @@ class TheDetectorSkipsTheShim(unittest.TestCase):
         self.assertEqual(str(self.real), self._detect(str(self.real) + "\n"))
 
 
+@unittest.skipIf(os.name == "nt", "POSIX which backstops; Windows bypasses them")
 class TheRootScanOverTheUserHomesRefusesAShim(unittest.TestCase):
     """``user_tool_detector`` is the surface that runs under MDM: one scan walks
     every home on the box. Its three PATH backstops were filtered too, and they
@@ -569,6 +570,42 @@ class AListingWithSeveralHitsIsReadInOrder(unittest.TestCase):
         other.write_text("#!/bin/sh\n")
         with patch.dict(os.environ, {"PATH": empty}):
             self.assertIsNone(install_from_lookup(f"{self.shim}\n{other}\n"))
+
+
+class ARelativePathEntryIsNotAnInstall(unittest.TestCase):
+    """PATH can hold ``.`` or another relative entry. A match found through one
+    would be stored as a path relative to wherever the scan ran, which names a
+    different file next time -- and is the same CWD exposure ``_which_no_cwd``
+    exists to refuse."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.shim = Path(self.root) / "cmux-cli-shims" / str(uuid.uuid4()) / "codex"
+        self.shim.parent.mkdir(parents=True)
+        self.shim.write_text("#!/bin/sh\n")
+        self.shim.chmod(0o755)
+        # A planted "codex" reachable only through a relative PATH entry.
+        self.cwd_dir = Path(self.root) / "cwd"
+        (self.cwd_dir / "bin").mkdir(parents=True)
+        plant = self.cwd_dir / "bin" / "codex"
+        plant.write_text("#!/bin/sh\n")
+        plant.chmod(0o755)
+
+    def test_a_relative_entry_is_skipped(self):
+        cwd = os.getcwd()
+        os.chdir(self.cwd_dir)
+        self.addCleanup(os.chdir, cwd)
+        with patch.dict(os.environ,
+                        {"PATH": os.pathsep.join([str(self.shim.parent), "bin", "."])}):
+            self.assertIsNone(install_from_lookup(str(self.shim)))
+
+    def test_an_absolute_entry_after_it_is_still_used(self):
+        """Skipping relative entries must not stop the walk."""
+        with patch.dict(os.environ, {"PATH": os.pathsep.join(
+                [str(self.shim.parent), "bin", str(self.cwd_dir / "bin")])}):
+            self.assertEqual(str(self.cwd_dir / "bin" / "codex"),
+                             install_from_lookup(str(self.shim)))
 
 if __name__ == "__main__":
     unittest.main()

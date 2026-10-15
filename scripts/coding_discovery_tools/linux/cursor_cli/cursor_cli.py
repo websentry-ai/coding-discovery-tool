@@ -11,7 +11,7 @@ from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
-from ...utils import run_command, extract_version_number
+from ...utils import not_session_shim, run_command, extract_version_number
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class LinuxCursorCliDetector(BaseToolDetector):
 
     def _check_cursor_command(self) -> Optional[str]:
         try:
-            output = run_command(["which", "cursor-agent"], VERSION_TIMEOUT)
+            output = not_session_shim(run_command(["which", "cursor-agent"], VERSION_TIMEOUT))
             if output:
                 path = output.strip()
                 if Path(path).exists():

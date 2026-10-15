@@ -11,7 +11,7 @@ from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
-from ...utils import run_command
+from ...utils import not_session_shim, run_command
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +87,7 @@ class MacOSCodexDetector(BaseToolDetector):
         """
         # First, try 'which codex'
         try:
-            output = run_command(
-                ["which", "codex"],
-                VERSION_TIMEOUT
-            )
+            output = not_session_shim(run_command(["which", "codex"], VERSION_TIMEOUT))
             if output:
                 path = output.strip()
                 # Verify the path exists

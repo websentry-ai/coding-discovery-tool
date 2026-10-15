@@ -2503,6 +2503,76 @@ def _is_safe_exec_path(path: str) -> bool:
         return False
 
 
+_SESSION_SHIM_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def is_session_temp_path(path) -> bool:
+    """True when ``path`` is a per-session shim rather than an installation.
+
+    Tools that wrap other tools write throwaway shims into the temp directory --
+    cmux puts a ``codex`` under ``$TMPDIR/cmux-cli-shims/<uuid>/`` and prepends
+    it to PATH -- so a ``which`` lookup answers with the wrapper. Recording it
+    reports an install that never existed, carries no version, and comes back
+    under a new UUID next session, so the rows accumulate indefinitely.
+
+    Being under a temp directory is necessary but not sufficient: this repo's
+    tests root synthetic filesystems at ``mkdtemp()``, so ``<tmp>/home/alice/...``
+    is an ordinary fixture. The distinguishing marks are a shim directory in the
+    path or a machine-generated UUID naming the parent, which neither a fixture
+    nor a real install has.
+
+    Says nothing about whether the file is safe to execute: a per-user temp dir
+    is owned by that user at mode 700, so it passes ``_is_safe_exec_path`` and
+    still has to be refused here.
+    """
+    if not path:
+        return False
+    try:
+        resolved = os.path.realpath(str(path))
+    except (OSError, ValueError):
+        return False
+
+    roots = []
+    try:
+        roots.append(tempfile.gettempdir())
+    except Exception:
+        pass
+    # macOS gives each user a per-boot dir under /var/folders, which realpath
+    # reports under /private; Linux and containers use /tmp.
+    roots.extend(["/tmp", "/var/tmp", "/var/folders",
+                  "/private/tmp", "/private/var/folders"])
+
+    if not any(_path_within(resolved, root) for root in roots):
+        return False
+
+    parts = resolved.split(os.sep)
+    if any("shim" in part.lower() for part in parts):
+        return True
+    return bool(len(parts) >= 2 and _SESSION_SHIM_UUID.match(parts[-2]))
+
+
+def _path_within(resolved: str, root: str) -> bool:
+    """True if ``resolved`` is ``root`` or sits beneath it. Never raises."""
+    try:
+        root_resolved = os.path.realpath(root)
+    except (OSError, ValueError):
+        return False
+    return (resolved == root_resolved
+            or resolved.startswith(root_resolved.rstrip(os.sep) + os.sep))
+
+
+def not_session_shim(found):
+    """``found`` unless it names a per-session shim (see ``is_session_temp_path``).
+
+    A filter over an already-resolved path rather than a wrapper around the
+    lookup, so each detector keeps making its own ``which`` call -- that call is
+    the seam the detector tests patch.
+    """
+    found = (found or "").strip()
+    return None if not found or is_session_temp_path(found) else found
+
+
 def _which_no_cwd(name: str) -> Optional[str]:
     """``shutil.which`` that rejects a match planted in the CWD or supplied by a
     shared-writable directory another local account could plant into."""

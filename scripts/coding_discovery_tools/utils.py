@@ -241,6 +241,9 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
             # Ownership on the target, not the link: the candidate loops reject
             # another account's install and this must not add it back.
             real = Path(os.path.realpath(str(resolved)))
+            if is_session_temp_path(str(resolved)):
+                logger.debug(f"Login shell answered {tool} with a session shim; ignoring")
+                continue
             if (resolved.is_absolute() and real.is_file() and os.access(str(real), os.X_OK)
                     and machine_global_binary_owned_by_user(real, user_home)):
                 found[tool] = str(resolved)
@@ -2555,15 +2558,50 @@ def _path_within(resolved: str, root: str) -> bool:
             or resolved.startswith(root_resolved.rstrip(os.sep) + os.sep))
 
 
-def not_session_shim(found):
-    """``found`` unless it names a per-session shim (see ``is_session_temp_path``).
+def install_from_lookup(found):
+    """The install to report for what a PATH lookup answered, or None.
 
-    A filter over an already-resolved path rather than a wrapper around the
-    lookup, so each detector keeps making its own ``which`` call -- that call is
-    the seam the detector tests patch.
+    Takes the hits in the order the lookup listed them and answers with the
+    first that is not a shim -- ``which`` prints one, ``where`` prints every
+    match. When every hit is a shim the rest of PATH is searched, because a
+    shim prepended to PATH hides a real install further along it and reporting
+    nothing would turn a real install into no install at all.
+
+    Takes the lookup's result rather than making the call, so each detector
+    keeps its own ``which`` -- that call is the seam the detector tests patch.
     """
-    found = (found or "").strip()
-    return None if not found or is_session_temp_path(found) else found
+    shim_name = None
+    for line in (found or "").splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if not is_session_temp_path(candidate):
+            return candidate
+        shim_name = shim_name or os.path.basename(candidate)
+    return _next_real_install_on_path(shim_name) if shim_name else None
+
+
+def _next_real_install_on_path(name) -> Optional[str]:
+    """The first executable ``name`` on PATH that is not a per-session shim.
+
+    Deliberately not ``_which_no_cwd``: that refuses a group-writable directory,
+    and ``/opt/homebrew/bin`` is group-writable by design, so it would drop the
+    install this is recovering. POSIX-shaped, which is where ``which`` runs.
+    """
+    if not name:
+        return None
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = os.path.join(entry, name)
+        try:
+            if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+                continue
+        except OSError:
+            continue
+        if not is_session_temp_path(candidate):
+            return candidate
+    return None
 
 
 def _which_no_cwd(name: str) -> Optional[str]:

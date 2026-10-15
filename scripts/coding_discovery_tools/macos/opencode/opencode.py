@@ -21,7 +21,7 @@ from typing import Optional, Dict, List
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
-from ...utils import not_session_shim, run_command
+from ...utils import install_from_lookup, run_command
 from ...macos_extraction_helpers import macos_app_candidates, read_bundle_version
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ class MacOSOpenCodeDetector(BaseToolDetector):
         self._resolved_from_fallback = False
 
         try:
-            output = not_session_shim(run_command(["which", "opencode"], VERSION_TIMEOUT))
+            output = install_from_lookup(run_command(["which", "opencode"], VERSION_TIMEOUT))
             if output:
                 path = output.strip()
                 # Verify the path exists

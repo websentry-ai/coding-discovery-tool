@@ -12,7 +12,7 @@ from typing import Optional, Dict
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
-from ...utils import not_session_shim, run_command, extract_version_number
+from ...utils import install_from_lookup, run_command, extract_version_number
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ class MacOSCursorCliDetector(BaseToolDetector):
             Path to the ``cursor-agent`` executable if found, None otherwise
         """
         try:
-            output = not_session_shim(run_command(["which", "cursor-agent"], VERSION_TIMEOUT))
+            output = install_from_lookup(run_command(["which", "cursor-agent"], VERSION_TIMEOUT))
             if output:
                 path = output.strip()
                 if Path(path).exists():

@@ -11,12 +11,16 @@ import os
 import re
 import shutil
 import tempfile
+import types
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.coding_discovery_tools.utils import is_session_temp_path
+from scripts.coding_discovery_tools.utils import (
+    install_from_lookup,
+    is_session_temp_path,
+)
 
 TMP = tempfile.gettempdir()
 
@@ -119,20 +123,24 @@ class TheRuleHoldsOnEveryPlatform(unittest.TestCase):
 class TheFilterHandlesWhatWhichReturns(unittest.TestCase):
 
     def test_a_trailing_newline_is_stripped(self):
-        from scripts.coding_discovery_tools.utils import not_session_shim
+        from scripts.coding_discovery_tools.utils import install_from_lookup
         self.assertEqual("/opt/homebrew/bin/codex",
-                         not_session_shim("/opt/homebrew/bin/codex\n"))
+                         install_from_lookup("/opt/homebrew/bin/codex\n"))
 
     def test_nothing_found_stays_nothing(self):
-        from scripts.coding_discovery_tools.utils import not_session_shim
+        from scripts.coding_discovery_tools.utils import install_from_lookup
         for value in (None, "", "   ", "\n"):
             with self.subTest(value=repr(value)):
-                self.assertIsNone(not_session_shim(value))
+                self.assertIsNone(install_from_lookup(value))
 
-    def test_a_shim_becomes_nothing_found(self):
-        from scripts.coding_discovery_tools.utils import not_session_shim
+    def test_a_shim_becomes_nothing_found_when_nothing_else_is_on_path(self):
         shim = f"{TMP}/cmux-cli-shims/{uuid.uuid4()}/codex"
-        self.assertIsNone(not_session_shim(shim + "\n"))
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        # PATH pinned: on a machine that really has the tool the answer is the
+        # real install, which AShimDoesNotEndTheSearch covers.
+        with patch.dict(os.environ, {"PATH": empty}):
+            self.assertIsNone(install_from_lookup(shim + "\n"))
 
 
 class TheDetectorSkipsTheShim(unittest.TestCase):
@@ -365,7 +373,7 @@ class NoLookupBypassesTheFilter(unittest.TestCase):
                 start = text.rfind("\n", 0, m.start()) + 1
                 end = text.find("\n", m.start())
                 line = text[start:end if end != -1 else len(text)]
-                if "not_session_shim" not in line:
+                if "install_from_lookup" not in line:
                     unfiltered.append(
                         f"{f}:{text.count(chr(10), 0, m.start()) + 1}")
         self.assertEqual([], unfiltered,
@@ -377,8 +385,163 @@ class NoLookupBypassesTheFilter(unittest.TestCase):
         import re as _re
         line = '            output = run_command(["which", "codex"], VERSION_TIMEOUT)'
         self.assertTrue(_re.search(r'run_command\(\s*\["which"', line))
-        self.assertNotIn("not_session_shim", line)
+        self.assertNotIn("install_from_lookup", line)
 
+
+
+class AShimDoesNotEndTheSearch(unittest.TestCase):
+    """``which`` answers with the first PATH hit only. Refusing a shim must not
+    turn a real install further along PATH into no install at all -- that trades
+    a wrong path for a missing tool, which is the worse of the two.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.shim_dir = Path(self.root) / "cmux-cli-shims" / str(uuid.uuid4())
+        self.real_dir = Path(self.root) / "custom" / "prefix" / "bin"
+        for d in (self.shim_dir, self.real_dir):
+            d.mkdir(parents=True)
+        for d in (self.shim_dir, self.real_dir):
+            f = d / "codex"
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
+        self.path = os.pathsep.join([str(self.shim_dir), str(self.real_dir)])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_the_real_install_behind_the_shim_is_reported(self):
+        shim = str(self.shim_dir / "codex")
+        with patch.dict(os.environ, {"PATH": self.path}):
+            self.assertEqual(str(self.real_dir / "codex"),
+                             install_from_lookup(shim))
+
+    def test_nothing_is_reported_when_only_the_shim_exists(self):
+        """With no real install on PATH there is nothing to recover, and a shim
+        is still not an install."""
+        shim = str(self.shim_dir / "codex")
+        with patch.dict(os.environ, {"PATH": str(self.shim_dir)}):
+            self.assertIsNone(install_from_lookup(shim))
+
+    def test_a_second_shim_does_not_stop_the_walk(self):
+        other = Path(self.root) / "other-shims" / str(uuid.uuid4())
+        other.mkdir(parents=True)
+        (other / "codex").write_text("#!/bin/sh\n")
+        (other / "codex").chmod(0o755)
+        path = os.pathsep.join([str(self.shim_dir), str(other), str(self.real_dir)])
+        with patch.dict(os.environ, {"PATH": path}):
+            self.assertEqual(str(self.real_dir / "codex"),
+                             install_from_lookup(str(self.shim_dir / "codex")))
+
+    def test_a_non_executable_file_is_not_an_install(self):
+        plain = Path(self.root) / "notbin"
+        plain.mkdir()
+        (plain / "codex").write_text("just a file\n")  # no exec bit
+        path = os.pathsep.join([str(self.shim_dir), str(plain)])
+        with patch.dict(os.environ, {"PATH": path}):
+            self.assertIsNone(install_from_lookup(str(self.shim_dir / "codex")))
+
+    def test_the_detector_reports_the_recovered_install(self):
+        """Through the detector, not the helper: the recovered path is what the
+        scan ends up carrying."""
+        from scripts.coding_discovery_tools.macos.codex import codex as mod
+        shim = str(self.shim_dir / "codex")
+        with patch.dict(os.environ, {"PATH": self.path}), \
+                patch.object(mod, "run_command", return_value=shim + "\n"):
+            self.assertEqual(str(self.real_dir / "codex"),
+                             mod.MacOSCodexDetector()._check_codex_command())
+
+
+class TheLoginShellLookupRefusesAShim(unittest.TestCase):
+    """The root/MDM scan asks each user's login shell for ``command -v <tool>``.
+    That is the same kind of lookup as ``which`` and can answer with the same
+    shim, so it carries the same rule."""
+
+    def test_a_shim_from_the_login_shell_is_not_stored(self):
+        from scripts.coding_discovery_tools import utils
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        home = Path(root) / "Users" / "dev"
+        home.mkdir(parents=True)
+        shim = Path(root) / "cmux-cli-shims" / str(uuid.uuid4()) / "codex"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+
+        class Entry:
+            pw_name = "dev"
+
+        completed = types.SimpleNamespace(
+            stdout=f"{utils._MARKER}codex\t{shim}\n", returncode=0)
+        with patch.object(utils, "_login_shell_owner", return_value=Entry()), \
+                patch.object(utils, "_safe_helper", return_value="/usr/bin/sudo"), \
+                patch.object(utils.subprocess, "run", return_value=completed), \
+                patch.object(utils, "machine_global_binary_owned_by_user",
+                             return_value=True):
+            self.assertEqual({}, utils._resolve_login_shell_tools(home))
+
+    def test_a_real_path_from_the_login_shell_is_still_stored(self):
+        """Proves the case above is the rule acting, not the lookup failing."""
+        from scripts.coding_discovery_tools import utils
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        home = Path(root) / "Users" / "dev"
+        home.mkdir(parents=True)
+        real = Path(root) / "usr" / "local" / "bin" / "codex"
+        real.parent.mkdir(parents=True)
+        real.write_text("#!/bin/sh\n")
+        real.chmod(0o755)
+
+        class Entry:
+            pw_name = "dev"
+
+        completed = types.SimpleNamespace(
+            stdout=f"{utils._MARKER}codex\t{real}\n", returncode=0)
+        with patch.object(utils, "_login_shell_owner", return_value=Entry()), \
+                patch.object(utils, "_safe_helper", return_value="/usr/bin/sudo"), \
+                patch.object(utils.subprocess, "run", return_value=completed), \
+                patch.object(utils, "machine_global_binary_owned_by_user",
+                             return_value=True):
+            self.assertEqual({"codex": str(real)},
+                             utils._resolve_login_shell_tools(home))
+
+
+
+class AListingWithSeveralHitsIsReadInOrder(unittest.TestCase):
+    """``where`` on Windows prints every match, not just the first, and the
+    Windows detectors read that listing. The selector therefore takes a listing
+    rather than a single line."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.shim = Path(self.root) / "cmux-cli-shims" / str(uuid.uuid4()) / "codex"
+        self.real = Path(self.root) / "prefix" / "codex"
+        for f in (self.shim, self.real):
+            f.parent.mkdir(parents=True)
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
+
+    def test_the_first_hit_that_is_not_a_shim_wins(self):
+        listing = f"{self.shim}\n{self.real}\n"
+        self.assertEqual(str(self.real), install_from_lookup(listing))
+
+    def test_order_is_respected_rather_than_preferring_a_later_hit(self):
+        listing = f"{self.real}\n{self.shim}\n"
+        self.assertEqual(str(self.real), install_from_lookup(listing))
+
+    def test_blank_lines_and_padding_do_not_confuse_it(self):
+        listing = f"\n  {self.shim}  \n\n  {self.real} \n\n"
+        self.assertEqual(str(self.real), install_from_lookup(listing))
+
+    def test_a_listing_of_only_shims_falls_through_to_path(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        other = Path(self.root) / "more-shims" / str(uuid.uuid4()) / "codex"
+        other.parent.mkdir(parents=True)
+        other.write_text("#!/bin/sh\n")
+        with patch.dict(os.environ, {"PATH": empty}):
+            self.assertIsNone(install_from_lookup(f"{self.shim}\n{other}\n"))
 
 if __name__ == "__main__":
     unittest.main()

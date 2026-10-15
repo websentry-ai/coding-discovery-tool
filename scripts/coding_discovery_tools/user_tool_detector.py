@@ -18,7 +18,7 @@ from .coding_tool_base import BaseToolDetector
 from .constants import MAX_CONFIG_FILE_SIZE, VERSION_TIMEOUT
 from .macos_extraction_helpers import is_running_as_root
 from .utils import (
-    not_session_shim,
+    install_from_lookup,
     _is_scanning_users_own_home,
     _read_own_regular_file,
     claude_code_sessions_recent,
@@ -728,7 +728,7 @@ def find_junie_binary_for_user(user_home: Path) -> Optional[str]:
     # PATH backstop: non-root only — under root ``which`` resolves the scanner's
     # PATH, mis-attributing its junie to a user who has only residue.
     if not is_root:
-        which_path = not_session_shim(run_command(["which", "junie"], VERSION_TIMEOUT))
+        which_path = install_from_lookup(run_command(["which", "junie"], VERSION_TIMEOUT))
         if which_path:
             try:
                 resolved = Path(which_path)
@@ -917,7 +917,7 @@ def find_claude_binary_for_user(user_home: Path) -> Optional[str]:
     # already user_home-relative. Skipped on Windows, where ``which`` is not a
     # command and the .exe/.cmd candidates already cover it.
     if _is_scanning_users_own_home(user_home) and platform.system() != "Windows":
-        which_path = not_session_shim(run_command(["which", "claude"], VERSION_TIMEOUT))
+        which_path = install_from_lookup(run_command(["which", "claude"], VERSION_TIMEOUT))
         if which_path:
             try:
                 resolved = Path(which_path)
@@ -1047,7 +1047,7 @@ def find_cursor_agent_binary_for_user(user_home: Path) -> Optional[str]:
     # PATH backstop: non-root only — under root ``which`` resolves the scanner's
     # PATH, mis-attributing its cursor-agent to a user who has only residue.
     if not is_running_as_root():
-        which_path = not_session_shim(run_command(["which", "cursor-agent"], VERSION_TIMEOUT))
+        which_path = install_from_lookup(run_command(["which", "cursor-agent"], VERSION_TIMEOUT))
         if which_path:
             try:
                 resolved = Path(which_path)

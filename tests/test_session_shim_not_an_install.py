@@ -869,5 +869,46 @@ class TheWindowsExtendedPrefixIsNormalised(unittest.TestCase):
         self.assertEqual("/opt/homebrew/bin/codex",
                          _plain_windows_path("/opt/homebrew/bin/codex"))
 
+
+class AnUnresolvablePathIsStillJudged(unittest.TestCase):
+    """Resolution can fail -- a link loop raises on Windows. Giving up there
+    would report a shim as an install, so the path as given is judged instead.
+
+    Only the path under test is made to fail, which is what happens on Windows:
+    a global patch would break the temp-root lookup too and the case would pass
+    for the wrong reason.
+    """
+
+    @staticmethod
+    def _only_this_path_fails(target):
+        real = os.path.realpath
+
+        def fake(p):
+            if str(p) == str(target):
+                raise OSError("ELOOP")
+            return real(p)
+        return patch("os.path.realpath", side_effect=fake)
+
+    def test_a_shim_is_still_refused_when_resolution_fails(self):
+        shim = f"{TMP}/cmux-cli-shims/{uuid.uuid4()}/codex"
+        with self._only_this_path_fails(shim):
+            self.assertTrue(is_session_temp_path(shim))
+
+    def test_an_ordinary_path_is_still_kept_when_resolution_fails(self):
+        path = "/opt/homebrew/bin/codex"
+        with self._only_this_path_fails(path):
+            self.assertFalse(is_session_temp_path(path))
+
+    def test_the_lookup_refuses_it_rather_than_reporting_it(self):
+        """Through the selector: with nothing else on PATH the answer is that
+        there is no install, not the shim."""
+        shim = f"{TMP}/cmux-cli-shims/{uuid.uuid4()}/codex"
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        with patch.dict(os.environ, {"PATH": empty}), \
+                self._only_this_path_fails(shim):
+            self.assertIsNone(install_from_lookup(shim + "\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2544,7 +2544,17 @@ def is_session_temp_path(path) -> bool:
     try:
         resolved = os.path.realpath(str(path))
     except (OSError, ValueError):
-        return False
+        # Resolution can fail -- a link loop raises on Windows. Resolve the
+        # parent instead, which cannot loop, rather than giving up: otherwise a
+        # shim whose target will not resolve is reported as an install. The
+        # parent has to be resolved too, since the roots are, and a temp dir is
+        # reached through a symlink on macOS and a short name on Windows.
+        try:
+            resolved = os.path.join(
+                os.path.realpath(os.path.dirname(str(path))),
+                os.path.basename(str(path)))
+        except (OSError, ValueError):
+            return False
 
     if not _under_temp_root(resolved):
         return False

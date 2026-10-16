@@ -528,6 +528,41 @@ class TheLoginShellLookupRefusesAShim(unittest.TestCase):
             os.pathsep.join([str(self.shim_dir), str(dud_dir)]))
         self.assertEqual({}, found)
 
+    def _symlink(self, target, link):
+        """Create the link, or skip for a reason that is actually true.
+
+        A bare ``except OSError`` here would report "symlinks unavailable" for
+        an existing file, and the case would pass as a skip while testing
+        nothing."""
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        try:
+            os.symlink(target, link)
+        except (NotImplementedError, PermissionError) as e:
+            self.skipTest(f"symlinks unavailable here: {e}")
+        return link
+
+    def test_a_symlink_answer_is_stored_as_its_target(self):
+        """The shell can answer with a link inside the shim dir. The predicate
+        rightly says that is not a shim, so nothing refuses it -- but the link
+        goes away with the session, so the target is what gets stored."""
+        link = self._symlink(self.real_dir / "codex", self.shim_dir / "codex")
+        found = self._resolve(str(link), str(self.shim_dir))
+        self.assertEqual(
+            {"codex": os.path.realpath(str(self.real_dir / "codex"))}, found)
+
+    def test_a_recovered_symlink_is_stored_as_its_target(self):
+        """And when the walk is what found it: the shell answers with a wrapper
+        script, the walk finds a link further along the user's PATH."""
+        link_dir = Path(self.root) / "onpath"
+        self._symlink(self.real_dir / "codex", link_dir / "codex")
+        found = self._resolve(
+            str(self.shim_dir / "codex"),
+            os.pathsep.join([str(self.shim_dir), str(link_dir)]))
+        self.assertEqual(
+            {"codex": os.path.realpath(str(self.real_dir / "codex"))}, found)
+
     def test_the_scanners_own_path_is_not_consulted(self):
         """A root scan walks the scanned user's PATH. Falling back to the
         scanner's would pin the scanner's install on that user."""

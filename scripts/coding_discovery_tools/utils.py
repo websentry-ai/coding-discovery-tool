@@ -253,6 +253,9 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
                     logger.debug(f"Login shell answered {tool} with a session shim")
                     continue
                 resolved = Path(recovered)
+            # Applies to the shell's own answer and to anything the walk found,
+            # so a link inside temp is stored as its target here too.
+            resolved = Path(_stable_path(str(resolved)))
             # Ownership on the target, not the link: the candidate loops reject
             # another account's install and this must not add it back. Resolved
             # after any shim recovery, so it describes what gets stored.

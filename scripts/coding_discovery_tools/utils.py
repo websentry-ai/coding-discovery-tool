@@ -2543,6 +2543,17 @@ def is_session_temp_path(path) -> bool:
     except (OSError, ValueError):
         return False
 
+    if not _under_temp_root(resolved):
+        return False
+
+    parts = resolved.split(os.sep)
+    if any("shim" in part.lower() for part in parts):
+        return True
+    return bool(len(parts) >= 2 and _SESSION_SHIM_UUID.match(parts[-2]))
+
+
+def _under_temp_root(resolved: str) -> bool:
+    """True if ``resolved`` -- an already-resolved path -- lies in a temp dir."""
     roots = []
     try:
         roots.append(tempfile.gettempdir())
@@ -2551,14 +2562,29 @@ def is_session_temp_path(path) -> bool:
     # TMPDIR is per-user on macOS, so the shared temp dirs are listed too.
     # _path_within resolves each root, which collapses the macOS /private forms.
     roots.extend(["/tmp", "/var/tmp", "/var/folders"])
+    return any(_path_within(resolved, root) for root in roots)
 
-    if not any(_path_within(resolved, root) for root in roots):
-        return False
 
-    parts = resolved.split(os.sep)
-    if any("shim" in part.lower() for part in parts):
-        return True
-    return bool(len(parts) >= 2 and _SESSION_SHIM_UUID.match(parts[-2]))
+def _stable_path(candidate: str) -> str:
+    """``candidate``, or what it points at when it is a link inside a temp dir.
+
+    A wrapper may plant a symlink to the real binary rather than a script. That
+    is not a shim by the rule above -- it resolves outside temp -- but the
+    link's own path goes away with the session, so recording it would report a
+    different install on the next scan.
+
+    Confined to links inside temp. Following every link would rewrite the
+    recorded path of ordinary symlinked installs, and that path is part of what
+    identifies a row, so the same install would start arriving under two names.
+    """
+    try:
+        if not os.path.islink(candidate):
+            return candidate
+        if not _under_temp_root(os.path.realpath(os.path.dirname(candidate))):
+            return candidate
+        return os.path.realpath(candidate)
+    except (OSError, ValueError):
+        return candidate
 
 
 def _path_within(resolved: str, root: str) -> bool:
@@ -2589,9 +2615,12 @@ def install_from_lookup(found):
         if not candidate:
             continue
         if not is_session_temp_path(candidate):
-            return candidate
+            return _stable_path(candidate)
         shim_name = shim_name or os.path.basename(candidate)
-    return _next_real_install_on_path(shim_name) if shim_name else None
+    if not shim_name:
+        return None
+    walked = _next_real_install_on_path(shim_name)
+    return _stable_path(walked) if walked else None
 
 
 def _next_real_install_on_path(name, path_env=None) -> Optional[str]:

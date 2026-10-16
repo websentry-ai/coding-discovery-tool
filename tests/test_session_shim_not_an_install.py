@@ -116,7 +116,8 @@ class TheRuleHoldsOnEveryPlatform(unittest.TestCase):
         except (OSError, NotImplementedError):
             self.skipTest("symlinks unavailable here")
         # The link lives in a shim dir but resolves to a plain temp path with no
-        # shim or UUID marker, so it is judged on where it really points.
+        # shim or UUID marker, so it is judged on where it really points. What
+        # then gets stored is ASymlinkShimIsNotStoredUnderItsTempPath's job.
         self.assertFalse(is_session_temp_path(str(link)))
 
 
@@ -610,6 +611,97 @@ class ARelativePathEntryIsNotAnInstall(unittest.TestCase):
                 [str(self.shim.parent), "bin", str(self.cwd_dir / "bin")])}):
             self.assertEqual(str(self.cwd_dir / "bin" / "codex"),
                              install_from_lookup(str(self.shim)))
+
+
+class ASymlinkShimIsNotStoredUnderItsTempPath(unittest.TestCase):
+    """A wrapper may plant a symlink to the real binary instead of a script.
+
+    The predicate correctly says that is not a shim -- it resolves outside the
+    shim directory -- but the link's own path disappears with the session, so
+    storing it would report a different install on every scan. What gets stored
+    is the thing it points at.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.real = Path(self.root) / "real" / "codex"
+        self.real.parent.mkdir(parents=True)
+        self.real.write_text("#!/bin/sh\n")
+        self.real.chmod(0o755)
+        self.shim_dir = Path(self.root) / "cmux-cli-shims" / str(uuid.uuid4())
+        self.shim_dir.mkdir(parents=True)
+
+    def _link(self, target, name="codex"):
+        link = self.shim_dir / name
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable here")
+        return link
+
+    def test_the_target_is_stored_not_the_link(self):
+        link = self._link(self.real)
+        stored = install_from_lookup(str(link) + "\n")
+        self.assertEqual(os.path.realpath(str(self.real)), stored)
+        self.assertNotIn("cmux-cli-shims", stored)
+
+    def test_a_wrapper_script_in_the_same_place_is_still_refused(self):
+        """The shape actually seen in production is a script, not a link, and it
+        must keep being refused rather than resolved to itself."""
+        script = self.shim_dir / "gemini"
+        script.write_text("#!/bin/sh\nexec true\n")
+        script.chmod(0o755)
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        with patch.dict(os.environ, {"PATH": empty}):
+            self.assertIsNone(install_from_lookup(str(script) + "\n"))
+
+    def test_a_plain_file_in_temp_is_stored_as_given(self):
+        """Only links are followed. Resolving every hit would rewrite the
+        recorded path of the fixtures this suite is built on."""
+        plain = Path(self.root) / "prefix" / "codex"
+        plain.parent.mkdir(parents=True)
+        plain.write_text("#!/bin/sh\n")
+        plain.chmod(0o755)
+        self.assertEqual(str(plain), install_from_lookup(str(plain) + "\n"))
+
+    def test_a_link_outside_temp_is_left_alone(self):
+        """The narrow scope is the point: an ordinary install reached through a
+        symlink keeps the path it was found at, because that path is part of
+        what identifies the row. Following it would make one install arrive
+        under two names."""
+        try:
+            outside = tempfile.mkdtemp(dir=os.path.expanduser("~"))
+        except OSError:
+            self.skipTest("cannot create a directory outside temp here")
+        self.addCleanup(shutil.rmtree, outside, True)
+        target = Path(outside) / "cellar" / "codex"
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/sh\n")
+        target.chmod(0o755)
+        link = Path(outside) / "bin" / "codex"
+        link.parent.mkdir(parents=True)
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable here")
+        self.assertEqual(str(link), install_from_lookup(str(link) + "\n"))
+
+    def test_the_recovered_install_is_also_stabilised(self):
+        """A shim refused, then a link inside temp found by the walk: the walk's
+        answer goes through the same rule."""
+        walk_dir = Path(self.root) / "onpath"
+        walk_dir.mkdir()
+        linked = walk_dir / "opencode"
+        os.symlink(self.real, linked)
+        script = self.shim_dir / "opencode"
+        script.write_text("#!/bin/sh\n")
+        script.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": os.pathsep.join(
+                [str(self.shim_dir), str(walk_dir)])}):
+            stored = install_from_lookup(str(script) + "\n")
+        self.assertEqual(os.path.realpath(str(self.real)), stored)
 
 if __name__ == "__main__":
     unittest.main()

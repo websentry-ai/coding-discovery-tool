@@ -2628,13 +2628,27 @@ def _stable_path(candidate: str) -> str:
 
 
 def _path_within(resolved: str, root: str) -> bool:
-    """True if ``resolved`` is ``root`` or sits beneath it. Never raises."""
+    """True if ``resolved`` is ``root`` or sits beneath it. Never raises.
+
+    Matched against the root both as given and resolved, and without regard to
+    case where the platform ignores it. A path is not always fully resolvable --
+    a link loop leaves a Windows short name in place -- and a short name matches
+    neither the long name a resolved root carries nor the other way around, so
+    one spelling alone lets such a path past.
+    """
+    spellings = [root]
     try:
-        root_resolved = os.path.realpath(root)
+        spellings.append(os.path.realpath(root))
     except (OSError, ValueError):
-        return False
-    return (resolved == root_resolved
-            or resolved.startswith(root_resolved.rstrip(os.sep) + os.sep))
+        pass
+    target = os.path.normcase(resolved)
+    for spelling in spellings:
+        prefix = os.path.normcase(spelling).rstrip(os.sep)
+        if not prefix:
+            continue
+        if target == prefix or target.startswith(prefix + os.sep):
+            return True
+    return False
 
 
 def install_from_lookup(found):

@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts.coding_discovery_tools import utils
 from scripts.coding_discovery_tools.utils import (
     _plain_windows_path,
     install_from_lookup,
@@ -909,6 +910,54 @@ class AnUnresolvablePathIsStillJudged(unittest.TestCase):
                 self._only_this_path_fails(shim):
             self.assertIsNone(install_from_lookup(shim + "\n"))
 
+
+
+class ARootReachedByAnotherNameStillMatches(unittest.TestCase):
+    """Resolution does not always reach the canonical name, and then the path
+    keeps the spelling it arrived with while the temp root is compared in its
+    resolved form.
+
+    That is what happens on Windows: a link loop sends ``realpath`` down its
+    non-strict path, which returns the name as given -- a short name such as
+    ``RUNNER~1`` -- while the root resolves to ``runneradmin``. Neither
+    spelling matches the other and the shim is waved through. Reproduced here
+    with a symlinked root, since the mismatch is what matters, not the reason
+    for it.
+    """
+
+    def setUp(self):
+        self.real_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.real_root, True)
+        self.alias = Path(tempfile.mkdtemp()) / "alias"
+        self.addCleanup(shutil.rmtree, str(self.alias.parent), True)
+        try:
+            os.symlink(self.real_root, self.alias)
+        except (NotImplementedError, PermissionError) as e:
+            self.skipTest(f"symlinks unavailable here: {e}")
+        self.shim = str(self.alias / "cmux-cli-shims" / str(uuid.uuid4()) / "codex")
+
+    def _resolution_stops_at(self, unresolvable):
+        """``realpath`` answering with the name as given for one path only, and
+        resolving everything else. Stubbing it everywhere would leave both
+        sides unresolved, they would match, and the case would prove nothing."""
+        real = os.path.realpath
+
+        def fake(q):
+            return str(q) if str(q) == str(unresolvable) else real(q)
+        return patch("os.path.realpath", side_effect=fake)
+
+    def test_a_shim_is_refused_though_its_name_never_resolved(self):
+        with patch("tempfile.gettempdir", return_value=str(self.alias)), \
+                self._resolution_stops_at(self.shim):
+            self.assertTrue(is_session_temp_path(self.shim))
+
+    def test_a_path_outside_the_root_is_still_kept(self):
+        """Matching the root in more than one spelling must not match more
+        than the root."""
+        outside = "/opt/homebrew/bin/codex"
+        with patch("tempfile.gettempdir", return_value=str(self.alias)), \
+                self._resolution_stops_at(outside):
+            self.assertFalse(is_session_temp_path(outside))
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.coding_discovery_tools.utils import (
+    _plain_windows_path,
     install_from_lookup,
     is_session_temp_path,
 )
@@ -840,6 +841,33 @@ class OneInstallIsRecordedUnderOneName(unittest.TestCase):
         self._symlink(a_dir / "codex", b_dir / "codex")
         self.assertEqual(str(a_dir / "codex"),
                          install_from_lookup(str(a_dir / "codex") + "\n"))
+
+
+class TheWindowsExtendedPrefixIsNormalised(unittest.TestCase):
+    """``os.readlink`` answers with the ``\\\\?\\`` form on Windows. Kept as given,
+    the same install is recorded as ``C:\\...`` when found directly and
+    ``\\\\?\\C:\\...`` when reached through a link -- two spellings for one
+    install -- and it matches no temp root either, so the walk stops early.
+
+    A pure string function, so it is pinned on every platform rather than only
+    on the Windows leg.
+    """
+
+    def test_the_drive_form_loses_the_prefix(self):
+        self.assertEqual(r"C:\Users\dev\bin\codex",
+                         _plain_windows_path(r"\\?\C:\Users\dev\bin\codex"))
+
+    def test_the_unc_form_becomes_a_plain_unc_path(self):
+        self.assertEqual(r"\\srv\share\codex",
+                         _plain_windows_path(r"\\?\UNC\srv\share\codex"))
+
+    def test_an_ordinary_windows_path_is_untouched(self):
+        self.assertEqual(r"C:\Users\dev\bin\codex",
+                         _plain_windows_path(r"C:\Users\dev\bin\codex"))
+
+    def test_a_posix_path_is_untouched(self):
+        self.assertEqual("/opt/homebrew/bin/codex",
+                         _plain_windows_path("/opt/homebrew/bin/codex"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -2568,6 +2568,20 @@ def _under_temp_root(resolved: str) -> bool:
     return any(_path_within(resolved, root) for root in roots)
 
 
+def _plain_windows_path(target: str) -> str:
+    """``target`` without Windows' extended-length prefix.
+
+    ``os.readlink`` answers with the ``\\\\?\\`` form there. Kept as given it
+    would record one install under two spellings depending on whether it was
+    reached through a link, and it would not match a temp root either.
+    """
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[8:]
+    if target.startswith("\\\\?\\"):
+        return target[4:]
+    return target
+
+
 def _stable_path(candidate: str) -> str:
     """``candidate``, or what it points at when it is a link inside a temp dir.
 
@@ -2590,7 +2604,7 @@ def _stable_path(candidate: str) -> str:
         while os.path.islink(path):
             if not _under_temp_root(os.path.realpath(os.path.dirname(path))):
                 break           # the link is an install's own path; keep it
-            target = os.readlink(path)
+            target = _plain_windows_path(os.readlink(path))
             if not os.path.isabs(target):
                 target = os.path.join(os.path.dirname(path), target)
             target = os.path.normpath(target)

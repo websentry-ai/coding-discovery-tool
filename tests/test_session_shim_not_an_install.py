@@ -528,6 +528,13 @@ class TheLoginShellLookupRefusesAShim(unittest.TestCase):
             os.pathsep.join([str(self.shim_dir), str(dud_dir)]))
         self.assertEqual({}, found)
 
+    def _assert_stored_the_real_binary(self, found):
+        self.assertEqual(["codex"], list(found))
+        self.assertNotIn("cmux-cli-shims", found["codex"])
+        self.assertTrue(
+            os.path.samefile(found["codex"], self.real_dir / "codex"),
+            found["codex"])
+
     def _symlink(self, target, link):
         """Create the link, or skip for a reason that is actually true.
 
@@ -549,8 +556,7 @@ class TheLoginShellLookupRefusesAShim(unittest.TestCase):
         goes away with the session, so the target is what gets stored."""
         link = self._symlink(self.real_dir / "codex", self.shim_dir / "codex")
         found = self._resolve(str(link), str(self.shim_dir))
-        self.assertEqual(
-            {"codex": os.path.realpath(str(self.real_dir / "codex"))}, found)
+        self._assert_stored_the_real_binary(found)
 
     def test_a_recovered_symlink_is_stored_as_its_target(self):
         """And when the walk is what found it: the shell answers with a wrapper
@@ -560,8 +566,7 @@ class TheLoginShellLookupRefusesAShim(unittest.TestCase):
         found = self._resolve(
             str(self.shim_dir / "codex"),
             os.pathsep.join([str(self.shim_dir), str(link_dir)]))
-        self.assertEqual(
-            {"codex": os.path.realpath(str(self.real_dir / "codex"))}, found)
+        self._assert_stored_the_real_binary(found)
 
     def test_the_scanners_own_path_is_not_consulted(self):
         """A root scan walks the scanned user's PATH. Falling back to the
@@ -675,11 +680,18 @@ class ASymlinkShimIsNotStoredUnderItsTempPath(unittest.TestCase):
             self.skipTest("symlinks unavailable here")
         return link
 
+    def _assert_is_the_real_binary(self, stored):
+        """Asserted by identity rather than by string: the link's target and
+        its fully canonical form name the same file, and which one is reported
+        is not what this rule is about -- not reporting the shim is."""
+        self.assertIsNotNone(stored)
+        self.assertNotIn("cmux-cli-shims", stored)
+        self.assertTrue(os.path.isabs(stored))
+        self.assertTrue(os.path.samefile(stored, self.real), stored)
+
     def test_the_target_is_stored_not_the_link(self):
         link = self._link(self.real)
-        stored = install_from_lookup(str(link) + "\n")
-        self.assertEqual(os.path.realpath(str(self.real)), stored)
-        self.assertNotIn("cmux-cli-shims", stored)
+        self._assert_is_the_real_binary(install_from_lookup(str(link) + "\n"))
 
     def test_a_wrapper_script_in_the_same_place_is_still_refused(self):
         """The shape actually seen in production is a script, not a link, and it
@@ -736,7 +748,98 @@ class ASymlinkShimIsNotStoredUnderItsTempPath(unittest.TestCase):
         with patch.dict(os.environ, {"PATH": os.pathsep.join(
                 [str(self.shim_dir), str(walk_dir)])}):
             stored = install_from_lookup(str(script) + "\n")
-        self.assertEqual(os.path.realpath(str(self.real)), stored)
+        self._assert_is_the_real_binary(stored)
+
+
+class OneInstallIsRecordedUnderOneName(unittest.TestCase):
+    """The real installs on a Mac are themselves symlinks into versioned
+    directories:
+
+        /opt/homebrew/bin/codex  ->  Caskroom/codex/0.139.0/bin/codex
+        ~/.local/bin/claude      ->  .../claude/versions/2.1.278
+
+    So resolving a shim all the way through lands on the version, and the same
+    install is recorded as one path when found directly and another when found
+    behind a shim -- a new row on every upgrade, which is the problem this
+    change exists to fix. Links are followed one step at a time and only while
+    they sit in temp.
+    """
+
+    def setUp(self):
+        # Outside temp, because that is the distinction under test.
+        try:
+            self.outside = tempfile.mkdtemp(dir=os.path.expanduser("~"))
+        except OSError as e:
+            self.skipTest(f"cannot create a directory outside temp here: {e}")
+        self.addCleanup(shutil.rmtree, self.outside, True)
+        self.versioned = Path(self.outside) / "Caskroom" / "codex" / "1.2.3" / "bin" / "codex"
+        self.versioned.parent.mkdir(parents=True)
+        self.versioned.write_text("#!/bin/sh\n")
+        self.versioned.chmod(0o755)
+        # The install path a package manager puts on PATH: a link to the above.
+        self.install = Path(self.outside) / "bin" / "codex"
+        self.install.parent.mkdir(parents=True)
+        self._symlink(self.versioned, self.install)
+        # The per-session shim: a link in temp to that install path.
+        self.temp_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp_root, True)
+        self.shim = Path(self.temp_root) / "cmux-cli-shims" / str(uuid.uuid4()) / "codex"
+        self.shim.parent.mkdir(parents=True)
+        self._symlink(self.install, self.shim)
+
+    def _symlink(self, target, link):
+        try:
+            os.symlink(target, link)
+        except (NotImplementedError, PermissionError) as e:
+            self.skipTest(f"symlinks unavailable here: {e}")
+
+    def test_the_shim_resolves_to_the_install_not_the_version(self):
+        stored = install_from_lookup(str(self.shim) + "\n")
+        self.assertTrue(os.path.samefile(stored, self.versioned), stored)
+        self.assertNotIn("Caskroom", stored)
+        self.assertEqual(str(self.install), stored)
+
+    def test_found_directly_and_found_behind_the_shim_agree(self):
+        """The invariant: one install, one recorded path, however it was
+        reached. Without it the upgrade churn comes back."""
+        self.assertEqual(install_from_lookup(str(self.install) + "\n"),
+                         install_from_lookup(str(self.shim) + "\n"))
+
+    def test_a_chain_of_temp_links_is_followed_to_the_install(self):
+        """Two shims pointing at each other still land on the install, and do
+        not run past it."""
+        second = Path(self.temp_root) / "other-shims" / str(uuid.uuid4()) / "codex"
+        second.parent.mkdir(parents=True)
+        self._symlink(self.shim, second)
+        self.assertEqual(str(self.install),
+                         install_from_lookup(str(second) + "\n"))
+
+    def test_a_loop_of_temp_links_does_not_hang(self):
+        """A pair of links pointing at each other terminates. Such a path is a
+        shim by name, so it is refused outright and the walk answers -- PATH is
+        pinned empty here so the only thing being proved is that it returns."""
+        a_dir = Path(self.temp_root) / "a-shims" / str(uuid.uuid4())
+        b_dir = Path(self.temp_root) / "b-shims" / str(uuid.uuid4())
+        a_dir.mkdir(parents=True)
+        b_dir.mkdir(parents=True)
+        self._symlink(b_dir / "codex", a_dir / "codex")
+        self._symlink(a_dir / "codex", b_dir / "codex")
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        with patch.dict(os.environ, {"PATH": empty}):
+            self.assertIsNone(install_from_lookup(str(a_dir / "codex") + "\n"))
+
+    def test_a_loop_reached_without_a_shim_name_also_terminates(self):
+        """The same loop under a plain name reaches _stable_path, where the
+        cycle guard is what has to stop it."""
+        a_dir = Path(self.temp_root) / "plainA"
+        b_dir = Path(self.temp_root) / "plainB"
+        a_dir.mkdir(parents=True)
+        b_dir.mkdir(parents=True)
+        self._symlink(b_dir / "codex", a_dir / "codex")
+        self._symlink(a_dir / "codex", b_dir / "codex")
+        self.assertEqual(str(a_dir / "codex"),
+                         install_from_lookup(str(a_dir / "codex") + "\n"))
 
 if __name__ == "__main__":
     unittest.main()

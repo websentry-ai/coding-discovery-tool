@@ -2576,16 +2576,29 @@ def _stable_path(candidate: str) -> str:
     link's own path goes away with the session, so recording it would report a
     different install on the next scan.
 
-    Confined to links inside temp. Following every link would rewrite the
-    recorded path of ordinary symlinked installs, and that path is part of what
-    identifies a row, so the same install would start arriving under two names.
+    Followed one link at a time, and only while the link itself sits in temp.
+    Resolving the whole chain would walk past the install and land on what it
+    points at: a Homebrew or version-manager binary is itself a link into a
+    versioned directory, so the same install would be recorded as
+    ``/opt/homebrew/bin/codex`` when found directly and as
+    ``Caskroom/codex/0.139.0/bin/codex`` when found through a temp link -- two
+    names for one install, and a new one on every upgrade.
     """
     try:
-        if not os.path.islink(candidate):
-            return candidate
-        if not _under_temp_root(os.path.realpath(os.path.dirname(candidate))):
-            return candidate
-        return os.path.realpath(candidate)
+        path = candidate
+        seen = set()
+        while os.path.islink(path):
+            if not _under_temp_root(os.path.realpath(os.path.dirname(path))):
+                break           # the link is an install's own path; keep it
+            target = os.readlink(path)
+            if not os.path.isabs(target):
+                target = os.path.join(os.path.dirname(path), target)
+            target = os.path.normpath(target)
+            if target in seen:  # a loop; nothing stable to report
+                return candidate
+            seen.add(target)
+            path = target
+        return path
     except (OSError, ValueError):
         return candidate
 

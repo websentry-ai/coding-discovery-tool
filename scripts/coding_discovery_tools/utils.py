@@ -213,9 +213,12 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         return {}
 
     # Marker-prefixed so profile banner output cannot be mistaken for a path.
+    # PATH first: when a tool resolves to a shim, that PATH is what gets walked
+    # for the real install -- the scanner's own PATH would name the wrong owner.
     script = "; ".join(
-        f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
-        for tool in LOGIN_SHELL_TOOLS
+        [f'printf "{_MARKER}PATH\\t%s\\n" "$PATH"']
+        + [f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
+           for tool in LOGIN_SHELL_TOOLS]
     )
     try:
         result = subprocess.run(
@@ -228,18 +231,34 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         return {}
 
     found: Dict[str, str] = {}
+    user_path = ""
     for line in result.stdout.splitlines():
         if not line.startswith(_MARKER) or "\t" not in line:
             continue
         tool, _, path = line[len(_MARKER):].partition("\t")
+        if tool == "PATH":
+            user_path = path.strip()
+            continue
         resolved = Path(path.strip())
         # The name as given, so a profile cannot rename another binary as a tool.
         if resolved.name != tool:
             logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
             continue
         try:
+            if is_session_temp_path(str(resolved)):
+                # A shim first on the user's PATH hides the real install behind
+                # it, so keep walking that PATH rather than losing the tool.
+                recovered = _next_real_install_on_path(tool, user_path)
+                if not recovered:
+                    logger.debug(f"Login shell answered {tool} with a session shim")
+                    continue
+                resolved = Path(recovered)
+            # Applies to the shell's own answer and to anything the walk found,
+            # so a link inside temp is stored as its target here too.
+            resolved = Path(_stable_path(str(resolved)))
             # Ownership on the target, not the link: the candidate loops reject
-            # another account's install and this must not add it back.
+            # another account's install and this must not add it back. Resolved
+            # after any shim recovery, so it describes what gets stored.
             real = Path(os.path.realpath(str(resolved)))
             if (resolved.is_absolute() and real.is_file() and os.access(str(real), os.X_OK)
                     and machine_global_binary_owned_by_user(real, user_home)):
@@ -2501,6 +2520,200 @@ def _is_safe_exec_path(path: str) -> bool:
             target = parent
     except OSError:
         return False
+
+
+# A directory that is named as a shim directory, rather than one that merely
+# contains the letters: a real account was called ``omershimonatzmon``, and a
+# substring test refuses that user's own installs.
+_SHIM_DIR = re.compile(r"^(?:.*[-_.])?shims?$", re.IGNORECASE)
+
+_SESSION_SHIM_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def is_session_temp_path(path) -> bool:
+    """True when ``path`` is a per-session shim rather than an installation.
+
+    A tool that wraps other tools writes throwaway shims into the temp dir and
+    prepends them to PATH, so a ``which`` lookup answers with the wrapper: an
+    install that never existed, with no version, under a new UUID each session.
+
+    Under a temp dir is necessary but not sufficient -- tests root synthetic
+    filesystems at ``mkdtemp()``, so ``<tmp>/home/alice/...`` is an ordinary
+    fixture. A directory named as a shim directory -- ``shims``, or anything
+    ending ``-shims`` such as cmux's -- or a UUID-named parent is what separates
+    them. Named, not merely containing: a real account is called
+    ``omershimonatzmon``. Ownership says nothing here: a per-user temp dir is mode 700 and so
+    passes ``_is_safe_exec_path``.
+    """
+    if not path:
+        return False
+    try:
+        resolved = os.path.realpath(str(path))
+    except (OSError, ValueError):
+        # Resolution can fail -- a link loop raises on Windows. Resolve the
+        # parent instead, which cannot loop, rather than giving up: otherwise a
+        # shim whose target will not resolve is reported as an install. The
+        # parent has to be resolved too, since the roots are, and a temp dir is
+        # reached through a symlink on macOS and a short name on Windows.
+        try:
+            resolved = os.path.join(
+                os.path.realpath(os.path.dirname(str(path))),
+                os.path.basename(str(path)))
+        except (OSError, ValueError):
+            return False
+
+    if not _under_temp_root(resolved):
+        return False
+
+    parts = resolved.split(os.sep)
+    if any(_SHIM_DIR.match(part) for part in parts):
+        return True
+    return bool(len(parts) >= 2 and _SESSION_SHIM_UUID.match(parts[-2]))
+
+
+def _under_temp_root(resolved: str) -> bool:
+    """True if ``resolved`` -- an already-resolved path -- lies in a temp dir."""
+    roots = []
+    try:
+        roots.append(tempfile.gettempdir())
+    except Exception:
+        pass
+    # TMPDIR is per-user on macOS, so the shared temp dirs are listed too.
+    # _path_within resolves each root, which collapses the macOS /private forms.
+    roots.extend(["/tmp", "/var/tmp", "/var/folders"])
+    return any(_path_within(resolved, root) for root in roots)
+
+
+def _plain_windows_path(target: str) -> str:
+    """``target`` without Windows' extended-length prefix.
+
+    ``os.readlink`` answers with the ``\\\\?\\`` form there. Kept as given it
+    would record one install under two spellings depending on whether it was
+    reached through a link, and it would not match a temp root either.
+    """
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[8:]
+    if target.startswith("\\\\?\\"):
+        return target[4:]
+    return target
+
+
+def _stable_path(candidate: str) -> str:
+    """``candidate``, or what it points at when it is a link inside a temp dir.
+
+    A wrapper may plant a symlink to the real binary rather than a script. That
+    is not a shim by the rule above -- it resolves outside temp -- but the
+    link's own path goes away with the session, so recording it would report a
+    different install on the next scan.
+
+    Followed one link at a time, and only while the link itself sits in temp.
+    Resolving the whole chain would walk past the install and land on what it
+    points at: a Homebrew or version-manager binary is itself a link into a
+    versioned directory, so the same install would be recorded as
+    ``/opt/homebrew/bin/codex`` when found directly and as
+    ``Caskroom/codex/0.139.0/bin/codex`` when found through a temp link -- two
+    names for one install, and a new one on every upgrade.
+    """
+    try:
+        path = candidate
+        seen = set()
+        while os.path.islink(path):
+            if not _under_temp_root(os.path.realpath(os.path.dirname(path))):
+                break           # the link is an install's own path; keep it
+            target = _plain_windows_path(os.readlink(path))
+            if not os.path.isabs(target):
+                target = os.path.join(os.path.dirname(path), target)
+            target = os.path.normpath(target)
+            if target in seen:  # a loop; nothing stable to report
+                return candidate
+            seen.add(target)
+            path = target
+        return path
+    except (OSError, ValueError):
+        return candidate
+
+
+def _path_within(resolved: str, root: str) -> bool:
+    """True if ``resolved`` is ``root`` or sits beneath it. Never raises.
+
+    Matched against the root both as given and resolved, and without regard to
+    case where the platform ignores it. A path is not always fully resolvable --
+    a link loop leaves a Windows short name in place -- and a short name matches
+    neither the long name a resolved root carries nor the other way around, so
+    one spelling alone lets such a path past.
+    """
+    spellings = [root]
+    try:
+        spellings.append(os.path.realpath(root))
+    except (OSError, ValueError):
+        pass
+    target = os.path.normcase(resolved)
+    for spelling in spellings:
+        prefix = os.path.normcase(spelling).rstrip(os.sep)
+        if not prefix:
+            continue
+        if target == prefix or target.startswith(prefix + os.sep):
+            return True
+    return False
+
+
+def install_from_lookup(found):
+    """The install to report for what a PATH lookup answered, or None.
+
+    Takes the hits in the order the lookup listed them and answers with the
+    first that is not a shim -- ``which`` prints one, ``where`` prints every
+    match. When every hit is a shim the rest of PATH is searched, because a
+    shim prepended to PATH hides a real install further along it and reporting
+    nothing would turn a real install into no install at all.
+
+    Takes the lookup's result rather than making the call, so each detector
+    keeps its own ``which`` -- that call is the seam the detector tests patch.
+    """
+    shim_name = None
+    for line in (found or "").splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if not is_session_temp_path(candidate):
+            return _stable_path(candidate)
+        shim_name = shim_name or os.path.basename(candidate)
+    if not shim_name:
+        return None
+    walked = _next_real_install_on_path(shim_name)
+    return _stable_path(walked) if walked else None
+
+
+def _next_real_install_on_path(name, path_env=None) -> Optional[str]:
+    """The first executable ``name`` on ``path_env`` that is not a session shim.
+
+    ``path_env`` defaults to this process's PATH. A root scan must pass the
+    scanned user's own PATH instead, or the scanner's install gets attributed
+    to a user who only has a shim.
+
+    Deliberately not ``_which_no_cwd``: that refuses a group-writable directory,
+    and ``/opt/homebrew/bin`` is group-writable by design, so it would drop the
+    install this is recovering. POSIX-shaped, which is where ``which`` runs.
+    """
+    if not name:
+        return None
+    if path_env is None:
+        path_env = os.environ.get("PATH", "")
+    for entry in path_env.split(os.pathsep):
+        # Absolute only: PATH may hold "." or another relative entry, and a
+        # match found through one would be recorded as a path relative to
+        # wherever the scan happened to be running.
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, name)
+        try:
+            if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+                continue
+        except OSError:
+            continue
+        if not is_session_temp_path(candidate):
+            return candidate
+    return None
 
 
 def _which_no_cwd(name: str) -> Optional[str]:

@@ -317,6 +317,28 @@ class ToolDetectorFactory:
             return None
 
     @staticmethod
+    def create_cmux_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
+        """
+        Create the cmux detector for the OS.
+
+        Args:
+            os_name: Operating system name (defaults to current OS)
+
+        Returns:
+            BaseToolDetector instance, or None where cmux does not ship
+
+        cmux is a macOS app only, so there is nothing to return elsewhere.
+        """
+        if os_name is None:
+            os_name = platform.system()
+
+        if os_name == "Darwin":
+            from .macos.cmux.cmux import MacOSCmuxDetector
+            return MacOSCmuxDetector()
+
+        return None
+
+    @staticmethod
     def create_antigravity_detector(os_name: Optional[str] = None) -> Optional[BaseToolDetector]:
         """
         Create appropriate Antigravity detector for the OS.
@@ -812,6 +834,11 @@ class ToolDetectorFactory:
         antigravity_detector = ToolDetectorFactory.create_antigravity_detector(os_name)
         if antigravity_detector is not None:
             detectors.append(antigravity_detector)
+
+        # Add cmux detector; macOS only
+        cmux_detector = ToolDetectorFactory.create_cmux_detector(os_name)
+        if cmux_detector is not None:
+            detectors.append(cmux_detector)
         
         # Add Kilo Code detector for macOS and Windows
         kilocode_detector = ToolDetectorFactory.create_kilocode_detector(os_name)

@@ -2522,6 +2522,11 @@ def _is_safe_exec_path(path: str) -> bool:
         return False
 
 
+# A directory that is named as a shim directory, rather than one that merely
+# contains the letters: a real account was called ``omershimonatzmon``, and a
+# substring test refuses that user's own installs.
+_SHIM_DIR = re.compile(r"^(?:.*[-_.])?shims?$", re.IGNORECASE)
+
 _SESSION_SHIM_UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -2535,8 +2540,10 @@ def is_session_temp_path(path) -> bool:
 
     Under a temp dir is necessary but not sufficient -- tests root synthetic
     filesystems at ``mkdtemp()``, so ``<tmp>/home/alice/...`` is an ordinary
-    fixture. A shim-named directory or a UUID-named parent is what separates
-    them. Ownership says nothing here: a per-user temp dir is mode 700 and so
+    fixture. A directory named as a shim directory -- ``shims``, or anything
+    ending ``-shims`` such as cmux's -- or a UUID-named parent is what separates
+    them. Named, not merely containing: a real account is called
+    ``omershimonatzmon``. Ownership says nothing here: a per-user temp dir is mode 700 and so
     passes ``_is_safe_exec_path``.
     """
     if not path:
@@ -2560,7 +2567,7 @@ def is_session_temp_path(path) -> bool:
         return False
 
     parts = resolved.split(os.sep)
-    if any("shim" in part.lower() for part in parts):
+    if any(_SHIM_DIR.match(part) for part in parts):
         return True
     return bool(len(parts) >= 2 and _SESSION_SHIM_UUID.match(parts[-2]))
 

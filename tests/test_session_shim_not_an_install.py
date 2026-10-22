@@ -959,5 +959,44 @@ class ARootReachedByAnotherNameStillMatches(unittest.TestCase):
                 self._resolution_stops_at(outside):
             self.assertFalse(is_session_temp_path(outside))
 
+
+class AUserWhoseNameContainsShimKeepsTheirInstalls(unittest.TestCase):
+    """The directory has to be *named* as a shim directory, not merely contain
+    the letters.
+
+    A substring test looked safe until production showed an account called
+    ``omershimonatzmon`` -- nine tools on that device. Their home directory sits
+    inside their temp path on Windows, so every install found there would have
+    been thrown away because four letters of their name happen to spell shim.
+    """
+
+    WINDOWS_TEMP = r"C:\Users\omershimonatzmon\AppData\Local\Temp"
+
+    def test_their_own_install_under_their_temp_is_kept(self):
+        with patch("tempfile.gettempdir", return_value=self.WINDOWS_TEMP):
+            self.assertFalse(is_session_temp_path(
+                self.WINDOWS_TEMP + r"\npm\claude.cmd"))
+
+    def test_their_own_install_under_a_posix_temp_is_kept(self):
+        self.assertFalse(is_session_temp_path("/tmp/omershimonatzmon/bin/claude"))
+
+    def test_the_wrapper_directory_is_still_refused(self):
+        """The shape actually seen in production still has to be caught."""
+        self.assertTrue(is_session_temp_path(
+            f"{TMP}/cmux-cli-shims/{uuid.uuid4()}/codex"))
+
+    def test_the_names_that_do_count(self):
+        for name in ("shims", "shim", "cmux-cli-shims", "some-tool-shims",
+                     "tool_shims", ".shim"):
+            with self.subTest(directory=name):
+                self.assertTrue(is_session_temp_path(f"{TMP}/{name}/codex"), name)
+
+    def test_the_names_that_do_not(self):
+        """Ordinary directories that merely contain the letters."""
+        for name in ("omershimonatzmon", "shimano", "shimmer", "ashim",
+                     "shimla-cache", "noshims-here"):
+            with self.subTest(directory=name):
+                self.assertFalse(is_session_temp_path(f"{TMP}/{name}/codex"), name)
+
 if __name__ == "__main__":
     unittest.main()

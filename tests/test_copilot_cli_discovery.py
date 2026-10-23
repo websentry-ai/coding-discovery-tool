@@ -1049,20 +1049,20 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["install_path"], str(shim))
 
-    def test_get_version_uses_shell_true_and_parses_semver(self):
-        """Windows get_version uses shell=True (npm .cmd shim) AND parses the bare
-        semver out of the multi-line banner — not the raw ~70-char string that
-        would overflow the backend version column."""
+    def test_get_version_path_fallback_never_shelled_and_parses_semver(self):
+        """The ``copilot`` on PATH is run without a shell AND the bare semver is parsed
+        out of the multi-line banner — not the raw ~70-char string that would
+        overflow the backend version column."""
         banner = "GitHub Copilot CLI 0.0.399.\nRun 'copilot update' to check for updates."
-        fake = MagicMock(returncode=0, stdout=banner, stderr="")
-        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", return_value=fake) as run:
+        with patch("shutil.which", return_value=r"C:\Users\a&b\copilot.exe"), \
+             patch(f"{_WIN_DETECTOR_MOD}.run_command", return_value=banner) as run:
             version = WindowsCopilotCliDetector().get_version()
         self.assertEqual(version, "0.0.399")
-        self.assertIs(run.call_args.kwargs.get("shell"), True)
+        run.assert_called_once_with([r"C:\Users\a&b\copilot.exe", "--version"], ANY)
 
     def test_get_version_returns_none_on_failure(self):
-        """A failed/absent binary yields None (caller falls back to 'unknown'), never raises."""
-        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run", side_effect=FileNotFoundError()):
+        """No ``copilot`` on PATH yields None (caller falls back to 'unknown'), never raises."""
+        with patch("shutil.which", return_value=None):
             self.assertIsNone(WindowsCopilotCliDetector().get_version())
 
     def test_version_read_from_per_user_npm_shim(self):
@@ -1077,7 +1077,7 @@ class TestWindowsCopilotCliDetection(unittest.TestCase):
         pkg = npm / "node_modules" / "@github" / "copilot"
         pkg.mkdir(parents=True)
         (pkg / "package.json").write_text('{"version": "0.0.399"}', encoding="utf-8")
-        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
+        with patch("subprocess.run") as run:
             version = self.detector.get_version()
         self.assertEqual(version, "0.0.399")
         run.assert_not_called()
@@ -1387,7 +1387,7 @@ class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         try:
             shim = self._npm_install(Path(tmp) / "npm")
-            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
+            with patch("subprocess.run") as run:
                 version = WindowsCopilotCliDetector().get_version(str(shim))
             self.assertEqual(version, "0.0.399")
             run.assert_not_called()
@@ -1399,7 +1399,7 @@ class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         try:
             shim = self._npm_install(Path(tmp) / "a&&calc" / "npm")
-            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
+            with patch("subprocess.run") as run:
                 version = WindowsCopilotCliDetector().get_version(str(shim))
             self.assertEqual(version, "0.0.399")
             run.assert_not_called()
@@ -1409,7 +1409,7 @@ class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
     def test_get_version_with_binary_no_bare_fallback_on_failure(self):
         """Unreadable metadata -> None, with no bare ``copilot`` retry."""
         shim = r"C:\Users\someone\AppData\Roaming\npm\copilot.cmd"
-        with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
+        with patch("subprocess.run") as run:
             self.assertIsNone(WindowsCopilotCliDetector().get_version(shim))
         run.assert_not_called()
 
@@ -1422,7 +1422,7 @@ class TestWindowsCopilotCliVersionThreadedFromBinary(unittest.TestCase):
             shim = self._npm_install(user_home / "AppData" / "Roaming" / "npm")
             detector = WindowsCopilotCliDetector()
             detector.user_home = None  # the standalone path; binary comes from the param
-            with patch(f"{_WIN_DETECTOR_MOD}.subprocess.run") as run:
+            with patch("subprocess.run") as run:
                 result = detector._detect_for_user(user_home)
             self.assertIsNotNone(result)
             self.assertEqual(result["install_path"], str(shim))

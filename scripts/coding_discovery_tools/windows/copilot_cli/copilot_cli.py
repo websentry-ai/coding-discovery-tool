@@ -17,7 +17,7 @@ execute part of itself). Everything else is inherited from the macOS detector (D
 
 import json
 import logging
-import subprocess
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -100,12 +100,11 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
 
     def get_version(self, binary: Optional[str] = None) -> Optional[str]:
         """
-        Extract Copilot CLI version on Windows using ``copilot --version``.
+        Extract Copilot CLI version on Windows without a shell.
 
-        Overrides the inherited macOS probe to pass ``shell=True`` (via
-        ``_probe_version``): npm installs the CLI as a ``copilot.cmd`` shim, which
-        Windows cannot exec from a bare argv list, so the inherited probe would read
-        "unknown". Mirrors ``WindowsCodexDetector``.
+        Overrides the inherited macOS probe: npm installs the CLI as a
+        ``copilot.cmd`` shim, which Windows cannot exec from a bare argv list, so
+        the shim's ``package.json`` is read instead (``_version_for_binary``).
 
         Args:
             binary: When provided, probe this exact ``copilot`` path with no
@@ -129,7 +128,7 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
         except Exception as exc:
             logger.debug(f"Could not extract Copilot CLI version from per-user binary on Windows: {exc}")
 
-        return self._probe_version(["copilot", "--version"])
+        return self._probe_version()
 
     @staticmethod
     def _resolve_windows_binary(user_home: Path) -> Optional[Path]:
@@ -184,23 +183,7 @@ class WindowsCopilotCliDetector(MacOSCopilotCliDetector):
         version = data.get("version") if isinstance(data, dict) else None
         return version if isinstance(version, str) else None
 
-    @staticmethod
-    def _probe_version(command: List[str]) -> Optional[str]:
-        """Run ``command`` with ``shell=True`` and parse the version banner.
-
-        ``shell=True`` is required for the npm ``.cmd`` shim. Best-effort:
-        returns None on any failure (the caller falls back to "unknown").
-        """
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=VERSION_TIMEOUT,
-                shell=True,  # Required for npm .CMD shims on Windows
-            )
-            if result.returncode == 0:
-                return _parse_cli_version(result.stdout or result.stderr)
-        except Exception as exc:
-            logger.debug(f"Could not extract Copilot CLI version on Windows: {exc}")
-        return None
+    def _probe_version(self) -> Optional[str]:
+        """Version of the ``copilot`` on PATH, read like a resolved binary so no shell runs."""
+        on_path = shutil.which("copilot")
+        return self._version_for_binary(on_path) if on_path else None

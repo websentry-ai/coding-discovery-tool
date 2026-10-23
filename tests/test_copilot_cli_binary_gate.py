@@ -417,6 +417,25 @@ class TestWindowsCopilotCliVersionNeverShelled(unittest.TestCase):
                           side_effect=AssertionError("shim must not be shelled")):
             self.assertIsNone(self.detector.get_version(str(shim)))
 
+    def test_path_fallback_shim_read_not_shelled(self):
+        """With no per-user binary, the ``copilot`` on PATH is read the same way, never shelled."""
+        shim = self._make_npm_install(self.root / "a&&calc")
+        with patch("shutil.which", return_value=str(shim)), \
+             patch("subprocess.run", side_effect=AssertionError("must not be shelled")):
+            self.assertEqual("1.0.59", self.detector.get_version())
+
+    def test_path_fallback_exe_probed_without_a_shell(self):
+        exe = self.root / "copilot.exe"
+        exe.write_text("", encoding="utf-8")
+        with patch("shutil.which", return_value=str(exe)), \
+             patch(f"{_WIN_MOD}.run_command", return_value="GitHub Copilot CLI 1.2.3") as rc:
+            self.assertEqual("1.2.3", self.detector.get_version())
+        rc.assert_called_once()
+
+    def test_path_fallback_not_on_path_returns_none(self):
+        with patch("shutil.which", return_value=None):
+            self.assertIsNone(self.detector.get_version())
+
 
 if __name__ == "__main__":
     unittest.main()

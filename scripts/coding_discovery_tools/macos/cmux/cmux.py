@@ -4,14 +4,22 @@ cmux detection for macOS
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
-from ...constants import VERSION_TIMEOUT
-from ...macos_extraction_helpers import macos_app_candidates
-from ...utils import run_command
+from ...macos_extraction_helpers import (
+    macos_app_candidates,
+    read_bundle_identifier,
+    read_bundle_version,
+)
 
 logger = logging.getLogger(__name__)
+
+# Every channel ships under this identifier or a suffix of it: stable is
+# ``com.cmuxterm.app``, nightly ``.nightly``, next ``.nightly.cmux-next``. The
+# name alone is not enough to identify the product -- unrelated projects are
+# also called cmux and would install a bundle of the same name.
+CMUX_BUNDLE_ID = "com.cmuxterm.app"
 
 
 class MacOSCmuxDetector(BaseToolDetector):
@@ -23,16 +31,23 @@ class MacOSCmuxDetector(BaseToolDetector):
     has a second layer in front of the agents, which is worth reporting whether
     or not any agent is found alongside.
 
-    Ships only as a macOS app, so there is no Windows or Linux detector. The
-    names cmux and cmux-tui also belong to unrelated projects; this one is the
-    app, identified by its bundle.
+    macOS only, because that is the only platform cmux ships on.
     """
 
-    POSSIBLE_APP_PATHS = [
+    # Ordered: the first channel that exists wins, so a stable install is
+    # reported in preference to a pre-release sitting beside it. Exposed as a
+    # class attribute so the order is visible to (and patchable by) tests.
+    APP_PATHS = [
         Path("/Applications/cmux.app"),
-        # Nightly carries its own bundle id so it can sit beside stable.
-        Path("/Applications/cmux Nightly.app"),
+        Path("/Applications/cmux NEXT.app"),
+        Path("/Applications/cmux NIGHTLY.app"),
+        # Upstream is folding release candidates into the stable identity, but
+        # already-installed RC builds still carry their own bundle.
+        Path("/Applications/cmux RC.app"),
     ]
+
+    def __init__(self) -> None:
+        self.user_home: Optional[Path] = None
 
     @property
     def tool_name(self) -> str:
@@ -50,52 +65,55 @@ class MacOSCmuxDetector(BaseToolDetector):
         belong to whichever pane wrote them.
 
         Returns:
-            Dict with tool info or None if not found
+            Dict with name/version/install_path, or None when no bundle exists.
         """
-        app_path = self._find_app_path()
-        if app_path:
-            return {
-                "name": self.tool_name,
-                "version": self.get_version(app_path),
-                "install_path": str(app_path),
-            }
+        app_path = self._resolve_app_path()
+        if app_path is None:
+            return None
+        return {
+            "name": self.tool_name,
+            "version": self.get_version(app_path) or "Unknown",
+            "install_path": str(app_path),
+        }
 
-        return None
+    def _candidates(self) -> List[Path]:
+        """Each channel's bundle, machine-wide then under the scanned user."""
+        found = []
+        for app_path in self.APP_PATHS:
+            found.extend(macos_app_candidates(app_path, self.user_home))
+        return found
 
-    def _find_app_path(self) -> Optional[Path]:
-        """The cmux bundle, preferring stable over nightly, else None."""
-        user_home = getattr(self, 'user_home', None)
-        for app_path in self.POSSIBLE_APP_PATHS:
-            for candidate in macos_app_candidates(app_path, user_home):
-                if candidate.exists():
-                    return candidate
+    def _resolve_app_path(self) -> Optional[Path]:
+        """The first cmux bundle that exists, or None."""
+        for candidate in self._candidates():
+            try:
+                if not candidate.exists():
+                    continue
+                identifier = read_bundle_identifier(candidate) or ""
+            except (OSError, ValueError) as exc:
+                logger.debug(f"Could not inspect {candidate}: {exc}")
+                continue
+            if identifier == CMUX_BUNDLE_ID or identifier.startswith(
+                    CMUX_BUNDLE_ID + "."):
+                return candidate
+            logger.debug(
+                f"{candidate} is not cmux (bundle id {identifier!r}); ignoring")
         return None
 
     def get_version(self, app_path: Optional[Path] = None) -> Optional[str]:
-        """Extract the cmux version from the bundle's Info.plist.
+        """Read ``CFBundleShortVersionString`` from the bundle's Info.plist.
 
-        Args:
-            app_path: Optional path to the app (if None, will try to find it)
-
-        Returns:
-            Version string or None
+        Uses ``read_bundle_version`` (O_NOFOLLOW + regular-file check) rather
+        than ``defaults read``: the bundle can live under a user-writable home
+        during a root scan, where a symlinked plist pointing at a FIFO would
+        otherwise block the whole scan.
         """
-        if app_path is None:
-            app_path = self._find_app_path()
-
-        if app_path is None:
-            return None
-
         try:
-            plist_path = app_path / "Contents" / "Info.plist"
-            if not plist_path.exists():
+            if app_path is None:
+                app_path = self._resolve_app_path()
+            if app_path is None:
                 return None
-
-            output = run_command(
-                ["defaults", "read", str(plist_path), "CFBundleShortVersionString"],
-                VERSION_TIMEOUT
-            )
-            return output if output else None
-        except Exception as e:
-            logger.warning(f"Could not extract cmux version: {e}")
+            return read_bundle_version(app_path)
+        except Exception as exc:
+            logger.debug(f"Could not extract cmux version: {exc}")
         return None

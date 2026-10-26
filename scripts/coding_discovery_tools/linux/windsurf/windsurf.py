@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...constants import VERSION_TIMEOUT
-from ...utils import run_command, extract_version_number
+from ...utils import install_from_lookup, run_command, extract_version_number
 from ...linux_extraction_helpers import get_linux_user_homes
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class LinuxWindsurfDetector(BaseToolDetector):
 
     def detect(self) -> Optional[Dict]:
         for name in _BINARY_NAMES:
-            which_out = run_command(["which", name], VERSION_TIMEOUT)
+            which_out = install_from_lookup(run_command(["which", name], VERSION_TIMEOUT))
             if which_out:
                 return {
                     "name": self.tool_name,

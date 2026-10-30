@@ -1805,9 +1805,8 @@ def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
     """Write failed report envelopes to the queue file, merging with any existing
     entries unless replace=True.
 
-    Pass replace=True when ``reports`` is already the complete set still owed, so
-    entries the caller has since delivered are dropped instead of being re-sent
-    on every run until they expire.
+    Pass replace=True when ``reports`` is the complete set still owed, so entries
+    the caller has since delivered are dropped rather than re-sent every run.
     """
     try:
         existing = [] if replace else _load_queue_file_safe()

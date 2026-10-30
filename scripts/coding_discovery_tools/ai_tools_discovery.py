@@ -3948,10 +3948,10 @@ def main():
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
         # --- Drain pending reports from earlier runs ---
-        # Time-bounded, so a backlog can neither delay detection nor outlive the
-        # run budget; what is left stays queued. Kept ahead of this run's own
-        # sends: the backend replaces rows per reported tool name, so a queued
-        # report landing after a fresh one would overwrite it with older data.
+        # Time-bounded: a backlog must neither delay detection nor outlive the run
+        # budget, and what is left stays queued. Kept ahead of this run's sends --
+        # the backend replaces rows per reported tool name, so a queued report
+        # landing after a fresh one would overwrite it with older data.
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
             if pending:
@@ -3977,10 +3977,8 @@ def main():
                         consecutive_failures = 0
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        # Retryable failures in a row mean the backend is unreachable, and
-                        # every report behind would pay its own retry cycle to learn the
-                        # same thing. One on its own is about that payload, so it must not
-                        # hold up the queue behind it.
+                        # A run of these means the backend is down. One on its own is
+                        # about that payload, so it must not hold up the queue behind it.
                         consecutive_failures += 1
                         requeued_pending.append(queued_report)
                         if consecutive_failures >= DRAIN_FAILURES_BEFORE_STOP:

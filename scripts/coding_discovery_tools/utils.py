@@ -1553,7 +1553,7 @@ BACKOFF_BASE_SECONDS = 15
 BACKOFF_CAP_SECONDS = 120
 
 
-def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.
 
@@ -1574,6 +1574,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         report: Report dictionary to send
         app_name: Optional application name (e.g., JumpCloud) to include in request body
         sentry_context: Optional context dict forwarded to Sentry on failure
+        deadline: Optional time.monotonic() value past which no further upload or
+            backoff is started, so a caller working to a budget is not held by one
+            report's retries. Overrun is bounded by one in-flight request.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1604,6 +1607,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             except Exception as e:
                 # Hash failure should never block the upload — log and proceed.
                 logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
+
+    if deadline is not None and time.monotonic() >= deadline:
+        return (False, True)
 
     if should_use_s3(payload):
         s3_success, _ = try_s3_upload(
@@ -1636,6 +1642,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             os.close(fd)
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                return (False, True)
             try:
                 result = subprocess.run(
                     [
@@ -1663,8 +1671,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     # Connection/DNS failure — retryable
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
-                    if attempt < MAX_ATTEMPTS:
-                        _backoff(attempt)
+                    if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
                         continue
                     try:
                         raise RuntimeError(error_msg)
@@ -1692,28 +1699,26 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
                     return (False, False)
 
-                if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt)
-                else:
-                    try:
-                        error_detail = f"HTTP {http_code}"
-                        if response_body:
-                            error_detail += f": {response_body[:200]}"
-                        raise RuntimeError(error_detail)
-                    except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
-                    return (False, True)
+                if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
+                    continue
+                try:
+                    error_detail = f"HTTP {http_code}"
+                    if response_body:
+                        error_detail += f": {response_body[:200]}"
+                    raise RuntimeError(error_detail)
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
+                return (False, True)
 
             except subprocess.TimeoutExpired:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
-                if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt)
-                else:
-                    try:
-                        raise RuntimeError("curl timeout")
-                    except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
-                    return (False, True)
+                if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
+                    continue
+                try:
+                    raise RuntimeError("curl timeout")
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
 
             except OSError as e:
                 # curl missing or not executable: local, not transient, so sleeping cannot help.
@@ -1723,11 +1728,10 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
-                if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt)
-                else:
-                    report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
-                    return (False, True)
+                if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
+                    continue
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                return (False, True)
 
         return (False, True)
     finally:
@@ -1759,14 +1763,19 @@ def _backoff_seconds(name: str, default: float) -> float:
         return default
 
 
-def _backoff(attempt: int) -> None:
-    """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed together from retrying together."""
+def _backoff(attempt: int, deadline: Optional[float] = None) -> bool:
+    """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed
+    together from retrying together. False means the deadline left no room to wait."""
     base = _backoff_seconds("AI_DISCOVERY_BACKOFF_BASE_SECONDS", BACKOFF_BASE_SECONDS)
     cap = _backoff_seconds("AI_DISCOVERY_BACKOFF_CAP_SECONDS", BACKOFF_CAP_SECONDS)
     ceiling = min(base * 2 ** (attempt - 1), cap)
     wait = random.uniform(ceiling / 2, ceiling)
+    if deadline is not None and time.monotonic() + wait > deadline:
+        logger.info("  Out of time to retry; leaving this report queued.")
+        return False
     logger.info(f"  Retrying in {wait:.1f}s...")
     time.sleep(wait)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1801,18 +1810,43 @@ QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
 
+def _report_key(report) -> Optional[str]:
+    """Stable identity for a queued report, for matching it against the queue file."""
+    try:
+        return json.dumps(report, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+
+
+def _queued_at_by_report(envelopes: List[Dict]) -> Dict[str, str]:
+    """Each report's earliest queued_at in the existing queue file."""
+    found: Dict[str, str] = {}
+    for envelope in envelopes:
+        if not isinstance(envelope, dict):
+            continue
+        key = _report_key(envelope.get("report"))
+        queued_at = envelope.get("queued_at")
+        if key and isinstance(queued_at, str) and key not in found:
+            found[key] = queued_at
+    return found
+
+
 def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
     """Write failed report envelopes to the queue file, merging with any existing
     entries unless replace=True.
 
     Pass replace=True when ``reports`` is the complete set still owed, so entries
-    the caller has since delivered are dropped rather than re-sent every run.
+    the caller has since delivered are dropped rather than re-sent every run. A
+    report already in the queue then keeps its original queued_at, so requeueing
+    it cannot refresh it past QUEUE_MAX_AGE_SECONDS.
     """
     try:
-        existing = [] if replace else _load_queue_file_safe()
+        existing = _load_queue_file_safe()
         now_iso = datetime.now(timezone.utc).isoformat()
-        envelopes = existing + [
-            {"report": r, "queued_at": now_iso} for r in reports
+        first_queued = _queued_at_by_report(existing) if replace else {}
+        envelopes = ([] if replace else existing) + [
+            {"report": r, "queued_at": first_queued.get(_report_key(r), now_iso)}
+            for r in reports
         ]
         # Keep only the most recent entries to prevent unbounded growth
         envelopes = envelopes[-MAX_QUEUE_SIZE:]

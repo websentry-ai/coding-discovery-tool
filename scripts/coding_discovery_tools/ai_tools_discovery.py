@@ -3623,6 +3623,21 @@ class AIToolsDetector:
         }
 
 
+def _report_identity(report) -> Optional[tuple]:
+    """The (home_user, tool) a single-tool report describes, or None if it is not one."""
+    tools = report.get("tools") if isinstance(report, dict) else None
+    if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+        return None
+    return (report.get("home_user"), tools[0].get("name"))
+
+
+def _drop_superseded(queued: List[Dict], reported_this_run: set) -> List[Dict]:
+    """Queued reports the backend has no newer snapshot of. Sending one it does have
+    would replace that snapshot, and this run's stored payload hash then stops
+    detection from putting it back."""
+    return [r for r in queued if _report_identity(r) not in reported_this_run]
+
+
 def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
     """Seconds the queue drain may spend: its own ceiling, and never more than half
     of what the run has left, since detecting tools is what the run is for."""
@@ -3939,6 +3954,9 @@ def main():
         # Queued reports this run did not get to. Separate so they go back ahead of
         # this run's own failures, and are the first dropped when the queue is capped.
         requeued_pending = []
+        # (home_user, tool) this run left current on the backend, by upload or by
+        # hash match. A queued older report for one of these must not be sent.
+        reported_this_run = set()
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -3971,7 +3989,7 @@ def main():
                         break
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
-                        sentry_context=sentry_ctx,
+                        sentry_context=sentry_ctx, deadline=drain_deadline,
                     )
                     if success:
                         consecutive_failures = 0
@@ -4433,6 +4451,7 @@ def main():
                         # re-processing it.
                         if reported_ok:
                             discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
+                            reported_this_run.add((user_name, tool_name))
 
                         if args.dump:
                             logger.info("")
@@ -4491,7 +4510,10 @@ def main():
         # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
             # Backlog first: the queue keeps its newest entries when it hits the cap.
-            still_owed = requeued_pending + failed_reports
+            still_owed = _drop_superseded(requeued_pending, reported_this_run) + failed_reports
+            superseded = len(requeued_pending) + len(failed_reports) - len(still_owed)
+            if superseded:
+                logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
             if still_owed:
                 # Authoritative, so reports delivered above are dropped instead of
                 # being re-sent every run until they expire.

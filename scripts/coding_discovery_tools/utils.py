@@ -1551,6 +1551,7 @@ def send_scan_event(
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 15
 BACKOFF_CAP_SECONDS = 120
+REQUEST_TIMEOUT_SECONDS = 60
 
 
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None) -> Tuple[bool, bool]:
@@ -1574,9 +1575,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         report: Report dictionary to send
         app_name: Optional application name (e.g., JumpCloud) to include in request body
         sentry_context: Optional context dict forwarded to Sentry on failure
-        deadline: Optional time.monotonic() value past which no further upload or
-            backoff is started, so a caller working to a budget is not held by one
-            report's retries. Overrun is bounded by one in-flight request.
+        deadline: Optional time.monotonic() value. No upload or backoff is started
+            past it, and every request's own timeout is clipped to what is left, so
+            a caller working to a budget is never held beyond it by one report.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1613,7 +1614,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
     if should_use_s3(payload):
         s3_success, _ = try_s3_upload(
-            backend_url, api_key, payload, sentry_context=ctx,
+            backend_url, api_key, payload, sentry_context=ctx, deadline=deadline,
         )
         if s3_success:
             return (True, False)
@@ -1642,8 +1643,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             os.close(fd)
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            if deadline is not None and time.monotonic() >= deadline:
-                return (False, True)
+            request_timeout = REQUEST_TIMEOUT_SECONDS
+            if deadline is not None:
+                request_timeout = int(min(request_timeout, deadline - time.monotonic()))
+                if request_timeout < 1:
+                    return (False, True)
             try:
                 result = subprocess.run(
                     [
@@ -1653,13 +1657,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         "-H", "Content-Type: application/json",
                         "-H", "User-Agent: AI-Tools-Discovery/1.0",
                         "-d", f"@{tmp_path}",
-                        "--max-time", "60",
+                        "--max-time", str(request_timeout),
                         "-w", "\n%{http_code}",
                         url,
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=65,
+                    timeout=request_timeout + 5,
                 )
 
                 # Parse response: stdout = body + "\n" + http_code

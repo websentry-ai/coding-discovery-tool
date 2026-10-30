@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.ai_tools_discovery as adm
+import scripts.coding_discovery_tools.s3_uploader as s3_mod
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
     MAX_QUEUE_SIZE,
@@ -443,6 +444,8 @@ class _AlwaysFailingHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.server.hits += 1
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.server.delay:
+            threading.Event().wait(self.server.delay)
         self.send_response(500)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -461,6 +464,7 @@ class TheTransportItselfRespectsTheDeadline(unittest.TestCase):
     def setUpClass(cls):
         cls.server = HTTPServer(("127.0.0.1", 0), _AlwaysFailingHandler)
         cls.server.hits = 0
+        cls.server.delay = 0
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -473,6 +477,14 @@ class TheTransportItselfRespectsTheDeadline(unittest.TestCase):
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
         self.server.hits = 0
+        self.server.delay = 0
+        # These assertions are about the real retry curve, so the class must not
+        # inherit backoff tuning left in the environment by another test.
+        unturned = {k: v for k, v in os.environ.items()
+                    if not k.startswith("AI_DISCOVERY_BACKOFF_")}
+        env = patch.dict(os.environ, unturned, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
         self.report = {"device_id": "D", "home_user": "u", "tools": []}
         self.url = f"http://127.0.0.1:{self.port}"
 
@@ -485,26 +497,67 @@ class TheTransportItselfRespectsTheDeadline(unittest.TestCase):
         self.assertEqual(self.server.hits, 0, "a request went out past the deadline")
 
     def test_a_near_deadline_stops_after_one_attempt_without_sleeping(self):
-        started = time.monotonic()
-        success, retryable = send_report_to_backend(
-            self.url, "test-key-000000", self.report, deadline=time.monotonic() + 0.5,
-        )
-        elapsed = time.monotonic() - started
+        with patch("time.sleep") as slept:
+            success, retryable = send_report_to_backend(
+                self.url, "test-key-000000", self.report,
+                deadline=time.monotonic() + 3,
+            )
 
         self.assertEqual((success, retryable), (False, True))
         self.assertEqual(self.server.hits, 1, "it retried past its deadline")
-        self.assertLess(elapsed, 10, "it slept a backoff it had no budget for")
+        self.assertEqual(slept.call_count, 0, "it slept a backoff it had no budget for")
+
+    def test_a_request_cannot_outlive_the_remaining_budget(self):
+        """Not starting a request past the deadline is not enough: the request's own
+        timeout has to be clipped too, or one slow upload outlives a short run."""
+        self.server.delay = 8
+        started = time.monotonic()
+
+        with patch("time.sleep"):
+            success, retryable = send_report_to_backend(
+                self.url, "test-key-000000", self.report,
+                deadline=time.monotonic() + 2,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual((success, retryable), (False, True))
+        self.assertLess(
+            elapsed, 7,
+            "the request kept its own fixed timeout and outlived the deadline",
+        )
 
     def test_without_a_deadline_the_retry_curve_is_unchanged(self):
         """The existing callers pass no deadline and must keep all five attempts."""
-        with patch.object(utils_mod, "BACKOFF_BASE_SECONDS", 0.01), \
-             patch.object(utils_mod, "BACKOFF_CAP_SECONDS", 0.02):
+        with patch("time.sleep") as slept:
             success, retryable = send_report_to_backend(
                 self.url, "test-key-000000", self.report,
             )
 
         self.assertEqual((success, retryable), (False, True))
         self.assertEqual(self.server.hits, utils_mod.MAX_ATTEMPTS)
+        # At least one backoff between each pair of attempts; subprocess polling
+        # can add its own sleeps, so this is a floor rather than an equality.
+        self.assertGreaterEqual(slept.call_count, utils_mod.MAX_ATTEMPTS - 1)
+
+
+class TheS3PathIsBoundedByTheSameDeadline(unittest.TestCase):
+    """Real queued tool reports take the S3 path first: three requests whose fixed
+    30/180/30s limits could each outlast a short run's whole budget."""
+
+    def test_each_step_is_clipped_to_what_is_left(self):
+        self.assertEqual(s3_mod._within(30, None), 30)
+        self.assertEqual(s3_mod._within(30, time.monotonic() + 100), 30)
+        self.assertIn(s3_mod._within(180, time.monotonic() + 10), (9, 10))
+
+    def test_a_passed_deadline_starts_no_step(self):
+        self.assertIsNone(s3_mod._within(30, time.monotonic() - 1))
+        self.assertEqual(
+            s3_mod.try_s3_upload(
+                "http://127.0.0.1:1", "k", {"device_id": "D", "tools": [{"name": "T"}]},
+                deadline=time.monotonic() - 1,
+            ),
+            (False, True),
+        )
 
 
 if __name__ == "__main__":

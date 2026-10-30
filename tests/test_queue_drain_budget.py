@@ -130,39 +130,51 @@ class TheDrainCannotStarveDetection(_DrivesMain, unittest.TestCase):
         sent, _saved, order = self.run_main(_queued(100), FAILED_RETRYABLE)
 
         self.assertEqual(
-            len(sent), 1,
+            len(sent), adm.DRAIN_FAILURES_BEFORE_STOP,
             "the drain paid a retry cycle per queued report before detecting anything",
         )
         self.assertIn("detect", order, "the run never reached detection")
 
 
 class AnUnreachableBackendStopsTheDrain(_DrivesMain, unittest.TestCase):
-    """A retryable failure is the transport, not the payload: every other queued
-    report would pay its own full retry cycle to fail the same way."""
+    """Retryable failures in a row are the transport, not the payloads: every
+    report behind them would pay its own retry cycle to fail the same way."""
 
-    def test_a_retryable_failure_leaves_the_rest_untried(self):
+    def test_a_run_of_failures_leaves_the_rest_untried(self):
         pending = _queued(5)
         sent, saved, _order = self.run_main(pending, FAILED_RETRYABLE)
 
         self.assertEqual(
-            self.ids(sent), ["QUEUED-0"],
+            self.ids(sent), ["QUEUED-0", "QUEUED-1"],
             "the drain kept going after the backend proved unreachable",
         )
         self.assertEqual(self.ids(self.requeued(saved)), self.ids(pending))
 
     def test_a_failure_part_way_through_requeues_only_what_is_left(self):
-        pending = _queued(4)
+        pending = _queued(5)
         reachable = {"QUEUED-0", "QUEUED-1"}
         sent, saved, _order = self.run_main(
             pending,
             lambda r: SENT_OK if r["device_id"] in reachable else FAILED_RETRYABLE,
         )
 
-        self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2"])
+        self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3"])
         self.assertEqual(
-            self.ids(self.requeued(saved)), ["QUEUED-2", "QUEUED-3"],
+            self.ids(self.requeued(saved)), ["QUEUED-2", "QUEUED-3", "QUEUED-4"],
             "delivered reports were re-queued, or the untried tail was dropped",
         )
+
+    def test_one_report_that_keeps_failing_does_not_block_the_queue(self):
+        """A lone retryable failure is about that payload. Stopping on it would
+        strand every healthy report behind it until the queue expired."""
+        pending = _queued(5)
+        sent, saved, _order = self.run_main(
+            pending,
+            lambda r: FAILED_RETRYABLE if r["device_id"] == "QUEUED-2" else SENT_OK,
+        )
+
+        self.assertEqual(self.ids(sent), self.ids(pending), "the drain stopped early")
+        self.assertEqual(self.ids(self.requeued(saved)), ["QUEUED-2"])
 
     def test_a_permanent_failure_does_not_stop_the_drain(self):
         """The counterweight: a 4xx is about one payload, so the queue behind it
@@ -283,7 +295,7 @@ class TheQueueFileEndsAsWhatIsStillOwed(_DrivesMain, unittest.TestCase):
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def test_delivered_reports_are_gone_and_the_untried_tail_remains(self):
-        pending = _queued(4)
+        pending = _queued(5)
         now = datetime.now(timezone.utc).isoformat()
         self.queue_file.write_text(json.dumps(
             [{"report": r, "queued_at": now} for r in pending]
@@ -298,11 +310,11 @@ class TheQueueFileEndsAsWhatIsStillOwed(_DrivesMain, unittest.TestCase):
 
         left = [e["report"]["device_id"] for e in json.loads(self.queue_file.read_text())]
         self.assertEqual(
-            left, ["QUEUED-2", "QUEUED-3"],
+            left, ["QUEUED-2", "QUEUED-3", "QUEUED-4"],
             "the queue kept reports it had already delivered, so the next run"
             " spends its budget re-sending them",
         )
-        self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2"])
+        self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3"])
 
     def test_a_fully_drained_queue_removes_the_file(self):
         pending = _queued(3)

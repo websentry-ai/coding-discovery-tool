@@ -36,6 +36,9 @@ DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 # backlog that cannot be sent now waits for the next run. Uncapped, a full queue
 # cost more than the run timeout and the run aborted before detecting anything.
 DRAIN_BUDGET_SECONDS = 600
+# Retryable failures in a row that mean the backend is down rather than one
+# report being bad. Each one costs a full five-attempt retry cycle.
+DRAIN_FAILURES_BEFORE_STOP = 2
 
 SCRIPT_VERSION = "1.2.0"
 
@@ -3957,9 +3960,10 @@ def main():
                     args.timeout, time.monotonic() - t_start
                 )
                 drain_deadline = time.monotonic() + drain_budget
+                consecutive_failures = 0
                 for index, queued_report in enumerate(pending):
                     if time.monotonic() >= drain_deadline:
-                        requeued_pending = pending[index:]
+                        requeued_pending.extend(pending[index:])
                         logger.info(
                             f"  Drain budget of {drain_budget:.0f}s spent;"
                             f" {len(requeued_pending)} report(s) stay queued."
@@ -3970,17 +3974,24 @@ def main():
                         sentry_context=sentry_ctx,
                     )
                     if success:
+                        consecutive_failures = 0
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        # Retryable means the transport, not this payload, so the rest
-                        # would each pay a full retry cycle to fail the same way.
-                        requeued_pending = pending[index:]
-                        logger.info(
-                            "  Backend unreachable;"
-                            f" {len(requeued_pending)} report(s) stay queued."
-                        )
-                        break
+                        # Retryable failures in a row mean the backend is unreachable, and
+                        # every report behind would pay its own retry cycle to learn the
+                        # same thing. One on its own is about that payload, so it must not
+                        # hold up the queue behind it.
+                        consecutive_failures += 1
+                        requeued_pending.append(queued_report)
+                        if consecutive_failures >= DRAIN_FAILURES_BEFORE_STOP:
+                            requeued_pending.extend(pending[index + 1:])
+                            logger.info(
+                                "  Backend unreachable;"
+                                f" {len(requeued_pending)} report(s) stay queued."
+                            )
+                            break
                     else:
+                        consecutive_failures = 0
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 logger.info("")
 

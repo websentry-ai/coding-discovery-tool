@@ -1558,7 +1558,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     Send discovery report to backend endpoint using curl with retry logic.
 
     Uses curl subprocess to avoid Zscaler certificate issues with urllib.
-    Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
+    Retries up to MAX_ATTEMPTS times for retryable errors, sleeping with
+    equal-jittered exponential backoff (ceilings 15s, 30s, 60s, 120s).
     Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
 
     For data reports (payloads carrying a non-empty ``tools`` list), tries the
@@ -1800,10 +1801,16 @@ QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
 
-def save_failed_reports(reports: List[Dict]) -> None:
-    """Write failed report envelopes to the queue file, merging with any existing entries."""
+def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
+    """Write failed report envelopes to the queue file, merging with any existing
+    entries unless replace=True.
+
+    Pass replace=True when ``reports`` is already the complete set still owed, so
+    entries the caller has since delivered are dropped instead of being re-sent
+    on every run until they expire.
+    """
     try:
-        existing = _load_queue_file_safe()
+        existing = [] if replace else _load_queue_file_safe()
         now_iso = datetime.now(timezone.utc).isoformat()
         envelopes = existing + [
             {"report": r, "queued_at": now_iso} for r in reports

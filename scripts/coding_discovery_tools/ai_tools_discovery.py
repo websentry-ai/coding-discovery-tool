@@ -32,6 +32,11 @@ from typing import Dict, Iterator, List, Optional, Callable
 # 200 minutes. Pass --timeout <=0 to disable.
 DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 
+# Ceiling on the queue drain (seconds). The queue is itself the retry, so a
+# backlog that cannot be sent now waits for the next run. Uncapped, a full queue
+# cost more than the run timeout and the run aborted before detecting anything.
+DRAIN_BUDGET_SECONDS = 600
+
 SCRIPT_VERSION = "1.2.0"
 
 try:
@@ -3615,6 +3620,14 @@ class AIToolsDetector:
         }
 
 
+def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
+    """Seconds the queue drain may spend: its own ceiling, and never more than half
+    of what the run has left, since detecting tools is what the run is for."""
+    if not run_timeout or run_timeout <= 0:
+        return float(DRAIN_BUDGET_SECONDS)
+    return max(0.0, min(float(DRAIN_BUDGET_SECONDS), (run_timeout - elapsed) / 2))
+
+
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
@@ -3920,6 +3933,9 @@ def main():
 
         # Track failed reports for persistence
         failed_reports = []
+        # Queued reports this run did not get to. Separate so they go back ahead of
+        # this run's own failures, and are the first dropped when the queue is capped.
+        requeued_pending = []
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -3928,12 +3944,27 @@ def main():
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
-        # --- Drain pending reports from previous run ---
+        # --- Drain pending reports from earlier runs ---
+        # Time-bounded, so a backlog can neither delay detection nor outlive the
+        # run budget; what is left stays queued. Kept ahead of this run's own
+        # sends: the backend replaces rows per reported tool name, so a queued
+        # report landing after a fresh one would overwrite it with older data.
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
             if pending:
                 logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
-                for queued_report in pending:
+                drain_budget = _drain_budget_seconds(
+                    args.timeout, time.monotonic() - t_start
+                )
+                drain_deadline = time.monotonic() + drain_budget
+                for index, queued_report in enumerate(pending):
+                    if time.monotonic() >= drain_deadline:
+                        requeued_pending = pending[index:]
+                        logger.info(
+                            f"  Drain budget of {drain_budget:.0f}s spent;"
+                            f" {len(requeued_pending)} report(s) stay queued."
+                        )
+                        break
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
                         sentry_context=sentry_ctx,
@@ -3941,7 +3972,14 @@ def main():
                     if success:
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        failed_reports.append(queued_report)
+                        # Retryable means the transport, not this payload, so the rest
+                        # would each pay a full retry cycle to fail the same way.
+                        requeued_pending = pending[index:]
+                        logger.info(
+                            "  Backend unreachable;"
+                            f" {len(requeued_pending)} report(s) stay queued."
+                        )
+                        break
                     else:
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 logger.info("")
@@ -4441,10 +4479,14 @@ def main():
         # Per-tool key, stale from here on; later events inherit this dict.
         sentry_ctx.pop("tool_name", None)
 
-        # --- Persist any failed reports for the next run ---
+        # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
-            if failed_reports:
-                save_failed_reports(failed_reports)
+            # Backlog first: the queue keeps its newest entries when it hits the cap.
+            still_owed = requeued_pending + failed_reports
+            if still_owed:
+                # Authoritative, so reports delivered above are dropped instead of
+                # being re-sent every run until they expire.
+                save_failed_reports(still_owed, replace=True)
             else:
                 queue_file = _get_queue_file_path()
                 if queue_file.exists():

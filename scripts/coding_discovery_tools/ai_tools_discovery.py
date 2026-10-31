@@ -3970,6 +3970,12 @@ def main():
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
+        def _rewrite_queue() -> None:
+            """Put what is still owed on disk now. A report the drain has settled
+            must leave the file before anything can store a payload hash that would
+            make a later run skip the upload that would correct it."""
+            save_failed_reports(requeued_pending + failed_reports, replace=True)
+
         # --- Drain pending reports from earlier runs ---
         # Time-bounded: a backlog must neither delay detection nor outlive the run
         # budget, and what is left stays queued. Kept ahead of this run's sends --
@@ -4017,6 +4023,7 @@ def main():
                     else:
                         consecutive_failures = 0
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                _rewrite_queue()
                 logger.info("")
 
         with time_step("enumerate_users", "detect"):
@@ -4460,16 +4467,12 @@ def main():
                         if reported_ok:
                             discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
                             reported_this_run.add((user_name, tool_name))
-                            # Detection will skip this pair on a later run now its hash
-                            # is stored, so a queued older report for it must leave the
-                            # file here, not at persist: a kill in between would let it
-                            # replace this snapshot permanently.
+                            # This pair now has a stored hash, so a queued older
+                            # report for it is settled too.
                             kept = _drop_superseded(requeued_pending, reported_this_run)
                             if len(kept) != len(requeued_pending):
                                 requeued_pending[:] = kept
-                                save_failed_reports(
-                                    requeued_pending + failed_reports, replace=True,
-                                )
+                                _rewrite_queue()
 
                         if args.dump:
                             logger.info("")

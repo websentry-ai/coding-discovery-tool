@@ -117,8 +117,9 @@ class _DrivesMain:
         return sent, saved, order
 
     def requeued(self, saved):
-        """The reports main() handed back to the queue, and how."""
-        self.assertEqual(saved.call_count, 1, "the queue was not written exactly once")
+        """What main() last left on the queue, and how. The queue is rewritten
+        whenever what is owed changes, so the final call is the one that counts."""
+        self.assertGreaterEqual(saved.call_count, 1, "the queue was never written")
         args, kwargs = saved.call_args
         self.assertTrue(kwargs.get("replace"), "the queue write was not authoritative")
         return args[0]
@@ -195,7 +196,7 @@ class AnUnreachableBackendStopsTheDrain(_DrivesMain, unittest.TestCase):
         sent, saved, _order = self.run_main(pending, FAILED_PERMANENT)
 
         self.assertEqual(self.ids(sent), self.ids(pending))
-        self.assertEqual(saved.call_count, 0, "a rejected report was re-queued")
+        self.assertEqual(self.requeued(saved), [], "a rejected report was re-queued")
 
 
 class TheDrainIsBoundedByTheRunBudget(_DrivesMain, unittest.TestCase):
@@ -606,11 +607,17 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             writes.append([r.get("device_id") for r in reports])
             return real_save(reports, **kwargs)
 
+        def _outcome(report):
+            if report.get("device_id") != "THIS-RUN":
+                return FAILED_RETRYABLE
+            writes.append("UPLOADED")
+            return SENT_OK
+
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
                  "tools": [{"name": "Claude Code", "projects": []}]}
         self.run_main(
             None,
-            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
+            _outcome,
             real_queue=True,
             tools=({"name": "Claude Code", "version": "1.0",
                     "install_path": "/usr/local/bin/claude"},),
@@ -629,12 +636,43 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             ),
         )
 
-        self.assertGreaterEqual(
-            len(writes), 1, "the queue was never written, so nothing was dropped"
-        )
+        self.assertIn("UPLOADED", writes, "the fresh report never went out")
+        after_upload = writes[writes.index("UPLOADED") + 1:]
+        self.assertTrue(after_upload, "the queue was not written after the upload")
         self.assertNotIn(
-            "Q-OLD", writes[0],
-            "the superseded report survived the write that follows the upload",
+            "Q-OLD", after_upload[0],
+            "the superseded report survived the first write after the upload, so a"
+            " kill before persist would leave it to overwrite this snapshot",
+        )
+
+    def test_a_delivered_report_leaves_the_file_before_detection_begins(self):
+        """A report the drain has settled must reach disk straight away. An abort
+        later in the run skips the persist step entirely (the watchdog calls
+        os._exit), and the next run would send that delivered report again -- after
+        a stored hash has already stopped detection from correcting it."""
+        delivered = {"device_id": "Q-GONE", "home_user": "alice",
+                     "tools": [{"name": "Claude Code"}]}
+        self._seed([delivered])
+        at_detection = {}
+
+        def _probe():
+            at_detection["queue"] = (
+                [e["report"]["device_id"]
+                 for e in json.loads(self.queue_file.read_text())]
+                if self.queue_file.exists() else []
+            )
+            return []
+
+        sent, _saved, _order = self.run_main(
+            None, SENT_OK, real_queue=True,
+            patches=(patch.object(adm, "get_all_users_linux", side_effect=_probe),),
+        )
+
+        self.assertEqual(self.ids(sent), ["Q-GONE"], "the drain never sent it")
+        self.assertEqual(
+            at_detection.get("queue"), [],
+            "a report the drain had already delivered was still on disk when"
+            " detection began, so an abort would send it a second time",
         )
 
     def test_a_pair_the_resumed_run_already_reported_is_dropped_unsent(self):

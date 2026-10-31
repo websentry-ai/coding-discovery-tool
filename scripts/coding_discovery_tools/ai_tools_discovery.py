@@ -32,6 +32,14 @@ from typing import Dict, Iterator, List, Optional, Callable
 # 200 minutes. Pass --timeout <=0 to disable.
 DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 
+# Ceiling on the queue drain (seconds). The queue is itself the retry, so a
+# backlog that cannot be sent now waits for the next run. Uncapped, a full queue
+# cost more than the run timeout and the run aborted before detecting anything.
+DRAIN_BUDGET_SECONDS = 600
+# Retryable failures in a row that mean the backend is down rather than one
+# report being bad. Each one costs a full five-attempt retry cycle.
+DRAIN_FAILURES_BEFORE_STOP = 2
+
 SCRIPT_VERSION = "1.2.0"
 
 try:
@@ -3615,6 +3623,29 @@ class AIToolsDetector:
         }
 
 
+def _report_identity(report) -> Optional[tuple]:
+    """The (home_user, tool) a single-tool report describes, or None if it is not one."""
+    tools = report.get("tools") if isinstance(report, dict) else None
+    if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+        return None
+    return (report.get("home_user"), tools[0].get("name"))
+
+
+def _drop_superseded(queued: List[Dict], reported_this_run: set) -> List[Dict]:
+    """Queued reports the backend has no newer snapshot of. Sending one it does have
+    would replace that snapshot, and this run's stored payload hash then stops
+    detection from putting it back."""
+    return [r for r in queued if _report_identity(r) not in reported_this_run]
+
+
+def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
+    """Seconds the queue drain may spend: its own ceiling, and never more than half
+    of what the run has left, since detecting tools is what the run is for."""
+    if not run_timeout or run_timeout <= 0:
+        return float(DRAIN_BUDGET_SECONDS)
+    return max(0.0, min(float(DRAIN_BUDGET_SECONDS), (run_timeout - elapsed) / 2))
+
+
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
@@ -3920,6 +3951,17 @@ def main():
 
         # Track failed reports for persistence
         failed_reports = []
+        # Queued reports this run did not get to. Separate so they go back ahead of
+        # this run's own failures, and are the first dropped when the queue is capped.
+        requeued_pending = []
+        # (home_user, tool) left current on the backend, by upload or by hash match.
+        # A queued older report for one of these must never be sent. Seeded from the
+        # interrupted run this one resumes, whose pairs this run skips re-reporting,
+        # so the drain below already knows about them.
+        reported_this_run = {
+            (home_user, tool_key.split(":", 1)[0])
+            for tool_key, home_user in resume_done
+        }
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -3928,22 +3970,60 @@ def main():
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
-        # --- Drain pending reports from previous run ---
+        def _rewrite_queue() -> None:
+            """Put what is still owed on disk now. A report the drain has settled
+            must leave the file before anything can store a payload hash that would
+            make a later run skip the upload that would correct it."""
+            save_failed_reports(requeued_pending + failed_reports, replace=True)
+
+        # --- Drain pending reports from earlier runs ---
+        # Time-bounded: a backlog must neither delay detection nor outlive the run
+        # budget, and what is left stays queued. Kept ahead of this run's sends --
+        # the backend replaces rows per reported tool name, so a queued report
+        # landing after a fresh one would overwrite it with older data.
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
             if pending:
                 logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
-                for queued_report in pending:
+                drain_budget = _drain_budget_seconds(
+                    args.timeout, time.monotonic() - t_start
+                )
+                drain_deadline = time.monotonic() + drain_budget
+                consecutive_failures = 0
+                for index, queued_report in enumerate(pending):
+                    if _report_identity(queued_report) in reported_this_run:
+                        logger.info("  · Queued report superseded; dropped unsent")
+                        continue
+                    if time.monotonic() >= drain_deadline:
+                        requeued_pending.extend(pending[index:])
+                        logger.info(
+                            f"  Drain budget of {drain_budget:.0f}s spent;"
+                            f" {len(requeued_pending)} report(s) stay queued."
+                        )
+                        break
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
-                        sentry_context=sentry_ctx,
+                        sentry_context=sentry_ctx, deadline=drain_deadline,
                     )
                     if success:
+                        consecutive_failures = 0
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        failed_reports.append(queued_report)
+                        # A run of these means the backend is down. One on its own is
+                        # about that payload, so it must not hold up the queue behind it.
+                        consecutive_failures += 1
+                        requeued_pending.append(queued_report)
+                        if consecutive_failures >= DRAIN_FAILURES_BEFORE_STOP:
+                            requeued_pending.extend(pending[index + 1:])
+                            logger.info(
+                                "  Backend unreachable;"
+                                f" {len(requeued_pending)} report(s) stay queued."
+                            )
+                            break
                     else:
+                        consecutive_failures = 0
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                _rewrite_queue()
                 logger.info("")
 
         with time_step("enumerate_users", "detect"):
@@ -4385,6 +4465,17 @@ def main():
                         # user) so a kill afterward lets the next quick re-run skip
                         # re-processing it.
                         if reported_ok:
+                            # Settle the queue BEFORE the hash is stored. The stored
+                            # hash is what makes a later run skip the upload that
+                            # would correct this pair, so a queued older report must
+                            # already be gone by then. Doing it the other way round
+                            # leaves a kill in between able to restore stale data for
+                            # good; this way round it only costs a re-upload.
+                            reported_this_run.add((user_name, tool_name))
+                            kept = _drop_superseded(requeued_pending, reported_this_run)
+                            if len(kept) != len(requeued_pending):
+                                requeued_pending[:] = kept
+                                _rewrite_queue()
                             discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
@@ -4441,10 +4532,17 @@ def main():
         # Per-tool key, stale from here on; later events inherit this dict.
         sentry_ctx.pop("tool_name", None)
 
-        # --- Persist any failed reports for the next run ---
+        # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
-            if failed_reports:
-                save_failed_reports(failed_reports)
+            # Backlog first: the queue keeps its newest entries when it hits the cap.
+            still_owed = _drop_superseded(requeued_pending, reported_this_run) + failed_reports
+            superseded = len(requeued_pending) + len(failed_reports) - len(still_owed)
+            if superseded:
+                logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
+            if still_owed:
+                # Authoritative, so reports delivered above are dropped instead of
+                # being re-sent every run until they expire.
+                save_failed_reports(still_owed, replace=True)
             else:
                 queue_file = _get_queue_file_path()
                 if queue_file.exists():

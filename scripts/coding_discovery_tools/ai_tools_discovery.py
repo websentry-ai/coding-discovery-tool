@@ -4465,14 +4465,18 @@ def main():
                         # user) so a kill afterward lets the next quick re-run skip
                         # re-processing it.
                         if reported_ok:
-                            discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
+                            # Settle the queue BEFORE the hash is stored. The stored
+                            # hash is what makes a later run skip the upload that
+                            # would correct this pair, so a queued older report must
+                            # already be gone by then. Doing it the other way round
+                            # leaves a kill in between able to restore stale data for
+                            # good; this way round it only costs a re-upload.
                             reported_this_run.add((user_name, tool_name))
-                            # This pair now has a stored hash, so a queued older
-                            # report for it is settled too.
                             kept = _drop_superseded(requeued_pending, reported_this_run)
                             if len(kept) != len(requeued_pending):
                                 requeued_pending[:] = kept
                                 _rewrite_queue()
+                            discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
                             logger.info("")

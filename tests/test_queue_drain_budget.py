@@ -594,37 +594,34 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             [{"report": r, "queued_at": now} for r in reports]
         ))
 
-    def test_the_drop_happens_at_the_upload_not_at_the_final_write(self):
-        """The invariant: by the time the stored hash can make a later run skip
-        this pair, the older queued report is already out of the file."""
+    def test_the_queue_is_settled_before_the_hash_that_hides_the_pair(self):
+        """The invariant, observed where it matters: at the instant the payload hash
+        is stored, the older queued report is already out of the file."""
         superseded = {"device_id": "Q-OLD", "home_user": "alice",
                       "tools": [{"name": "Claude Code"}]}
         self._seed([superseded])
-        writes = []
-        real_save = utils_mod.save_failed_reports
+        # The stored hash is the thing that makes a later run skip the correcting
+        # upload, so the queue file is observed at the moment it is written.
+        at_hash_write = {}
 
-        def _spy(reports, **kwargs):
-            writes.append([r.get("device_id") for r in reports])
-            return real_save(reports, **kwargs)
-
-        def _outcome(report):
-            if report.get("device_id") != "THIS-RUN":
-                return FAILED_RETRYABLE
-            writes.append("UPLOADED")
-            return SENT_OK
+        def _record_report(*_a, **_k):
+            at_hash_write["queue"] = (
+                [e["report"]["device_id"]
+                 for e in json.loads(self.queue_file.read_text())]
+                if self.queue_file.exists() else []
+            )
 
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
                  "tools": [{"name": "Claude Code", "projects": []}]}
         self.run_main(
             None,
-            _outcome,
+            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
             real_queue=True,
             tools=({"name": "Claude Code", "version": "1.0",
                     "install_path": "/usr/local/bin/claude"},),
             users=("alice",),
             fresh_report=fresh,
             patches=(
-                patch.object(adm, "save_failed_reports", _spy),
                 patch.object(adm, "DRAIN_FAILURES_BEFORE_STOP", 99),
                 patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
                 patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
@@ -632,17 +629,16 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
                 patch.object(adm, "_machine_global_install_disowned", return_value=False),
                 patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
                 patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
-                patch.object(adm.discovery_cache, "record_report", Mock()),
+                patch.object(adm.discovery_cache, "record_report",
+                             side_effect=_record_report),
             ),
         )
 
-        self.assertIn("UPLOADED", writes, "the fresh report never went out")
-        after_upload = writes[writes.index("UPLOADED") + 1:]
-        self.assertTrue(after_upload, "the queue was not written after the upload")
+        self.assertIn("queue", at_hash_write, "no hash was ever stored")
         self.assertNotIn(
-            "Q-OLD", after_upload[0],
-            "the superseded report survived the first write after the upload, so a"
-            " kill before persist would leave it to overwrite this snapshot",
+            "Q-OLD", at_hash_write["queue"],
+            "the superseded report was still on disk when the hash was stored, so a"
+            " kill in between would restore stale data for good",
         )
 
     def test_a_delivered_report_leaves_the_file_before_detection_begins(self):

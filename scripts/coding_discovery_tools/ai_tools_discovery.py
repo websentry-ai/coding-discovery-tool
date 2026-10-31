@@ -3954,9 +3954,14 @@ def main():
         # Queued reports this run did not get to. Separate so they go back ahead of
         # this run's own failures, and are the first dropped when the queue is capped.
         requeued_pending = []
-        # (home_user, tool) this run left current on the backend, by upload or by
-        # hash match. A queued older report for one of these must not be sent.
-        reported_this_run = set()
+        # (home_user, tool) left current on the backend, by upload or by hash match.
+        # A queued older report for one of these must never be sent. Seeded from the
+        # interrupted run this one resumes, whose pairs this run skips re-reporting,
+        # so the drain below already knows about them.
+        reported_this_run = {
+            (home_user, tool_key.split(":", 1)[0])
+            for tool_key, home_user in resume_done
+        }
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -3980,6 +3985,9 @@ def main():
                 drain_deadline = time.monotonic() + drain_budget
                 consecutive_failures = 0
                 for index, queued_report in enumerate(pending):
+                    if _report_identity(queued_report) in reported_this_run:
+                        logger.info("  · Queued report superseded; dropped unsent")
+                        continue
                     if time.monotonic() >= drain_deadline:
                         requeued_pending.extend(pending[index:])
                         logger.info(
@@ -4452,6 +4460,16 @@ def main():
                         if reported_ok:
                             discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
                             reported_this_run.add((user_name, tool_name))
+                            # Detection will skip this pair on a later run now its hash
+                            # is stored, so a queued older report for it must leave the
+                            # file here, not at persist: a kill in between would let it
+                            # replace this snapshot permanently.
+                            kept = _drop_superseded(requeued_pending, reported_this_run)
+                            if len(kept) != len(requeued_pending):
+                                requeued_pending[:] = kept
+                                save_failed_reports(
+                                    requeued_pending + failed_reports, replace=True,
+                                )
 
                         if args.dump:
                             logger.info("")

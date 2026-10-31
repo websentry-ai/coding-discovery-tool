@@ -52,7 +52,7 @@ class _DrivesMain:
     detection, and what it handed to the queue."""
 
     def run_main(self, pending, outcome, timeout="12000", patches=(),
-                 real_queue=False):
+                 real_queue=False, tools=(), users=(), fresh_report=None):
         sent = []
         order = []
 
@@ -63,12 +63,20 @@ class _DrivesMain:
 
         def _detect(*_args, **_kwargs):
             order.append("detect")
-            return []
+            return [dict(t) for t in tools]
 
         detector = Mock()
         detector.get_device_id.return_value = "test-device"
         detector.detect_all_tools.side_effect = _detect
         detector.skills_metrics = {}
+        detector.process_single_tool.side_effect = lambda t: dict(t)
+        detector.filter_tool_projects_by_user.side_effect = (
+            lambda t, _home: {**t, "projects": []}
+        )
+        if fresh_report is not None:
+            detector.generate_single_tool_report.side_effect = (
+                lambda *_a, **_k: dict(fresh_report)
+            )
 
         saved = Mock()
         argv = [
@@ -94,7 +102,7 @@ class _DrivesMain:
                 patch.object(adm, "load_pending_reports", return_value=list(pending)),
                 patch.object(adm, "save_failed_reports", saved),
             ) if not real_queue else ()) + (
-                patch.object(adm, "get_all_users_linux", return_value=[]),
+                patch.object(adm, "get_all_users_linux", return_value=list(users)),
                 patch.object(adm, "get_user_info", return_value={}),
                 patch.object(adm, "get_audit_user", Mock(return_value=None)),
                 patch.object(adm, "report_to_sentry", Mock()),
@@ -558,6 +566,100 @@ class TheS3PathIsBoundedByTheSameDeadline(unittest.TestCase):
             ),
             (False, True),
         )
+
+
+class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
+    """Dropping a superseded report only at the final queue write is too late: the
+    payload hash is stored the moment an upload succeeds, so a kill in between
+    leaves the older report to replace that snapshot on the next run -- and it
+    stays, because the stored hash makes detection skip the correcting upload."""
+
+    def setUp(self):
+        self._prior = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+        self._dir = tempfile.mkdtemp(prefix="drain-supersede-test-")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(self._dir) / "queue.json")
+        self.queue_file = utils_mod._get_queue_file_path()
+
+    def tearDown(self):
+        if self._prior is None:
+            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+        else:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._prior
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _seed(self, reports):
+        now = datetime.now(timezone.utc).isoformat()
+        self.queue_file.write_text(json.dumps(
+            [{"report": r, "queued_at": now} for r in reports]
+        ))
+
+    def test_the_drop_happens_at_the_upload_not_at_the_final_write(self):
+        """The invariant: by the time the stored hash can make a later run skip
+        this pair, the older queued report is already out of the file."""
+        superseded = {"device_id": "Q-OLD", "home_user": "alice",
+                      "tools": [{"name": "Claude Code"}]}
+        self._seed([superseded])
+        writes = []
+        real_save = utils_mod.save_failed_reports
+
+        def _spy(reports, **kwargs):
+            writes.append([r.get("device_id") for r in reports])
+            return real_save(reports, **kwargs)
+
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+        self.run_main(
+            None,
+            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
+            real_queue=True,
+            tools=({"name": "Claude Code", "version": "1.0",
+                    "install_path": "/usr/local/bin/claude"},),
+            users=("alice",),
+            fresh_report=fresh,
+            patches=(
+                patch.object(adm, "save_failed_reports", _spy),
+                patch.object(adm, "DRAIN_FAILURES_BEFORE_STOP", 99),
+                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
+                patch.object(adm.discovery_cache, "record_report", Mock()),
+            ),
+        )
+
+        self.assertGreaterEqual(
+            len(writes), 1, "the queue was never written, so nothing was dropped"
+        )
+        self.assertNotIn(
+            "Q-OLD", writes[0],
+            "the superseded report survived the write that follows the upload",
+        )
+
+    def test_a_pair_the_resumed_run_already_reported_is_dropped_unsent(self):
+
+        """Known before the drain starts, so the drain can refuse it outright
+        rather than send it and rely on the requeue filter afterwards."""
+        superseded = {"device_id": "Q-OLD", "home_user": "alice",
+                      "tools": [{"name": "Claude Code"}]}
+        other = {"device_id": "Q-KEEP", "home_user": "bob",
+                 "tools": [{"name": "Cursor"}]}
+        self._seed([superseded, other])
+
+        sent, _saved, _order = self.run_main(
+            None, SENT_OK, real_queue=True,
+            patches=(
+                patch.object(adm.discovery_cache, "resumable_done",
+                             return_value={("Claude Code:/usr/local/bin/claude", "alice")}),
+            ),
+        )
+
+        self.assertEqual(
+            self.ids(sent), ["Q-KEEP"],
+            "a report the resumed run had already superseded was sent anyway",
+        )
+        self.assertFalse(self.queue_file.exists(), "the dropped report was re-queued")
 
 
 if __name__ == "__main__":

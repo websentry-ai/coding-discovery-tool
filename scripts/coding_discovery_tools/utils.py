@@ -1835,7 +1835,7 @@ def _queued_at_by_report(envelopes: List[Dict]) -> Dict[str, str]:
     return found
 
 
-def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
+def save_failed_reports(reports: List[Dict], replace: bool = False) -> bool:
     """Write failed report envelopes to the queue file, merging with any existing
     entries unless replace=True.
 
@@ -1843,6 +1843,9 @@ def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
     the caller has since delivered are dropped rather than re-sent every run. A
     report already in the queue then keeps its original queued_at, so requeueing
     it cannot refresh it past QUEUE_MAX_AGE_SECONDS.
+
+    Returns whether the queue reached disk, for a caller whose next step is only
+    safe once it has.
     """
     try:
         existing = _load_queue_file_safe()
@@ -1857,9 +1860,11 @@ def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
         queue_file = _get_queue_file_path()
         _write_file_secure(queue_file, json.dumps(envelopes).encode())
         logger.info(f"Saved {len(reports)} failed report(s) to {queue_file}")
+        return True
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
         report_to_sentry(e, {"phase": "queue"}, level="warning")
+        return False
 
 
 def load_pending_reports() -> List[Dict]:

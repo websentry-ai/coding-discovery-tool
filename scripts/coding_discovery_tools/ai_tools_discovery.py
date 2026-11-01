@@ -3970,11 +3970,12 @@ def main():
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
-        def _rewrite_queue() -> None:
-            """Put what is still owed on disk now. A report the drain has settled
-            must leave the file before anything can store a payload hash that would
-            make a later run skip the upload that would correct it."""
-            save_failed_reports(requeued_pending + failed_reports, replace=True)
+        def _rewrite_queue() -> bool:
+            """Put what is still owed on disk now, reporting whether it got there. A
+            report the drain has settled must leave the file before anything can
+            store a payload hash that would make a later run skip the upload that
+            would correct it."""
+            return save_failed_reports(requeued_pending + failed_reports, replace=True)
 
         # --- Drain pending reports from earlier runs ---
         # Time-bounded: a backlog must neither delay detection nor outlive the run
@@ -4472,11 +4473,19 @@ def main():
                             # leaves a kill in between able to restore stale data for
                             # good; this way round it only costs a re-upload.
                             reported_this_run.add((user_name, tool_name))
+                            settled = True
                             kept = _drop_superseded(requeued_pending, reported_this_run)
                             if len(kept) != len(requeued_pending):
                                 requeued_pending[:] = kept
-                                _rewrite_queue()
-                            discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
+                                settled = _rewrite_queue()
+                            if settled:
+                                discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
+                            else:
+                                logger.warning(
+                                    f"  Queue still holds an older {tool_name} report for"
+                                    f" {user_name}; not storing its hash, so the next run"
+                                    f" re-uploads rather than skipping it"
+                                )
 
                         if args.dump:
                             logger.info("")

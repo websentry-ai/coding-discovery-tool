@@ -329,29 +329,6 @@ class TheQueueFileEndsAsWhatIsStillOwed(_DrivesMain, unittest.TestCase):
         )
         self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3"])
 
-    def test_what_is_written_back_has_been_through_the_supersede_filter(self):
-        """The wiring between the two: reaching the per-tool send path in-process
-        means mocking the whole extraction pipeline, so the filter's own rule is
-        unit-tested and this asserts main() actually routes the backlog through it."""
-        seen = {}
-
-        def _spy(queued, reported_this_run):
-            seen["queued"] = list(queued)
-            seen["reported"] = set(reported_this_run)
-            return list(queued)
-
-        pending = _queued(3)
-        self.queue_file.write_text(json.dumps(
-            [{"report": r, "queued_at": datetime.now(timezone.utc).isoformat()}
-             for r in pending]
-        ))
-
-        self.run_main(None, FAILED_RETRYABLE, real_queue=True,
-                      patches=(patch.object(adm, "_drop_superseded", _spy),))
-
-        self.assertEqual(self.ids(seen["queued"]), self.ids(pending))
-        self.assertIsInstance(seen["reported"], set)
-
     def test_a_fully_drained_queue_removes_the_file(self):
         pending = _queued(3)
         now = datetime.now(timezone.utc).isoformat()
@@ -669,6 +646,44 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             at_detection.get("queue"), [],
             "a report the drain had already delivered was still on disk when"
             " detection began, so an abort would send it a second time",
+        )
+
+    def test_a_failed_queue_write_stops_the_hash_being_stored(self):
+        """The ordering only helps if the write actually landed. Storing the hash
+        after a failed rewrite would hide the pair while the stale report is still
+        queued -- the exact outcome the ordering exists to prevent."""
+        superseded = {"device_id": "Q-OLD", "home_user": "alice",
+                      "tools": [{"name": "Claude Code"}]}
+        self._seed([superseded])
+        recorded = []
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+
+        self.run_main(
+            None,
+            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
+            real_queue=True,
+            tools=({"name": "Claude Code", "version": "1.0",
+                    "install_path": "/usr/local/bin/claude"},),
+            users=("alice",),
+            fresh_report=fresh,
+            patches=(
+                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
+                patch.object(adm, "save_failed_reports", return_value=False),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
+                patch.object(adm.discovery_cache, "record_report",
+                             side_effect=lambda *a, **k: recorded.append(a)),
+            ),
+        )
+
+        self.assertEqual(
+            recorded, [],
+            "the hash was stored although the queue write failed, so the stale"
+            " report is both queued and hidden",
         )
 
     def test_a_pair_the_resumed_run_already_reported_is_dropped_unsent(self):

@@ -483,10 +483,13 @@ class TheTransportItselfRespectsTheDeadline(unittest.TestCase):
         self.assertEqual(self.server.hits, 0, "a request went out past the deadline")
 
     def test_a_near_deadline_stops_after_one_attempt_without_sleeping(self):
+        # Comfortable room for one instant request, and none for a backoff: the
+        # smallest real ceiling is 15s, so any sleep is refused. A tighter margin
+        # makes the request itself unstartable on a loaded machine.
         with patch("time.sleep") as slept:
             success, retryable = send_report_to_backend(
                 self.url, "test-key-000000", self.report,
-                deadline=time.monotonic() + 3,
+                deadline=time.monotonic() + 6,
             )
 
         self.assertEqual((success, retryable), (False, True))
@@ -684,6 +687,43 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             recorded, [],
             "the hash was stored although the queue write failed, so the stale"
             " report is both queued and hidden",
+        )
+
+    def test_a_failed_post_drain_write_also_stops_the_hash(self):
+        """The drain delivering a report leaves nothing to drop later, so the
+        per-upload rewrite would not fire and the post-drain write is the only one
+        that cleaned the file. Its failure has to count too, or a delivered report
+        stays on disk while hashes hide the pairs that would correct it."""
+        delivered = {"device_id": "Q-DELIVERED", "home_user": "bob",
+                     "tools": [{"name": "Cursor"}]}
+        self._seed([delivered])
+        recorded = []
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+
+        sent, _saved, _order = self.run_main(
+            None, SENT_OK, real_queue=True,
+            tools=({"name": "Claude Code", "version": "1.0",
+                    "install_path": "/usr/local/bin/claude"},),
+            users=("alice",),
+            fresh_report=fresh,
+            patches=(
+                patch.object(adm, "save_failed_reports", return_value=False),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
+                patch.object(adm.discovery_cache, "record_report",
+                             side_effect=lambda *a, **k: recorded.append(a)),
+            ),
+        )
+
+        self.assertIn("Q-DELIVERED", self.ids(sent), "the drain never delivered it")
+        self.assertEqual(
+            recorded, [],
+            "a hash was stored although the write that should have cleared the"
+            " delivered report from disk had failed",
         )
 
     def test_a_pair_the_resumed_run_already_reported_is_dropped_unsent(self):

@@ -4466,19 +4466,20 @@ def main():
                         # user) so a kill afterward lets the next quick re-run skip
                         # re-processing it.
                         if reported_ok:
-                            # Settle the queue BEFORE the hash is stored. The stored
-                            # hash is what makes a later run skip the upload that
-                            # would correct this pair, so a queued older report must
-                            # already be gone by then. Doing it the other way round
-                            # leaves a kill in between able to restore stale data for
-                            # good; this way round it only costs a re-upload.
+                            # The stored hash is what makes a later run skip the
+                            # upload that would correct this pair, so it may only be
+                            # stored once the queue is known not to hold an older
+                            # report for it. Failing that way round costs a re-upload;
+                            # the other way round restores stale data for good.
                             reported_this_run.add((user_name, tool_name))
-                            settled = True
-                            kept = _drop_superseded(requeued_pending, reported_this_run)
-                            if len(kept) != len(requeued_pending):
-                                requeued_pending[:] = kept
-                                settled = _rewrite_queue()
-                            if settled:
+                            requeued_pending[:] = _drop_superseded(
+                                requeued_pending, reported_this_run
+                            )
+                            # With nothing drained this run, no queued report can be
+                            # hiding behind this pair. Otherwise the queue has to be
+                            # on disk before the hash is: delivered reports included,
+                            # since the post-drain write can fail too.
+                            if not pending or _rewrite_queue():
                                 discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
                             else:
                                 logger.warning(

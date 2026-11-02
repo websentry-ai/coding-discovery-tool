@@ -928,10 +928,6 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         mock_file.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestClaudeMaxPlanRefinement(unittest.TestCase):
     """Claude reports Max and Ultra both as "max". The scan refines it from the account
     profile in ~/.claude.json, through the real plan detection on its Linux path."""
@@ -994,3 +990,21 @@ class TestClaudeMaxPlanRefinement(unittest.TestCase):
         for plan in ("pro", "team", "enterprise", "api_key"):
             with self.subTest(plan=plan):
                 self.assertEqual(self.detect(subscription=plan, profile=ultra_profile), plan)
+
+    def test_a_non_string_tier_keeps_max(self):
+        for tier in ([], {"a": 1}, 20):
+            with self.subTest(tier=tier):
+                self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier=tier,
+                                                                  planDisplayName="Ultra")), "max")
+
+    def test_a_non_object_account_keeps_max(self):
+        for profile in ({"oauthAccount": ["x"]}, ["x"], 7):
+            with self.subTest(profile=profile):
+                self.assertEqual(self.detect(profile=profile), "max")
+
+    def test_a_cached_name_without_a_tier_keeps_max(self):
+        self.assertEqual(self.detect(profile=self.account(planDisplayName="Max 20x")), "max")
+
+
+if __name__ == "__main__":
+    unittest.main()

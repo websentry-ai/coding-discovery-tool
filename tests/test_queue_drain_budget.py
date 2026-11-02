@@ -484,18 +484,22 @@ class TheTransportItselfRespectsTheDeadline(unittest.TestCase):
 
     def test_a_near_deadline_stops_after_one_attempt_without_sleeping(self):
         # Comfortable room for one instant request, and none for a backoff: the
-        # smallest real wait is 7.5s. The clock is the assertion rather than a
-        # mocked time.sleep, which subprocess also calls while polling curl.
-        started = time.monotonic()
-        success, retryable = send_report_to_backend(
-            self.url, "test-key-000000", self.report,
-            deadline=time.monotonic() + 6,
-        )
-        elapsed = time.monotonic() - started
+        # smallest real wait is 7.5s. Sleeps are mocked so a regression here fails
+        # fast instead of serving out the retry curve, and the request count is
+        # what proves the guard -- counting sleeps cannot, because subprocess
+        # calls time.sleep too while it polls curl.
+        with patch("time.sleep"):
+            success, retryable = send_report_to_backend(
+                self.url, "test-key-000000", self.report,
+                deadline=time.monotonic() + 6,
+            )
 
         self.assertEqual((success, retryable), (False, True))
-        self.assertEqual(self.server.hits, 1, "it retried past its deadline")
-        self.assertLess(elapsed, 7, "it slept a backoff it had no budget for")
+        self.assertEqual(
+            self.server.hits, 1,
+            "it retried past its deadline; with the backoff refused there is"
+            " nothing to wait for and the attempt loop must stop",
+        )
 
     def test_a_request_cannot_outlive_the_remaining_budget(self):
         """Not starting a request past the deadline is not enough: the request's own

@@ -928,5 +928,110 @@ class TestGetPlanFromCredentialsFile(unittest.TestCase):
         mock_file.assert_not_called()
 
 
+class TestClaudeMaxPlanRefinement(unittest.TestCase):
+    """Claude reports Max and Ultra both as "max". The scan refines it from the account
+    profile in ~/.claude.json, through the real plan detection on its Linux path."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.utils as utils_mod
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        patcher = patch("scripts.coding_discovery_tools.utils.platform.system", return_value="Linux")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def detect(self, subscription="max", profile=None):
+        (self.home / ".claude").mkdir(exist_ok=True)
+        (self.home / ".claude" / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"subscriptionType": subscription}}))
+        if profile is not None:
+            (self.home / ".claude.json").write_text(profile if isinstance(profile, str) else json.dumps(profile))
+        return get_claude_subscription_type("someone", None, user_home=self.home)
+
+    def account(self, **fields):
+        return {"oauthAccount": fields}
+
+    def test_the_20x_tier_is_ultra(self):
+        self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier="default_claude_max_20x",
+                                                          planDisplayName="Ultra")), "ultra")
+
+    def test_the_5x_tier_stays_max(self):
+        self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier="default_claude_max_5x",
+                                                          planDisplayName="Max")), "max")
+
+    def test_a_profile_cached_before_the_rename_still_maps_by_tier(self):
+        self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier="default_claude_max_20x",
+                                                          planDisplayName="Max 20x")), "ultra")
+
+    def test_an_unknown_tier_keeps_max(self):
+        self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier="default_claude_pro",
+                                                          planDisplayName="Pro")), "max")
+
+    def test_no_profile_keeps_max(self):
+        self.assertEqual(self.detect(), "max")
+
+    def test_a_malformed_profile_keeps_max(self):
+        self.assertEqual(self.detect(profile="{not json"), "max")
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink")
+    def test_a_symlinked_profile_is_not_read(self):
+        real = Path(self.tmp.name) / "elsewhere.json"
+        real.write_text(json.dumps(self.account(organizationRateLimitTier="default_claude_max_20x")))
+        (self.home / ".claude.json").symlink_to(real)
+        self.assertEqual(self.detect(), "max")
+
+    def test_other_plans_are_never_rewritten(self):
+        ultra_profile = self.account(organizationRateLimitTier="default_claude_max_20x", planDisplayName="Ultra")
+        for plan in ("pro", "team", "enterprise", "api_key"):
+            with self.subTest(plan=plan):
+                self.assertEqual(self.detect(subscription=plan, profile=ultra_profile), plan)
+
+    def test_a_non_string_tier_keeps_max(self):
+        for tier in ([], {"a": 1}, 20):
+            with self.subTest(tier=tier):
+                self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier=tier,
+                                                                  planDisplayName="Ultra")), "max")
+
+    def test_a_non_object_account_keeps_max(self):
+        for profile in ({"oauthAccount": ["x"]}, ["x"], 7):
+            with self.subTest(profile=profile):
+                self.assertEqual(self.detect(profile=profile), "max")
+
+    def test_a_cached_name_without_a_tier_keeps_max(self):
+        self.assertEqual(self.detect(profile=self.account(planDisplayName="Max 20x")), "max")
+
+    def write_profile(self, tier):
+        (self.home / ".claude.json").write_text(json.dumps(self.account(organizationRateLimitTier=tier)))
+
+    def test_the_macos_keychain_path_is_refined(self):
+        self.write_profile("default_claude_max_20x")
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+                patch(f"{_MOD}._is_root", return_value=False), \
+                patch(f"{_MOD}._get_plan_from_keychain", return_value="max"):
+            self.assertEqual(get_claude_subscription_type("someone", None, user_home=self.home), "ultra")
+
+    def test_the_claude_cli_fallback_is_refined(self):
+        self.write_profile("default_claude_max_20x")
+        status = MagicMock(spec=subprocess.CompletedProcess, returncode=0, stderr="",
+                           stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"}))
+        with patch(f"{_MOD}._is_root", return_value=False), \
+                patch(f"{_MOD}._safe_helper", side_effect=lambda name: name), \
+                patch(f"{_MOD}.subprocess.run", return_value=status):
+            self.assertEqual(get_claude_subscription_type("someone", "/usr/local/bin/claude",
+                                                         user_home=self.home), "ultra")
+
+    def test_a_profile_over_the_read_cap_keeps_max(self):
+        account = json.dumps(self.account(organizationRateLimitTier="default_claude_max_20x"))
+        padding = json.dumps({"projects": {"/p": {"history": "x" * (9 * 1024 * 1024)}}})
+        self.assertEqual(self.detect(profile=padding[:-1] + "," + account[1:]), "max")
+
+    @unittest.skipIf(os.name == "nt", "POSIX FIFO")
+    def test_a_fifo_profile_keeps_max_without_blocking(self):
+        os.mkfifo(self.home / ".claude.json")
+        self.assertEqual(self.detect(), "max")
+
+
 if __name__ == "__main__":
     unittest.main()

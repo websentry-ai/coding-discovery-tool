@@ -1064,10 +1064,11 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
         )
 
     def test_a_failed_cache_write_does_not_let_the_stale_hash_win(self):
-        """forget_tool_hash goes through atomic_write_cache, which swallows write
-        errors. If the stale hash survives on disk, the correcting upload has to
-        happen anyway -- otherwise the drain replaced the row and nothing ever
-        puts it back, because the delivered report has left the queue."""
+        """When the write is reported as failed and the stale hash survives on
+        disk, the correcting upload still has to go out in THIS run, carried by
+        the in-memory set. What happens to the queue entry afterwards is the
+        sibling test's subject: here the run does correct the pair, so dropping
+        it is right."""
         tools = ({"name": "Claude Code", "version": "1.0",
                   "install_path": "/usr/local/bin/claude"},)
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
@@ -1082,8 +1083,11 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
         backend, _ = self.run_main(
             tools=tools, users=("alice",), fresh_report=fresh,
             patches=(
-                # The invalidation cannot reach disk, and the old hash still matches.
-                patch.object(adm.discovery_cache, "forget_tool_hash", Mock()),
+                # The invalidation reports that it never reached disk, and the old
+                # hash still matches. A bare Mock would not do: it is truthy, so
+                # main() would read it as a successful write.
+                patch.object(adm.discovery_cache, "forget_tool_hash",
+                             return_value=False),
                 patch.object(adm.discovery_cache, "get_cached_hash",
                              return_value=stale_hash),
                 patch.object(adm, "_refresh_mcp_tools_cache", Mock()),

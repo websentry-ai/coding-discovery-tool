@@ -269,6 +269,20 @@ def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:
     atomic_write_cache(cache)
 
 
+def forget_tool_hash(tool_name: str, home_user: str) -> None:
+    """Drop the recorded hash for one (tool, home_user), so the next detection
+    uploads instead of treating the backend as already current."""
+    cache = read_cache()
+    tools = cache.get("tools")
+    if not isinstance(tools, dict):
+        return
+    by_user = tools.get(tool_name)
+    if not isinstance(by_user, dict) or home_user not in by_user:
+        return
+    by_user.pop(home_user, None)
+    atomic_write_cache(cache)
+
+
 def get_cached_hash(tool_name: str, home_user: str, cache: Optional[dict] = None) -> Optional[str]:
     cache = cache if cache is not None else read_cache()
     tools = cache.get("tools") or {}

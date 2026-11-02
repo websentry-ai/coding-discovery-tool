@@ -4030,6 +4030,13 @@ def main():
                     )
                     if success:
                         consecutive_failures = 0
+                        # The backend now holds this report's older snapshot, so what
+                        # we last uploaded for that pair is no longer what is there.
+                        # Dropping the hash makes detection below re-upload and
+                        # correct it rather than skip the pair as unchanged.
+                        delivered = _report_identity(queued_report)
+                        if delivered:
+                            discovery_cache.forget_tool_hash(delivered[1], delivered[0])
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
                         # A run of these means the backend is down. One on its own is

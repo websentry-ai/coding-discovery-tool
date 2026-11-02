@@ -836,5 +836,80 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
         self.assertFalse(self.queue_file.exists(), "the dropped report was re-queued")
 
 
+class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
+    """Capping the drain is only half of it. A backend that is down costs each
+    (tool, user) report five attempts and ~169s of backoff as well, so on a
+    multi-user device with several tools this run's own sends could spend the
+    budget the drain was capped to protect."""
+
+    def test_a_per_tool_send_is_given_the_run_budget_as_its_deadline(self):
+        deadlines = []
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+
+        def _send(domain, api_key, report, app_name=None, sentry_context=None,
+                  deadline=None):
+            if report.get("device_id") == "THIS-RUN":
+                deadlines.append(deadline)
+            return SENT_OK
+
+        self.run_main(
+            [], SENT_OK, timeout="900",
+            tools=({"name": "Claude Code", "version": "1.0",
+                    "install_path": "/usr/local/bin/claude"},),
+            users=("alice",),
+            fresh_report=fresh,
+            patches=(
+                patch.object(adm, "send_report_to_backend", _send),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(tempfile.gettempdir())),
+                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
+                patch.object(adm.discovery_cache, "record_report", Mock()),
+            ),
+        )
+
+        self.assertEqual(len(deadlines), 1, "this run's report never went out")
+        self.assertIsNotNone(
+            deadlines[0],
+            "the per-tool send had no deadline, so a down backend can spend the"
+            " whole run on retries the drain was capped to prevent",
+        )
+        # 900s run, 120s reserved for the completed event and metrics.
+        self.assertLess(deadlines[0] - time.monotonic(), 900 - 120 + 1)
+
+    def test_a_disabled_run_timeout_leaves_the_sends_unbounded(self):
+        """--timeout <=0 turns the self-deadline off by design; the sends follow."""
+        deadlines = []
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+
+        def _send(domain, api_key, report, app_name=None, sentry_context=None,
+                  deadline=None):
+            if report.get("device_id") == "THIS-RUN":
+                deadlines.append(deadline)
+            return SENT_OK
+
+        self.run_main(
+            [], SENT_OK, timeout="0",
+            tools=({"name": "Claude Code", "version": "1.0",
+                    "install_path": "/usr/local/bin/claude"},),
+            users=("alice",),
+            fresh_report=fresh,
+            patches=(
+                patch.object(adm, "send_report_to_backend", _send),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(tempfile.gettempdir())),
+                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
+                patch.object(adm.discovery_cache, "record_report", Mock()),
+            ),
+        )
+
+        self.assertEqual(deadlines, [None])
+
+
 if __name__ == "__main__":
     unittest.main()

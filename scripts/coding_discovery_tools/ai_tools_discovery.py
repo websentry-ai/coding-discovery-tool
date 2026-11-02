@@ -36,6 +36,10 @@ DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 # backlog that cannot be sent now waits for the next run. Uncapped, a full queue
 # cost more than the run timeout and the run aborted before detecting anything.
 DRAIN_BUDGET_SECONDS = 600
+# Left of the run budget for the end-of-run sends once this run's own reports
+# have had the rest. Unbounded, those reports carry the same cost the drain was
+# capped for -- five attempts and ~169s of backoff each, per tool per user.
+RUN_SEND_RESERVE_SECONDS = 120
 # Retryable failures in a row that mean the backend is down rather than one
 # report being bad. Each one costs a full five-attempt retry cycle.
 DRAIN_FAILURES_BEFORE_STOP = 2
@@ -4162,6 +4166,14 @@ def main():
         # Pick the single Junie surface that should carry the shared config.
         detector._set_canonical_junie_surface(tools)
 
+        # This run's own reports get the rest of the budget, minus what the
+        # completed event and metrics need. A send that would outlive it queues
+        # instead, which is what the queue is for.
+        send_deadline = (
+            t_start + args.timeout - RUN_SEND_RESERVE_SECONDS
+            if args.timeout and args.timeout > 0 else None
+        )
+
         # Resume observability: how many tools had their processing fully skipped.
         resume_tools_skipped = 0
         # Process each tool, then explore all users for that tool and send reports
@@ -4459,7 +4471,11 @@ def main():
                                 logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
                             with time_step("send_report_per_tool_user", "send"):
-                                success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                                success, retryable = send_report_to_backend(
+                                    args.domain, args.api_key, single_tool_report,
+                                    args.app_name, sentry_context=sentry_ctx,
+                                    deadline=send_deadline,
+                                )
                             if success:
                                 reported_ok = True
                                 hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)

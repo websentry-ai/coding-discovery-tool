@@ -4043,6 +4043,16 @@ def main():
                         if delivered:
                             stale_on_backend.add(delivered)
                             discovery_cache.forget_tool_hash(delivered[1], delivered[0])
+                            # The cache write can fail silently, and the set above
+                            # only lasts this process. Read it back: if the hash
+                            # survived, keep the report queued so a later run drains
+                            # it and retries, rather than leaving a row that a stale
+                            # hash hides for good. The persist-time filter drops it
+                            # again if this run does correct the pair.
+                            if discovery_cache.get_cached_hash(
+                                delivered[1], delivered[0]
+                            ) is not None:
+                                requeued_pending.append(queued_report)
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
                         # A run of these means the backend is down. One on its own is

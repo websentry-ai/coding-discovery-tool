@@ -1099,6 +1099,30 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
             " drain replaced stays wrong for good",
         )
 
+    def test_an_invalidation_that_did_not_land_keeps_the_report_queued(self):
+        """The in-memory set only lasts this process. If the hash survived the
+        write, the report has to stay queued so a later run retries -- otherwise
+        an interruption here leaves a row that the stale hash hides for good."""
+        stale = {"device_id": "QUEUED-0", "home_user": "alice",
+                 "tools": [{"name": "Claude Code"}]}
+        self.seed_queue([stale])
+
+        backend, _ = self.run_main(
+            patches=(
+                # Delivered, but the invalidation never reaches disk.
+                patch.object(adm.discovery_cache, "forget_tool_hash", Mock()),
+                patch.object(adm.discovery_cache, "get_cached_hash",
+                             return_value="a-hash-that-survived-the-write"),
+            ),
+        )
+
+        self.assertEqual(backend.device_ids(), ["QUEUED-0"], "it was never delivered")
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "a delivered report was dropped although its invalidation never"
+            " landed, so nothing will retry it",
+        )
+
     def test_a_report_it_could_not_deliver_leaves_the_hash_alone(self):
         """Only a delivery makes the hash wrong. Clearing it on a failure would
         force a pointless re-upload of a pair the backend never heard about."""

@@ -3970,6 +3970,10 @@ def main():
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
+        # Whether the queue file is known to hold only what is still owed. False
+        # means a write failed, so nothing may store a hash until one lands.
+        queue_on_disk = [True]
+
         def _rewrite_queue() -> bool:
             """Put what is still owed on disk now, reporting whether it got there. A
             report the drain has settled must leave the file before anything can
@@ -4024,7 +4028,7 @@ def main():
                     else:
                         consecutive_failures = 0
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
-                _rewrite_queue()
+                queue_on_disk[0] = _rewrite_queue()
                 logger.info("")
 
         with time_step("enumerate_users", "detect"):
@@ -4472,14 +4476,15 @@ def main():
                             # report for it. Failing that way round costs a re-upload;
                             # the other way round restores stale data for good.
                             reported_this_run.add((user_name, tool_name))
+                            owed = len(requeued_pending)
                             requeued_pending[:] = _drop_superseded(
                                 requeued_pending, reported_this_run
                             )
-                            # With nothing drained this run, no queued report can be
-                            # hiding behind this pair. Otherwise the queue has to be
-                            # on disk before the hash is: delivered reports included,
-                            # since the post-drain write can fail too.
-                            if not pending or _rewrite_queue():
+                            # The file already lacks this pair unless it just came out
+                            # of the backlog, or an earlier write never landed.
+                            if len(requeued_pending) != owed or not queue_on_disk[0]:
+                                queue_on_disk[0] = _rewrite_queue()
+                            if queue_on_disk[0]:
                                 discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
                             else:
                                 logger.warning(

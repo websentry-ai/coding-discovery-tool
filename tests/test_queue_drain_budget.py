@@ -484,17 +484,18 @@ class TheTransportItselfRespectsTheDeadline(unittest.TestCase):
 
     def test_a_near_deadline_stops_after_one_attempt_without_sleeping(self):
         # Comfortable room for one instant request, and none for a backoff: the
-        # smallest real ceiling is 15s, so any sleep is refused. A tighter margin
-        # makes the request itself unstartable on a loaded machine.
-        with patch("time.sleep") as slept:
-            success, retryable = send_report_to_backend(
-                self.url, "test-key-000000", self.report,
-                deadline=time.monotonic() + 6,
-            )
+        # smallest real wait is 7.5s. The clock is the assertion rather than a
+        # mocked time.sleep, which subprocess also calls while polling curl.
+        started = time.monotonic()
+        success, retryable = send_report_to_backend(
+            self.url, "test-key-000000", self.report,
+            deadline=time.monotonic() + 6,
+        )
+        elapsed = time.monotonic() - started
 
         self.assertEqual((success, retryable), (False, True))
         self.assertEqual(self.server.hits, 1, "it retried past its deadline")
-        self.assertEqual(slept.call_count, 0, "it slept a backoff it had no budget for")
+        self.assertLess(elapsed, 7, "it slept a backoff it had no budget for")
 
     def test_a_request_cannot_outlive_the_remaining_budget(self):
         """Not starting a request past the deadline is not enough: the request's own
@@ -724,6 +725,48 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             recorded, [],
             "a hash was stored although the write that should have cleared the"
             " delivered report from disk had failed",
+        )
+
+    def test_a_pair_the_backlog_does_not_hold_costs_no_extra_write(self):
+        """Once the post-drain write has landed, the file holds only what is owed,
+        so a pair that is not in it needs no further write. Rewriting per upload
+        re-reads and re-serialises every queued report, which on a device with a
+        backlog and several tools is pure cost."""
+        unrelated = {"device_id": "Q-OTHER", "home_user": "bob",
+                     "tools": [{"name": "Cursor"}]}
+        self._seed([unrelated])
+        writes = []
+        real_save = utils_mod.save_failed_reports
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+
+        self.run_main(
+            None,
+            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
+            real_queue=True,
+            tools=({"name": "Claude Code", "version": "1.0",
+                    "install_path": "/usr/local/bin/claude"},),
+            users=("alice",),
+            fresh_report=fresh,
+            patches=(
+                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
+                patch.object(adm, "save_failed_reports",
+                             side_effect=lambda *a, **k: (
+                                 writes.append(1), real_save(*a, **k))[1]),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
+                patch.object(adm.discovery_cache, "record_report", Mock()),
+            ),
+        )
+
+        # Two: once when the drain finishes, once at persist. A third would be a
+        # rewrite for a pair the file never held.
+        self.assertEqual(
+            len(writes), 2,
+            "the queue was rewritten for a pair it never held",
         )
 
     def test_a_pair_the_resumed_run_already_reported_is_dropped_unsent(self):

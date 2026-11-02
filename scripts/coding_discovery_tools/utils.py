@@ -1487,6 +1487,7 @@ def send_scan_event(
     system_user: Optional[str] = None,
     manifest: Optional[List[Dict]] = None,
     covered_home_users: Optional[List[str]] = None,
+    deadline: Optional[float] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -1544,7 +1545,8 @@ def send_scan_event(
         api_key,
         payload,
         app_name,
-        sentry_context
+        sentry_context,
+        deadline=deadline,
     )
 
 

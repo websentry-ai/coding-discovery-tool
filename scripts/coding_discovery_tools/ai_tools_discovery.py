@@ -38,8 +38,10 @@ DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 DRAIN_BUDGET_SECONDS = 600
 # Left of the run budget for the end-of-run sends once this run's own reports
 # have had the rest. Unbounded, those reports carry the same cost the drain was
-# capped for -- five attempts and ~169s of backoff each, per tool per user.
-RUN_SEND_RESERVE_SECONDS = 120
+# capped for -- five attempts and ~169s of backoff each, per tool per user. The
+# reserve has to fit a whole retry cycle, or the tail of the run trips the
+# watchdog it exists to avoid.
+RUN_SEND_RESERVE_SECONDS = 300
 # Retryable failures in a row that mean the backend is down rather than one
 # report being bad. Each one costs a full five-attempt retry cycle.
 DRAIN_FAILURES_BEFORE_STOP = 2
@@ -4169,9 +4171,12 @@ def main():
         # This run's own reports get the rest of the budget, minus what the
         # completed event and metrics need. A send that would outlive it queues
         # instead, which is what the queue is for.
+        run_deadline = (
+            t_start + args.timeout if args.timeout and args.timeout > 0 else None
+        )
         send_deadline = (
-            t_start + args.timeout - RUN_SEND_RESERVE_SECONDS
-            if args.timeout and args.timeout > 0 else None
+            run_deadline - RUN_SEND_RESERVE_SECONDS
+            if run_deadline is not None else None
         )
 
         # Resume observability: how many tools had their processing fully skipped.
@@ -4724,7 +4729,7 @@ def main():
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
-            manifest=manifest, covered_home_users=covered,
+            manifest=manifest, covered_home_users=covered, deadline=run_deadline,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")

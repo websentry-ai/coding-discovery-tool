@@ -830,7 +830,8 @@ class TestManifestKeyedByInstallPath(unittest.TestCase):
 
         reports, captured = [], {}
 
-        def _send_report(domain, api_key, report, app_name, sentry_context=None):
+        def _send_report(domain, api_key, report, app_name, sentry_context=None,
+                         **_kwargs):
             reports.append((report["home_user"], report["tools"][0].get("install_path")))
             return True, False
 

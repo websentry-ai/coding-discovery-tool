@@ -876,8 +876,36 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
             "the per-tool send had no deadline, so a down backend can spend the"
             " whole run on retries the drain was capped to prevent",
         )
-        # 900s run, 120s reserved for the completed event and metrics.
-        self.assertLess(deadlines[0] - time.monotonic(), 900 - 120 + 1)
+        # The reserve is what the completed event and metrics get after this; it
+        # has to fit a whole retry cycle, so it is not a token amount.
+        left = deadlines[0] - time.monotonic()
+        self.assertLess(left, 900 - adm.RUN_SEND_RESERVE_SECONDS + 1)
+        self.assertGreater(
+            adm.RUN_SEND_RESERVE_SECONDS, 225,
+            "the reserve is shorter than one retry cycle, so the tail of the run"
+            " can still trip the watchdog",
+        )
+
+    def test_the_completed_event_is_bounded_by_the_run_deadline(self):
+        """The last send of the run had no deadline at all, so one retry cycle
+        there could outlive the reserve and trip the watchdog."""
+        seen = {}
+
+        def _event(domain, api_key, device_id, run_id, event, *a, **kw):
+            if event == "completed":
+                seen["deadline"] = kw.get("deadline")
+            return (True, None)
+
+        self.run_main(
+            [], SENT_OK, timeout="900",
+            patches=(patch.object(adm, "send_scan_event", _event),),
+        )
+
+        self.assertIn("deadline", seen, "no completed event was sent")
+        self.assertIsNotNone(
+            seen["deadline"],
+            "the completed event can still retry past the run's own timeout",
+        )
 
     def test_a_disabled_run_timeout_leaves_the_sends_unbounded(self):
         """--timeout <=0 turns the self-deadline off by design; the sends follow."""

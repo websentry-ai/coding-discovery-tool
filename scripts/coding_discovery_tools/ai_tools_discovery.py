@@ -3980,6 +3980,11 @@ def main():
             (home_user, tool_key.split(":", 1)[0])
             for tool_key, home_user in resume_done
         }
+        # (home_user, tool) whose backend row the drain has just replaced with an
+        # older snapshot. The cache write that records this can fail silently, so
+        # this run trusts the set rather than the file: the stored hash must not be
+        # allowed to skip the upload that corrects them.
+        stale_on_backend = set()
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -4036,6 +4041,7 @@ def main():
                         # correct it rather than skip the pair as unchanged.
                         delivered = _report_identity(queued_report)
                         if delivered:
+                            stale_on_backend.add(delivered)
                             discovery_cache.forget_tool_hash(delivered[1], delivered[0])
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
@@ -4473,7 +4479,10 @@ def main():
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        cached_hash = (
+                            None if (user_name, tool_name) in stale_on_backend
+                            else discovery_cache.get_cached_hash(tool_name, user_name)
+                        )
                         reported_ok = False
                         hash_to_store = None
                         if local_payload_hash and cached_hash == local_payload_hash:

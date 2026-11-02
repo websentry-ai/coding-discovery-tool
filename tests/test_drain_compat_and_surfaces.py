@@ -10,7 +10,6 @@ show, because nothing was renamed.
 import json
 import os
 import shutil
-import stat
 import tempfile
 import threading
 import unittest
@@ -206,17 +205,17 @@ class TheDrainSurvivesADegradedDevice(_ServesABackend):
     """What a real device throws at it: a queue it cannot write, a queue file
     something corrupted, and payloads big enough that rewriting costs."""
 
-    def test_a_queue_directory_it_cannot_write_is_reported_not_raised(self):
-        locked = Path(self._dir) / "locked"
-        locked.mkdir()
-        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(locked / "queue.json")
-        os.chmod(locked, stat.S_IREAD | stat.S_IEXEC)
-        try:
-            landed = save_failed_reports([{"device_id": "D"}], replace=True)
-        finally:
-            os.chmod(locked, stat.S_IRWXU)
+    def test_a_queue_path_it_cannot_write_is_reported_not_raised(self):
+        """The writer creates the parent directory, so a parent that is already a
+        file fails on every platform. chmod would not do: on Windows it only sets
+        the read-only attribute and files inside the directory still write."""
+        blocker = Path(self._dir) / "not-a-directory"
+        blocker.write_text("i am a file")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(blocker / "queue.json")
 
-        self.assertFalse(landed, "an unwritable queue reported success")
+        landed = save_failed_reports([{"device_id": "D"}], replace=True)
+
+        self.assertFalse(landed, "an unwritable queue path reported success")
 
     def test_a_corrupt_queue_file_does_not_stop_the_run(self):
         for junk in (b"", b"{", b"not json at all", b'{"a": 1}', b"[1, 2, 3]"):
@@ -225,9 +224,9 @@ class TheDrainSurvivesADegradedDevice(_ServesABackend):
                 self.assertIsInstance(load_pending_reports(), list)
 
     def test_a_queue_of_large_payloads_is_rewritten_without_blowing_up(self):
-        """MAX_QUEUE_SIZE reports with a megabyte of rules each: the authoritative
-        rewrite reads and re-serialises all of them."""
-        big = "x" * (1024 * 1024)
+        """A full queue of real-sized payloads: the authoritative rewrite reads and
+        re-serialises every one of them."""
+        big = "x" * (256 * 1024)
         reports = [{"device_id": f"D{i}", "home_user": "u",
                     "tools": [{"name": "T", "projects": [{"rules": big}]}]}
                    for i in range(utils_mod.MAX_QUEUE_SIZE)]

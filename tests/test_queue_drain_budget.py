@@ -155,11 +155,25 @@ class _DrivesMain:
         self._dir = tempfile.mkdtemp(prefix="drain-test-")
         os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(self._dir) / "queue.json")
         self.queue_file = utils_mod._get_queue_file_path()
-        # The cache and lock live under HOME; keep them in the fixture so a test
-        # can use the real cache without touching the developer's own state.
+        # The cache and lock live under HOME, but cache.py resolves that ONCE at
+        # import time into _HOME_STATE_DIR -- so setting os.environ["HOME"] here
+        # redirects nothing and a test using the real cache writes to the
+        # developer's own ~/.unbound. Patch the constant, not the environment.
         self._prior_home = (os.environ.get("HOME"), os.environ.get("USERPROFILE"))
         os.environ["HOME"] = self._dir
         os.environ["USERPROFILE"] = self._dir
+        state_dir = Path(self._dir) / ".unbound"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        for name, value in (
+            ("_HOME_STATE_DIR", state_dir),
+            ("UNBOUND_DIR", state_dir),
+            ("CACHE_PATH", state_dir / "discovery-cache.json"),
+            ("LOCK_PATH", state_dir / "discovery.lock"),
+        ):
+            if hasattr(adm.discovery_cache, name):
+                pt = patch.object(adm.discovery_cache, name, value)
+                pt.start()
+                self.addCleanup(pt.stop)
         utils_mod._SENTRY_DSN = ""
 
     def tearDown(self):
@@ -1044,6 +1058,40 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
             "THIS-RUN", second.device_ids(prefix="THIS-RUN"),
             "the stale hash suppressed the correcting upload, so the backend is"
             " left holding the snapshot the drain delivered",
+        )
+
+    def test_a_failed_cache_write_does_not_let_the_stale_hash_win(self):
+        """forget_tool_hash goes through atomic_write_cache, which swallows write
+        errors. If the stale hash survives on disk, the correcting upload has to
+        happen anyway -- otherwise the drain replaced the row and nothing ever
+        puts it back, because the delivered report has left the queue."""
+        tools = ({"name": "Claude Code", "version": "1.0",
+                  "install_path": "/usr/local/bin/claude"},)
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            tools=tools, users=("alice",), fresh_report=fresh,
+            patches=(
+                # The invalidation cannot reach disk, and the old hash still matches.
+                patch.object(adm.discovery_cache, "forget_tool_hash", Mock()),
+                patch.object(adm.discovery_cache, "get_cached_hash",
+                             return_value="whatever-the-local-state-hashes-to"),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch.object(adm.discovery_cache, "record_report", Mock()),
+            ),
+        )
+
+        self.assertIn("QUEUED-0", backend.device_ids(), "the drain never delivered it")
+        self.assertIn(
+            "THIS-RUN", backend.device_ids(prefix="THIS-RUN"),
+            "a stale hash on disk suppressed the correcting upload, so the row the"
+            " drain replaced stays wrong for good",
         )
 
     def test_a_report_it_could_not_deliver_leaves_the_hash_alone(self):

@@ -46,23 +46,144 @@ def _queued(count):
     ]
 
 
+class _Backend:
+    """A localhost backend the drain tests drive main() against. Real HTTP, real
+    curl, real retry loop -- `rule` only decides what status each data report
+    gets back, so a test can say "this one is unreachable" without replacing the
+    transport underneath it."""
+
+    def __init__(self, rule=None, stall=0, stall_when=None):
+        outer = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw)
+                except Exception:
+                    body = {}
+                code = outer._record(self.path, body)
+                if outer.stall and outer._stall_when(body):
+                    threading.Event().wait(outer.stall)
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}' if code < 300 else b'{"error":"no"}')
+
+            def log_message(self, *_a):
+                pass
+
+        self._rule = rule or (lambda _body: 200)
+        self.stall = stall
+        self._stall_when = stall_when or (lambda _body: True)
+        self._lock = threading.Lock()
+        self.received = []
+        self.server = HTTPServer(("127.0.0.1", 0), _Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def _record(self, path, body):
+        # The S3 presign path is refused so every report falls back to the legacy
+        # endpoint, which is the one whose retry curve these tests are about.
+        if "upload-url" in path or "from-s3" in path:
+            return 500
+        with self._lock:
+            self.received.append(body)
+        return self._rule(body)
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def device_ids(self, prefix="QUEUED-"):
+        """Data reports received, in arrival order, deduped to first attempt. The
+        prefix keeps the run's own lifecycle and metrics payloads out of it."""
+        with self._lock:
+            seen, out = set(), []
+            for body in self.received:
+                dev = body.get("device_id")
+                if body.get("scan_event") or not isinstance(dev, str):
+                    continue
+                if prefix is not None and not dev.startswith(prefix):
+                    continue
+                if dev not in seen:
+                    seen.add(dev)
+                    out.append(dev)
+            return out
+
+    def attempts(self, device_id):
+        with self._lock:
+            return sum(1 for b in self.received if b.get("device_id") == device_id)
+
+    def events(self):
+        with self._lock:
+            return [b.get("scan_event") for b in self.received if b.get("scan_event")]
+
+
+def statuses(table, default=200):
+    """A rule mapping device id to HTTP status: 500 is retryable, 422 is not."""
+    return lambda body: table.get(body.get("device_id"), default)
+
+
+def status_for(ok=(), retryable=(), permanent=()):
+    """A rule mapping device ids to HTTP statuses: 500 is retryable, 422 is not."""
+    def _rule(body):
+        dev = body.get("device_id")
+        if not retryable and not permanent and not ok and isinstance(dev, str) \
+                and dev.startswith("QUEUED-"):
+            return 500          # no rule given: the whole backlog is unreachable
+        if dev in retryable:
+            return 500
+        if dev in permanent:
+            return 422
+        if ok and isinstance(dev, str) and dev.startswith("QUEUED-") and dev not in ok:
+            return 500
+        return 200
+    return _rule
+
+
 class _DrivesMain:
-    """Runs main() with detection and transport stubbed, and reports what the
-    drain actually did: which reports it sent, in what order relative to
-    detection, and what it handed to the queue."""
+    """Runs main() against a real localhost backend and a real queue file, and
+    reports what the drain actually did: which reports reached the backend, and
+    what was left on disk. Only detection, the lock and the cache are stubbed --
+    the transport is not."""
 
-    def run_main(self, pending, outcome, timeout="12000", patches=(),
-                 real_queue=False, tools=(), users=(), fresh_report=None):
-        sent = []
-        order = []
+    def setUp(self):
+        self._prior_queue = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+        self._dir = tempfile.mkdtemp(prefix="drain-test-")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(self._dir) / "queue.json")
+        self.queue_file = utils_mod._get_queue_file_path()
+        utils_mod._SENTRY_DSN = ""
 
-        def _send(domain, api_key, report, app_name=None, sentry_context=None, **_kwargs):
-            sent.append(report)
-            order.append("send")
-            return outcome(report) if callable(outcome) else outcome
+    def tearDown(self):
+        if self._prior_queue is None:
+            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+        else:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._prior_queue
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def seed_queue(self, reports, queued_at=None):
+        stamp = queued_at or datetime.now(timezone.utc).isoformat()
+        self.queue_file.write_text(json.dumps(
+            [{"report": r, "queued_at": stamp} for r in reports]
+        ))
+
+    def queue_now(self):
+        if not self.queue_file.exists():
+            return []
+        return [e["report"].get("device_id")
+                for e in json.loads(self.queue_file.read_text())]
+
+    def run_main(self, rule=None, timeout="12000", patches=(), tools=(), users=(),
+                 fresh_report=None, backend=None, stall=0, stall_when=None):
+        detected = []
+        owns_backend = backend is None
+        backend = backend or _Backend(rule, stall=stall, stall_when=stall_when)
 
         def _detect(*_args, **_kwargs):
-            order.append("detect")
+            detected.append(True)
             return [dict(t) for t in tools]
 
         detector = Mock()
@@ -78,54 +199,43 @@ class _DrivesMain:
                 lambda *_a, **_k: dict(fresh_report)
             )
 
-        saved = Mock()
         argv = [
-            "ai_tools_discovery.py", "--api-key", "k",
-            "--domain", "http://127.0.0.1:1", "--timeout", timeout,
+            "ai_tools_discovery.py", "--api-key", "test-key-000000",
+            "--domain", backend.url, "--timeout", timeout,
         ]
-        with ExitStack() as stack:
-            for ctx in (
-                patch.object(adm.platform, "system", return_value="Linux"),
-                patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"),
-                patch.object(adm.discovery_cache, "heartbeat_start",
-                             Mock(return_value=threading.Event())),
-                patch.object(adm.discovery_cache, "release_lock", Mock()),
-                patch.object(adm.discovery_cache, "resumable_done", return_value=set()),
-                patch.object(adm.discovery_cache, "start_run", Mock()),
-                patch.object(adm.discovery_cache, "mark_run_completed", Mock()),
-                patch.object(adm.discovery_cache, "read_run", return_value={}),
-                patch.object(adm, "AIToolsDetector", return_value=detector),
-                patch.object(adm, "send_scan_event", Mock(return_value=(True, None))),
-                patch.object(adm, "send_discovery_metrics", Mock()),
-                patch.object(adm, "send_report_to_backend", _send),
-            ) + ((
-                patch.object(adm, "load_pending_reports", return_value=list(pending)),
-                patch.object(adm, "save_failed_reports", saved),
-            ) if not real_queue else ()) + (
-                patch.object(adm, "get_all_users_linux", return_value=list(users)),
-                patch.object(adm, "get_user_info", return_value={}),
-                patch.object(adm, "get_audit_user", Mock(return_value=None)),
-                patch.object(adm, "report_to_sentry", Mock()),
-                patch.object(utils_mod, "_SENTRY_DSN", ""),
-                patch.object(sys, "argv", argv),
-            ) + tuple(patches):
-                stack.enter_context(ctx)
-            try:
-                adm.main()
-            except SystemExit:
-                pass
-        return sent, saved, order
-
-    def requeued(self, saved):
-        """What main() last left on the queue, and how. The queue is rewritten
-        whenever what is owed changes, so the final call is the one that counts."""
-        self.assertGreaterEqual(saved.call_count, 1, "the queue was never written")
-        args, kwargs = saved.call_args
-        self.assertTrue(kwargs.get("replace"), "the queue write was not authoritative")
-        return args[0]
-
-    def ids(self, reports):
-        return [r["device_id"] for r in reports]
+        try:
+            with ExitStack() as stack:
+                for ctx in (
+                    # Retry sleeps are mocked as the repository requires; the real
+                    # curl calls underneath them are not.
+                    patch("time.sleep", Mock()),
+                    patch.object(adm.os, "_exit", Mock(side_effect=SystemExit(1))),
+                    patch.object(adm.platform, "system", return_value="Linux"),
+                    patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"),
+                    patch.object(adm.discovery_cache, "heartbeat_start",
+                                 Mock(return_value=threading.Event())),
+                    patch.object(adm.discovery_cache, "release_lock", Mock()),
+                    patch.object(adm.discovery_cache, "resumable_done", return_value=set()),
+                    patch.object(adm.discovery_cache, "start_run", Mock()),
+                    patch.object(adm.discovery_cache, "mark_run_completed", Mock()),
+                    patch.object(adm.discovery_cache, "read_run", return_value={}),
+                    patch.object(adm, "AIToolsDetector", return_value=detector),
+                    patch.object(adm, "get_all_users_linux", return_value=list(users)),
+                    patch.object(adm, "get_user_info", return_value={}),
+                    patch.object(adm, "get_audit_user", Mock(return_value=None)),
+                    patch.object(adm, "report_to_sentry", Mock()),
+                    patch.object(utils_mod, "_SENTRY_DSN", ""),
+                    patch.object(sys, "argv", argv),
+                ) + tuple(patches):
+                    stack.enter_context(ctx)
+                try:
+                    adm.main()
+                except SystemExit:
+                    pass
+        finally:
+            if owns_backend:
+                backend.close()
+        return backend, bool(detected)
 
 
 class TheDrainCannotStarveDetection(_DrivesMain, unittest.TestCase):
@@ -133,20 +243,30 @@ class TheDrainCannotStarveDetection(_DrivesMain, unittest.TestCase):
     it can never stop detection from happening."""
 
     def test_a_full_queue_still_gets_drained_and_detection_still_runs(self):
-        sent, _saved, order = self.run_main(_queued(3), SENT_OK)
+        self.seed_queue(_queued(3))
 
-        self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2"])
-        self.assertIn("detect", order, "detection never ran")
+        backend, detected = self.run_main()
+
+        self.assertEqual(backend.device_ids(), ["QUEUED-0", "QUEUED-1", "QUEUED-2"])
+        self.assertTrue(detected, "detection never ran")
+        self.assertFalse(
+            self.queue_file.exists(),
+            "the queue file survived a run that owed nothing",
+        )
 
     def test_an_undrainable_queue_does_not_cost_the_run(self):
         """What timed out in production: a full queue, none of it sendable."""
-        sent, _saved, order = self.run_main(_queued(100), FAILED_RETRYABLE)
+        pending = _queued(100)
+        self.seed_queue(pending)
+
+        backend, detected = self.run_main(rule=status_for())
 
         self.assertEqual(
-            len(sent), adm.DRAIN_FAILURES_BEFORE_STOP,
+            len(backend.device_ids()), adm.DRAIN_FAILURES_BEFORE_STOP,
             "the drain paid a retry cycle per queued report before detecting anything",
         )
-        self.assertIn("detect", order, "the run never reached detection")
+        self.assertTrue(detected, "the run never reached detection")
+        self.assertEqual(len(self.queue_now()), len(pending))
 
 
 class AnUnreachableBackendStopsTheDrain(_DrivesMain, unittest.TestCase):
@@ -155,25 +275,34 @@ class AnUnreachableBackendStopsTheDrain(_DrivesMain, unittest.TestCase):
 
     def test_a_run_of_failures_leaves_the_rest_untried(self):
         pending = _queued(5)
-        sent, saved, _order = self.run_main(pending, FAILED_RETRYABLE)
+        self.seed_queue(pending)
+
+        backend, _ = self.run_main(rule=status_for())
 
         self.assertEqual(
-            self.ids(sent), ["QUEUED-0", "QUEUED-1"],
+            backend.device_ids(), ["QUEUED-0", "QUEUED-1"],
             "the drain kept going after the backend proved unreachable",
         )
-        self.assertEqual(self.ids(self.requeued(saved)), self.ids(pending))
+        self.assertEqual(self.queue_now(), [r["device_id"] for r in pending])
+
+    def test_each_failure_really_paid_its_retry_cycle(self):
+        """Through the real transport: one unreachable report is five curl calls,
+        which is the cost the budget and the early stop exist to bound."""
+        self.seed_queue(_queued(5))
+
+        backend, _ = self.run_main(rule=status_for())
+
+        self.assertEqual(backend.attempts("QUEUED-0"), utils_mod.MAX_ATTEMPTS)
+        self.assertEqual(backend.attempts("QUEUED-2"), 0, "a report past the stop was tried")
 
     def test_a_failure_part_way_through_requeues_only_what_is_left(self):
-        pending = _queued(5)
-        reachable = {"QUEUED-0", "QUEUED-1"}
-        sent, saved, _order = self.run_main(
-            pending,
-            lambda r: SENT_OK if r["device_id"] in reachable else FAILED_RETRYABLE,
-        )
+        self.seed_queue(_queued(5))
 
-        self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3"])
+        backend, _ = self.run_main(rule=status_for(ok={"QUEUED-0", "QUEUED-1"}))
+
+        self.assertEqual(backend.device_ids(), ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3"])
         self.assertEqual(
-            self.ids(self.requeued(saved)), ["QUEUED-2", "QUEUED-3", "QUEUED-4"],
+            self.queue_now(), ["QUEUED-2", "QUEUED-3", "QUEUED-4"],
             "delivered reports were re-queued, or the untried tail was dropped",
         )
 
@@ -181,22 +310,29 @@ class AnUnreachableBackendStopsTheDrain(_DrivesMain, unittest.TestCase):
         """A lone retryable failure is about that payload. Stopping on it would
         strand every healthy report behind it until the queue expired."""
         pending = _queued(5)
-        sent, saved, _order = self.run_main(
-            pending,
-            lambda r: FAILED_RETRYABLE if r["device_id"] == "QUEUED-2" else SENT_OK,
-        )
+        self.seed_queue(pending)
 
-        self.assertEqual(self.ids(sent), self.ids(pending), "the drain stopped early")
-        self.assertEqual(self.ids(self.requeued(saved)), ["QUEUED-2"])
+        backend, _ = self.run_main(rule=status_for(retryable={"QUEUED-2"}))
+
+        self.assertEqual(
+            backend.device_ids(), [r["device_id"] for r in pending],
+            "the drain stopped early",
+        )
+        self.assertEqual(self.queue_now(), ["QUEUED-2"])
 
     def test_a_permanent_failure_does_not_stop_the_drain(self):
         """The counterweight: a 4xx is about one payload, so the queue behind it
         is still worth draining."""
         pending = _queued(3)
-        sent, saved, _order = self.run_main(pending, FAILED_PERMANENT)
+        self.seed_queue(pending)
 
-        self.assertEqual(self.ids(sent), self.ids(pending))
-        self.assertEqual(self.requeued(saved), [], "a rejected report was re-queued")
+        backend, _ = self.run_main(
+            rule=status_for(permanent={"QUEUED-0", "QUEUED-1", "QUEUED-2"})
+        )
+
+        self.assertEqual(backend.device_ids(), [r["device_id"] for r in pending])
+        self.assertEqual(backend.attempts("QUEUED-0"), 1, "a 4xx was retried")
+        self.assertEqual(self.queue_now(), [], "a rejected report was re-queued")
 
 
 class TheDrainIsBoundedByTheRunBudget(_DrivesMain, unittest.TestCase):
@@ -225,14 +361,15 @@ class TheDrainIsBoundedByTheRunBudget(_DrivesMain, unittest.TestCase):
 
     def test_a_spent_budget_leaves_the_whole_queue_untried(self):
         pending = _queued(3)
-        sent, saved, order = self.run_main(
-            pending, SENT_OK,
+        self.seed_queue(pending)
+
+        backend, detected = self.run_main(
             patches=(patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),),
         )
 
-        self.assertEqual(sent, [], "the drain ran with no budget left")
-        self.assertIn("detect", order, "detection was skipped too")
-        self.assertEqual(self.ids(self.requeued(saved)), self.ids(pending))
+        self.assertEqual(backend.device_ids(), [], "the drain ran with no budget left")
+        self.assertTrue(detected, "detection was skipped too")
+        self.assertEqual(self.queue_now(), [r["device_id"] for r in pending])
 
 
 class ADeliveredReportLeavesTheQueue(unittest.TestCase):
@@ -288,58 +425,6 @@ class ADeliveredReportLeavesTheQueue(unittest.TestCase):
         self.assertEqual(len(kept), MAX_QUEUE_SIZE)
         for report in fresh:
             self.assertIn(report["id"], kept)
-
-
-class TheQueueFileEndsAsWhatIsStillOwed(_DrivesMain, unittest.TestCase):
-    """End to end through main() and the real queue file: a run leaves behind
-    exactly the reports it still owes -- no delivered ones, no duplicates."""
-
-    def setUp(self):
-        self._prior = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
-        self._dir = tempfile.mkdtemp(prefix="drain-e2e-test-")
-        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(self._dir) / "queue.json")
-        self.queue_file = utils_mod._get_queue_file_path()
-
-    def tearDown(self):
-        if self._prior is None:
-            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
-        else:
-            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._prior
-        shutil.rmtree(self._dir, ignore_errors=True)
-
-    def test_delivered_reports_are_gone_and_the_untried_tail_remains(self):
-        pending = _queued(5)
-        now = datetime.now(timezone.utc).isoformat()
-        self.queue_file.write_text(json.dumps(
-            [{"report": r, "queued_at": now} for r in pending]
-        ))
-        reachable = {"QUEUED-0", "QUEUED-1"}
-
-        sent, _saved, _order = self.run_main(
-            None,
-            lambda r: SENT_OK if r["device_id"] in reachable else FAILED_RETRYABLE,
-            real_queue=True,
-        )
-
-        left = [e["report"]["device_id"] for e in json.loads(self.queue_file.read_text())]
-        self.assertEqual(
-            left, ["QUEUED-2", "QUEUED-3", "QUEUED-4"],
-            "the queue kept reports it had already delivered, so the next run"
-            " spends its budget re-sending them",
-        )
-        self.assertEqual(self.ids(sent), ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3"])
-
-    def test_a_fully_drained_queue_removes_the_file(self):
-        pending = _queued(3)
-        now = datetime.now(timezone.utc).isoformat()
-        self.queue_file.write_text(json.dumps(
-            [{"report": r, "queued_at": now} for r in pending]
-        ))
-
-        sent, _saved, _order = self.run_main(None, SENT_OK, real_queue=True)
-
-        self.assertEqual(self.ids(sent), self.ids(pending))
-        self.assertFalse(self.queue_file.exists())
 
 
 class ARequeuedReportStillExpires(unittest.TestCase):
@@ -560,31 +645,12 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
     leaves the older report to replace that snapshot on the next run -- and it
     stays, because the stored hash makes detection skip the correcting upload."""
 
-    def setUp(self):
-        self._prior = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
-        self._dir = tempfile.mkdtemp(prefix="drain-supersede-test-")
-        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(self._dir) / "queue.json")
-        self.queue_file = utils_mod._get_queue_file_path()
-
-    def tearDown(self):
-        if self._prior is None:
-            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
-        else:
-            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._prior
-        shutil.rmtree(self._dir, ignore_errors=True)
-
-    def _seed(self, reports):
-        now = datetime.now(timezone.utc).isoformat()
-        self.queue_file.write_text(json.dumps(
-            [{"report": r, "queued_at": now} for r in reports]
-        ))
-
     def test_the_queue_is_settled_before_the_hash_that_hides_the_pair(self):
         """The invariant, observed where it matters: at the instant the payload hash
         is stored, the older queued report is already out of the file."""
         superseded = {"device_id": "Q-OLD", "home_user": "alice",
                       "tools": [{"name": "Claude Code"}]}
-        self._seed([superseded])
+        self.seed_queue([superseded])
         # The stored hash is the thing that makes a later run skip the correcting
         # upload, so the queue file is observed at the moment it is written.
         at_hash_write = {}
@@ -599,9 +665,7 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
                  "tools": [{"name": "Claude Code", "projects": []}]}
         self.run_main(
-            None,
-            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
-            real_queue=True,
+            rule=statuses({"Q-OLD": 500}),
             tools=({"name": "Claude Code", "version": "1.0",
                     "install_path": "/usr/local/bin/claude"},),
             users=("alice",),
@@ -633,7 +697,7 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
         a stored hash has already stopped detection from correcting it."""
         delivered = {"device_id": "Q-GONE", "home_user": "alice",
                      "tools": [{"name": "Claude Code"}]}
-        self._seed([delivered])
+        self.seed_queue([delivered])
         at_detection = {}
 
         def _probe():
@@ -644,12 +708,13 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             )
             return []
 
-        sent, _saved, _order = self.run_main(
-            None, SENT_OK, real_queue=True,
+        backend, _ = self.run_main(
             patches=(patch.object(adm, "get_all_users_linux", side_effect=_probe),),
         )
 
-        self.assertEqual(self.ids(sent), ["Q-GONE"], "the drain never sent it")
+        self.assertEqual(
+            backend.device_ids(prefix="Q-"), ["Q-GONE"], "the drain never sent it"
+        )
         self.assertEqual(
             at_detection.get("queue"), [],
             "a report the drain had already delivered was still on disk when"
@@ -662,15 +727,13 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
         queued -- the exact outcome the ordering exists to prevent."""
         superseded = {"device_id": "Q-OLD", "home_user": "alice",
                       "tools": [{"name": "Claude Code"}]}
-        self._seed([superseded])
+        self.seed_queue([superseded])
         recorded = []
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
                  "tools": [{"name": "Claude Code", "projects": []}]}
 
         self.run_main(
-            None,
-            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
-            real_queue=True,
+            rule=statuses({"Q-OLD": 500}),
             tools=({"name": "Claude Code", "version": "1.0",
                     "install_path": "/usr/local/bin/claude"},),
             users=("alice",),
@@ -701,13 +764,12 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
         stays on disk while hashes hide the pairs that would correct it."""
         delivered = {"device_id": "Q-DELIVERED", "home_user": "bob",
                      "tools": [{"name": "Cursor"}]}
-        self._seed([delivered])
+        self.seed_queue([delivered])
         recorded = []
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
                  "tools": [{"name": "Claude Code", "projects": []}]}
 
-        sent, _saved, _order = self.run_main(
-            None, SENT_OK, real_queue=True,
+        backend, _ = self.run_main(
             tools=({"name": "Claude Code", "version": "1.0",
                     "install_path": "/usr/local/bin/claude"},),
             users=("alice",),
@@ -724,7 +786,10 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             ),
         )
 
-        self.assertIn("Q-DELIVERED", self.ids(sent), "the drain never delivered it")
+        self.assertIn(
+            "Q-DELIVERED", backend.device_ids(prefix="Q-"),
+            "the drain never delivered it",
+        )
         self.assertEqual(
             recorded, [],
             "a hash was stored although the write that should have cleared the"
@@ -738,16 +803,14 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
         backlog and several tools is pure cost."""
         unrelated = {"device_id": "Q-OTHER", "home_user": "bob",
                      "tools": [{"name": "Cursor"}]}
-        self._seed([unrelated])
+        self.seed_queue([unrelated])
         writes = []
         real_save = utils_mod.save_failed_reports
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
                  "tools": [{"name": "Claude Code", "projects": []}]}
 
         self.run_main(
-            None,
-            lambda r: SENT_OK if r.get("device_id") == "THIS-RUN" else FAILED_RETRYABLE,
-            real_queue=True,
+            rule=statuses({"Q-OLD": 500}),
             tools=({"name": "Claude Code", "version": "1.0",
                     "install_path": "/usr/local/bin/claude"},),
             users=("alice",),
@@ -782,7 +845,7 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
                       "tools": [{"name": "Claude Code"}]}
         # The superseded one sits BEHIND the stop point, so it reaches the queue as
         # part of the untried tail rather than being skipped report by report.
-        self._seed([other, superseded])
+        self.seed_queue([other, superseded])
 
         at_detection = {}
 
@@ -795,7 +858,6 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             return []
 
         self.run_main(
-            None, SENT_OK, real_queue=True,
             patches=(
                 patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
                 patch.object(adm, "get_all_users_linux", side_effect=_probe),
@@ -819,10 +881,9 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
                       "tools": [{"name": "Claude Code"}]}
         other = {"device_id": "Q-KEEP", "home_user": "bob",
                  "tools": [{"name": "Cursor"}]}
-        self._seed([superseded, other])
+        self.seed_queue([superseded, other])
 
-        sent, _saved, _order = self.run_main(
-            None, SENT_OK, real_queue=True,
+        backend, _ = self.run_main(
             patches=(
                 patch.object(adm.discovery_cache, "resumable_done",
                              return_value={("Claude Code:/usr/local/bin/claude", "alice")}),
@@ -830,7 +891,7 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
         )
 
         self.assertEqual(
-            self.ids(sent), ["Q-KEEP"],
+            backend.device_ids(prefix="Q-"), ["Q-KEEP"],
             "a report the resumed run had already superseded was sent anyway",
         )
         self.assertFalse(self.queue_file.exists(), "the dropped report was re-queued")
@@ -840,164 +901,81 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
     """Capping the drain is only half of it. A backend that is down costs each
     (tool, user) report five attempts and ~169s of backoff as well, so on a
     multi-user device with several tools this run's own sends could spend the
-    budget the drain was capped to protect."""
+    budget the drain was capped to protect.
 
-    def test_a_per_tool_send_is_given_the_run_budget_as_its_deadline(self):
-        deadlines = []
+    Observed through the real transport: a deadline shows up as attempts the run
+    does not make. The backend stalls before answering, so each attempt costs
+    real time even with the retry sleeps mocked."""
+
+    ONE_TOOL = ({"name": "Claude Code", "version": "1.0",
+                 "install_path": "/usr/local/bin/claude"},)
+
+    def _tool_run(self, timeout, stall=0, rule=None, stall_when=None):
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
                  "tools": [{"name": "Claude Code", "projects": []}]}
-
-        def _send(domain, api_key, report, app_name=None, sentry_context=None,
-                  deadline=None):
-            if report.get("device_id") == "THIS-RUN":
-                deadlines.append(deadline)
-            return SENT_OK
-
-        self.run_main(
-            [], SENT_OK, timeout="900",
-            tools=({"name": "Claude Code", "version": "1.0",
-                    "install_path": "/usr/local/bin/claude"},),
-            users=("alice",),
-            fresh_report=fresh,
+        return self.run_main(
+            rule=rule, timeout=timeout, stall=stall, stall_when=stall_when,
+            tools=self.ONE_TOOL, users=("alice",), fresh_report=fresh,
             patches=(
-                patch.object(adm, "send_report_to_backend", _send),
                 patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
                 patch.object(adm, "_install_in_another_users_home", return_value=False),
                 patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(tempfile.gettempdir())),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
                 patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
                 patch.object(adm.discovery_cache, "record_report", Mock()),
             ),
         )
 
-        self.assertEqual(len(deadlines), 1, "this run's report never went out")
-        self.assertIsNotNone(
-            deadlines[0],
-            "the per-tool send had no deadline, so a down backend can spend the"
-            " whole run on retries the drain was capped to prevent",
-        )
-        # The reserve is what the completed event and metrics get after this: the
-        # smaller of the ceiling and a quarter of the run.
-        reserve = min(adm.RUN_SEND_RESERVE_SECONDS, 900 / 4)
-        left = deadlines[0] - time.monotonic()
-        self.assertLess(left, 900 - reserve + 1)
-        self.assertGreater(left, 900 - reserve - 60)
-        self.assertGreater(
-            adm.RUN_SEND_RESERVE_SECONDS, 225,
-            "the ceiling is shorter than one retry cycle, so on a long run the"
-            " tail can still trip the watchdog",
+    def test_a_per_tool_send_stops_retrying_inside_the_run_budget(self):
+        """Eight seconds of budget leaves six for the sends, and each attempt costs
+        the backend's two-second stall, so the fifth attempt is never started."""
+        backend, _ = self._tool_run(
+            "8", stall=2, rule=statuses({"THIS-RUN": 500}),
+            # Only this run's report stalls, so the lifecycle sends stay quick and
+            # the run finishes inside its own budget rather than being aborted.
+            stall_when=lambda body: body.get("device_id") == "THIS-RUN",
         )
 
-    def test_the_completed_event_is_bounded_by_the_run_deadline(self):
-        """The last send of the run had no deadline at all, so one retry cycle
-        there could outlive the reserve and trip the watchdog."""
-        seen = {}
-
-        def _event(domain, api_key, device_id, run_id, event, *a, **kw):
-            if event == "completed":
-                seen["deadline"] = kw.get("deadline")
-            return (True, None)
-
-        self.run_main(
-            [], SENT_OK, timeout="900",
-            patches=(patch.object(adm, "send_scan_event", _event),),
+        tried = backend.attempts("THIS-RUN")
+        self.assertGreater(tried, 0, "this run's report never went out")
+        self.assertLess(
+            tried, utils_mod.MAX_ATTEMPTS,
+            "the send used its whole retry curve regardless of the run budget, so a"
+            " down backend can still spend the run on this one report",
         )
 
-        self.assertIn("deadline", seen, "no completed event was sent")
-        self.assertIsNotNone(
-            seen["deadline"],
-            "the completed event can still retry past the run's own timeout",
-        )
+    def test_a_disabled_run_timeout_leaves_the_retry_curve_whole(self):
+        """--timeout <=0 turns the self-deadline off by design; the sends follow."""
+        backend, _ = self._tool_run("0", stall=0, rule=statuses({"THIS-RUN": 500}))
+
+        self.assertEqual(backend.attempts("THIS-RUN"), utils_mod.MAX_ATTEMPTS)
 
     def test_a_short_run_still_has_room_to_upload(self):
         """A fixed reserve bigger than the run leaves the sends no time at all, so
         a short scan would detect everything and report none of it."""
-        deadlines = []
-        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
-                 "tools": [{"name": "Claude Code", "projects": []}]}
+        backend, _ = self._tool_run("300")
 
-        def _send(domain, api_key, report, app_name=None, sentry_context=None,
-                  deadline=None):
-            if report.get("device_id") == "THIS-RUN":
-                deadlines.append(deadline)
-            return SENT_OK
-
-        self.run_main(
-            [], SENT_OK, timeout="300",
-            tools=({"name": "Claude Code", "version": "1.0",
-                    "install_path": "/usr/local/bin/claude"},),
-            users=("alice",),
-            fresh_report=fresh,
-            patches=(
-                patch.object(adm, "send_report_to_backend", _send),
-                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-                patch.object(adm, "_install_in_another_users_home", return_value=False),
-                patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(tempfile.gettempdir())),
-                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
-                patch.object(adm.discovery_cache, "record_report", Mock()),
-            ),
+        self.assertIn(
+            "THIS-RUN", backend.device_ids(prefix="THIS-RUN"),
+            "the reserve ate the whole budget, so a short scan uploaded nothing",
         )
 
-        self.assertEqual(len(deadlines), 1, "this run's report never went out")
-        # 300s run: the reserve is a quarter of it, so three quarters are left.
-        self.assertGreater(
-            deadlines[0] - time.monotonic(), 150,
-            "the reserve ate the whole budget, so a short scan can upload nothing",
+    def test_the_lifecycle_events_stop_retrying_inside_the_budget(self):
+        """in_progress and completed carry the manifest and the run's shape. Each
+        is a full retry cycle on an unreachable backend if it is not bounded."""
+        backend, _ = self.run_main(
+            rule=lambda body: 500 if body.get("scan_event") == "in_progress" else 200,
+            timeout="8", stall=2,
+            stall_when=lambda body: body.get("scan_event") == "in_progress",
         )
 
-    def test_the_lifecycle_events_this_run_sends_are_bounded(self):
-        """Every lifecycle send is a full retry cycle if it is not bounded. Only
-        in_progress fires on a clean run, so that is what this asserts; the
-        per-user failure event is covered by reading the call site, not here."""
-        seen = []
-
-        def _event(domain, api_key, device_id, run_id, event, *a, **kw):
-            seen.append((event, kw.get("deadline")))
-            return (True, None)
-
-        self.run_main(
-            [], SENT_OK, timeout="900",
-            patches=(patch.object(adm, "send_scan_event", _event),),
+        started = [e for e in backend.events() if e == "in_progress"]
+        self.assertTrue(started, "no in_progress event was sent")
+        self.assertLess(
+            len(started), utils_mod.MAX_ATTEMPTS,
+            "the in_progress event used its whole retry curve regardless of the"
+            " run budget",
         )
-
-        bounded = {event: deadline for event, deadline in seen}
-        self.assertIn("in_progress", bounded, "no in_progress event was sent")
-        self.assertIsNotNone(
-            bounded["in_progress"],
-            "the in_progress event can still retry without a deadline",
-        )
-
-    def test_a_disabled_run_timeout_leaves_the_sends_unbounded(self):
-        """--timeout <=0 turns the self-deadline off by design; the sends follow."""
-        deadlines = []
-        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
-                 "tools": [{"name": "Claude Code", "projects": []}]}
-
-        def _send(domain, api_key, report, app_name=None, sentry_context=None,
-                  deadline=None):
-            if report.get("device_id") == "THIS-RUN":
-                deadlines.append(deadline)
-            return SENT_OK
-
-        self.run_main(
-            [], SENT_OK, timeout="0",
-            tools=({"name": "Claude Code", "version": "1.0",
-                    "install_path": "/usr/local/bin/claude"},),
-            users=("alice",),
-            fresh_report=fresh,
-            patches=(
-                patch.object(adm, "send_report_to_backend", _send),
-                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-                patch.object(adm, "_install_in_another_users_home", return_value=False),
-                patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(tempfile.gettempdir())),
-                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
-                patch.object(adm.discovery_cache, "record_report", Mock()),
-            ),
-        )
-
-        self.assertEqual(deadlines, [None])
 
 
 if __name__ == "__main__":

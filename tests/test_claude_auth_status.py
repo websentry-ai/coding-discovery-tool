@@ -1002,6 +1002,36 @@ class TestClaudeMaxPlanRefinement(unittest.TestCase):
     def test_a_cached_name_without_a_tier_keeps_max(self):
         self.assertEqual(self.detect(profile=self.account(planDisplayName="Max 20x")), "max")
 
+    def write_profile(self, tier):
+        (self.home / ".claude.json").write_text(json.dumps(self.account(organizationRateLimitTier=tier)))
+
+    def test_the_macos_keychain_path_is_refined(self):
+        self.write_profile("default_claude_max_20x")
+        with patch(f"{_MOD}.platform.system", return_value="Darwin"), \
+                patch(f"{_MOD}._is_root", return_value=False), \
+                patch(f"{_MOD}._get_plan_from_keychain", return_value="max"):
+            self.assertEqual(get_claude_subscription_type("someone", None, user_home=self.home), "ultra")
+
+    def test_the_claude_cli_fallback_is_refined(self):
+        self.write_profile("default_claude_max_20x")
+        status = MagicMock(spec=subprocess.CompletedProcess, returncode=0, stderr="",
+                           stdout=json.dumps({"loggedIn": True, "subscriptionType": "max"}))
+        with patch(f"{_MOD}._is_root", return_value=False), \
+                patch(f"{_MOD}._safe_helper", side_effect=lambda name: name), \
+                patch(f"{_MOD}.subprocess.run", return_value=status):
+            self.assertEqual(get_claude_subscription_type("someone", "/usr/local/bin/claude",
+                                                         user_home=self.home), "ultra")
+
+    def test_a_profile_over_the_read_cap_keeps_max(self):
+        account = json.dumps(self.account(organizationRateLimitTier="default_claude_max_20x"))
+        padding = json.dumps({"projects": {"/p": {"history": "x" * (9 * 1024 * 1024)}}})
+        self.assertEqual(self.detect(profile=padding[:-1] + "," + account[1:]), "max")
+
+    @unittest.skipIf(os.name == "nt", "POSIX FIFO")
+    def test_a_fifo_profile_keeps_max_without_blocking(self):
+        os.mkfifo(self.home / ".claude.json")
+        self.assertEqual(self.detect(), "max")
+
 
 if __name__ == "__main__":
     unittest.main()

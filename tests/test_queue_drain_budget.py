@@ -769,6 +769,44 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             "the queue was rewritten for a pair it never held",
         )
 
+    def test_the_untried_tail_is_filtered_before_it_is_requeued(self):
+        """An early stop requeues the tail wholesale. A pair the resumed run has
+        already reported must not go back on the queue to overwrite it next run."""
+        other = {"device_id": "Q-KEEP", "home_user": "bob",
+                 "tools": [{"name": "Cursor"}]}
+        superseded = {"device_id": "Q-OLD", "home_user": "alice",
+                      "tools": [{"name": "Claude Code"}]}
+        # The superseded one sits BEHIND the stop point, so it reaches the queue as
+        # part of the untried tail rather than being skipped report by report.
+        self._seed([other, superseded])
+
+        at_detection = {}
+
+        def _probe():
+            at_detection["queue"] = (
+                [e["report"]["device_id"]
+                 for e in json.loads(self.queue_file.read_text())]
+                if self.queue_file.exists() else []
+            )
+            return []
+
+        self.run_main(
+            None, SENT_OK, real_queue=True,
+            patches=(
+                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
+                patch.object(adm, "get_all_users_linux", side_effect=_probe),
+                patch.object(adm.discovery_cache, "resumable_done",
+                             return_value={("Claude Code:/usr/local/bin/claude", "alice")}),
+            ),
+        )
+
+        # The filter at persist would catch it, but an abort never reaches persist.
+        self.assertEqual(
+            at_detection.get("queue"), ["Q-KEEP"],
+            "the untried tail went to disk without checking what this run had"
+            " already reported, so an abort would leave it there",
+        )
+
     def test_a_pair_the_resumed_run_already_reported_is_dropped_unsent(self):
 
         """Known before the drain starts, so the drain can refuse it outright

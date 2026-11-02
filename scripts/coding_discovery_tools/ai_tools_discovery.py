@@ -4028,6 +4028,11 @@ def main():
                     else:
                         consecutive_failures = 0
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                # An early stop requeues the untried tail wholesale, which can hold
+                # a pair the resumed run already reported.
+                requeued_pending[:] = _drop_superseded(
+                    requeued_pending, reported_this_run
+                )
                 queue_on_disk[0] = _rewrite_queue()
                 logger.info("")
 

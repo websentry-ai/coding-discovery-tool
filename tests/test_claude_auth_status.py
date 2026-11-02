@@ -965,18 +965,15 @@ class TestClaudeMaxPlanRefinement(unittest.TestCase):
         self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier="default_claude_max_20x",
                                                           planDisplayName="Max 20x")), "ultra")
 
-    def test_an_unknown_tier_takes_claudes_own_plan_name(self):
-        self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier="default_claude_max_40x",
-                                                          planDisplayName="Ultra Plus")), "ultra_plus")
+    def test_an_unknown_tier_keeps_max(self):
+        self.assertEqual(self.detect(profile=self.account(organizationRateLimitTier="default_claude_pro",
+                                                          planDisplayName="Pro")), "max")
 
     def test_no_profile_keeps_max(self):
         self.assertEqual(self.detect(), "max")
 
     def test_a_malformed_profile_keeps_max(self):
         self.assertEqual(self.detect(profile="{not json"), "max")
-
-    def test_a_hostile_plan_name_keeps_max(self):
-        self.assertEqual(self.detect(profile=self.account(planDisplayName="x" * 200 + "\n\x1b[31m")), "max")
 
     @unittest.skipIf(os.name == "nt", "POSIX symlink")
     def test_a_symlinked_profile_is_not_read(self):

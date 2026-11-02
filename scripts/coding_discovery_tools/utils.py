@@ -2155,9 +2155,8 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
     return None
 
 
-# Claude reports both Max and Ultra as "max". The account profile in ~/.claude.json
-# says which: its usage tier, or for a tier not listed here, the plan's own name.
-# A profile without a tier keeps "max".
+# Claude reports both Max and Ultra as "max". The usage tier in the account profile
+# (~/.claude.json) says which; any other tier, or none, keeps "max".
 CLAUDE_MAX_TIERS = {"default_claude_max_20x": "ultra", "default_claude_max_5x": "max"}
 CLAUDE_PROFILE_MAX_BYTES = 8 * 1024 * 1024
 
@@ -2174,13 +2173,7 @@ def _claude_max_plan(user_home: Optional[Path]) -> Optional[str]:
     except (ValueError, RecursionError, AttributeError):
         return None
     tier = account.get("organizationRateLimitTier") if isinstance(account, dict) else None
-    if not isinstance(tier, str):
-        return None
-    if tier in CLAUDE_MAX_TIERS:
-        return CLAUDE_MAX_TIERS[tier]
-    name = account.get("planDisplayName")
-    slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_") if isinstance(name, str) else ""
-    return slug if re.fullmatch(r"[a-z0-9_]{1,32}", slug) else None
+    return CLAUDE_MAX_TIERS.get(tier) if isinstance(tier, str) else None
 
 
 def get_claude_subscription_type(

@@ -946,9 +946,10 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
             "the reserve ate the whole budget, so a short scan can upload nothing",
         )
 
-    def test_a_per_user_failure_event_is_bounded_too(self):
-        """Every lifecycle send is a full retry cycle if it is not bounded, and the
-        per-user failure path fires once per user."""
+    def test_the_lifecycle_events_this_run_sends_are_bounded(self):
+        """Every lifecycle send is a full retry cycle if it is not bounded. Only
+        in_progress fires on a clean run, so that is what this asserts; the
+        per-user failure event is covered by reading the call site, not here."""
         seen = []
 
         def _event(domain, api_key, device_id, run_id, event, *a, **kw):

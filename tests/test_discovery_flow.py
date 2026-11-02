@@ -319,7 +319,10 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             self.rfile.read(length)
-            time.sleep(4)  # stall every call so the scan can't finish under the timeout
+            # Stall longer than any run budget this test uses, so every send burns
+            # its whole deadline allowance instead of completing. The overrun is
+            # then arithmetic rather than a bet on how slow local detection is.
+            time.sleep(30)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -352,7 +355,11 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 "scripts/coding_discovery_tools/ai_tools_discovery.py",
                 "--api-key", "test-key-000000",
                 "--domain", f"http://127.0.0.1:{self.port}",
-                "--timeout", "2",
+                # Sends are clipped to the budget minus its last quarter, so the
+                # first one burns 6s and the completed event burns the remaining 2s,
+                # reaching the watchdog at 8s on any machine. A smaller budget makes
+                # every clip round down to nothing and the run finishes early.
+                "--timeout", "8",
             ],
             cwd=str(REPO_ROOT),
             capture_output=True,

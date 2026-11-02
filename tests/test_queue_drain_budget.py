@@ -1016,8 +1016,10 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
                           "tools": [{"name": "Claude Code"}]}])
 
         self.run_main(
-            patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
-                                  side_effect=lambda t, u: forgotten.append((u, t))),),
+            patches=(patch.object(
+                adm.discovery_cache, "forget_tool_hash",
+                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
+            ),),
         )
 
         self.assertIn(
@@ -1109,10 +1111,9 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
 
         backend, _ = self.run_main(
             patches=(
-                # Delivered, but the invalidation never reaches disk.
-                patch.object(adm.discovery_cache, "forget_tool_hash", Mock()),
-                patch.object(adm.discovery_cache, "get_cached_hash",
-                             return_value="a-hash-that-survived-the-write"),
+                # Delivered, but the cache says the hash never left disk.
+                patch.object(adm.discovery_cache, "forget_tool_hash",
+                             return_value=False),
             ),
         )
 
@@ -1131,8 +1132,10 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
 
         self.run_main(
             rule=status_for(),
-            patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
-                                  side_effect=lambda t, u: forgotten.append((u, t))),),
+            patches=(patch.object(
+                adm.discovery_cache, "forget_tool_hash",
+                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
+            ),),
         )
 
         self.assertEqual(forgotten, [])

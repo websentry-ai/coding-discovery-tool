@@ -25,6 +25,7 @@ from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.ai_tools_discovery as adm
 import scripts.coding_discovery_tools.s3_uploader as s3_mod
+from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
     MAX_QUEUE_SIZE,
@@ -1071,6 +1072,10 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
                  "tools": [{"name": "Claude Code", "projects": []}]}
         self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
                           "tools": [{"name": "Claude Code"}]}])
+        # The cached hash has to be the one production will actually compute for
+        # this payload, or the dedup branch is never reached and the test passes
+        # whether the guard exists or not.
+        stale_hash = compute_payload_hash(fresh["tools"][0])
 
         backend, _ = self.run_main(
             tools=tools, users=("alice",), fresh_report=fresh,
@@ -1078,7 +1083,7 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
                 # The invalidation cannot reach disk, and the old hash still matches.
                 patch.object(adm.discovery_cache, "forget_tool_hash", Mock()),
                 patch.object(adm.discovery_cache, "get_cached_hash",
-                             return_value="whatever-the-local-state-hashes-to"),
+                             return_value=stale_hash),
                 patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
                 patch.object(adm, "_install_in_another_users_home", return_value=False),
                 patch.object(adm, "_machine_global_install_disowned", return_value=False),

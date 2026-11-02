@@ -1894,7 +1894,15 @@ def load_pending_reports() -> List[Dict]:
 
     now = datetime.now(timezone.utc)
     valid: List[Dict] = []
+    if not isinstance(envelopes, list):
+        logger.warning("Queue file does not hold a list of envelopes; ignoring it")
+        return []
     for envelope in envelopes:
+        # The recovery branch below reads the entry as a mapping, so anything that
+        # is not one has to go before it: raising here aborts the whole scan.
+        if not isinstance(envelope, dict):
+            logger.debug("Discarding malformed queue entry")
+            continue
         try:
             queued_at = datetime.fromisoformat(envelope["queued_at"])
             if (now - queued_at).total_seconds() > QUEUE_MAX_AGE_SECONDS:

@@ -876,14 +876,16 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
             "the per-tool send had no deadline, so a down backend can spend the"
             " whole run on retries the drain was capped to prevent",
         )
-        # The reserve is what the completed event and metrics get after this; it
-        # has to fit a whole retry cycle, so it is not a token amount.
+        # The reserve is what the completed event and metrics get after this: the
+        # smaller of the ceiling and a quarter of the run.
+        reserve = min(adm.RUN_SEND_RESERVE_SECONDS, 900 / 4)
         left = deadlines[0] - time.monotonic()
-        self.assertLess(left, 900 - adm.RUN_SEND_RESERVE_SECONDS + 1)
+        self.assertLess(left, 900 - reserve + 1)
+        self.assertGreater(left, 900 - reserve - 60)
         self.assertGreater(
             adm.RUN_SEND_RESERVE_SECONDS, 225,
-            "the reserve is shorter than one retry cycle, so the tail of the run"
-            " can still trip the watchdog",
+            "the ceiling is shorter than one retry cycle, so on a long run the"
+            " tail can still trip the watchdog",
         )
 
     def test_the_completed_event_is_bounded_by_the_run_deadline(self):
@@ -905,6 +907,64 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
         self.assertIsNotNone(
             seen["deadline"],
             "the completed event can still retry past the run's own timeout",
+        )
+
+    def test_a_short_run_still_has_room_to_upload(self):
+        """A fixed reserve bigger than the run leaves the sends no time at all, so
+        a short scan would detect everything and report none of it."""
+        deadlines = []
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+
+        def _send(domain, api_key, report, app_name=None, sentry_context=None,
+                  deadline=None):
+            if report.get("device_id") == "THIS-RUN":
+                deadlines.append(deadline)
+            return SENT_OK
+
+        self.run_main(
+            [], SENT_OK, timeout="300",
+            tools=({"name": "Claude Code", "version": "1.0",
+                    "install_path": "/usr/local/bin/claude"},),
+            users=("alice",),
+            fresh_report=fresh,
+            patches=(
+                patch.object(adm, "send_report_to_backend", _send),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(tempfile.gettempdir())),
+                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
+                patch.object(adm.discovery_cache, "record_report", Mock()),
+            ),
+        )
+
+        self.assertEqual(len(deadlines), 1, "this run's report never went out")
+        # 300s run: the reserve is a quarter of it, so three quarters are left.
+        self.assertGreater(
+            deadlines[0] - time.monotonic(), 150,
+            "the reserve ate the whole budget, so a short scan can upload nothing",
+        )
+
+    def test_a_per_user_failure_event_is_bounded_too(self):
+        """Every lifecycle send is a full retry cycle if it is not bounded, and the
+        per-user failure path fires once per user."""
+        seen = []
+
+        def _event(domain, api_key, device_id, run_id, event, *a, **kw):
+            seen.append((event, kw.get("deadline")))
+            return (True, None)
+
+        self.run_main(
+            [], SENT_OK, timeout="900",
+            patches=(patch.object(adm, "send_scan_event", _event),),
+        )
+
+        bounded = {event: deadline for event, deadline in seen}
+        self.assertIn("in_progress", bounded, "no in_progress event was sent")
+        self.assertIsNotNone(
+            bounded["in_progress"],
+            "the in_progress event can still retry without a deadline",
         )
 
     def test_a_disabled_run_timeout_leaves_the_sends_unbounded(self):

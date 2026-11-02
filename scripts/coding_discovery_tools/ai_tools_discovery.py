@@ -40,7 +40,8 @@ DRAIN_BUDGET_SECONDS = 600
 # have had the rest. Unbounded, those reports carry the same cost the drain was
 # capped for -- five attempts and ~169s of backoff each, per tool per user. The
 # reserve has to fit a whole retry cycle, or the tail of the run trips the
-# watchdog it exists to avoid.
+# watchdog it exists to avoid -- but never more than a quarter of the budget,
+# since a short scan still has to be able to report what it found.
 RUN_SEND_RESERVE_SECONDS = 300
 # Retryable failures in a row that mean the backend is down rather than one
 # report being bad. Each one costs a full five-attempt retry cycle.
@@ -3955,6 +3956,17 @@ def main():
             )
         discovery_cache.start_run(run_id, done=resume_done)
 
+        # This run's own reports get the rest of the budget, minus what the
+        # completed event and metrics need. A send that would outlive it queues
+        # instead, which is what the queue is for.
+        run_deadline = (
+            t_start + args.timeout if args.timeout and args.timeout > 0 else None
+        )
+        send_deadline = (
+            run_deadline - min(RUN_SEND_RESERVE_SECONDS, args.timeout / 4)
+            if run_deadline is not None else None
+        )
+
         # Track failed reports for persistence
         failed_reports = []
         # Queued reports this run did not get to. Separate so they go back ahead of
@@ -4098,7 +4110,8 @@ def main():
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
-                args.app_name, sentry_context=sentry_ctx, system_user=system_user
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user,
+                deadline=send_deadline,
             )
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
@@ -4167,17 +4180,6 @@ def main():
         detector._set_canonical_augment_surface(tools)
         # Pick the single Junie surface that should carry the shared config.
         detector._set_canonical_junie_surface(tools)
-
-        # This run's own reports get the rest of the budget, minus what the
-        # completed event and metrics need. A send that would outlive it queues
-        # instead, which is what the queue is for.
-        run_deadline = (
-            t_start + args.timeout if args.timeout and args.timeout > 0 else None
-        )
-        send_deadline = (
-            run_deadline - RUN_SEND_RESERVE_SECONDS
-            if run_deadline is not None else None
-        )
 
         # Resume observability: how many tools had their processing fully skipped.
         resume_tools_skipped = 0
@@ -4537,7 +4539,8 @@ def main():
                         success, _ = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
-                            sentry_context=sentry_ctx, system_user=system_user
+                            sentry_context=sentry_ctx, system_user=system_user,
+                            deadline=send_deadline,
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")

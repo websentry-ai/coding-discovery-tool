@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -119,24 +120,54 @@ class OldCallersStillWork(_ServesABackend):
         self.assertTrue(ok)
         self.assertEqual(self.sent_bodies()[0]["scan_event"], "in_progress")
 
+    def _max_times(self, call):
+        """The --max-time values curl was actually given, in order."""
+        seen = []
+        real_run = s3_mod.subprocess.run
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and "--max-time" in cmd:
+                seen.append(int(cmd[cmd.index("--max-time") + 1]))
+            return real_run(cmd, *a, **kw)
+
+        with patch.object(s3_mod.subprocess, "run", spy):
+            call()
+        return seen
+
     def test_an_s3_upload_without_a_deadline_keeps_its_own_timeouts(self):
         """try_s3_upload gained a deadline; a caller passing four positionals must
-        still get the fixed 30/180/30 budgets rather than a clipped one."""
-        self.server.code = 500   # refuses the presign, so it reports a clean failure
+        still get the module's own budget, not a clipped one."""
+        self.server.code = 500   # refuses the presign, so it stops after step one
 
-        ok, retryable = s3_mod.try_s3_upload(
+        used = self._max_times(lambda: s3_mod.try_s3_upload(
             self.url, "test-key-000000",
             {"device_id": "D", "tools": [{"name": "T"}]}, {"phase": "t"},
-        )
+        ))
 
-        self.assertEqual((ok, retryable), (False, True))
+        self.assertEqual(used, [s3_mod.META_TIMEOUT_SECONDS])
+
+    def test_an_s3_upload_with_a_deadline_is_clipped_to_it(self):
+        """The counterweight, so the test above cannot pass by accident: the same
+        call with four seconds left asks curl for four, not thirty."""
+        self.server.code = 500
+
+        used = self._max_times(lambda: s3_mod.try_s3_upload(
+            self.url, "test-key-000000",
+            {"device_id": "D", "tools": [{"name": "T"}]}, {"phase": "t"},
+            deadline=time.monotonic() + 4,
+        ))
+
+        self.assertEqual(len(used), 1)
+        self.assertLessEqual(used[0], 4)
 
     def test_the_s3_put_helper_still_takes_two_arguments(self):
         """_curl_put_to_s3 gained a defaulted timeout; the old two-argument call
-        has to keep working and use the module's own upload budget."""
-        ok, status, _body, _err = s3_mod._curl_put_to_s3(self.url, '{"a":1}')
+        has to keep working and ask curl for the module's upload budget."""
+        used = self._max_times(
+            lambda: s3_mod._curl_put_to_s3(self.url, '{"a":1}')
+        )
 
-        self.assertTrue(ok or status is None)
+        self.assertEqual(used, [s3_mod.UPLOAD_TIMEOUT_SECONDS])
 
     def test_the_queue_writer_still_merges_when_called_the_old_way(self):
         save_failed_reports([{"id": 1}])

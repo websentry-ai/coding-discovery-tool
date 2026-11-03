@@ -1044,6 +1044,25 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
             " scale to the budget",
         )
 
+    def test_metrics_cannot_spend_the_completed_event_s_window(self):
+        """Metrics are fire-and-forget; the completed event carries the manifest
+        the backend prunes against. Sharing one deadline, a slow metrics POST
+        leaves the event's deadline already passed and it never goes.
+
+        The stall has to outlast the whole tail for that to happen, so the budget
+        is small and the stall longer than what the tail has left."""
+        backend = _Backend(stall=5, stall_when=lambda b: not b.get("scan_event"))
+
+        try:
+            self.run_main(timeout="6", backend=backend)
+        finally:
+            backend.close()
+
+        self.assertIn(
+            "completed", backend.events(),
+            "the metrics POST spent the tail and the run never reported finishing",
+        )
+
     def test_the_lifecycle_events_stop_retrying_inside_the_budget(self):
         """in_progress and completed carry the manifest and the run's shape. Each
         is a full retry cycle on an unreachable backend if it is not bounded."""

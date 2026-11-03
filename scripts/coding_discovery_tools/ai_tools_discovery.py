@@ -4544,11 +4544,9 @@ def main():
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        # A queued older report for this pair is itself evidence the
-                        # stored hash may not describe the backend any more: the drain
-                        # may have delivered one like it in an earlier run and failed
-                        # to clear the hash. Re-uploading now corrects the row in this
-                        # run instead of waiting for a later one to deliver it.
+                        # A queued older report for this pair is itself evidence
+                        # against the stored hash: an earlier drain may have delivered
+                        # one like it and failed to clear it. Re-upload and be sure.
                         older_report_queued = any(
                             _report_identity(r) == (user_name, tool_name)
                             for r in requeued_pending
@@ -4592,9 +4590,8 @@ def main():
                         # re-processing it.
                         if reported_ok:
                             # The stored hash is what makes a later run skip the
-                            # correcting upload, so store it only once the queue is
-                            # known to hold no older report for the pair. This way
-                            # round a failure costs a re-upload, not a stale row.
+                            # correcting upload, so it waits until the queue write
+                            # lands. Failing that way round costs a re-upload.
                             owed = len(requeued_pending)
                             requeued_pending[:] = _drop_superseded(
                                 requeued_pending, uploaded_this_run
@@ -4731,11 +4728,19 @@ def main():
                     {"tool": tool_key, **counts}
                     for tool_key, counts in sorted(detector.skills_metrics.items())
                 ]
+            # Half of what the tail has left, so fire-and-forget telemetry cannot
+            # spend the window the completed event needs: that one carries the
+            # manifest the backend prunes against.
+            metrics_deadline = None
+            if run_deadline is not None:
+                now = time.monotonic()
+                metrics_deadline = now + max(
+                    0.0, (run_deadline - tail_grace - now) / 2
+                )
             send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
-                deadline=(run_deadline - tail_grace
-                          if run_deadline is not None else None),
+                deadline=metrics_deadline,
             )
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
@@ -4877,10 +4882,9 @@ def main():
         # instead of os._exit(1)-ing over a clean finish.
         _finished[0] = True
         if _aborting[0]:
-            # The abort got there first and exits the process itself, but only once
-            # it has tried to tell the backend. Exiting here would cut that report
-            # off; returning 0 would tell the scheduler an aborted run succeeded.
-            # So wait for it, and fail loudly if it somehow never arrives.
+            # The abort exits the process itself, but only once it has tried to
+            # tell the backend. Exiting here cuts that report off; returning 0 calls
+            # an aborted run a success. So wait for it, then fail loudly.
             _abort_exiting.wait(ABORT_EXIT_GRACE_SECONDS)
             os._exit(1)
         if _watchdog is not None:

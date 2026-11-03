@@ -1603,9 +1603,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
-    # 413 is as permanent as a validation error: the backend checks the body
-    # against a fixed limit, so the same payload is refused every time. Retrying
-    # it burns a cycle and then re-sends it from the queue for a day.
     NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
     # Too large for THIS endpoint, which is not the same as a bad report: every
     # data report tries S3 first, and S3 exists for bodies the legacy endpoint

@@ -304,6 +304,9 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
     that no longer describes the row."""
 
     def setUp(self):
+        # The legacy fallback below reports its refusal, so the DSN has to go or
+        # the test talks to Sentry for real.
+        utils_mod._SENTRY_DSN = ""
         s3_mod.logger.disabled = True
         self.addCleanup(setattr, s3_mod.logger, "disabled", False)
         self.server = HTTPServer(("127.0.0.1", 0), _RunsTheWholeS3Flow)

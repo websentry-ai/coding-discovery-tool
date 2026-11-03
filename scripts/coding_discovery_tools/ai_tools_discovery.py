@@ -4101,8 +4101,10 @@ def main():
                             break
                         if failure.get("too_large"):
                             # The wrong route for this body, not a backend in
-                            # trouble. Counting it would let two big reports stop
-                            # the drain over a backlog it could have delivered.
+                            # trouble -- and an answer at all is evidence it is
+                            # well, so it breaks the run of failures rather than
+                            # being passed over silently.
+                            consecutive_failures = 0
                             continue
                         # Answered and refused can be about this payload, so it must
                         # not hold up the queue behind it; a run of them is not.

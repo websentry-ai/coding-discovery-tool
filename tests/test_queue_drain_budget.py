@@ -1425,6 +1425,25 @@ class ABodyTooLargeForOneRouteIsNotALostReport(_DrivesMain, unittest.TestCase):
                          "the two it could not place stay for the S3 route;"
                          " the delivered one is gone")
 
+    def test_an_answered_refusal_breaks_the_run_of_failures(self):
+        """A 413 is an answer, so the backend is plainly up. Skipped but not
+        counted, it still leaves one failure either side of it looking like two in
+        a row, and the drain stops over a backend it just heard from."""
+        queued = [dict(self.BIG, device_id=f"QUEUED-{i}") for i in range(4)]
+        self.seed_queue(queued)
+
+        backend, _ = self.run_main(rule=statuses({
+            "QUEUED-0": 500,    # one failure
+            "QUEUED-1": 413,    # answered: too large for this route
+            "QUEUED-2": 500,    # one failure again, not two in a row
+        }))
+
+        self.assertEqual(
+            backend.device_ids(prefix="QUEUED-")[-1], "QUEUED-3",
+            "the drain stopped after a refusal it had already decided says"
+            " nothing about the backend's health",
+        )
+
     def test_a_report_the_backend_will_never_accept_is_still_discarded(self):
         """The counterweight: 422 is about the report, so keeping it would mean
         re-sending it every run for a day."""

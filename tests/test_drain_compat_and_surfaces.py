@@ -177,6 +177,63 @@ class OldCallersStillWork(_ServesABackend):
                           json.loads(self.queue_file.read_text())], [1, 2])
 
 
+class ThePermanentRefusalsMatchWhatTheBackendSends(_ServesABackend):
+    """The codes the discovery endpoints actually return, checked against how the
+    client treats them. report_ai_tools returns 202, 400, 413 and 500."""
+
+    REPORT = {"device_id": "D", "home_user": "u", "tools": []}
+
+    def test_an_oversized_report_is_refused_once_and_discarded(self):
+        """413 comes from a fixed body-size limit, so the same payload is refused
+        every time. Retrying it costs a cycle and then a day of re-sends."""
+        self.server.code = 413
+
+        with patch("time.sleep", Mock()):
+            ok, retryable = send_report_to_backend(
+                self.url, "test-key-000000", dict(self.REPORT),
+            )
+
+        self.assertEqual(
+            (ok, retryable), (False, False),
+            "an oversized report was marked retryable, so it goes back on the queue",
+        )
+        self.assertEqual(len(self.server.bodies), 1, "it was sent more than once")
+
+    def test_a_server_error_is_still_retried(self):
+        """The counterweight: 500 is the one the backend sends for a transient
+        failure, and it has to keep its whole curve."""
+        self.server.code = 500
+
+        with patch("time.sleep", Mock()):
+            ok, retryable = send_report_to_backend(
+                self.url, "test-key-000000", dict(self.REPORT),
+            )
+
+        self.assertEqual((ok, retryable), (False, True))
+        self.assertEqual(len(self.server.bodies), utils_mod.MAX_ATTEMPTS)
+
+    def test_a_validation_failure_is_refused_once(self):
+        self.server.code = 400
+
+        with patch("time.sleep", Mock()):
+            ok, retryable = send_report_to_backend(
+                self.url, "test-key-000000", dict(self.REPORT),
+            )
+
+        self.assertEqual((ok, retryable), (False, False))
+        self.assertEqual(len(self.server.bodies), 1)
+
+    def test_the_dedup_accepted_response_counts_as_delivered(self):
+        """202 is what the backend answers when it already holds this payload."""
+        self.server.code = 202
+
+        ok, retryable = send_report_to_backend(
+            self.url, "test-key-000000", dict(self.REPORT),
+        )
+
+        self.assertEqual((ok, retryable), (True, False))
+
+
 class TheFormatsSurviveARollback(_ServesABackend):
     """The queue and cache files on a device outlive a release. A rollback has to
     read what the new code wrote, and the new code has to read what the old one

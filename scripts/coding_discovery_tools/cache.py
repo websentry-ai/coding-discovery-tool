@@ -282,6 +282,10 @@ def forget_tool_hash(tool_name: str, home_user: str) -> bool:
     Returns whether the hash is gone afterwards -- False means the write did not
     land and a later run would still read it, which the caller has to handle."""
     cache = read_cache()
+    if not cache and CACHE_PATH.exists():
+        # read_cache() flattens a read failure into an empty dict. A file that
+        # exists but came back as nothing means we cannot claim the hash is gone.
+        return False
     tools = cache.get("tools")
     if not isinstance(tools, dict):
         return True

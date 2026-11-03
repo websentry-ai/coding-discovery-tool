@@ -1550,13 +1550,18 @@ def send_scan_event(
     )
 
 
+# curl exit codes that mean nothing was ever handed to the backend. Any other
+# failure is read as "it may have arrived", which costs a redundant upload at
+# worst, where the opposite mistake leaves a row stale for good.
+CURL_NEVER_CONNECTED = frozenset({6, 7})
+
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 15
 BACKOFF_CAP_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 60
 
 
-def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None) -> Tuple[bool, bool]:
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None, failure: Optional[Dict] = None, stop_if_unreachable: bool = False) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.
 
@@ -1580,11 +1585,26 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         deadline: Optional time.monotonic() value. No upload or backoff is started
             past it, and every request's own timeout is clipped to what is left, so
             a caller working to a budget is never held beyond it by one report.
+        failure: Optional dict the caller owns; on failure its "kind" becomes
+            "unreachable" (nothing reached the backend), "uncertain" (sent, but no
+            answer came, so it may have landed) or "rejected" (answered and refused).
+        stop_if_unreachable: give up on the first failure that never reached the
+            backend, without retrying or sleeping. A caller whose queue is itself
+            the retry gains nothing from a curve that cannot connect.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
-    NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
+    # 413 is as permanent as a validation error: the backend checks the body
+    # against a fixed limit, so the same payload is refused every time. Retrying
+    # it burns a cycle and then re-sends it from the queue for a day.
+    NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 413, 422)
+
+    def _note(kind: str) -> bool:
+        """Record why this failed, and say whether to abandon it straight away."""
+        if failure is not None:
+            failure["kind"] = kind
+        return stop_if_unreachable and kind == "unreachable"
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     ctx = sentry_context or {}
@@ -1612,6 +1632,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
 
     if deadline is not None and time.monotonic() >= deadline:
+        _note("unreachable")
         return (False, True)
 
     if should_use_s3(payload):
@@ -1649,6 +1670,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             if deadline is not None:
                 request_timeout = int(min(request_timeout, deadline - time.monotonic()))
                 if request_timeout < 1:
+                    _note("unreachable")
                     return (False, True)
             try:
                 result = subprocess.run(
@@ -1677,7 +1699,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     # Connection/DNS failure — retryable
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
-                    if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
+                    give_up = _note(
+                        "unreachable" if result.returncode in CURL_NEVER_CONNECTED
+                        else "uncertain"
+                    )
+                    if not give_up and attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
                         continue
                     try:
                         raise RuntimeError(error_msg)
@@ -1691,6 +1717,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     return (True, False)
 
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
+                _note("rejected")
                 _log_http_error_details(http_code, response_body or None)
 
                 # Cloudflare 403s with error 1010 are transient rate limits — allow retry
@@ -1718,6 +1745,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
             except subprocess.TimeoutExpired:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
+                _note("uncertain")
                 if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
                     continue
                 try:
@@ -1729,11 +1757,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             except OSError as e:
                 # curl missing or not executable: local, not transient, so sleeping cannot help.
                 logger.error(f"Cannot execute curl: {e}")
+                _note("unreachable")
                 report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                 return (False, True)
 
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
+                _note("uncertain")
                 if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
                     continue
                 report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")

@@ -202,7 +202,8 @@ class _DrivesMain:
                 for e in json.loads(self.queue_file.read_text())]
 
     def run_main(self, rule=None, timeout="12000", patches=(), tools=(), users=(),
-                 fresh_report=None, backend=None, stall=0, stall_when=None):
+                 fresh_report=None, backend=None, stall=0, stall_when=None,
+                 domain=None):
         detected = []
         owns_backend = backend is None
         backend = backend or _Backend(rule, stall=stall, stall_when=stall_when)
@@ -226,7 +227,7 @@ class _DrivesMain:
 
         argv = [
             "ai_tools_discovery.py", "--api-key", "test-key-000000",
-            "--domain", backend.url, "--timeout", timeout,
+            "--domain", domain or backend.url, "--timeout", timeout,
         ]
         try:
             with ExitStack() as stack:
@@ -1159,6 +1160,68 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
         self.assertIn("bob", written["tools"]["Claude Code"])
         self.assertEqual(written["tools"]["Cursor"]["alice"]["payload_hash"], "h3")
         self.assertEqual(written["run"]["run_id"], "keep-me")
+
+
+class AnUnreachableBackendIsConclusive(_DrivesMain, unittest.TestCase):
+    """A refused connection is not the same as a refused report. Nothing reached
+    the backend, so nothing behind this one will either -- there is no payload to
+    give the benefit of the doubt to, and no reason to sleep out a retry curve
+    that cannot connect."""
+
+    DEAD = "http://127.0.0.1:1"
+
+    def _posted_device_ids(self):
+        """The device id of every curl POST the sender makes. The lifecycle events
+        share the report endpoint, so counting URLs would conflate them with the
+        drain; the payload curl is handed names the report itself."""
+        posted = []
+        real_run = utils_mod.subprocess.run
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd and cmd[0] == "curl" and "-d" in cmd:
+                body = cmd[cmd.index("-d") + 1]
+                if isinstance(body, str) and body.startswith("@"):
+                    try:
+                        posted.append(json.loads(
+                            Path(body[1:]).read_text()).get("device_id"))
+                    except Exception:
+                        pass
+            return real_run(cmd, *a, **kw)
+
+        return posted, patch.object(utils_mod.subprocess, "run", spy)
+
+    def test_one_refused_connection_ends_the_drain(self):
+        pending = _queued(10)
+        self.seed_queue(pending)
+        posted, spy = self._posted_device_ids()
+
+        with spy:
+            self.run_main(domain=self.DEAD)
+
+        drained = [d for d in posted if (d or "").startswith("QUEUED-")]
+        self.assertEqual(
+            drained, ["QUEUED-0"],
+            "a backend that refused the connection was asked again; one answer of"
+            " 'nothing listening' settles it for the whole queue",
+        )
+        self.assertEqual(
+            self.queue_now(), [r["device_id"] for r in pending],
+            "all ten are still owed, so all ten stay queued",
+        )
+
+    def test_it_does_not_sleep_out_a_curve_it_cannot_use(self):
+        """With the real backoff ceilings, ten reports used to cost ~28 minutes.
+        Nothing connected, so this has to finish in the time one failed connect
+        takes -- which is why the sleeps are not mocked here."""
+        self.seed_queue(_queued(10))
+        started = time.monotonic()
+
+        self.run_main(domain=self.DEAD, patches=(patch("time.sleep", Mock()),))
+
+        self.assertLess(
+            time.monotonic() - started, 60,
+            "the drain spent real time on a backend it never reached",
+        )
 
 
 if __name__ == "__main__":

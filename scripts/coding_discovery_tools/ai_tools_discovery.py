@@ -4029,9 +4029,11 @@ def main():
                             f" {len(requeued_pending)} report(s) stay queued."
                         )
                         break
+                    failure = {}
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
                         sentry_context=sentry_ctx, deadline=drain_deadline,
+                        failure=failure, stop_if_unreachable=True,
                     )
                     if success:
                         consecutive_failures = 0
@@ -4053,15 +4055,33 @@ def main():
                                 requeued_pending.append(queued_report)
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        # A run of these means the backend is down. One on its own is
-                        # about that payload, so it must not hold up the queue behind it.
-                        consecutive_failures += 1
                         requeued_pending.append(queued_report)
-                        if consecutive_failures >= DRAIN_FAILURES_BEFORE_STOP:
+                        if failure.get("kind") == "uncertain":
+                            # Sent, but the answer never came, so the backend may
+                            # hold this older snapshot already. Clear the pair's
+                            # hash so detection re-uploads rather than trusting it.
+                            unsure = _report_identity(queued_report)
+                            if unsure:
+                                stale_on_backend.add(unsure)
+                                discovery_cache.forget_tool_hash(unsure[1], unsure[0])
+                        if failure.get("kind") == "unreachable":
+                            # Nothing reached the backend, so nothing behind this
+                            # will either. One is conclusive; no point in a second.
                             requeued_pending.extend(pending[index + 1:])
                             logger.info(
                                 "  Backend unreachable;"
                                 f" {len(requeued_pending)} report(s) stay queued."
+                            )
+                            break
+                        # Answered and refused: that can be about this payload, so it
+                        # must not hold up the queue behind it. A run of them is the
+                        # backend, not the report.
+                        consecutive_failures += 1
+                        if consecutive_failures >= DRAIN_FAILURES_BEFORE_STOP:
+                            requeued_pending.extend(pending[index + 1:])
+                            logger.info(
+                                f"  Backend failing; {len(requeued_pending)}"
+                                " report(s) stay queued."
                             )
                             break
                     else:

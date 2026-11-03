@@ -3966,6 +3966,13 @@ def main():
             run_deadline - min(RUN_SEND_RESERVE_SECONDS, args.timeout / 4)
             if run_deadline is not None else None
         )
+        # The tail grace scales with the budget for the same reason: a flat margin
+        # puts a short scan's completed event behind its own deadline, so the run
+        # does its work and never reports it.
+        tail_grace = (
+            min(RUN_TAIL_GRACE_SECONDS, args.timeout / 8)
+            if run_deadline is not None else 0
+        )
 
         # Track failed reports for persistence
         failed_reports = []
@@ -3998,6 +4005,14 @@ def main():
         # Whether the queue file is known to hold only what is still owed. False
         # means a write failed, so nothing may store a hash until one lands.
         queue_on_disk = [True]
+
+        def _invalidate(report) -> None:
+            """Stop trusting the stored hash for this report's pair: the backend may
+            hold the older snapshot now, so detection has to re-upload."""
+            pair = _report_identity(report)
+            if pair:
+                stale_on_backend.add(pair)
+                discovery_cache.forget_tool_hash(pair[1], pair[0])
 
         def _rewrite_queue() -> bool:
             """Put what is still owed on disk now, reporting whether it got there. A
@@ -4058,12 +4073,8 @@ def main():
                         requeued_pending.append(queued_report)
                         if failure.get("kind") == "uncertain":
                             # Sent, but the answer never came, so the backend may
-                            # hold this older snapshot already. Clear the pair's
-                            # hash so detection re-uploads rather than trusting it.
-                            unsure = _report_identity(queued_report)
-                            if unsure:
-                                stale_on_backend.add(unsure)
-                                discovery_cache.forget_tool_hash(unsure[1], unsure[0])
+                            # hold this older snapshot already.
+                            _invalidate(queued_report)
                         if failure.get("kind") == "unreachable":
                             # Nothing reached the backend, so nothing behind this
                             # will either. One is conclusive; no point in a second.
@@ -4085,6 +4096,11 @@ def main():
                             break
                     else:
                         consecutive_failures = 0
+                        if failure.get("kind") == "uncertain":
+                            # Refused for good now, but an earlier attempt may have
+                            # landed: dropping the report is right, leaving its hash
+                            # behind is not.
+                            _invalidate(queued_report)
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # An early stop requeues the untried tail wholesale, which can hold
                 # a pair the resumed run already reported.
@@ -4782,7 +4798,7 @@ def main():
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
             manifest=manifest, covered_home_users=covered,
-            deadline=(run_deadline - RUN_TAIL_GRACE_SECONDS
+            deadline=(run_deadline - tail_grace
                       if run_deadline is not None else None),
         )
         if success:
@@ -4805,7 +4821,7 @@ def main():
             # so a run with nothing left to spare skips it rather than being killed
             # inside it. Best-effort by design: the next run picks it up.
             out_of_budget = run_deadline is not None and time.monotonic() > (
-                run_deadline - RUN_TAIL_GRACE_SECONDS
+                run_deadline - tail_grace
             )
             if out_of_budget:
                 logger.info("Connector UUID sweep skipped: out of run budget")

@@ -65,6 +65,11 @@ class _Backend:
                 except Exception:
                     body = {}
                 code = outer._record(self.path, body)
+                if code is None:
+                    # Hang up without answering: curl reports an empty reply, which
+                    # is a send that may well have landed.
+                    self.connection.close()
+                    return
                 if outer.stall and outer._stall_when(body):
                     threading.Event().wait(outer.stall)
                 self.send_response(code)
@@ -126,6 +131,19 @@ class _Backend:
 def statuses(table, default=200):
     """A rule mapping device id to HTTP status: 500 is retryable, 422 is not."""
     return lambda body: table.get(body.get("device_id"), default)
+
+
+def lost_then_refused():
+    """The first answer is lost and the second is a permanent refusal -- the shape
+    of an upload that may have landed and will never be accepted again."""
+    seen = {"n": 0}
+
+    def _rule(body):
+        if not (body.get("device_id") or "").startswith("QUEUED-"):
+            return 200
+        seen["n"] += 1
+        return None if seen["n"] == 1 else 413
+    return _rule
 
 
 def status_for(ok=(), retryable=(), permanent=()):
@@ -1012,6 +1030,18 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
             " still be in flight when the run is killed over it",
         )
 
+    def test_a_short_run_still_reports_completion(self):
+        """The end-of-run grace is subtracted from the deadline, so a flat one puts
+        a short scan's completed event behind its own deadline and the backend
+        never hears that the run finished."""
+        backend, _ = self.run_main(timeout="20")
+
+        self.assertIn(
+            "completed", backend.events(),
+            "the run did its work and never reported it: the grace margin did not"
+            " scale to the budget",
+        )
+
     def test_the_lifecycle_events_stop_retrying_inside_the_budget(self):
         """in_progress and completed carry the manifest and the run's shape. Each
         is a full retry cycle on an unreachable backend if it is not bounded."""
@@ -1154,6 +1184,34 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
             "a delivered report was dropped although its invalidation never"
             " landed, so nothing will retry it",
         )
+
+    def test_a_refusal_after_a_lost_answer_still_clears_the_hash(self):
+        """413 is final, so the report is rightly discarded -- but an earlier
+        attempt may already have put it on the backend, and the stored hash would
+        then describe a row that is no longer there. Nothing would be left to
+        correct it: the report is gone."""
+        forgotten = []
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            rule=lost_then_refused(),
+            patches=(patch.object(
+                adm.discovery_cache, "forget_tool_hash",
+                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
+            ),),
+        )
+
+        self.assertEqual(backend.attempts("QUEUED-0"), 2,
+                         "the lost answer has to be retried for this to be the"
+                         " uncertain-then-refused path at all")
+        self.assertEqual(
+            forgotten, [("alice", "Claude Code")],
+            "a report that may have reached the backend was discarded with its"
+            " hash intact, so detection trusts a row that may be stale",
+        )
+        self.assertEqual(self.queue_now(), [],
+                         "413 is permanent; requeueing it would never end")
 
     def test_a_report_it_could_not_deliver_leaves_the_hash_alone(self):
         """Only a delivery makes the hash wrong. Clearing it on a failure would

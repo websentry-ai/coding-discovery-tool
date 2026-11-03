@@ -356,9 +356,10 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 "--api-key", "test-key-000000",
                 "--domain", f"http://127.0.0.1:{self.port}",
                 # Sends are clipped to the budget minus its last quarter, so the
-                # first one burns 6s and the completed event burns the remaining 2s,
-                # reaching the watchdog at 8s on any machine. A smaller budget makes
-                # every clip round down to nothing and the run finishes early.
+                # first burns 6s and the completed event the second after it; the
+                # metrics send, which carries no deadline, then runs into the
+                # watchdog at 8s on any machine. A smaller budget makes every clip
+                # round down to nothing and the run finishes early.
                 "--timeout", "8",
             ],
             cwd=str(REPO_ROOT),

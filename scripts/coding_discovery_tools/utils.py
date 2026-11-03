@@ -2155,7 +2155,42 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
     return None
 
 
+# Claude reports both Max and Ultra as "max". The usage tier in the account profile
+# (~/.claude.json) says which; any other tier, or none, keeps "max".
+CLAUDE_MAX_TIERS = {"default_claude_max_20x": "ultra", "default_claude_max_5x": "max"}
+CLAUDE_PROFILE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _claude_max_plan(user_home: Optional[Path]) -> Optional[str]:
+    """Which Max-family plan the account in ``<home>/.claude.json`` is on, as a plan id
+    ("ultra", "max"), or None when the profile can't be read."""
+    if user_home is None:
+        return None
+    home = Path(user_home)
+    raw = _read_own_regular_file(home / ".claude.json", home, CLAUDE_PROFILE_MAX_BYTES)
+    try:
+        account = json.loads(raw).get("oauthAccount") if raw else None
+    except (ValueError, RecursionError, AttributeError):
+        return None
+    tier = account.get("organizationRateLimitTier") if isinstance(account, dict) else None
+    return CLAUDE_MAX_TIERS.get(tier) if isinstance(tier, str) else None
+
+
 def get_claude_subscription_type(
+    username: str,
+    claude_binary: Optional[str] = None,
+    diagnostics: Optional[List[Dict]] = None,
+    user_home: Optional[Path] = None,
+) -> Optional[str]:
+    """Claude Code plan id for ``username``, with "max" refined to the Max-family plan
+    the account is actually on (Max or Ultra). See ``_detect_claude_subscription_type``."""
+    plan = _detect_claude_subscription_type(username, claude_binary, diagnostics, user_home)
+    if plan == "max":
+        plan = _claude_max_plan(user_home) or plan
+    return plan
+
+
+def _detect_claude_subscription_type(
     username: str,
     claude_binary: Optional[str] = None,
     diagnostics: Optional[List[Dict]] = None,

@@ -46,6 +46,8 @@ class _Recorder(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
         self.server.bodies.append(raw)
+        if getattr(self.server, "stall", 0):
+            self.server.stalling.wait(self.server.stall)
         code = self.server.code
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -64,6 +66,8 @@ class _ServesABackend(unittest.TestCase):
         self.server = HTTPServer(("127.0.0.1", 0), _Recorder)
         self.server.bodies = []
         self.server.code = 200
+        self.server.stall = 0
+        self.server.stalling = threading.Event()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -73,6 +77,7 @@ class _ServesABackend(unittest.TestCase):
         self.queue_file = utils_mod._get_queue_file_path()
 
     def tearDown(self):
+        self.server.stalling.set()
         self.server.shutdown()
         self.server.server_close()
         if self._prior is None:
@@ -160,6 +165,25 @@ class OldCallersStillWork(_ServesABackend):
 
         self.assertEqual(len(used), 1)
         self.assertLessEqual(used[0], 4)
+
+    def test_the_metrics_post_without_a_deadline_keeps_its_own_budget(self):
+        used = self._max_times(lambda: utils_mod.send_discovery_metrics(
+            self.url, "test-key-000000", "D", {"t": 1},
+        ))
+
+        self.assertEqual(used, [utils_mod.METRICS_TIMEOUT_SECONDS])
+
+    def test_the_metrics_post_is_clipped_to_the_run_budget(self):
+        """It runs immediately before the completed event, which the backend needs
+        for its prune manifest. Unbounded, it can spend the run's last seconds and
+        the event never goes out at all."""
+        used = self._max_times(lambda: utils_mod.send_discovery_metrics(
+            self.url, "test-key-000000", "D", {"t": 1},
+            deadline=time.monotonic() + 3,
+        ))
+
+        self.assertEqual(len(used), 1)
+        self.assertLessEqual(used[0], 3)
 
     def test_the_s3_put_helper_still_takes_two_arguments(self):
         """_curl_put_to_s3 gained a defaulted timeout; the old two-argument call
@@ -251,9 +275,12 @@ class _RunsTheWholeS3Flow(BaseHTTPRequestHandler):
                 "object_key": "k",
             }).encode()
             self._reply(200, body)
-        else:
+        elif "from-s3" in self.path:
             self.server.notified = True
             self._reply(self.server.notify_code, b'{"error":"no"}')
+        else:
+            # The legacy endpoint the sender falls back to once S3 has failed.
+            self._reply(self.server.legacy_code, b'{"error":"no"}')
 
     def do_PUT(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -281,6 +308,7 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
         self.addCleanup(setattr, s3_mod.logger, "disabled", False)
         self.server = HTTPServer(("127.0.0.1", 0), _RunsTheWholeS3Flow)
         self.server.notify_code = 500
+        self.server.legacy_code = 500
         self.server.notified = False
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -304,6 +332,26 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
             "the object is in S3 and the backend answered 500, so it may have"
             " ingested it -- read as 'never arrived', the stale hash survives",
         )
+
+    def test_a_lost_notification_does_not_mask_an_oversized_body(self):
+        """Both facts have to survive: the payload may be on the backend already,
+        AND the legacy endpoint cannot take it. Carried in one field, the sticky
+        uncertainty hides the refusal, and a caller draining a backlog reads two
+        oversized reports as a backend in trouble and stops."""
+        self.server.legacy_code = 413
+        failure = {}
+        with patch("time.sleep", Mock()):
+            utils_mod.send_report_to_backend(
+                self.url, "test-key-000000",
+                {"device_id": "D", "home_user": "u", "tools": [{"name": "T"}]},
+                failure=failure,
+            )
+
+        self.assertEqual(failure.get("kind"), "uncertain",
+                         "the stored object may have been ingested")
+        self.assertTrue(failure.get("too_large"),
+                        "the legacy endpoint's refusal was lost behind the"
+                        " uncertainty, so the drain will count it as a failure")
 
     def test_a_refusal_on_the_notification_is_not(self):
         """The counterweight: a 4xx is the backend declining to ingest it, which
@@ -354,19 +402,38 @@ class ADroppedPacketIsAsConclusiveAsARefusedOne(unittest.TestCase):
         self.assertEqual(len(calls), 1,
                          "a host that was never reached was asked again")
 
-    def test_a_timeout_after_connecting_is_still_a_maybe(self):
-        """The counterweight: the request did go out, so the backend may hold it
-        and the pair's hash cannot be trusted."""
-        failure, calls = self._send("1")
-
-        self.assertEqual(failure.get("kind"), "uncertain")
-        self.assertEqual(len(calls), utils_mod.MAX_ATTEMPTS)
-
     def test_the_connect_phase_is_bounded(self):
+        """A blackholed host would otherwise hold each attempt for the whole
+        request budget before curl gave up on it."""
         _, calls = self._send("0")
 
-        self.assertIn("--connect-timeout", calls[0],
-                      "a blackholed host holds the whole request budget")
+        self.assertIn("--connect-timeout", calls[0])
+
+
+class AConnectedSendThatTimesOutIsStillAMaybe(_ServesABackend):
+    """The counterweight to the blackhole case, over real traffic: curl connects,
+    the server never answers, and the attempt times out with the same exit code a
+    dropped packet gives. The request did go out, so the backend may hold it and
+    the pair's hash cannot be trusted."""
+
+    def test_a_server_that_never_answers_leaves_the_outcome_uncertain(self):
+        self.server.stall = 30
+        failure = {}
+
+        with patch("time.sleep", Mock()):
+            utils_mod.send_report_to_backend(
+                self.url, "test-key-000000",
+                {"device_id": "D", "home_user": "u", "tools": []},
+                failure=failure, stop_if_unreachable=True,
+                deadline=time.monotonic() + 2,
+            )
+
+        self.assertEqual(
+            failure.get("kind"), "uncertain",
+            "a request that was answered by nothing is not a request that never"
+            " went: reading it as unreachable leaves the stale hash in place",
+        )
+        self.assertEqual(len(self.server.bodies), 1, "the backend did receive it")
 
 
 class TheFormatsSurviveARollback(_ServesABackend):

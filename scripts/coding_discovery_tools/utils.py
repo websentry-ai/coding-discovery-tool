@@ -1560,6 +1560,8 @@ CURL_NEVER_CONNECTED = frozenset({6, 7})
 # attempt for the whole request budget. Generous for a laptop on a slow link,
 # and never longer than the request itself is allowed to take.
 CONNECT_TIMEOUT_SECONDS = 10
+# The metrics POST's own budget when the run has not given it a tighter one.
+METRICS_TIMEOUT_SECONDS = 10
 
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 15
@@ -1609,6 +1611,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     # data report tries S3 first, and S3 exists for bodies the legacy endpoint
     # refuses. Retrying here cannot help, but discarding loses the report.
     PAYLOAD_TOO_LARGE = 413
+
+    def _note_too_large() -> None:
+        """Which endpoint refused the body, recorded apart from whether anything
+        was delivered: a report can both be too large for this route and have
+        reached the backend by the other one."""
+        if failure is not None:
+            failure["too_large"] = True
 
     def _note(kind: str) -> bool:
         """Record why this failed, and say whether to abandon it straight away.
@@ -1751,8 +1760,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
                 if http_code == PAYLOAD_TOO_LARGE:
                     # Says nothing about the backend's health, so a caller draining
-                    # a backlog must not read it as one.
-                    _note("too_large")
+                    # a backlog must not read it as one. Kept out of "kind", which
+                    # carries delivery uncertainty and is deliberately sticky.
+                    _note_too_large()
                     try:
                         raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
                     except RuntimeError as exc:
@@ -3654,6 +3664,7 @@ def send_discovery_metrics(
     sentry_metrics: Dict[str, Any],
     run_id: Optional[str] = None,
     app_name: Optional[str] = None,
+    deadline: Optional[float] = None,
 ) -> bool:
     """Fire-and-forget POST of client-side timing metrics to the backend.
 
@@ -3689,6 +3700,15 @@ def send_discovery_metrics(
         finally:
             os.close(fd)
 
+        # Metrics run immediately before the completed event, which the backend
+        # needs for its prune manifest. Unbounded, a slow POST here spends the
+        # run's last seconds and the event never goes.
+        max_time = METRICS_TIMEOUT_SECONDS
+        if deadline is not None:
+            max_time = int(min(max_time, deadline - time.monotonic()))
+            if max_time < 1:
+                logger.debug("Discovery metrics skipped: out of run budget")
+                return False
         result = subprocess.run(
             [
                 "curl", "-s",
@@ -3697,13 +3717,13 @@ def send_discovery_metrics(
                 "-H", "Content-Type: application/json",
                 "-H", "User-Agent: AI-Tools-Discovery/1.0",
                 "-d", f"@{tmp_path}",
-                "--max-time", "10",
+                "--max-time", str(max_time),
                 "-w", "\n%{http_code}",
                 url,
             ],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=max_time + 5,
         )
         status = result.stdout.rsplit("\n", 1)[-1].strip()
         ok = result.returncode == 0 and status.isdigit() and status.startswith("2")

@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -326,7 +326,13 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
             self._ok()
 
         def do_POST(self):
-            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                event = json.loads(raw).get("scan_event")
+            except Exception:
+                event = None
+            if event:
+                self.server.events.append(event)
             self._ok()
 
         def _ok(self):
@@ -339,9 +345,12 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
             pass
 
     def setUp(self):
-        self.server = HTTPServer(("127.0.0.1", 0), self._StallsTheSweep)
+        # Threading, so the abort's own failure report is not queued behind the
+        # sweep request the run is stuck in.
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._StallsTheSweep)
         # Released in tearDown so a stalled handler cannot hold up the suite.
         self.server.stalling = threading.Event()
+        self.server.events = []
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -380,6 +389,11 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         # Aborted by its own watchdog (non-zero) rather than completing the scan.
         self.assertNotEqual(result.returncode, 0, f"stdout={result.stdout}\nstderr={result.stderr}")
         self.assertLess(elapsed, 60, "self-timeout did not abort promptly")
+        # The abort runs on its own thread and exits the process itself, but only
+        # after telling the backend. A main thread that finished first and exited
+        # over it would take that report with it, and the run would be invisible.
+        self.assertIn("failed", self.server.events,
+                      "the aborted run never reported its failure")
         # Lock cleaned up so a subsequent rerun isn't blocked.
         lock = Path(self._home) / ".unbound" / "discovery.lock"
         self.assertFalse(lock.exists(), "discovery.lock left behind after self-timeout")

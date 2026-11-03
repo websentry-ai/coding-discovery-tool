@@ -46,6 +46,9 @@ DRAIN_FAILURES_BEFORE_STOP = 2
 # Kept clear at the end of the run so the completed event finishes before the
 # watchdog: one that fires over it reports a run that did its work as failed.
 RUN_TAIL_GRACE_SECONDS = 30
+# Longest the main thread waits for an abort on another thread to finish its
+# failure report and exit. Covers that report's own bound with slack.
+ABORT_EXIT_GRACE_SECONDS = 20
 
 SCRIPT_VERSION = "1.2.0"
 
@@ -3807,6 +3810,9 @@ def main():
     # step it interrupted afterwards does not make the run a success, and the
     # abort's own exit can still be waiting on a bounded failure report.
     _aborting = [False]
+    # Set by the abort once it is about to exit, so a main thread that finishes
+    # first waits for the failure report rather than cutting it off.
+    _abort_exiting = threading.Event()
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
     # safely even if they fire before capture (in which case it is still None).
@@ -3881,6 +3887,7 @@ def main():
         except Exception:
             pass
         _report_failed_bounded(error_type, message)
+        _abort_exiting.set()
         os._exit(1)
 
     def _on_watchdog_timeout() -> None:
@@ -4092,7 +4099,7 @@ def main():
                                 f" {len(requeued_pending)} report(s) stay queued."
                             )
                             break
-                        if failure.get("kind") == "too_large":
+                        if failure.get("too_large"):
                             # The wrong route for this body, not a backend in
                             # trouble. Counting it would let two big reports stop
                             # the drain over a backlog it could have delivered.
@@ -4727,6 +4734,8 @@ def main():
             send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
+                deadline=(run_deadline - tail_grace
+                          if run_deadline is not None else None),
             )
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
@@ -4868,9 +4877,11 @@ def main():
         # instead of os._exit(1)-ing over a clean finish.
         _finished[0] = True
         if _aborting[0]:
-            # The abort got there first and is on its own thread, which exits only
-            # after a bounded failure report. Returning 0 from here would race it
-            # and tell the scheduler a run it aborted had succeeded.
+            # The abort got there first and exits the process itself, but only once
+            # it has tried to tell the backend. Exiting here would cut that report
+            # off; returning 0 would tell the scheduler an aborted run succeeded.
+            # So wait for it, and fail loudly if it somehow never arrives.
+            _abort_exiting.wait(ABORT_EXIT_GRACE_SECONDS)
             os._exit(1)
         if _watchdog is not None:
             _watchdog.cancel()

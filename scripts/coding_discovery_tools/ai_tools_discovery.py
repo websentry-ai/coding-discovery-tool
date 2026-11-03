@@ -4006,13 +4006,16 @@ def main():
         # means a write failed, so nothing may store a hash until one lands.
         queue_on_disk = [True]
 
-        def _invalidate(report) -> None:
+        def _invalidate(report) -> bool:
             """Stop trusting the stored hash for this report's pair: the backend may
-            hold the older snapshot now, so detection has to re-upload."""
+            hold the older snapshot now, so detection has to re-upload. Reports
+            whether that reached disk, since this run's own memory of it dies with
+            the process."""
             pair = _report_identity(report)
-            if pair:
-                stale_on_backend.add(pair)
-                discovery_cache.forget_tool_hash(pair[1], pair[0])
+            if not pair:
+                return True
+            stale_on_backend.add(pair)
+            return discovery_cache.forget_tool_hash(pair[1], pair[0])
 
         def _rewrite_queue() -> bool:
             """Put what is still owed on disk now, reporting whether it got there. A
@@ -4098,9 +4101,11 @@ def main():
                         consecutive_failures = 0
                         if failure.get("kind") == "uncertain":
                             # Refused for good now, but an earlier attempt may have
-                            # landed: dropping the report is right, leaving its hash
-                            # behind is not.
-                            _invalidate(queued_report)
+                            # landed, so the stale hash has to go. If that write did
+                            # not land either, the report stays queued: its presence
+                            # is what makes a later run distrust the hash.
+                            if not _invalidate(queued_report):
+                                requeued_pending.append(queued_report)
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # An early stop requeues the untried tail wholesale, which can hold
                 # a pair the resumed run already reported.
@@ -4522,8 +4527,19 @@ def main():
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
+                        # A queued older report for this pair is itself evidence the
+                        # stored hash may not describe the backend any more: the drain
+                        # may have delivered one like it in an earlier run and failed
+                        # to clear the hash. Re-uploading now corrects the row in this
+                        # run instead of waiting for a later one to deliver it.
+                        older_report_queued = any(
+                            _report_identity(r) == (user_name, tool_name)
+                            for r in requeued_pending
+                        )
                         cached_hash = (
-                            None if (user_name, tool_name) in stale_on_backend
+                            None
+                            if older_report_queued
+                            or (user_name, tool_name) in stale_on_backend
                             else discovery_cache.get_cached_hash(tool_name, user_name)
                         )
                         reported_ok = False
@@ -4570,20 +4586,13 @@ def main():
                             # of the backlog, or an earlier write never landed.
                             if len(requeued_pending) != owed or not queue_on_disk[0]:
                                 queue_on_disk[0] = _rewrite_queue()
-                            # A pair whose older report is still owed is not settled:
-                            # recording it would also checkpoint it, and a resumed run
-                            # skips checkpointed pairs and drops their queued reports.
-                            still_owed_here = any(
-                                _report_identity(r) == (user_name, tool_name)
-                                for r in requeued_pending
-                            )
-                            if queue_on_disk[0] and not still_owed_here:
+                            if queue_on_disk[0]:
                                 discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
                             else:
                                 logger.warning(
                                     f"  Queue still holds an older {tool_name} report for"
-                                    f" {user_name}; not recording it as reported, so the"
-                                    f" next run re-uploads rather than skipping it"
+                                    f" {user_name}; not storing its hash, so the next run"
+                                    f" re-uploads rather than skipping it"
                                 )
 
                         if args.dump:

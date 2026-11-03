@@ -1213,6 +1213,25 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
         self.assertEqual(self.queue_now(), [],
                          "413 is permanent; requeueing it would never end")
 
+    def test_a_refusal_whose_invalidation_failed_keeps_the_report(self):
+        """The set that remembers the pair dies with the process, so when the write
+        does not land the report has to stay -- its presence is what makes the next
+        run distrust the hash, whatever that run manages to send."""
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        self.run_main(
+            rule=lost_then_refused(),
+            patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
+                                  return_value=False),),
+        )
+
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "the hash stayed on disk and the report that would have exposed it was"
+            " discarded, so an interrupted run leaves the row hidden for good",
+        )
+
     def test_a_report_it_could_not_deliver_leaves_the_hash_alone(self):
         """Only a delivery makes the hash wrong. Clearing it on a failure would
         force a pointless re-upload of a pair the backend never heard about."""
@@ -1246,94 +1265,75 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
         self.assertEqual(written["run"]["run_id"], "keep-me")
 
 
-class OnlyAnUploadDropsAQueuedReport(_DrivesMain, unittest.TestCase):
-    """A queued report is dropped because this run has put something newer on the
-    backend. A hash match is not that: it says the backend matches our last
-    upload, which a drain in an earlier run may already have overwritten with the
-    very report still sitting in the queue. Dropping it on a match would remove
-    the only thing left that would ever correct that row."""
+class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
+    """The cache says what we last uploaded. A queued older report says the drain
+    may since have replaced that row with it -- in this run or a previous one whose
+    invalidation never reached disk. The queue wins: detection re-uploads, which
+    corrects the row now instead of waiting for a later run to deliver the report.
+    And because the upload is what made the row current, it is also what earns the
+    right to drop the queued copy."""
 
-    DEAD = "http://127.0.0.1:1"
     TOOLS = ({"name": "Claude Code", "version": "1.0",
               "install_path": "/usr/local/bin/claude"},)
     FRESH = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
              "tools": [{"name": "Claude Code", "projects": []}]}
 
-    def _checkpoints(self):
-        """Pairs handed to record_report, which both stores the hash and marks the
-        pair done for a resumed run."""
-        done = []
-        return done, patch.object(
-            adm.discovery_cache, "record_report",
-            side_effect=lambda t, u, _k, **_kw: done.append((u, t)),
-        )
-
-    def _detects_alice(self, *extra):
-        return (
-            patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-            patch.object(adm, "_install_in_another_users_home", return_value=False),
-            patch.object(adm, "_machine_global_install_disowned", return_value=False),
-            patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
-        ) + extra
-
-    def test_a_hash_match_keeps_a_report_the_drain_could_not_deliver(self):
+    def setUp(self):
+        super().setUp()
         self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
                           "tools": [{"name": "Claude Code"}]}])
-        # The hash production will compute for this payload, so the dedup branch is
-        # really taken; a literal would miss it and the test would prove nothing.
-        matching = compute_payload_hash(self.FRESH["tools"][0])
+        # The hash production really computes for this payload: with a literal the
+        # dedup branch is never reached and the test proves nothing.
+        self.matching = compute_payload_hash(self.FRESH["tools"][0])
 
-        done, spy = self._checkpoints()
-
-        self.run_main(
-            domain=self.DEAD, tools=self.TOOLS, users=("alice",),
-            fresh_report=self.FRESH,
-            patches=self._detects_alice(
-                patch.object(adm.discovery_cache, "get_cached_hash",
-                             return_value=matching),
-                spy,
-            ),
-        )
-
-        self.assertEqual(
-            done, [],
-            "the pair was checkpointed although its older report is still owed, so"
-            " a resumed run would skip it and drop that report unsent -- the same"
-            " row left wrong, one run later",
-        )
-        self.assertEqual(
-            self.queue_now(), ["QUEUED-0"],
-            "a report the drain never delivered was dropped on a hash match, so"
-            " nothing will retry it and a row the backend may already hold stays"
-            " wrong for good",
-        )
-
-    def test_an_upload_for_the_same_pair_does_drop_it(self):
-        """The counterweight. Same retention path -- the drain leaves the report
-        untried -- so the only difference is that this run really uploaded."""
-        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
-                          "tools": [{"name": "Claude Code"}]}])
-
-        done, spy = self._checkpoints()
-
-        backend, _ = self.run_main(
+    def _run(self, *extra, **kwargs):
+        return self.run_main(
             tools=self.TOOLS, users=("alice",), fresh_report=self.FRESH,
-            patches=self._detects_alice(
-                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0), spy,
-            ),
+            patches=(
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                # Left untried by the drain, so it is still owed when detection runs.
+                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
+            ) + extra,
+            **kwargs,
         )
 
-        self.assertEqual(done, [("alice", "Claude Code")],
-                         "an uploaded pair owes nothing, so it must be recorded")
+    def test_the_correcting_upload_goes_out_despite_a_matching_hash(self):
+        backend, _ = self._run(
+            patch.object(adm.discovery_cache, "get_cached_hash",
+                         return_value=self.matching),
+        )
 
         self.assertEqual(backend.device_ids(prefix="QUEUED-"), [],
-                         "the drain delivered it, so retention is not what is"
-                         " being tested")
+                         "the drain delivered it, so the queue is not what made"
+                         " detection distrust the hash")
+        self.assertIn(
+            "THIS-RUN", backend.device_ids(prefix="THIS-RUN"),
+            "a matching hash suppressed the upload while an older report for the"
+            " same pair sat in the queue, so a row the drain may already have"
+            " replaced stays wrong until the tool's config changes",
+        )
+
+    def test_the_upload_is_what_drops_the_queued_copy(self):
+        backend, _ = self._run()
+
         self.assertIn("THIS-RUN", backend.device_ids(prefix="THIS-RUN"))
         self.assertEqual(
             self.queue_now(), [],
             "this run replaced that row with a newer snapshot, so sending the"
             " queued one later would undo the upload",
+        )
+
+    def test_an_upload_that_fails_leaves_the_queued_copy_alone(self):
+        """Nothing was replaced, so nothing is superseded: both are still owed."""
+        backend, _ = self._run(rule=status_for(permanent=()), domain="http://127.0.0.1:1")
+
+        self.assertEqual(
+            sorted(self.queue_now()), ["QUEUED-0", "THIS-RUN"],
+            "the run could not reach the backend, so dropping either of them"
+            " loses a report nothing will send again",
         )
 
 

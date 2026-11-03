@@ -82,7 +82,7 @@ class TestDetector(unittest.TestCase):
             # Assert required top-level keys
             self.assertIn("home_user", report)
             self.assertIn("system_user", report)
-            self.assertIn("device_id", report)
+            self.assertIn("device_discovery_id", report)
             self.assertIn("tools", report)
             self.assertEqual(len(report["tools"]), 1)
 

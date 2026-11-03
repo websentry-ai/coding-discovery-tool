@@ -1552,8 +1552,14 @@ def send_scan_event(
 
 # curl exit codes that mean nothing was ever handed to the backend. Any other
 # failure is read as "it may have arrived", which costs a redundant upload at
-# worst, where the opposite mistake leaves a row stale for good.
+# worst, where the opposite mistake leaves a row stale for good. A dropped
+# packet is not among them -- curl reports a plain timeout for that, so the
+# connection count below is what tells the two apart.
 CURL_NEVER_CONNECTED = frozenset({6, 7})
+# A host that drops packets rather than refusing them would otherwise hold each
+# attempt for the whole request budget. Generous for a laptop on a slow link,
+# and never longer than the request itself is allowed to take.
+CONNECT_TIMEOUT_SECONDS = 10
 
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 15
@@ -1698,7 +1704,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         "-H", "User-Agent: AI-Tools-Discovery/1.0",
                         "-d", f"@{tmp_path}",
                         "--max-time", str(request_timeout),
-                        "-w", "\n%{http_code}",
+                        "--connect-timeout",
+                        str(min(CONNECT_TIMEOUT_SECONDS, request_timeout)),
+                        "-w", "\n%{num_connects} %{http_code}",
                         url,
                     ],
                     capture_output=True,
@@ -1706,17 +1714,22 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     timeout=request_timeout + 5,
                 )
 
-                # Parse response: stdout = body + "\n" + http_code
+                # Parse response: stdout = body + "\n" + connections + " " + http_code
                 lines = result.stdout.rsplit("\n", 1)
-                status_str = lines[-1].strip() if lines else ""
+                connects, _, status_str = (lines[-1] if lines else "").strip().partition(" ")
+                status_str = status_str.strip()
                 response_body = lines[0] if len(lines) > 1 else ""
 
                 if result.returncode != 0 or not status_str.isdigit():
                     # Connection/DNS failure — retryable
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
+                    # Nothing was handed over if no connection was ever opened,
+                    # whatever curl called the failure. A blackholed host times out
+                    # exactly like a slow one, and only this tells them apart.
                     give_up = _note(
-                        "unreachable" if result.returncode in CURL_NEVER_CONNECTED
+                        "unreachable"
+                        if result.returncode in CURL_NEVER_CONNECTED or connects == "0"
                         else "uncertain"
                     )
                     if not give_up and attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):

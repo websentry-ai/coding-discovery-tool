@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import tempfile
+import subprocess
 import threading
 import time
 import unittest
@@ -310,6 +311,62 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
         self.server.notify_code = 400
 
         self.assertIsNone(self._upload().get("kind"))
+
+
+class ADroppedPacketIsAsConclusiveAsARefusedOne(unittest.TestCase):
+    """A VPN that is down or a firewall that blackholes the backend does not
+    refuse the connection -- it swallows it, and curl reports the same timeout a
+    slow server would. Read as "it may have arrived", every queued report pays a
+    full retry curve against a host that was never there.
+
+    This is the one place a real transport cannot be used: a dropped packet has
+    no reliable stand-in on localhost. curl's own answer is stubbed, and nothing
+    else about the send is."""
+
+    REPORT = {"device_id": "D", "home_user": "u", "tools": []}
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+
+    def _send(self, connects):
+        """curl timed out. `connects` is how many connections it managed first."""
+        calls = []
+
+        def _curl(cmd, *_a, **_kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 28, stdout=f"\n{connects} 000", stderr="curl: (28) timed out",
+            )
+
+        failure = {}
+        with patch.object(utils_mod.subprocess, "run", _curl), \
+             patch("time.sleep", Mock()):
+            utils_mod.send_report_to_backend(
+                "http://127.0.0.1:1", "test-key-000000", dict(self.REPORT),
+                failure=failure, stop_if_unreachable=True,
+            )
+        return failure, calls
+
+    def test_a_timeout_that_never_connected_settles_the_queue(self):
+        failure, calls = self._send("0")
+
+        self.assertEqual(failure.get("kind"), "unreachable")
+        self.assertEqual(len(calls), 1,
+                         "a host that was never reached was asked again")
+
+    def test_a_timeout_after_connecting_is_still_a_maybe(self):
+        """The counterweight: the request did go out, so the backend may hold it
+        and the pair's hash cannot be trusted."""
+        failure, calls = self._send("1")
+
+        self.assertEqual(failure.get("kind"), "uncertain")
+        self.assertEqual(len(calls), utils_mod.MAX_ATTEMPTS)
+
+    def test_the_connect_phase_is_bounded(self):
+        _, calls = self._send("0")
+
+        self.assertIn("--connect-timeout", calls[0],
+                      "a blackholed host holds the whole request budget")
 
 
 class TheFormatsSurviveARollback(_ServesABackend):

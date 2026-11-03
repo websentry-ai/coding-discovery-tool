@@ -3803,6 +3803,10 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
+    # Set once the watchdog or a signal has decided this run failed. Finishing the
+    # step it interrupted afterwards does not make the run a success, and the
+    # abort's own exit can still be waiting on a bounded failure report.
+    _aborting = [False]
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
     # safely even if they fire before capture (in which case it is still None).
@@ -3860,6 +3864,7 @@ def main():
         # late Timer fire would otherwise os._exit(1) over a successful exit 0.
         if _finished[0]:
             return
+        _aborting[0] = True
         logger.error(message)
         # Release the lock FIRST so a follow-up run is never blocked even if the
         # reports below stall. Surface the abort to Sentry (the observability path
@@ -4857,6 +4862,11 @@ def main():
         # (cancel() doesn't stop an already-dispatched callback) no-ops in _abort
         # instead of os._exit(1)-ing over a clean finish.
         _finished[0] = True
+        if _aborting[0]:
+            # The abort got there first and is on its own thread, which exits only
+            # after a bounded failure report. Returning 0 from here would race it
+            # and tell the scheduler a run it aborted had succeeded.
+            os._exit(1)
         if _watchdog is not None:
             _watchdog.cancel()
         for _sig, _prev in _prev_signal_handlers.items():

@@ -1737,6 +1737,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 _log_http_error_details(http_code, response_body or None)
 
                 if http_code == PAYLOAD_TOO_LARGE:
+                    # Says nothing about the backend's health, so a caller draining
+                    # a backlog must not read it as one.
+                    _note("too_large")
                     try:
                         raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
                     except RuntimeError as exc:

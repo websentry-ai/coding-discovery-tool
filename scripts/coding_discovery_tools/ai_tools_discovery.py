@@ -4092,6 +4092,11 @@ def main():
                                 f" {len(requeued_pending)} report(s) stay queued."
                             )
                             break
+                        if failure.get("kind") == "too_large":
+                            # The wrong route for this body, not a backend in
+                            # trouble. Counting it would let two big reports stop
+                            # the drain over a backlog it could have delivered.
+                            continue
                         # Answered and refused can be about this payload, so it must
                         # not hold up the queue behind it; a run of them is not.
                         consecutive_failures += 1
@@ -4104,13 +4109,13 @@ def main():
                             break
                     else:
                         consecutive_failures = 0
-                        if failure.get("kind") == "uncertain":
-                            # Refused for good now, but an earlier attempt may have
-                            # landed, so the stale hash has to go. If that write did
-                            # not land either, the report stays queued: its presence
-                            # is what makes a later run distrust the hash.
-                            if not _invalidate(queued_report):
-                                requeued_pending.append(queued_report)
+                        # The queue held an older report for this pair, which is
+                        # reason enough to stop trusting the stored hash: giving up
+                        # on the report does not establish what the backend holds.
+                        # If the write did not land either, keep the report -- its
+                        # presence is what makes a later run distrust the hash.
+                        if not _invalidate(queued_report):
+                            requeued_pending.append(queued_report)
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # An early stop requeues the untried tail wholesale, which can hold
                 # a pair the resumed run already reported.

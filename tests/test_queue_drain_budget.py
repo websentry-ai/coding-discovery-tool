@@ -1234,6 +1234,28 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
             " discarded, so an interrupted run leaves the row hidden for good",
         )
 
+    def test_giving_up_on_a_report_still_clears_the_hash(self):
+        """No lost answer anywhere -- just a refusal the drain will not retry. The
+        queue disagreed with the stored hash, and dropping the report does not
+        settle that disagreement, so the pair has to be re-uploaded once."""
+        forgotten = []
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        self.run_main(
+            rule=statuses({"QUEUED-0": 422}),
+            patches=(patch.object(
+                adm.discovery_cache, "forget_tool_hash",
+                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
+            ),),
+        )
+
+        self.assertEqual(
+            forgotten, [("alice", "Claude Code")],
+            "the report that disagreed with the hash is gone and the hash is"
+            " still trusted, so nothing will ever check that row again",
+        )
+
     def test_a_report_it_could_not_deliver_leaves_the_hash_alone(self):
         """Only a delivery makes the hash wrong. Clearing it on a failure would
         force a pointless re-upload of a pair the backend never heard about."""
@@ -1362,6 +1384,27 @@ class ABodyTooLargeForOneRouteIsNotALostReport(_DrivesMain, unittest.TestCase):
             "a report only the S3 route can carry was dropped at the legacy"
             " endpoint, so nothing will ever try the route that works",
         )
+
+    def test_two_oversized_reports_do_not_stop_the_drain(self):
+        """A body the legacy endpoint will not take says nothing about whether the
+        backend is healthy. Counted as failures, two of them at the front of the
+        queue strand everything behind them."""
+        big = [dict(self.BIG, device_id=f"QUEUED-{i}") for i in range(3)]
+        self.seed_queue(big)
+
+        backend, _ = self.run_main(
+            rule=statuses({"QUEUED-0": 413, "QUEUED-1": 413}),
+        )
+
+        self.assertEqual(
+            backend.device_ids(prefix="QUEUED-"),
+            ["QUEUED-0", "QUEUED-1", "QUEUED-2"],
+            "the drain stopped on two reports the legacy endpoint merely could"
+            " not take, so the healthy one behind them was never tried",
+        )
+        self.assertEqual(sorted(self.queue_now()), ["QUEUED-0", "QUEUED-1"],
+                         "the two it could not place stay for the S3 route;"
+                         " the delivered one is gone")
 
     def test_a_report_the_backend_will_never_accept_is_still_discarded(self):
         """The counterweight: 422 is about the report, so keeping it would mean

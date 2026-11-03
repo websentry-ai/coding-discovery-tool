@@ -148,6 +148,7 @@ def try_s3_upload(
     payload: Dict,
     sentry_context: Optional[Dict] = None,
     deadline: Optional[float] = None,
+    failure: Optional[Dict] = None,
 ) -> Tuple[bool, bool]:
     """
     Run the 3-step flow. Returns (success, retryable).
@@ -231,6 +232,11 @@ def try_s3_upload(
         f"{base}{FROM_S3_PATH}", api_key, notify_body, notify_timeout,
     )
     if not ok:
+        # The upload itself succeeded, so the backend may well have taken this
+        # payload and only the answer was lost. Say so rather than letting the
+        # caller read it as "never arrived".
+        if failure is not None:
+            failure["kind"] = "uncertain"
         _report_step_failure("from_s3_request", status, body, err, ctx)
         return False, True
     if not (200 <= status < 300):

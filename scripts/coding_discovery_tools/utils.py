@@ -1601,10 +1601,16 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 413, 422)
 
     def _note(kind: str) -> bool:
-        """Record why this failed, and say whether to abandon it straight away."""
-        if failure is not None:
+        """Record why this failed, and say whether to abandon it straight away.
+
+        "uncertain" is sticky across attempts: once one of them may have reached
+        the backend, a later attempt that cannot connect does not make that
+        untrue, and the caller still has to assume the report landed."""
+        if failure is not None and failure.get("kind") != "uncertain":
             failure["kind"] = kind
-        return stop_if_unreachable and kind == "unreachable"
+        return stop_if_unreachable and kind == "unreachable" and (
+            failure is None or failure.get("kind") != "uncertain"
+        )
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     ctx = sentry_context or {}
@@ -1636,11 +1642,17 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         return (False, True)
 
     if should_use_s3(payload):
+        s3_failure = {}
         s3_success, _ = try_s3_upload(
             backend_url, api_key, payload, sentry_context=ctx, deadline=deadline,
+            failure=s3_failure,
         )
         if s3_success:
             return (True, False)
+        # A lost answer from the from-s3 notification means the backend may hold
+        # this payload already; the legacy retry below must not erase that.
+        if s3_failure.get("kind") == "uncertain":
+            _note("uncertain")
         logger.info("S3 upload path failed; falling back to legacy /api/v1/ai-tools/report/")
 
     payload_json = json.dumps(payload)

@@ -986,6 +986,32 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
             "the reserve ate the whole budget, so a short scan uploaded nothing",
         )
 
+    def test_the_completed_event_finishes_before_the_watchdog(self):
+        """It carries the manifest the backend prunes against, and a watchdog that
+        fires over it reports the run failed even though it did its work."""
+        seen = {}
+
+        def _event(domain, api_key, device_id, run_id, event, *a, **kw):
+            if event == "completed":
+                seen["deadline"] = kw.get("deadline")
+            return (True, None)
+
+        started = time.monotonic()
+        self.run_main(
+            timeout="900",
+            patches=(patch.object(adm, "send_scan_event", _event),),
+        )
+
+        self.assertIn("deadline", seen, "no completed event was sent")
+        # Behavioural rather than a reference to the constant: the deadline has to
+        # be meaningfully earlier than the watchdog, not the same instant.
+        watchdog_at = started + 900
+        self.assertLess(
+            seen["deadline"], watchdog_at - 5,
+            "the completed event is given until the watchdog fires, so it can"
+            " still be in flight when the run is killed over it",
+        )
+
     def test_the_lifecycle_events_stop_retrying_inside_the_budget(self):
         """in_progress and completed carry the manifest and the run's shape. Each
         is a full retry cycle on an unreachable backend if it is not bounded."""
@@ -1162,6 +1188,97 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
         self.assertEqual(written["run"]["run_id"], "keep-me")
 
 
+class OnlyAnUploadDropsAQueuedReport(_DrivesMain, unittest.TestCase):
+    """A queued report is dropped because this run has put something newer on the
+    backend. A hash match is not that: it says the backend matches our last
+    upload, which a drain in an earlier run may already have overwritten with the
+    very report still sitting in the queue. Dropping it on a match would remove
+    the only thing left that would ever correct that row."""
+
+    DEAD = "http://127.0.0.1:1"
+    TOOLS = ({"name": "Claude Code", "version": "1.0",
+              "install_path": "/usr/local/bin/claude"},)
+    FRESH = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+             "tools": [{"name": "Claude Code", "projects": []}]}
+
+    def _checkpoints(self):
+        """Pairs handed to record_report, which both stores the hash and marks the
+        pair done for a resumed run."""
+        done = []
+        return done, patch.object(
+            adm.discovery_cache, "record_report",
+            side_effect=lambda t, u, _k, **_kw: done.append((u, t)),
+        )
+
+    def _detects_alice(self, *extra):
+        return (
+            patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+            patch.object(adm, "_install_in_another_users_home", return_value=False),
+            patch.object(adm, "_machine_global_install_disowned", return_value=False),
+            patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+        ) + extra
+
+    def test_a_hash_match_keeps_a_report_the_drain_could_not_deliver(self):
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+        # The hash production will compute for this payload, so the dedup branch is
+        # really taken; a literal would miss it and the test would prove nothing.
+        matching = compute_payload_hash(self.FRESH["tools"][0])
+
+        done, spy = self._checkpoints()
+
+        self.run_main(
+            domain=self.DEAD, tools=self.TOOLS, users=("alice",),
+            fresh_report=self.FRESH,
+            patches=self._detects_alice(
+                patch.object(adm.discovery_cache, "get_cached_hash",
+                             return_value=matching),
+                spy,
+            ),
+        )
+
+        self.assertEqual(
+            done, [],
+            "the pair was checkpointed although its older report is still owed, so"
+            " a resumed run would skip it and drop that report unsent -- the same"
+            " row left wrong, one run later",
+        )
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "a report the drain never delivered was dropped on a hash match, so"
+            " nothing will retry it and a row the backend may already hold stays"
+            " wrong for good",
+        )
+
+    def test_an_upload_for_the_same_pair_does_drop_it(self):
+        """The counterweight. Same retention path -- the drain leaves the report
+        untried -- so the only difference is that this run really uploaded."""
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        done, spy = self._checkpoints()
+
+        backend, _ = self.run_main(
+            tools=self.TOOLS, users=("alice",), fresh_report=self.FRESH,
+            patches=self._detects_alice(
+                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0), spy,
+            ),
+        )
+
+        self.assertEqual(done, [("alice", "Claude Code")],
+                         "an uploaded pair owes nothing, so it must be recorded")
+
+        self.assertEqual(backend.device_ids(prefix="QUEUED-"), [],
+                         "the drain delivered it, so retention is not what is"
+                         " being tested")
+        self.assertIn("THIS-RUN", backend.device_ids(prefix="THIS-RUN"))
+        self.assertEqual(
+            self.queue_now(), [],
+            "this run replaced that row with a newer snapshot, so sending the"
+            " queued one later would undo the upload",
+        )
+
+
 class AnUnreachableBackendIsConclusive(_DrivesMain, unittest.TestCase):
     """A refused connection is not the same as a refused report. Nothing reached
     the backend, so nothing behind this one will either -- there is no payload to
@@ -1199,6 +1316,9 @@ class AnUnreachableBackendIsConclusive(_DrivesMain, unittest.TestCase):
             self.run_main(domain=self.DEAD)
 
         drained = [d for d in posted if (d or "").startswith("QUEUED-")]
+        # The request count is the proof, not elapsed time: a refused connection
+        # returns instantly, so a regression that retried all ten would still be
+        # quick. Ten queued reports used to cost fifty requests here.
         self.assertEqual(
             drained, ["QUEUED-0"],
             "a backend that refused the connection was asked again; one answer of"
@@ -1207,20 +1327,6 @@ class AnUnreachableBackendIsConclusive(_DrivesMain, unittest.TestCase):
         self.assertEqual(
             self.queue_now(), [r["device_id"] for r in pending],
             "all ten are still owed, so all ten stay queued",
-        )
-
-    def test_it_does_not_sleep_out_a_curve_it_cannot_use(self):
-        """With the real backoff ceilings, ten reports used to cost ~28 minutes.
-        Nothing connected, so this has to finish in the time one failed connect
-        takes -- which is why the sleeps are not mocked here."""
-        self.seed_queue(_queued(10))
-        started = time.monotonic()
-
-        self.run_main(domain=self.DEAD, patches=(patch("time.sleep", Mock()),))
-
-        self.assertLess(
-            time.monotonic() - started, 60,
-            "the drain spent real time on a backend it never reached",
         )
 
 

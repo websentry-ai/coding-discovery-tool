@@ -36,16 +36,16 @@ DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 # backlog that cannot be sent now waits for the next run. Uncapped, a full queue
 # cost more than the run timeout and the run aborted before detecting anything.
 DRAIN_BUDGET_SECONDS = 600
-# Left of the run budget for the end-of-run sends once this run's own reports
-# have had the rest. Unbounded, those reports carry the same cost the drain was
-# capped for -- five attempts and ~169s of backoff each, per tool per user. The
-# reserve has to fit a whole retry cycle, or the tail of the run trips the
-# watchdog it exists to avoid -- but never more than a quarter of the budget,
-# since a short scan still has to be able to report what it found.
+# Held back for the end-of-run sends. Must fit a whole retry cycle, or the tail
+# of the run trips the watchdog; never more than a quarter of the budget, or a
+# short scan cannot report what it found.
 RUN_SEND_RESERVE_SECONDS = 300
 # Retryable failures in a row that mean the backend is down rather than one
 # report being bad. Each one costs a full five-attempt retry cycle.
 DRAIN_FAILURES_BEFORE_STOP = 2
+# Kept clear at the end of the run so the completed event finishes before the
+# watchdog: one that fires over it reports a run that did its work as failed.
+RUN_TAIL_GRACE_SECONDS = 30
 
 SCRIPT_VERSION = "1.2.0"
 
@@ -3638,11 +3638,12 @@ def _report_identity(report) -> Optional[tuple]:
     return (report.get("home_user"), tools[0].get("name"))
 
 
-def _drop_superseded(queued: List[Dict], reported_this_run: set) -> List[Dict]:
-    """Queued reports the backend has no newer snapshot of. Sending one it does have
-    would replace that snapshot, and this run's stored payload hash then stops
-    detection from putting it back."""
-    return [r for r in queued if _report_identity(r) not in reported_this_run]
+def _drop_superseded(queued: List[Dict], uploaded_this_run: set) -> List[Dict]:
+    """Queued reports this run has not uploaded a newer snapshot for. Sending one
+    it has would overwrite that snapshot. Only an upload counts: a hash match can
+    describe a row an earlier drain replaced, and the queued report is then the
+    only thing left that will correct it."""
+    return [r for r in queued if _report_identity(r) not in uploaded_this_run]
 
 
 def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
@@ -3956,9 +3957,8 @@ def main():
             )
         discovery_cache.start_run(run_id, done=resume_done)
 
-        # This run's own reports get the rest of the budget, minus what the
-        # completed event and metrics need. A send that would outlive it queues
-        # instead, which is what the queue is for.
+        # This run's reports get the budget less the end-of-run reserve. A send
+        # that would outlive it queues instead, which is what the queue is for.
         run_deadline = (
             t_start + args.timeout if args.timeout and args.timeout > 0 else None
         )
@@ -3972,19 +3972,21 @@ def main():
         # Queued reports this run did not get to. Separate so they go back ahead of
         # this run's own failures, and are the first dropped when the queue is capped.
         requeued_pending = []
-        # (home_user, tool) left current on the backend, by upload or by hash match.
-        # A queued older report for one of these must never be sent. Seeded from the
-        # interrupted run this one resumes, whose pairs this run skips re-reporting,
-        # so the drain below already knows about them.
-        reported_this_run = {
+        # (home_user, tool) the resumed run already reported and this run skips.
+        # The drain must not send a queued older report for one of them: that would
+        # overwrite the newer snapshot nothing would then correct.
+        resume_reported = {
             (home_user, tool_key.split(":", 1)[0])
             for tool_key, home_user in resume_done
         }
-        # (home_user, tool) whose backend row the drain has just replaced with an
-        # older snapshot. The cache write that records this can fail silently, so
-        # this run trusts the set rather than the file: the stored hash must not be
-        # allowed to skip the upload that corrects them.
+        # (home_user, tool) whose row the drain has just replaced with an older
+        # snapshot. The cache write recording that can fail silently, so this run
+        # trusts the set over the file.
         stale_on_backend = set()
+        # (home_user, tool) this run uploaded itself. Only an upload authorises
+        # dropping a report the drain could not deliver: a hash match describes a
+        # snapshot the drain may already have replaced with an older one.
+        uploaded_this_run = set()
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -4006,9 +4008,9 @@ def main():
 
         # --- Drain pending reports from earlier runs ---
         # Time-bounded: a backlog must neither delay detection nor outlive the run
-        # budget, and what is left stays queued. Kept ahead of this run's sends --
-        # the backend replaces rows per reported tool name, so a queued report
-        # landing after a fresh one would overwrite it with older data.
+        # budget, and what is left stays queued. Kept ahead of this run's sends,
+        # since the backend replaces rows per tool name and an older report
+        # landing after a fresh one would overwrite it.
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
             if pending:
@@ -4019,7 +4021,7 @@ def main():
                 drain_deadline = time.monotonic() + drain_budget
                 consecutive_failures = 0
                 for index, queued_report in enumerate(pending):
-                    if _report_identity(queued_report) in reported_this_run:
+                    if _report_identity(queued_report) in resume_reported:
                         logger.info("  · Queued report superseded; dropped unsent")
                         continue
                     if time.monotonic() >= drain_deadline:
@@ -4037,18 +4039,16 @@ def main():
                     )
                     if success:
                         consecutive_failures = 0
-                        # The backend now holds this report's older snapshot, so what
-                        # we last uploaded for that pair is no longer what is there.
-                        # Dropping the hash makes detection below re-upload and
-                        # correct it rather than skip the pair as unchanged.
+                        # The backend now holds this older snapshot, so the stored
+                        # hash no longer describes it. Dropping it makes detection
+                        # below re-upload rather than skip the pair.
                         delivered = _report_identity(queued_report)
                         if delivered:
                             stale_on_backend.add(delivered)
-                            # The set above only lasts this process, so if the hash
-                            # did not actually go, keep the report queued for a later
-                            # run to retry rather than leaving a row that the stale
-                            # hash hides for good. The persist-time filter drops it
-                            # again if this run does correct the pair.
+                            # The set above only lasts this process, so a hash that
+                            # did not go keeps its report queued for a later run to
+                            # retry. The persist filter drops it if this run corrects
+                            # the pair.
                             if not discovery_cache.forget_tool_hash(
                                 delivered[1], delivered[0]
                             ):
@@ -4073,9 +4073,8 @@ def main():
                                 f" {len(requeued_pending)} report(s) stay queued."
                             )
                             break
-                        # Answered and refused: that can be about this payload, so it
-                        # must not hold up the queue behind it. A run of them is the
-                        # backend, not the report.
+                        # Answered and refused can be about this payload, so it must
+                        # not hold up the queue behind it; a run of them is not.
                         consecutive_failures += 1
                         if consecutive_failures >= DRAIN_FAILURES_BEFORE_STOP:
                             requeued_pending.extend(pending[index + 1:])
@@ -4090,7 +4089,7 @@ def main():
                 # An early stop requeues the untried tail wholesale, which can hold
                 # a pair the resumed run already reported.
                 requeued_pending[:] = _drop_superseded(
-                    requeued_pending, reported_this_run
+                    requeued_pending, resume_reported
                 )
                 queue_on_disk[0] = _rewrite_queue()
                 logger.info("")
@@ -4529,6 +4528,7 @@ def main():
                                 )
                             if success:
                                 reported_ok = True
+                                uploaded_this_run.add((user_name, tool_name))
                                 hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
@@ -4543,26 +4543,31 @@ def main():
                         # re-processing it.
                         if reported_ok:
                             # The stored hash is what makes a later run skip the
-                            # upload that would correct this pair, so it may only be
-                            # stored once the queue is known not to hold an older
-                            # report for it. Failing that way round costs a re-upload;
-                            # the other way round restores stale data for good.
-                            reported_this_run.add((user_name, tool_name))
+                            # correcting upload, so store it only once the queue is
+                            # known to hold no older report for the pair. This way
+                            # round a failure costs a re-upload, not a stale row.
                             owed = len(requeued_pending)
                             requeued_pending[:] = _drop_superseded(
-                                requeued_pending, reported_this_run
+                                requeued_pending, uploaded_this_run
                             )
                             # The file already lacks this pair unless it just came out
                             # of the backlog, or an earlier write never landed.
                             if len(requeued_pending) != owed or not queue_on_disk[0]:
                                 queue_on_disk[0] = _rewrite_queue()
-                            if queue_on_disk[0]:
+                            # A pair whose older report is still owed is not settled:
+                            # recording it would also checkpoint it, and a resumed run
+                            # skips checkpointed pairs and drops their queued reports.
+                            still_owed_here = any(
+                                _report_identity(r) == (user_name, tool_name)
+                                for r in requeued_pending
+                            )
+                            if queue_on_disk[0] and not still_owed_here:
                                 discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
                             else:
                                 logger.warning(
                                     f"  Queue still holds an older {tool_name} report for"
-                                    f" {user_name}; not storing its hash, so the next run"
-                                    f" re-uploads rather than skipping it"
+                                    f" {user_name}; not recording it as reported, so the"
+                                    f" next run re-uploads rather than skipping it"
                                 )
 
                         if args.dump:
@@ -4623,7 +4628,7 @@ def main():
         # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
             # Backlog first: the queue keeps its newest entries when it hits the cap.
-            still_owed = _drop_superseded(requeued_pending, reported_this_run) + failed_reports
+            still_owed = _drop_superseded(requeued_pending, uploaded_this_run) + failed_reports
             superseded = len(requeued_pending) + len(failed_reports) - len(still_owed)
             if superseded:
                 logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
@@ -4776,7 +4781,9 @@ def main():
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
-            manifest=manifest, covered_home_users=covered, deadline=run_deadline,
+            manifest=manifest, covered_home_users=covered,
+            deadline=(run_deadline - RUN_TAIL_GRACE_SECONDS
+                      if run_deadline is not None else None),
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")
@@ -4794,8 +4801,17 @@ def main():
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            sent, failed, matched = run_sweep(args.domain, args.api_key)
-            logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
+            # Its requests are unbounded and it runs with the watchdog still armed,
+            # so a run with nothing left to spare skips it rather than being killed
+            # inside it. Best-effort by design: the next run picks it up.
+            out_of_budget = run_deadline is not None and time.monotonic() > (
+                run_deadline - RUN_TAIL_GRACE_SECONDS
+            )
+            if out_of_budget:
+                logger.info("Connector UUID sweep skipped: out of run budget")
+            else:
+                sent, failed, matched = run_sweep(args.domain, args.api_key)
+                logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
         except Exception as sweep_err:
             logger.debug(f"Connector UUID sweep failed: {sweep_err}")
 

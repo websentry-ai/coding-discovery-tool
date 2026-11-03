@@ -183,9 +183,10 @@ class ThePermanentRefusalsMatchWhatTheBackendSends(_ServesABackend):
 
     REPORT = {"device_id": "D", "home_user": "u", "tools": []}
 
-    def test_an_oversized_report_is_refused_once_and_discarded(self):
-        """413 comes from a fixed body-size limit, so the same payload is refused
-        every time. Retrying it costs a cycle and then a day of re-sends."""
+    def test_an_oversized_report_is_refused_once_but_kept(self):
+        """413 is about this endpoint, not the report: a body too large for the
+        legacy route is what the S3 route exists for, and that is what the report
+        tries first on the next run. So stop asking, but keep it."""
         self.server.code = 413
 
         with patch("time.sleep", Mock()):
@@ -194,10 +195,12 @@ class ThePermanentRefusalsMatchWhatTheBackendSends(_ServesABackend):
             )
 
         self.assertEqual(
-            (ok, retryable), (False, False),
-            "an oversized report was marked retryable, so it goes back on the queue",
+            (ok, retryable), (False, True),
+            "a report the legacy endpoint cannot take was discarded, so its data"
+            " never reaches the backend even though S3 could carry it",
         )
-        self.assertEqual(len(self.server.bodies), 1, "it was sent more than once")
+        self.assertEqual(len(self.server.bodies), 1,
+                         "asking the same endpoint again cannot change the answer")
 
     def test_a_server_error_is_still_retried(self):
         """The counterweight: 500 is the one the backend sends for a transient
@@ -232,6 +235,81 @@ class ThePermanentRefusalsMatchWhatTheBackendSends(_ServesABackend):
         )
 
         self.assertEqual((ok, retryable), (True, False))
+
+
+class _RunsTheWholeS3Flow(BaseHTTPRequestHandler):
+    """Presign and PUT succeed; the notification answers whatever the test says.
+    The object is in S3 by then, so what the notification says decides whether
+    the backend may already hold this payload."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if "upload-url" in self.path:
+            body = json.dumps({
+                "upload_url": f"http://127.0.0.1:{self.server.server_address[1]}/put",
+                "object_key": "k",
+            }).encode()
+            self._reply(200, body)
+        else:
+            self.server.notified = True
+            self._reply(self.server.notify_code, b'{"error":"no"}')
+
+    def do_PUT(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self._reply(200, b"")
+
+    def _reply(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_a):
+        pass
+
+
+class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
+    """Once the PUT has landed, the payload exists in S3 and the backend may pick
+    it up. A server error on the notification therefore has to be read as "it may
+    be there", or the caller clears nothing and detection goes on trusting a hash
+    that no longer describes the row."""
+
+    def setUp(self):
+        s3_mod.logger.disabled = True
+        self.addCleanup(setattr, s3_mod.logger, "disabled", False)
+        self.server = HTTPServer(("127.0.0.1", 0), _RunsTheWholeS3Flow)
+        self.server.notify_code = 500
+        self.server.notified = False
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def _upload(self):
+        failure = {}
+        ok, _ = s3_mod.try_s3_upload(
+            self.url, "test-key-000000",
+            {"device_id": "D", "home_user": "u", "tools": [{"name": "T"}]},
+            {"phase": "t"}, failure=failure,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(self.server.notified, "the flow never reached the notification")
+        return failure
+
+    def test_a_server_error_on_the_notification_is_uncertain(self):
+        self.assertEqual(
+            self._upload().get("kind"), "uncertain",
+            "the object is in S3 and the backend answered 500, so it may have"
+            " ingested it -- read as 'never arrived', the stale hash survives",
+        )
+
+    def test_a_refusal_on_the_notification_is_not(self):
+        """The counterweight: a 4xx is the backend declining to ingest it, which
+        is not a maybe. Calling that uncertain would clear hashes for nothing."""
+        self.server.notify_code = 400
+
+        self.assertIsNone(self._upload().get("kind"))
 
 
 class TheFormatsSurviveARollback(_ServesABackend):

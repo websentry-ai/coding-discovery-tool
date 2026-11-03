@@ -1598,7 +1598,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     # 413 is as permanent as a validation error: the backend checks the body
     # against a fixed limit, so the same payload is refused every time. Retrying
     # it burns a cycle and then re-sends it from the queue for a day.
-    NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 413, 422)
+    NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
+    # Too large for THIS endpoint, which is not the same as a bad report: every
+    # data report tries S3 first, and S3 exists for bodies the legacy endpoint
+    # refuses. Retrying here cannot help, but discarding loses the report.
+    PAYLOAD_TOO_LARGE = 413
 
     def _note(kind: str) -> bool:
         """Record why this failed, and say whether to abandon it straight away.
@@ -1731,6 +1735,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
                 _note("rejected")
                 _log_http_error_details(http_code, response_body or None)
+
+                if http_code == PAYLOAD_TOO_LARGE:
+                    try:
+                        raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
+                    except RuntimeError as exc:
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                    return (False, True)
 
                 # Cloudflare 403s with error 1010 are transient rate limits — allow retry
                 is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body

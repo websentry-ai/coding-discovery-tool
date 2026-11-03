@@ -135,14 +135,16 @@ def statuses(table, default=200):
 
 def lost_then_refused():
     """The first answer is lost and the second is a permanent refusal -- the shape
-    of an upload that may have landed and will never be accepted again."""
+    of an upload that may have landed and will never be accepted again. 422 and
+    not 413: a body too large for the legacy endpoint is kept for the S3 route to
+    carry next run, so it is not a permanent refusal at all."""
     seen = {"n": 0}
 
     def _rule(body):
         if not (body.get("device_id") or "").startswith("QUEUED-"):
             return 200
         seen["n"] += 1
-        return None if seen["n"] == 1 else 413
+        return None if seen["n"] == 1 else 422
     return _rule
 
 
@@ -1335,6 +1337,40 @@ class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
             "the run could not reach the backend, so dropping either of them"
             " loses a report nothing will send again",
         )
+
+
+class ABodyTooLargeForOneRouteIsNotALostReport(_DrivesMain, unittest.TestCase):
+    """Every report with tools in it goes through S3 first, and S3 is there for the
+    bodies the legacy endpoint refuses. So when S3 fails for its own reasons and
+    the fallback answers 413, the report is not bad -- the route is. Discarding it
+    loses that device's data until the tool's config changes."""
+
+    BIG = {"device_id": "QUEUED-0", "home_user": "alice",
+           "tools": [{"name": "Claude Code", "projects": []}]}
+
+    def test_a_fallback_refusal_keeps_the_report_for_the_other_route(self):
+        self.seed_queue([dict(self.BIG)])
+
+        # The stub refuses the presign, which is what sends a real report down the
+        # legacy fallback in the first place.
+        backend, _ = self.run_main(rule=statuses({"QUEUED-0": 413}))
+
+        self.assertEqual(backend.attempts("QUEUED-0"), 1,
+                         "asking the same endpoint again cannot change the answer")
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "a report only the S3 route can carry was dropped at the legacy"
+            " endpoint, so nothing will ever try the route that works",
+        )
+
+    def test_a_report_the_backend_will_never_accept_is_still_discarded(self):
+        """The counterweight: 422 is about the report, so keeping it would mean
+        re-sending it every run for a day."""
+        self.seed_queue([dict(self.BIG)])
+
+        self.run_main(rule=statuses({"QUEUED-0": 422}))
+
+        self.assertEqual(self.queue_now(), [])
 
 
 class AnUnreachableBackendIsConclusive(_DrivesMain, unittest.TestCase):

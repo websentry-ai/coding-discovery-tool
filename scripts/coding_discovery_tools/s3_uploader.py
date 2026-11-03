@@ -240,6 +240,10 @@ def try_s3_upload(
         _report_step_failure("from_s3_request", status, body, err, ctx)
         return False, True
     if not (200 <= status < 300):
+        # A server error after the object is already in S3 may mean the backend
+        # ingested it and then failed to answer. A 4xx means it refused outright.
+        if failure is not None and status and status >= 500:
+            failure["kind"] = "uncertain"
         _report_step_failure("from_s3_request", status, body, None, ctx)
         return False, True
 

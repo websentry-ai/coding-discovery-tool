@@ -315,14 +315,21 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
     (instead of hanging until a parent force-kills it) and removes its lock so
     the next run isn't blocked."""
 
-    class _SlowHandler(BaseHTTPRequestHandler):
+    class _StallsTheSweep(BaseHTTPRequestHandler):
+        """Answers the scan's own sends at once and stalls the connector sweep.
+        Every send is clipped to what is left of the run budget, so none of them
+        can overrun it any more; the sweep's requests carry their own timeout
+        instead, which is why the run is the thing that has to stop it."""
+
+        def do_GET(self):
+            self.server.stalling.wait(20)
+            self._ok()
+
         def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            self.rfile.read(length)
-            # Stall longer than any run budget this test uses, so every send burns
-            # its whole deadline allowance instead of completing. The overrun is
-            # then arithmetic rather than a bet on how slow local detection is.
-            time.sleep(30)
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self._ok()
+
+        def _ok(self):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -332,13 +339,16 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
             pass
 
     def setUp(self):
-        self.server = HTTPServer(("127.0.0.1", 0), self._SlowHandler)
+        self.server = HTTPServer(("127.0.0.1", 0), self._StallsTheSweep)
+        # Released in tearDown so a stalled handler cannot hold up the suite.
+        self.server.stalling = threading.Event()
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self._home = tempfile.mkdtemp(prefix="ai-discovery-timeout-home-")
 
     def tearDown(self):
+        self.server.stalling.set()
         self.server.shutdown()
         self.thread.join(timeout=5)
         shutil.rmtree(self._home, ignore_errors=True)
@@ -355,11 +365,9 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 "scripts/coding_discovery_tools/ai_tools_discovery.py",
                 "--api-key", "test-key-000000",
                 "--domain", f"http://127.0.0.1:{self.port}",
-                # Sends are clipped to the budget minus its last quarter, so the
-                # first burns 6s and the completed event the second after it; the
-                # metrics send, which carries no deadline, then runs into the
-                # watchdog at 8s on any machine. A smaller budget makes every clip
-                # round down to nothing and the run finishes early.
+                # Long enough to reach the sweep on a fast machine and short
+                # enough that slow local detection trips the watchdog first. Either
+                # way the run is aborted rather than left to hang.
                 "--timeout", "8",
             ],
             cwd=str(REPO_ROOT),

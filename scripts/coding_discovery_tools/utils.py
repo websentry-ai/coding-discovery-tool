@@ -1737,9 +1737,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     # Connection/DNS failure — retryable
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
-                    # Nothing was handed over if no connection was ever opened,
-                    # whatever curl called the failure. A blackholed host times out
-                    # exactly like a slow one, and only this tells them apart.
                     give_up = _note(
                         "unreachable"
                         if never_connected(result.returncode, connects)

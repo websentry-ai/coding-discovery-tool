@@ -4518,9 +4518,9 @@ def main():
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        # A queued older report for this pair is itself evidence
-                        # against the stored hash: an earlier drain may have delivered
-                        # one like it and failed to clear it. Re-upload and be sure.
+                        # A report still owed for this pair is an overwrite of its
+                        # row waiting to happen, so skipping the upload on a hash
+                        # match would leave nothing to correct it once that lands.
                         older_report_queued = any(
                             _report_identity(r) == (user_name, tool_name)
                             for r in requeued_pending

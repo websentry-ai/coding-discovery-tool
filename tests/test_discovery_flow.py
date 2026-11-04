@@ -374,10 +374,15 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 "scripts/coding_discovery_tools/ai_tools_discovery.py",
                 "--api-key", "test-key-000000",
                 "--domain", f"http://127.0.0.1:{self.port}",
-                # Long enough to reach the sweep on a fast machine and short
-                # enough that slow local detection trips the watchdog first. Either
-                # way the run is aborted rather than left to hang.
-                "--timeout", "8",
+                # The run has to still be working when the watchdog fires, which
+                # happens one of two ways: it is parked in the stalled sweep, or it
+                # is still detecting. The sweep is skipped in the last eighth of
+                # the budget, so a detection pass ending inside that eighth would
+                # let the run finish normally and prove nothing. 12s puts that
+                # window at roughly 10-11.5s, far from both a bare runner's
+                # detection (a few seconds, so the sweep is reached) and a machine
+                # with tools installed (tens of seconds, so the watchdog is first).
+                "--timeout", "12",
             ],
             cwd=str(REPO_ROOT),
             capture_output=True,
@@ -387,7 +392,12 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         )
         elapsed = time.monotonic() - start
         # Aborted by its own watchdog (non-zero) rather than completing the scan.
-        self.assertNotEqual(result.returncode, 0, f"stdout={result.stdout}\nstderr={result.stderr}")
+        self.assertNotEqual(
+            result.returncode, 0,
+            "the run finished inside its budget, so nothing exercised the abort"
+            " path: detection ended in the last eighth, where the sweep is"
+            f" skipped.\nstdout={result.stdout}\nstderr={result.stderr}",
+        )
         self.assertLess(elapsed, 60, "self-timeout did not abort promptly")
         # The abort runs on its own thread and exits the process itself, but only
         # after telling the backend. A main thread that finished first and exited

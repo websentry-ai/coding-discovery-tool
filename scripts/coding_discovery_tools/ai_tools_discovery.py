@@ -3998,10 +3998,6 @@ def main():
             (home_user, tool_key.split(":", 1)[0])
             for tool_key, home_user in resume_done
         }
-        # (home_user, tool) whose row the drain has just replaced with an older
-        # snapshot. The cache write recording that can fail silently, so this run
-        # trusts the set over the file.
-        stale_on_backend = set()
         # (home_user, tool) this run uploaded itself. Only an upload authorises
         # dropping a report the drain could not deliver: a hash match describes a
         # snapshot the drain may already have replaced with an older one.
@@ -4017,17 +4013,6 @@ def main():
         # Whether the queue file is known to hold only what is still owed. False
         # means a write failed, so nothing may store a hash until one lands.
         queue_on_disk = [True]
-
-        def _invalidate(report) -> bool:
-            """Stop trusting the stored hash for this report's pair: the backend may
-            hold the older snapshot now, so detection has to re-upload. Reports
-            whether that reached disk, since this run's own memory of it dies with
-            the process."""
-            pair = _report_identity(report)
-            if not pair:
-                return True
-            stale_on_backend.add(pair)
-            return discovery_cache.forget_tool_hash(pair[1], pair[0])
 
         def _rewrite_queue() -> bool:
             """Put what is still owed on disk now, reporting whether it got there. A
@@ -4061,6 +4046,18 @@ def main():
                             f" {len(requeued_pending)} report(s) stay queued."
                         )
                         break
+                    # Delivering this older snapshot leaves the pair's stored
+                    # hash describing a row the backend no longer holds, and a
+                    # note to correct that later would not outlive the process.
+                    # So clear the hash first and confirm it is gone.
+                    pair = _report_identity(queued_report)
+                    if pair and not discovery_cache.forget_tool_hash(pair[1], pair[0]):
+                        requeued_pending.append(queued_report)
+                        logger.info(
+                            "  · Cached hash for this pair could not be cleared;"
+                            " report stays queued rather than going out behind it"
+                        )
+                        continue
                     failure = {}
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
@@ -4069,27 +4066,9 @@ def main():
                     )
                     if success:
                         consecutive_failures = 0
-                        # The backend now holds this older snapshot, so the stored
-                        # hash no longer describes it. Dropping it makes detection
-                        # below re-upload rather than skip the pair.
-                        delivered = _report_identity(queued_report)
-                        if delivered:
-                            stale_on_backend.add(delivered)
-                            # The set above only lasts this process, so a hash that
-                            # did not go keeps its report queued for a later run to
-                            # retry. The persist filter drops it if this run corrects
-                            # the pair.
-                            if not discovery_cache.forget_tool_hash(
-                                delivered[1], delivered[0]
-                            ):
-                                requeued_pending.append(queued_report)
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
                         requeued_pending.append(queued_report)
-                        if failure.get("kind") == "uncertain":
-                            # Sent, but the answer never came, so the backend may
-                            # hold this older snapshot already.
-                            _invalidate(queued_report)
                         if failure.get("kind") == "unreachable":
                             # Nothing reached the backend, so nothing behind this
                             # will either. One is conclusive; no point in a second.
@@ -4118,13 +4097,6 @@ def main():
                             break
                     else:
                         consecutive_failures = 0
-                        # The queue held an older report for this pair, which is
-                        # reason enough to stop trusting the stored hash: giving up
-                        # on the report does not establish what the backend holds.
-                        # If the write did not land either, keep the report -- its
-                        # presence is what makes a later run distrust the hash.
-                        if not _invalidate(queued_report):
-                            requeued_pending.append(queued_report)
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # An early stop requeues the untried tail wholesale, which can hold
                 # a pair the resumed run already reported.
@@ -4554,9 +4526,7 @@ def main():
                             for r in requeued_pending
                         )
                         cached_hash = (
-                            None
-                            if older_report_queued
-                            or (user_name, tool_name) in stale_on_backend
+                            None if older_report_queued
                             else discovery_cache.get_cached_hash(tool_name, user_name)
                         )
                         reported_ok = False

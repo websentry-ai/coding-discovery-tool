@@ -370,47 +370,82 @@ class ADroppedPacketIsAsConclusiveAsARefusedOne(unittest.TestCase):
     slow server would. Read as "it may have arrived", every queued report pays a
     full retry curve against a host that was never there.
 
-    This is the one place a real transport cannot be used: a dropped packet has
-    no reliable stand-in on localhost. curl's own answer is stubbed, and nothing
-    else about the send is."""
+    Both halves run over real curl against real addresses: a closed port, which
+    is refused outright, and an address reserved for documentation, which nothing
+    routes. The spy records each command and calls the transport through, so what
+    classifies the failure is curl's own answer."""
 
     REPORT = {"device_id": "D", "home_user": "u", "tools": []}
+    # Refused outright: nothing listens, so curl never gets a connection.
+    REFUSED = "http://127.0.0.1:1"
+    # Reserved for documentation (RFC 5737), so the handshake is dropped rather
+    # than answered -- the same silence a blackholing firewall produces.
+    BLACKHOLED = "http://192.0.2.1"
+    CONNECT_TIMEOUT = 3
 
     def setUp(self):
         utils_mod._SENTRY_DSN = ""
 
-    def _send(self, connects):
-        """curl timed out. `connects` is how many connections it managed first."""
-        calls = []
+    def _send(self, domain):
+        """Really send to `domain` and report what curl was asked and what it said."""
+        calls, results = [], []
+        real_run = utils_mod.subprocess.run
 
-        def _curl(cmd, *_a, **_kw):
+        def _spy(cmd, *a, **kw):
             calls.append(cmd)
-            return subprocess.CompletedProcess(
-                cmd, 28, stdout=f"\n{connects} 000", stderr="curl: (28) timed out",
-            )
+            result = real_run(cmd, *a, **kw)
+            results.append(result)
+            return result
 
         failure = {}
-        with patch.object(utils_mod.subprocess, "run", _curl), \
+        with patch.object(utils_mod.subprocess, "run", _spy), \
+             patch.object(utils_mod, "CONNECT_TIMEOUT_SECONDS", self.CONNECT_TIMEOUT), \
              patch("time.sleep", Mock()):
             utils_mod.send_report_to_backend(
-                "http://127.0.0.1:1", "test-key-000000", dict(self.REPORT),
+                domain, "test-key-000000", dict(self.REPORT),
                 failure=failure, stop_if_unreachable=True,
             )
-        return failure, calls
+        return failure, calls, results
+
+    def _require_no_connection(self, results):
+        """The precondition this class rests on. A network that answers for a
+        reserved address cannot show what a blackholed one does, so say that
+        rather than asserting something else."""
+        connects = [r.stdout.strip().rpartition("\n")[2].partition(" ")[0]
+                    for r in results if r.stdout]
+        if any(c not in ("0", "") for c in connects):
+            self.skipTest("this network connects to a reserved address")
 
     def test_a_timeout_that_never_connected_settles_the_queue(self):
-        failure, calls = self._send("0")
+        """curl gives up in the connect phase with exit 28, the same code a slow
+        server's timeout gives -- the connection count is what separates them."""
+        failure, calls, results = self._send(self.BLACKHOLED)
+        self._require_no_connection(results)
 
+        self.assertEqual([r.returncode for r in results], [28],
+                         "a dropped handshake no longer reads as a timeout")
         self.assertEqual(failure.get("kind"), "unreachable")
         self.assertEqual(len(calls), 1,
                          "a host that was never reached was asked again")
 
+    def test_a_refused_connection_settles_the_queue_too(self):
+        """The same rule over a transport failure no network can interfere with,
+        so the behaviour stays covered where the case above has to skip. The
+        refusal also reports no connection, so it is that count -- not curl's
+        exit code -- which classifies both."""
+        failure, calls, _ = self._send(self.REFUSED)
+
+        self.assertEqual(failure.get("kind"), "unreachable")
+        self.assertEqual(len(calls), 1,
+                         "a host that refused the connection was asked again")
+
     def test_the_connect_phase_is_bounded(self):
         """A blackholed host would otherwise hold each attempt for the whole
         request budget before curl gave up on it."""
-        _, calls = self._send("0")
+        _, calls, _ = self._send(self.REFUSED)
 
         self.assertIn("--connect-timeout", calls[0])
+        self.assertIn(str(self.CONNECT_TIMEOUT), calls[0])
 
 
 class AConnectedSendThatTimesOutIsStillAMaybe(_ServesABackend):

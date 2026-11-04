@@ -1552,10 +1552,17 @@ def send_scan_event(
 
 # curl exit codes that mean nothing was ever handed to the backend. Any other
 # failure is read as "it may have arrived", which costs a redundant upload at
-# worst, where the opposite mistake leaves a row stale for good. A dropped
-# packet is not among them -- curl reports a plain timeout for that, so the
-# connection count below is what tells the two apart.
+# worst, where the opposite mistake leaves a row stale for good.
 CURL_NEVER_CONNECTED = frozenset({6, 7})
+
+
+def never_connected(returncode: int, connects: str) -> bool:
+    """Whether curl got no connection at all. A dropped packet is not in the set
+    above -- curl reports the plain timeout it reports for a stalled server, so
+    the connection count is the only thing that tells those two apart."""
+    return returncode in CURL_NEVER_CONNECTED or connects == "0"
+
+
 # A host that drops packets rather than refusing them would otherwise hold each
 # attempt for the whole request budget. Generous for a laptop on a slow link,
 # and never longer than the request itself is allowed to take.
@@ -1735,7 +1742,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     # exactly like a slow one, and only this tells them apart.
                     give_up = _note(
                         "unreachable"
-                        if result.returncode in CURL_NEVER_CONNECTED or connects == "0"
+                        if never_connected(result.returncode, connects)
                         else "uncertain"
                     )
                     if not give_up and attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):

@@ -370,17 +370,16 @@ class ADroppedPacketIsAsConclusiveAsARefusedOne(unittest.TestCase):
     slow server would. Read as "it may have arrived", every queued report pays a
     full retry curve against a host that was never there.
 
-    Both halves run over real curl against real addresses: a closed port, which
-    is refused outright, and an address reserved for documentation, which nothing
-    routes. The spy records each command and calls the transport through, so what
-    classifies the failure is curl's own answer."""
+    A localhost server cannot drop a handshake: filling its accept queue
+    completes the connection instead, differently on each platform. So the rule
+    is split -- the outcome end to end over a refused localhost port, and the
+    discriminator itself against the exit code and connection count curl really
+    produces. The stalled-server case below supplies its other half over real
+    traffic."""
 
     REPORT = {"device_id": "D", "home_user": "u", "tools": []}
-    # Refused outright: nothing listens, so curl never gets a connection.
+    # Nothing listens, so curl is refused without ever getting a connection.
     REFUSED = "http://127.0.0.1:1"
-    # Reserved for documentation (RFC 5737), so the handshake is dropped rather
-    # than answered -- the same silence a blackholing firewall produces.
-    BLACKHOLED = "http://192.0.2.1"
     CONNECT_TIMEOUT = 3
 
     def setUp(self):
@@ -407,37 +406,34 @@ class ADroppedPacketIsAsConclusiveAsARefusedOne(unittest.TestCase):
             )
         return failure, calls, results
 
-    def _require_no_connection(self, results):
-        """The precondition this class rests on. A network that answers for a
-        reserved address cannot show what a blackholed one does, so say that
-        rather than asserting something else."""
-        connects = [r.stdout.strip().rpartition("\n")[2].partition(" ")[0]
-                    for r in results if r.stdout]
-        if any(c not in ("0", "") for c in connects):
-            self.skipTest("this network connects to a reserved address")
+    def test_a_host_that_was_never_reached_settles_the_queue(self):
+        """End to end: one attempt, and the queue behind it is left alone."""
+        failure, calls, results = self._send(self.REFUSED)
 
-    def test_a_timeout_that_never_connected_settles_the_queue(self):
-        """curl gives up in the connect phase with exit 28, the same code a slow
-        server's timeout gives -- the connection count is what separates them."""
-        failure, calls, results = self._send(self.BLACKHOLED)
-        self._require_no_connection(results)
-
-        self.assertEqual([r.returncode for r in results], [28],
-                         "a dropped handshake no longer reads as a timeout")
         self.assertEqual(failure.get("kind"), "unreachable")
         self.assertEqual(len(calls), 1,
                          "a host that was never reached was asked again")
+        self.assertEqual(
+            [r.stdout.strip().rpartition("\n")[2].partition(" ")[0] for r in results],
+            ["0"], "curl reported a connection to a port nothing listens on",
+        )
 
-    def test_a_refused_connection_settles_the_queue_too(self):
-        """The same rule over a transport failure no network can interfere with,
-        so the behaviour stays covered where the case above has to skip. The
-        refusal also reports no connection, so it is that count -- not curl's
-        exit code -- which classifies both."""
-        failure, calls, _ = self._send(self.REFUSED)
+    def test_a_timeout_without_a_connection_is_not_a_timeout_in_flight(self):
+        """The one combination localhost cannot produce. curl exits 28 both for a
+        blackholed host and for a server that accepts and then says nothing; the
+        connection count is the whole difference, and reading it wrong is what
+        made every queued report pay a full retry curve."""
+        self.assertTrue(utils_mod.never_connected(28, "0"))
+        self.assertFalse(
+            utils_mod.never_connected(28, "1"),
+            "a request that went out would be abandoned as if it never had",
+        )
 
-        self.assertEqual(failure.get("kind"), "unreachable")
-        self.assertEqual(len(calls), 1,
-                         "a host that refused the connection was asked again")
+    def test_a_refusal_is_conclusive_whatever_it_writes_out(self):
+        """Exit 6 and 7 settle it on their own, so a lost write-out cannot turn a
+        refusal into a maybe."""
+        self.assertTrue(utils_mod.never_connected(7, ""))
+        self.assertTrue(utils_mod.never_connected(6, ""))
 
     def test_the_connect_phase_is_bounded(self):
         """A blackholed host would otherwise hold each attempt for the whole

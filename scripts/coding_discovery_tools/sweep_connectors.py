@@ -23,8 +23,15 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# A request's own ceiling. The run that calls this can lower it: the sweep is
+# best-effort work after the scan has already reported, so it must not keep the
+# process alive past the budget the run was given.
+LIST_MAX_TIME = 30
+REPORT_MAX_TIME = 60
 
 REPORT_PATH = "/api/v1/ai-tools/mcp-server-scan/"
 LIST_PATH = "/api/v1/ai-tools/unresolved-connector-uuids/"
@@ -143,12 +150,22 @@ def _auth_header(api_key):
     )
 
 
-def fetch_unresolved_uuids(domain, api_key):
+def _budget(ceiling, deadline):
+    """A request's timeout clipped to what the deadline leaves, or None when too
+    little is left to be worth starting."""
+    if deadline is None:
+        return ceiling
+    remaining = int(deadline - time.monotonic())
+    return min(ceiling, remaining) if remaining >= 1 else None
+
+
+def fetch_unresolved_uuids(domain, api_key, max_time=LIST_MAX_TIME):
     """GET the opaque list of UUIDs the backend still needs resolved."""
     url = f"{_normalize_url(domain)}{LIST_PATH}"
     http_code, body = _run_curl(
-        ["curl", "-s", "--config", "-", "--max-time", "30", "-w", "\n%{http_code}", url],
-        _auth_header(api_key), timeout=45,
+        ["curl", "-s", "--config", "-", "--max-time", str(max_time),
+         "-w", "\n%{http_code}", url],
+        _auth_header(api_key), timeout=max_time + 15,
     )
     if not http_code.startswith("2"):
         raise RuntimeError(f"list endpoint http {http_code}: {body[:200]}")
@@ -156,7 +173,8 @@ def fetch_unresolved_uuids(domain, api_key):
     return [u for u in (parsed.get("uuids") or []) if u]
 
 
-def report_connector(domain, api_key, connector_uuid, name, tools):
+def report_connector(domain, api_key, connector_uuid, name, tools,
+                     max_time=REPORT_MAX_TIME):
     """POST one resolved connector to the single-server scan endpoint.
     Returns (http_code, body)."""
     endpoint = f"{_normalize_url(domain)}{REPORT_PATH}"
@@ -175,17 +193,29 @@ def report_connector(domain, api_key, connector_uuid, name, tools):
         + f'data = "{_curl_config_quote(payload)}"\n'
     )
     return _run_curl(
-        ["curl", "-s", "-X", "POST", "--config", "-", "--max-time", "60", "-w", "\n%{http_code}", endpoint],
-        curl_config, timeout=90,
+        ["curl", "-s", "-X", "POST", "--config", "-", "--max-time", str(max_time),
+         "-w", "\n%{http_code}", endpoint],
+        curl_config, timeout=max_time + 30,
     )
 
 
-def run_sweep(domain, api_key):
+def run_sweep(domain, api_key, deadline=None):
     """Fetch the backend's unresolved-UUID worklist, match it against the local
     Claude session connectors, and report each resolution. Best-effort and
     side-effect-light: logs progress to stderr and returns (sent, failed, matched).
-    Designed to be called from the main discovery run as well as standalone."""
-    needed = {u.strip().lower() for u in fetch_unresolved_uuids(domain, api_key) if u}
+    Designed to be called from the main discovery run as well as standalone.
+
+    `deadline` is a time.monotonic() value the whole sweep stays inside: each
+    request is clipped to what it leaves and the worklist stops when it is spent,
+    so a long list cannot keep the calling run alive past its budget. What is
+    left over is picked up by the next run."""
+    list_budget = _budget(LIST_MAX_TIME, deadline)
+    if list_budget is None:
+        print("info: connector sweep — no run budget left", file=sys.stderr)
+        return (0, 0, 0)
+    needed = {u.strip().lower()
+              for u in fetch_unresolved_uuids(domain, api_key, max_time=list_budget)
+              if u}
     if not needed:
         print("info: connector sweep — nothing to resolve", file=sys.stderr)
         return (0, 0, 0)
@@ -198,9 +228,15 @@ def run_sweep(domain, api_key):
         return (0, 0, 0)
 
     sent = failed = 0
-    for uuid, info in matches.items():
+    for done, (uuid, info) in enumerate(matches.items()):
+        report_budget = _budget(REPORT_MAX_TIME, deadline)
+        if report_budget is None:
+            print(f"info: connector sweep — out of run budget after {done} of"
+                  f" {len(matches)}; the rest waits for the next run", file=sys.stderr)
+            break
         try:
-            http_code, body = report_connector(domain, api_key, uuid, info["name"], info.get("tools"))
+            http_code, body = report_connector(domain, api_key, uuid, info["name"],
+                                               info.get("tools"), max_time=report_budget)
         except Exception as e:
             failed += 1
             print(f"error: report failed for {uuid}: {e}", file=sys.stderr)

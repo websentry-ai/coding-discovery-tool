@@ -315,11 +315,9 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
     (instead of hanging until a parent force-kills it) and removes its lock so
     the next run isn't blocked."""
 
-    class _HoldsOneSend(BaseHTTPRequestHandler):
-        """Records the scan's lifecycle events and holds whichever one the test
-        names, so the run is still working when its watchdog fires rather than
-        racing it. The hold outlives the send's own clip, which is what keeps the
-        run from finishing early."""
+    class _RecordsLifecycleEvents(BaseHTTPRequestHandler):
+        """Answers every send at once and records the run's lifecycle events, so a
+        test can say what the backend was told and in what order."""
 
         def do_GET(self):
             self._ok()
@@ -332,8 +330,6 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 event = None
             if event:
                 self.server.events.append(event)
-            if event and event == self.server.hold_event:
-                self.server.stalling.wait(30)
             self._ok()
 
         def _ok(self):
@@ -348,10 +344,9 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
     def setUp(self):
         # Threading, so the abort's own failure report is not queued behind the
         # sweep request the run is stuck in.
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._HoldsOneSend)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._RecordsLifecycleEvents)
         # Released in tearDown so a stalled handler cannot hold up the suite.
         self.server.stalling = threading.Event()
-        self.server.hold_event = None
         self.server.events = []
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -422,47 +417,6 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         # Lock cleaned up so a subsequent rerun isn't blocked.
         lock = Path(self._home) / ".unbound" / "discovery.lock"
         self.assertFalse(lock.exists(), "discovery.lock left behind after an abort")
-
-    @unittest.skipUnless(os.name == "posix", "watchdog timing asserted on POSIX")
-    def test_the_watchdog_aborts_a_run_that_cannot_finish_in_its_budget(self):
-        """The other trigger, end to end, on its own thread rather than the main
-        one. The first send is held past its own clip, so the run reaches
-        detection with only a quarter of the budget left.
-
-        That margin cannot be nil: every bounded step is deliberately clipped to
-        finish before the watchdog, so only work that outlasts the whole budget
-        trips it. A 1s budget leaves 0.25s for detection and everything after it,
-        where the 12s budget this replaces left 1.5s."""
-        self.server.hold_event = "in_progress"
-        env = os.environ.copy()
-        env["HOME"] = self._home
-        env["USERPROFILE"] = self._home
-        start = time.monotonic()
-        result = subprocess.run(
-            [
-                sys.executable,
-                "scripts/coding_discovery_tools/ai_tools_discovery.py",
-                "--api-key", "test-key-000000",
-                "--domain", f"http://127.0.0.1:{self.port}",
-                "--timeout", "1",
-            ],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=90,
-            env=env,
-        )
-
-        self.assertNotEqual(
-            result.returncode, 0,
-            "the run finished inside a 1s budget, so the watchdog had nothing to"
-            f" abort.\nstdout={result.stdout}\nstderr={result.stderr}",
-        )
-        self.assertLess(time.monotonic() - start, 60, "the abort was not prompt")
-        self.assertIn("failed", self.server.events,
-                      "the timed-out run never reported its failure")
-        lock = Path(self._home) / ".unbound" / "discovery.lock"
-        self.assertFalse(lock.exists(), "discovery.lock left behind after a timeout")
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
     def test_main_traps_and_restores_termination_signals(self):

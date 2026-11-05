@@ -22,6 +22,7 @@ from unittest.mock import Mock, patch
 
 import scripts.coding_discovery_tools.cache as cache_mod
 import scripts.coding_discovery_tools.s3_uploader as s3_mod
+import scripts.coding_discovery_tools.sweep_connectors as sweep_mod
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.utils import (
     load_pending_reports,
@@ -358,6 +359,87 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
         self.server.notify_code = 400
 
         self.assertIsNone(self._upload().get("kind"))
+
+
+class _Clock:
+    """A clock the test advances itself, so a budget can be spent without
+    spending any real time."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def monotonic(self):
+        return self.now
+
+
+class TheConnectorSweepStaysInsideTheRunBudget(unittest.TestCase):
+    """The sweep runs after the outcome is reported, so nothing aborts it. Its
+    worklist is as long as the device's connector list and each entry gets its own
+    60s request, so without the run's deadline it can keep the process alive long
+    past the budget the run was given."""
+
+    THREE = {f"uuid-{i}": {"name": f"n{i}", "tools": []} for i in (1, 2, 3)}
+
+    def test_the_worklist_stops_once_the_budget_is_spent(self):
+        clock, reported = _Clock(), []
+
+        def _report(_domain, _api_key, uuid, _name, _tools, max_time=None):
+            reported.append(max_time)
+            clock.now += 40          # as a real report can
+            return ("200", "")
+
+        with patch.object(sweep_mod, "time", clock), \
+             patch.object(sweep_mod, "fetch_unresolved_uuids",
+                          return_value=list(self.THREE)), \
+             patch.object(sweep_mod, "read_local_connectors", return_value=self.THREE), \
+             patch.object(sweep_mod, "report_connector", _report):
+            sent, failed, matched = sweep_mod.run_sweep(
+                "http://127.0.0.1:1", "k", deadline=clock.now + 70
+            )
+
+        self.assertEqual(
+            reported, [60, 30],
+            "the sweep worked through its list regardless of what the run had"
+            " left, keeping the process alive past its budget",
+        )
+        self.assertEqual((sent, matched), (2, 3), "it claimed work it never did")
+
+    def test_the_worklist_request_is_clipped_to_what_is_left(self):
+        clock, seen = _Clock(), []
+
+        def _fetch(_domain, _api_key, max_time=None):
+            seen.append(max_time)
+            return []
+
+        with patch.object(sweep_mod, "time", clock), \
+             patch.object(sweep_mod, "fetch_unresolved_uuids", _fetch):
+            sweep_mod.run_sweep("http://127.0.0.1:1", "k", deadline=clock.now + 5)
+
+        self.assertEqual(seen, [5], "the request took its own ceiling rather than"
+                                    " what the run had left")
+
+    def test_nothing_is_started_with_no_budget_left(self):
+        clock, seen = _Clock(), []
+
+        with patch.object(sweep_mod, "time", clock), \
+             patch.object(sweep_mod, "fetch_unresolved_uuids",
+                          side_effect=lambda *a, **k: seen.append(1) or []):
+            sweep_mod.run_sweep("http://127.0.0.1:1", "k", deadline=clock.now)
+
+        self.assertEqual(seen, [], "the sweep started work the run had no time for")
+
+    def test_no_deadline_leaves_the_ceilings_alone(self):
+        """The standalone entry point has no run to stay inside."""
+        seen = []
+
+        def _fetch(_domain, _api_key, max_time=None):
+            seen.append(max_time)
+            return []
+
+        with patch.object(sweep_mod, "fetch_unresolved_uuids", _fetch):
+            sweep_mod.run_sweep("http://127.0.0.1:1", "k")
+
+        self.assertEqual(seen, [sweep_mod.LIST_MAX_TIME])
 
 
 class ADroppedPacketIsAsConclusiveAsARefusedOne(unittest.TestCase):

@@ -4803,16 +4803,19 @@ def main():
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            # Its requests are unbounded and nothing can abort them now, so a run
-            # with nothing left to spare skips it rather than overrunning on work
-            # it does not owe. Best-effort by design: the next run picks it up.
+            # Nothing aborts this once the outcome is reported, so it carries the
+            # run's deadline instead: each request is clipped to what is left and
+            # the worklist stops when it is spent. Skipped outright with nothing
+            # to spare. Best-effort by design: the next run picks it up.
             out_of_budget = run_deadline is not None and time.monotonic() > (
                 run_deadline - tail_grace
             )
             if out_of_budget:
                 logger.info("Connector UUID sweep skipped: out of run budget")
             else:
-                sent, failed, matched = run_sweep(args.domain, args.api_key)
+                sent, failed, matched = run_sweep(
+                    args.domain, args.api_key, deadline=run_deadline
+                )
                 logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
         except Exception as sweep_err:
             logger.debug(f"Connector UUID sweep failed: {sweep_err}")

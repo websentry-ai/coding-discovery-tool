@@ -34,7 +34,23 @@ from scripts.coding_discovery_tools.utils import (
     send_report_to_backend,
 )
 
-_REAL_SLEEP = time.sleep
+class _SimulatedClock:
+    """A stand-in for the `time` module whose sleeps cost no real time but do
+    move its clock. Retry backoff stays mocked, as the repository requires, and
+    a time budget can still be spent and seen to be spent."""
+
+    def __init__(self):
+        self.slept = 0.0
+
+    def sleep(self, seconds):
+        self.slept += seconds
+
+    def monotonic(self):
+        return time.monotonic() + self.slept
+
+    def __getattr__(self, name):          # everything else is the real module
+        return getattr(time, name)
+
 
 SENT_OK = (True, False)
 FAILED_RETRYABLE = (False, True)
@@ -326,35 +342,31 @@ class TheDrainCannotStarveDetection(_DrivesMain, unittest.TestCase):
         )
 
     def test_an_undrainable_queue_does_not_cost_the_run(self):
-        """What timed out in production: a full queue, none of it sendable.
+        """What timed out in production: a full queue, none of it sendable. The
+        cost is what matters, and nearly all of it was retry backoff -- five
+        attempts per report with 15/30/60/120s waits, about 169s each, so 71
+        reports were the whole 12000s run.
 
-        Two things hold the line here and either is enough: the drain stops when
-        its budget is spent, and a send started past the deadline reports that it
-        never reached the backend, which settles the queue behind it. So this
-        asserts the outcome rather than one mechanism -- it fails only when the
-        drain is unbounded, which is how it behaved before.
-
-        The backoff has to really elapse for any of that to be reached, so it is
-        shortened but actually slept; a mocked sleep would let the drain walk the
-        whole queue for free and the test would pass with no bound at all."""
+        The clock the run reads is advanced by its own mocked sleeps, so that cost
+        is spent and measured without spending any real time. Reports are still
+        attempted once the backoff budget is gone, which is cheap and deliberate:
+        every report gets a try, and none is dropped."""
         pending = _queued(100)
         self.seed_queue(pending)
+        clock = _SimulatedClock()
 
         backend, detected = self.run_main(
             rule=status_for(),
             patches=(
-                patch("time.sleep", _REAL_SLEEP),
-                patch.dict(os.environ, {
-                    "AI_DISCOVERY_BACKOFF_BASE_SECONDS": "0.05",
-                    "AI_DISCOVERY_BACKOFF_CAP_SECONDS": "0.1",
-                }),
-                patch.object(adm, "DRAIN_BUDGET_SECONDS", 2),
+                patch.object(adm, "time", clock),
+                patch.object(utils_mod, "time", clock),
             ),
         )
 
-        self.assertLess(
-            len(backend.device_ids()), len(pending),
-            "the drain worked through the whole queue before detecting anything",
+        self.assertLessEqual(
+            clock.slept, adm.DRAIN_BUDGET_SECONDS + 1,
+            "the drain spent longer than its budget on a queue it could not"
+            " send, which is what left the run no time to detect anything",
         )
         self.assertTrue(detected, "the run never reached detection")
         self.assertEqual(
@@ -493,15 +505,16 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
     def test_a_sweep_that_outlives_the_run_does_not_undo_the_completed_event(self):
         swept = threading.Event()
 
-        def _slow_sweep(_domain, _api_key):
+        def _slow_sweep(_domain, _api_key, deadline=None):
             swept.set()
-            # Outlives the run's deadline, as a real sweep can: its fetch alone is
-            # allowed 45s and each connector report 90s.
-            threading.Event().wait(3)
+            # Outlives the run's deadline, as a real sweep's own requests can.
+            threading.Event().wait(8)
             return (0, 0, 0)
 
+        # Long enough that the sweep is reached well before the out-of-budget
+        # skip, and short enough that the watchdog fires while it is still going.
         backend, _ = self.run_main(
-            timeout="2",
+            timeout="4",
             patches=(patch.object(adm, "run_sweep", _slow_sweep),),
         )
 
@@ -512,6 +525,60 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             "the backend was told the run completed and then that it failed, so a"
             " scan that did all its work is recorded as a timeout",
         )
+
+
+class TheWatchdogAbortsARunThatCannotFinish(_DrivesMain, unittest.TestCase):
+    """The timer's own path, driven by firing its callback rather than by racing
+    it. A real timer cannot be raced deterministically: every bounded step is
+    clipped to finish before the watchdog, so whether the run is still working at
+    that instant depends on how fast the machine detects -- which is how an
+    earlier version of this passed here and went red on CI."""
+
+    def _capturing_timer(self, armed):
+        """Stands in for the watchdog's timer, handing the test its callback."""
+        class _Captured:
+            def __init__(_self, interval, callback):
+                armed["interval"] = interval
+                armed["fire"] = callback
+            def start(_self):
+                pass
+            def cancel(_self):
+                armed["cancelled"] = True
+        return patch.object(adm.threading, "Timer", _Captured)
+
+    def test_the_watchdog_is_armed_for_the_run_s_own_timeout(self):
+        armed = {}
+
+        self.run_main(timeout="900", patches=(self._capturing_timer(armed),))
+
+        self.assertEqual(armed.get("interval"), 900,
+                         "the run would not be aborted at the timeout it was given")
+        self.assertTrue(armed.get("cancelled"),
+                        "a timer left running outlives the run that armed it")
+
+    def test_the_watchdog_firing_mid_run_reports_the_failure(self):
+        """Fired while the run is still enumerating users, which is where a real
+        timeout lands: before anything has been reported."""
+        armed = {}
+
+        def _fire_then_return(*_a, **_kw):
+            armed["fired"] = True
+            armed["fire"]()          # the real _on_watchdog_timeout
+            return ["alice"]
+
+        backend, _ = self.run_main(
+            timeout="900",
+            patches=(
+                self._capturing_timer(armed),
+                patch.object(adm, "get_all_users_linux", _fire_then_return),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "no watchdog was armed to fire")
+        self.assertIn("failed", backend.events(),
+                      "the aborted run never told the backend it failed")
+        self.assertNotIn("completed", backend.events(),
+                         "the run carried on and reported success after aborting")
 
 
 class ADeliveredReportLeavesTheQueue(unittest.TestCase):

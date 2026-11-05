@@ -146,6 +146,20 @@ class _Backend:
             return [b.get("scan_event") for b in self.received if b.get("scan_event")]
 
 
+def _capturing_timer(armed):
+    """Stands in for the watchdog's timer, handing the test its callback instead
+    of racing it."""
+    class _Captured:
+        def __init__(_self, interval, callback):
+            armed["interval"] = interval
+            armed["fire"] = callback
+        def start(_self):
+            pass
+        def cancel(_self):
+            armed["cancelled"] = True
+    return patch.object(adm.threading, "Timer", _Captured)
+
+
 def _posted_device(cmd):
     """The device_id in the body a curl command is posting, or None."""
     try:
@@ -497,33 +511,55 @@ class TheDrainIsBoundedByTheRunBudget(_DrivesMain, unittest.TestCase):
 
 
 class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
-    """The connector sweep runs after the completed event, and its own requests
-    are not bounded by the run deadline. The watchdog is what used to fire over
-    it, sending "failed" for a run the backend had already been told completed --
-    and exiting non-zero over a scan that did all its work."""
+    """The connector sweep runs after the completed event. Two things have to
+    hold at once there: the backend must not then be told the run failed, and the
+    run must still be stoppable -- a signal that is swallowed leaves only SIGKILL,
+    which leaves the lock behind for every later run to trip over."""
 
-    def test_a_sweep_that_outlives_the_run_does_not_undo_the_completed_event(self):
-        swept = threading.Event()
+    def _abort_during_sweep(self):
+        """Runs main() and fires the watchdog from inside the sweep, reporting
+        what the backend heard and whether the abort actually ended the run."""
+        armed, exited = {}, Mock()
 
-        def _slow_sweep(_domain, _api_key, deadline=None):
-            swept.set()
-            # Outlives the run's deadline, as a real sweep's own requests can.
-            threading.Event().wait(8)
+        def _fire_during_sweep(*_a, **_kw):
+            armed["fired"] = True
+            armed["fire"]()
             return (0, 0, 0)
 
-        # Long enough that the sweep is reached well before the out-of-budget
-        # skip, and short enough that the watchdog fires while it is still going.
         backend, _ = self.run_main(
-            timeout="4",
-            patches=(patch.object(adm, "run_sweep", _slow_sweep),),
+            timeout="900",
+            patches=(
+                _capturing_timer(armed),
+                patch.object(adm, "run_sweep", _fire_during_sweep),
+                # A plain stand-in: the real one ends the process rather than
+                # raising, and raising here would only surface on the timer's
+                # thread as an unhandled exception.
+                patch.object(adm.os, "_exit", exited),
+            ),
         )
+        self.assertTrue(armed.get("fired"), "the sweep never ran, so nothing was tested")
+        return backend, exited
 
-        self.assertTrue(swept.is_set(), "the sweep never ran, so nothing was tested")
+    def test_an_abort_in_the_sweep_does_not_undo_the_completed_event(self):
+        backend, _ = self._abort_during_sweep()
+
         self.assertIn("completed", backend.events())
         self.assertNotIn(
             "failed", backend.events(),
             "the backend was told the run completed and then that it failed, so a"
             " scan that did all its work is recorded as a timeout",
+        )
+
+    def test_an_abort_in_the_sweep_still_ends_the_run(self):
+        """Not reporting the failure is one thing; ignoring the abort is another.
+        Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and
+        that leaves the lock behind for every later run to trip over."""
+        _, exited = self._abort_during_sweep()
+
+        self.assertTrue(
+            exited.called,
+            "the abort returned without ending the run, so a signal during the"
+            " sweep is silently ignored",
         )
 
 
@@ -534,22 +570,10 @@ class TheWatchdogAbortsARunThatCannotFinish(_DrivesMain, unittest.TestCase):
     that instant depends on how fast the machine detects -- which is how an
     earlier version of this passed here and went red on CI."""
 
-    def _capturing_timer(self, armed):
-        """Stands in for the watchdog's timer, handing the test its callback."""
-        class _Captured:
-            def __init__(_self, interval, callback):
-                armed["interval"] = interval
-                armed["fire"] = callback
-            def start(_self):
-                pass
-            def cancel(_self):
-                armed["cancelled"] = True
-        return patch.object(adm.threading, "Timer", _Captured)
-
     def test_the_watchdog_is_armed_for_the_run_s_own_timeout(self):
         armed = {}
 
-        self.run_main(timeout="900", patches=(self._capturing_timer(armed),))
+        self.run_main(timeout="900", patches=(_capturing_timer(armed),))
 
         self.assertEqual(armed.get("interval"), 900,
                          "the run would not be aborted at the timeout it was given")
@@ -569,7 +593,7 @@ class TheWatchdogAbortsARunThatCannotFinish(_DrivesMain, unittest.TestCase):
         backend, _ = self.run_main(
             timeout="900",
             patches=(
-                self._capturing_timer(armed),
+                _capturing_timer(armed),
                 patch.object(adm, "get_all_users_linux", _fire_then_return),
             ),
         )

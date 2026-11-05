@@ -3806,6 +3806,10 @@ def main():
     # Set once the watchdog or a signal has decided this run failed. Finishing the
     # step it interrupted afterwards does not make the run a success, and the
     # abort's own exit can still be waiting on a bounded failure report.
+    # Set once the backend has been told how the run ended, so a later abort
+    # does not contradict it. Distinct from _finished, which means the run is over
+    # and an abort has nothing left to do at all.
+    _reported = [False]
     _aborting = [False]
     # Set by the abort once it is about to exit, so a main thread that finishes
     # first waits for the failure report rather than cutting it off.
@@ -3883,7 +3887,10 @@ def main():
             )
         except Exception:
             pass
-        _report_failed_bounded(error_type, message)
+        if not _reported[0]:
+            # Already told it the run completed; a failure now would contradict
+            # a scan that did its work. The cleanup above still has to happen.
+            _report_failed_bounded(error_type, message)
         _abort_exiting.set()
         os._exit(1)
 
@@ -4793,20 +4800,19 @@ def main():
         # next run starts fresh (won't resume), independent of the completed-event
         # send result above.
         discovery_cache.mark_run_completed()
-        # The run's outcome is now reported and must not change. What follows is
-        # best-effort, and a watchdog firing over it would send "failed" for a run
-        # the backend has already been told completed.
-        _finished[0] = True
+        # The outcome is now reported and must not change: an abort from here on
+        # cleans up and exits as always, but says nothing further to the backend.
+        _reported[0] = True
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            # Nothing aborts this once the outcome is reported, so it carries the
-            # run's deadline instead: each request is clipped to what is left and
-            # the worklist stops when it is spent. Skipped outright with nothing
-            # to spare. Best-effort by design: the next run picks it up.
+            # Carries the run's deadline, so each request is clipped to what is
+            # left and the worklist stops when it is spent -- and skipped outright
+            # with nothing to spare. A signal or the watchdog still ends it.
+            # Best-effort by design: the next run picks up the rest.
             out_of_budget = run_deadline is not None and time.monotonic() > (
                 run_deadline - tail_grace
             )

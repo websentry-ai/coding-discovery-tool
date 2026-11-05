@@ -32,6 +32,10 @@ from pathlib import Path
 # process alive past the budget the run was given.
 LIST_MAX_TIME = 30
 REPORT_MAX_TIME = 60
+# How long past its own timeout curl is given before the process gives up on it.
+# A backstop for curl not honouring --max-time, so it stays small: the run's
+# deadline is only as real as the longest a single request can hold it.
+CURL_KILL_GRACE = 5
 
 REPORT_PATH = "/api/v1/ai-tools/mcp-server-scan/"
 LIST_PATH = "/api/v1/ai-tools/unresolved-connector-uuids/"
@@ -165,7 +169,7 @@ def fetch_unresolved_uuids(domain, api_key, max_time=LIST_MAX_TIME):
     http_code, body = _run_curl(
         ["curl", "-s", "--config", "-", "--max-time", str(max_time),
          "-w", "\n%{http_code}", url],
-        _auth_header(api_key), timeout=max_time + 15,
+        _auth_header(api_key), timeout=max_time + CURL_KILL_GRACE,
     )
     if not http_code.startswith("2"):
         raise RuntimeError(f"list endpoint http {http_code}: {body[:200]}")
@@ -195,7 +199,7 @@ def report_connector(domain, api_key, connector_uuid, name, tools,
     return _run_curl(
         ["curl", "-s", "-X", "POST", "--config", "-", "--max-time", str(max_time),
          "-w", "\n%{http_code}", endpoint],
-        curl_config, timeout=max_time + 30,
+        curl_config, timeout=max_time + CURL_KILL_GRACE,
     )
 
 

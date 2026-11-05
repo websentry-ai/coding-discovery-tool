@@ -372,74 +372,116 @@ class _Clock:
         return self.now
 
 
-class TheConnectorSweepStaysInsideTheRunBudget(unittest.TestCase):
-    """The sweep runs after the outcome is reported, so nothing aborts it. Its
-    worklist is as long as the device's connector list and each entry gets its own
-    60s request, so without the run's deadline it can keep the process alive long
-    past the budget the run was given."""
+class _SweepBackend(BaseHTTPRequestHandler):
+    """Answers the sweep's worklist fetch and its per-connector reports."""
 
-    THREE = {f"uuid-{i}": {"name": f"n{i}", "tools": []} for i in (1, 2, 3)}
+    def do_GET(self):
+        self._json(json.dumps({"uuids": self.server.uuids}).encode())
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.reports += 1
+        self._json(b'{"ok": true}')
+
+    def _json(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_a):
+        pass
+
+
+class TheConnectorSweepStaysInsideTheRunBudget(unittest.TestCase):
+    """The sweep runs after the outcome is reported, so a run with a long
+    connector list could keep the process alive well past the budget it was
+    given: its worklist is one 60s request per connector, after a 45s fetch.
+
+    Real curl against a real localhost backend; what the test controls is the
+    clock the sweep reads, so a budget can be spent without spending it."""
+
+    UUIDS = ["uuid-1", "uuid-2", "uuid-3"]
+
+    def setUp(self):
+        self.server = HTTPServer(("127.0.0.1", 0), _SweepBackend)
+        self.server.uuids = list(self.UUIDS)
+        self.server.reports = 0
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.local = {u: {"name": f"n{i}", "tools": []}
+                      for i, u in enumerate(self.UUIDS)}
+
+    def _run(self, deadline_in=None, cost=0.0):
+        """Really sweep, recording the --max-time curl was handed each time. The
+        clock advances by `cost` per request, standing in for the time a real
+        one takes against a backend that is not on localhost."""
+        clock, seen, caps = _Clock(), [], []
+        real_run = sweep_mod.subprocess.run
+
+        def _spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and "--max-time" in cmd:
+                seen.append(int(cmd[cmd.index("--max-time") + 1]))
+                caps.append(kw.get("timeout"))
+                clock.now += cost
+            return real_run(cmd, *a, **kw)
+
+        deadline = None if deadline_in is None else clock.now + deadline_in
+        with patch.object(sweep_mod, "time", clock), \
+             patch.object(sweep_mod.subprocess, "run", _spy), \
+             patch.object(sweep_mod, "read_local_connectors", return_value=self.local):
+            result = sweep_mod.run_sweep(self.url, "test-key-000000", deadline=deadline)
+        self.caps = caps
+        return seen, result
 
     def test_the_worklist_stops_once_the_budget_is_spent(self):
-        clock, reported = _Clock(), []
-
-        def _report(_domain, _api_key, uuid, _name, _tools, max_time=None):
-            reported.append(max_time)
-            clock.now += 40          # as a real report can
-            return ("200", "")
-
-        with patch.object(sweep_mod, "time", clock), \
-             patch.object(sweep_mod, "fetch_unresolved_uuids",
-                          return_value=list(self.THREE)), \
-             patch.object(sweep_mod, "read_local_connectors", return_value=self.THREE), \
-             patch.object(sweep_mod, "report_connector", _report):
-            sent, failed, matched = sweep_mod.run_sweep(
-                "http://127.0.0.1:1", "k", deadline=clock.now + 70
-            )
+        """Two of three connectors fit; the third has no room left. The second
+        one's request is clipped on the way, which is the other half of the rule."""
+        seen, (sent, _failed, matched) = self._run(deadline_in=120, cost=40)
 
         self.assertEqual(
-            reported, [60, 30],
-            "the sweep worked through its list regardless of what the run had"
-            " left, keeping the process alive past its budget",
+            seen, [30, 60, 40],
+            "the sweep worked through its whole list regardless of what the run"
+            " had left, keeping the process alive past its budget",
         )
         self.assertEqual((sent, matched), (2, 3), "it claimed work it never did")
+        self.assertEqual(self.server.reports, 2, "the backend heard otherwise")
 
-    def test_the_worklist_request_is_clipped_to_what_is_left(self):
-        clock, seen = _Clock(), []
+    def test_each_request_is_clipped_to_what_the_run_has_left(self):
+        seen, _ = self._run(deadline_in=5)
 
-        def _fetch(_domain, _api_key, max_time=None):
-            seen.append(max_time)
-            return []
-
-        with patch.object(sweep_mod, "time", clock), \
-             patch.object(sweep_mod, "fetch_unresolved_uuids", _fetch):
-            sweep_mod.run_sweep("http://127.0.0.1:1", "k", deadline=clock.now + 5)
-
-        self.assertEqual(seen, [5], "the request took its own ceiling rather than"
-                                    " what the run had left")
+        self.assertEqual(seen[0], 5, "the fetch took its own ceiling rather than"
+                                     " what the run had left")
+        self.assertTrue(all(t <= 5 for t in seen), f"a request overran: {seen}")
 
     def test_nothing_is_started_with_no_budget_left(self):
-        clock, seen = _Clock(), []
-
-        with patch.object(sweep_mod, "time", clock), \
-             patch.object(sweep_mod, "fetch_unresolved_uuids",
-                          side_effect=lambda *a, **k: seen.append(1) or []):
-            sweep_mod.run_sweep("http://127.0.0.1:1", "k", deadline=clock.now)
+        seen, result = self._run(deadline_in=0)
 
         self.assertEqual(seen, [], "the sweep started work the run had no time for")
+        self.assertEqual(result, (0, 0, 0))
+
+    def test_a_hung_request_cannot_hold_the_run_much_past_the_deadline(self):
+        """curl's own timeout is what should end a request; the process-level cap
+        is only a backstop for it not doing so, and the deadline is only as real
+        as the longest a single request can hold it."""
+        seen, _ = self._run(deadline_in=120, cost=40)
+
+        for given, cap in zip(seen, self.caps):
+            self.assertLessEqual(
+                cap, given + sweep_mod.CURL_KILL_GRACE,
+                f"a request clipped to {given}s could be held {cap}s, well past"
+                " what the run had left",
+            )
 
     def test_no_deadline_leaves_the_ceilings_alone(self):
         """The standalone entry point has no run to stay inside."""
-        seen = []
+        seen, _ = self._run()
 
-        def _fetch(_domain, _api_key, max_time=None):
-            seen.append(max_time)
-            return []
-
-        with patch.object(sweep_mod, "fetch_unresolved_uuids", _fetch):
-            sweep_mod.run_sweep("http://127.0.0.1:1", "k")
-
-        self.assertEqual(seen, [sweep_mod.LIST_MAX_TIME])
+        self.assertEqual(seen[0], sweep_mod.LIST_MAX_TIME)
+        self.assertEqual(seen[1:], [sweep_mod.REPORT_MAX_TIME] * 3)
 
 
 class ADroppedPacketIsAsConclusiveAsARefusedOne(unittest.TestCase):

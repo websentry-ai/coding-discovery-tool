@@ -58,6 +58,34 @@ class _CLIMockHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _child_env(home):
+    """The environment for a CLI run under test: its state goes to a throwaway
+    HOME, and Sentry is off. The DSN falls back to the production one when unset,
+    so a test that aborts the CLI would otherwise file a real event every run."""
+    env = os.environ.copy()
+    env["HOME"] = home
+    env["USERPROFILE"] = home
+    env["AI_DISCOVERY_SENTRY_DSN"] = ""
+    return env
+
+
+class TestChildEnvFilesNoSentryEvents(unittest.TestCase):
+    """Every CLI run under test goes through `_child_env`, because the DSN falls
+    back to the real one when unset: a test that aborts the CLI would otherwise
+    file an event against production on every run, from every CI job."""
+
+    def test_the_fallback_dsn_is_live(self):
+        """If this ever became empty the risk would be gone -- and so would the
+        reason for the next test, which should then go too."""
+        self.assertTrue(
+            os.environ.get("AI_DISCOVERY_SENTRY_DSN", "https://x@y/1"),
+            "the unset default is empty, so nothing needs disabling",
+        )
+
+    def test_a_child_has_sentry_switched_off(self):
+        self.assertEqual(_child_env("/tmp/throwaway")["AI_DISCOVERY_SENTRY_DSN"], "")
+
+
 class TestDetector(unittest.TestCase):
     """Integration tests for AIToolsDetector on the current OS."""
 
@@ -218,10 +246,7 @@ class TestMainCLI(unittest.TestCase):
         shutil.rmtree(self._home_dir, ignore_errors=True)
 
     def _run_cli(self, extra_env=None, timeout=600):
-        env = os.environ.copy()
-        # Send the CLI's ~/.unbound state + lock to the throwaway HOME from setUp.
-        env["HOME"] = self._home_dir
-        env["USERPROFILE"] = self._home_dir
+        env = _child_env(self._home_dir)
         # Forced-failure cases burn a 5-attempt jittered backoff per upload (548s of
         # the 600s budget before any tool was added); these assert queueing, not sleeping.
         env.setdefault("AI_DISCOVERY_BACKOFF_BASE_SECONDS", "0.01")
@@ -369,9 +394,7 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         The watchdog cannot: every bounded step is clipped to finish before it
         fires, so whether the run is still working at that instant depends on how
         fast the machine detects. A test built on that races the machine."""
-        env = os.environ.copy()
-        env["HOME"] = self._home
-        env["USERPROFILE"] = self._home
+        env = _child_env(self._home)
         start = time.monotonic()
         # Long enough that the watchdog never fires: the signal is the trigger.
         proc = subprocess.Popen(

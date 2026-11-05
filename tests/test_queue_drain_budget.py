@@ -18,7 +18,7 @@ import threading
 import unittest
 import time
 from contextlib import ExitStack
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -69,7 +69,12 @@ class _Backend:
     """A localhost backend the drain tests drive main() against. Real HTTP, real
     curl, real retry loop -- `rule` only decides what status each data report
     gets back, so a test can say "this one is unreachable" without replacing the
-    transport underneath it."""
+    transport underneath it.
+
+    Threaded on purpose: a stalled handler must not hold up the request behind
+    it. Single-threaded, a test that stalls one send makes the next one time out,
+    and then passes only because the server drained its backlog before the test
+    looked -- which is a race, not the property it meant to assert."""
 
     def __init__(self, rule=None, stall=0, stall_when=None):
         outer = self
@@ -103,7 +108,7 @@ class _Backend:
         self._stall_when = stall_when or (lambda _body: True)
         self._lock = threading.Lock()
         self.received = []
-        self.server = HTTPServer(("127.0.0.1", 0), _Handler)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self._thread.start()
@@ -548,6 +553,35 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             "failed", backend.events(),
             "the backend was told the run completed and then that it failed, so a"
             " scan that did all its work is recorded as a timeout",
+        )
+
+    def test_an_undelivered_outcome_does_not_silence_the_failure(self):
+        """The completed event can fail like any other send -- refused, or out of
+        budget. The backend then still has the run in progress, and the failure
+        report is the only thing that will ever correct it, so it must not be
+        suppressed on the strength of a send that never landed."""
+        armed = {}
+
+        def _fire_during_sweep(*_a, **_kw):
+            armed["fired"] = True
+            armed["fire"]()
+            return (0, 0, 0)
+
+        backend, _ = self.run_main(
+            timeout="900",
+            rule=lambda body: 500 if body.get("scan_event") == "completed" else 200,
+            patches=(
+                _capturing_timer(armed),
+                patch.object(adm, "run_sweep", _fire_during_sweep),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "the sweep never ran, so nothing was tested")
+        self.assertIn(
+            "failed", backend.events(),
+            "the completed event was refused and the failure suppressed anyway,"
+            " so the backend is left holding a run that never ends",
         )
 
     def test_an_abort_in_the_sweep_still_ends_the_run(self):

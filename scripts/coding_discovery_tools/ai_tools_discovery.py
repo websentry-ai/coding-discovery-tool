@@ -4800,29 +4800,28 @@ def main():
         # next run starts fresh (won't resume), independent of the completed-event
         # send result above.
         discovery_cache.mark_run_completed()
-        # The outcome is now reported and must not change: an abort from here on
-        # cleans up and exits as always, but says nothing further to the backend.
-        _reported[0] = True
+        # Only a delivered outcome may silence a later failure report. If the
+        # event above never landed -- refused, or out of budget -- the backend
+        # still has the run in progress, and an abort saying so is the only thing
+        # that will ever correct it.
+        _reported[0] = success
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            # Carries the run's deadline, so each request is clipped to what is
-            # left and the worklist stops when it is spent -- and skipped outright
-            # with nothing to spare. A signal or the watchdog still ends it.
-            # Best-effort by design: the next run picks up the rest.
-            out_of_budget = run_deadline is not None and time.monotonic() > (
-                run_deadline - tail_grace
+            # Given the run's deadline less the tail the watchdog needs, so it
+            # stops short of that rather than being killed at it: each request is
+            # clipped to what is left, the worklist stops when that is spent, and
+            # nothing starts with no room. A signal still ends it, and whatever is
+            # left is picked up by the next run.
+            sent, failed, matched = run_sweep(
+                args.domain, args.api_key,
+                deadline=(run_deadline - tail_grace
+                          if run_deadline is not None else None),
             )
-            if out_of_budget:
-                logger.info("Connector UUID sweep skipped: out of run budget")
-            else:
-                sent, failed, matched = run_sweep(
-                    args.domain, args.api_key, deadline=run_deadline
-                )
-                logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
+            logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
         except Exception as sweep_err:
             logger.debug(f"Connector UUID sweep failed: {sweep_err}")
 

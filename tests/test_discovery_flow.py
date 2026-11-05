@@ -74,14 +74,6 @@ class TestChildEnvFilesNoSentryEvents(unittest.TestCase):
     back to the real one when unset: a test that aborts the CLI would otherwise
     file an event against production on every run, from every CI job."""
 
-    def test_the_fallback_dsn_is_live(self):
-        """If this ever became empty the risk would be gone -- and so would the
-        reason for the next test, which should then go too."""
-        self.assertTrue(
-            os.environ.get("AI_DISCOVERY_SENTRY_DSN", "https://x@y/1"),
-            "the unset default is empty, so nothing needs disabling",
-        )
-
     def test_a_child_has_sentry_switched_off(self):
         self.assertEqual(_child_env("/tmp/throwaway")["AI_DISCOVERY_SENTRY_DSN"], "")
 

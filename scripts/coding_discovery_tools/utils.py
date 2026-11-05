@@ -1488,6 +1488,7 @@ def send_scan_event(
     manifest: Optional[List[Dict]] = None,
     covered_home_users: Optional[List[str]] = None,
     deadline: Optional[float] = None,
+    failure: Optional[Dict] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -1509,6 +1510,9 @@ def send_scan_event(
             "completed" so the backend set-diffs it to prune the rest.
         covered_home_users: Optional home users covered; sent only on "completed" to
             bound the prune scope.
+        failure: Optional dict the caller owns, filled in as send_report_to_backend
+            describes. A caller that has to know whether an event may have landed
+            needs more than the success flag.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1547,6 +1551,7 @@ def send_scan_event(
         app_name,
         sentry_context,
         deadline=deadline,
+        failure=failure,
     )
 
 
@@ -1753,9 +1758,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 _log_http_error_details(http_code, response_body or None)
 
                 if http_code == PAYLOAD_TOO_LARGE:
-                    # Says nothing about the backend's health, so a caller draining
-                    # a backlog must not read it as one. Kept out of "kind", which
-                    # carries delivery uncertainty and is deliberately sticky.
+                    # One attempt, not a curve: the same endpoint will refuse the
+                    # same body. Kept queued, per the constant above.
                     try:
                         raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
                     except RuntimeError as exc:

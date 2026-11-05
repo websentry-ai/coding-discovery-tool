@@ -4783,12 +4783,14 @@ def main():
                     for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
         covered = [u for u in all_users
                    if u not in unreadable_users and u not in incomplete_users]
+        completed_failure = {}
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
             manifest=manifest, covered_home_users=covered,
             deadline=(run_deadline - tail_grace
                       if run_deadline is not None else None),
+            failure=completed_failure,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")
@@ -4800,11 +4802,13 @@ def main():
         # next run starts fresh (won't resume), independent of the completed-event
         # send result above.
         discovery_cache.mark_run_completed()
-        # Only a delivered outcome may silence a later failure report. If the
-        # event above never landed -- refused, or out of budget -- the backend
-        # still has the run in progress, and an abort saying so is the only thing
-        # that will ever correct it.
-        _reported[0] = success
+        # Only an outcome the backend may hold silences a later failure report.
+        # A lost answer counts: the send path's rule is that such an attempt may
+        # already have been accepted, and a failure afterwards would contradict
+        # it. A refusal, or a connection that never opened, leaves the run in
+        # progress there -- and an abort saying so is the only thing that will
+        # ever correct that.
+        _reported[0] = success or completed_failure.get("kind") == "uncertain"
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs

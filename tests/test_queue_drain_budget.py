@@ -584,6 +584,36 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " so the backend is left holding a run that never ends",
         )
 
+    def test_a_completion_that_may_have_landed_silences_the_failure(self):
+        """The counterweight to the test above. A completed event whose answer
+        was lost may well have been accepted -- the send path's own rule -- so a
+        failure afterwards would contradict a run the backend already has."""
+        armed = {}
+
+        def _fire_during_sweep(*_a, **_kw):
+            armed["fired"] = True
+            armed["fire"]()
+            return (0, 0, 0)
+
+        backend, _ = self.run_main(
+            timeout="900",
+            # Hangs up on the completed event without answering, which is what a
+            # lost answer looks like from the sending end.
+            rule=lambda body: None if body.get("scan_event") == "completed" else 200,
+            patches=(
+                _capturing_timer(armed),
+                patch.object(adm, "run_sweep", _fire_during_sweep),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "the sweep never ran, so nothing was tested")
+        self.assertNotIn(
+            "failed", backend.events(),
+            "the completed event may already have been accepted, so reporting a"
+            " failure over it contradicts a run the backend has",
+        )
+
     def test_an_abort_in_the_sweep_still_ends_the_run(self):
         """Not reporting the failure is one thing; ignoring the abort is another.
         Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and

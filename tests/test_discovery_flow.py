@@ -315,14 +315,13 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
     (instead of hanging until a parent force-kills it) and removes its lock so
     the next run isn't blocked."""
 
-    class _StallsTheSweep(BaseHTTPRequestHandler):
-        """Answers the scan's own sends at once and stalls the connector sweep.
-        Every send is clipped to what is left of the run budget, so none of them
-        can overrun it any more; the sweep's requests carry their own timeout
-        instead, which is why the run is the thing that has to stop it."""
+    class _HoldsOneSend(BaseHTTPRequestHandler):
+        """Records the scan's lifecycle events and holds whichever one the test
+        names, so the run is still working when its watchdog fires rather than
+        racing it. The hold outlives the send's own clip, which is what keeps the
+        run from finishing early."""
 
         def do_GET(self):
-            self.server.stalling.wait(20)
             self._ok()
 
         def do_POST(self):
@@ -333,6 +332,8 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 event = None
             if event:
                 self.server.events.append(event)
+            if event and event == self.server.hold_event:
+                self.server.stalling.wait(30)
             self._ok()
 
         def _ok(self):
@@ -347,9 +348,10 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
     def setUp(self):
         # Threading, so the abort's own failure report is not queued behind the
         # sweep request the run is stuck in.
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._StallsTheSweep)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._HoldsOneSend)
         # Released in tearDown so a stalled handler cannot hold up the suite.
         self.server.stalling = threading.Event()
+        self.server.hold_event = None
         self.server.events = []
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -362,8 +364,76 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         self.thread.join(timeout=5)
         shutil.rmtree(self._home, ignore_errors=True)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX signals")
+    def test_an_aborted_run_reports_failure_exits_nonzero_and_cleans_the_lock(self):
+        """What the abort has to do, whichever trigger reaches it: tell the
+        backend, release the lock, and exit non-zero. The watchdog and the signal
+        handler both call the same `_abort`, and the signal is what can be aimed
+        precisely -- so it drives this.
+
+        The watchdog cannot: every bounded step is clipped to finish before it
+        fires, so whether the run is still working at that instant depends on how
+        fast the machine detects. A test built on that races the machine."""
+        env = os.environ.copy()
+        env["HOME"] = self._home
+        env["USERPROFILE"] = self._home
+        start = time.monotonic()
+        # Long enough that the watchdog never fires: the signal is the trigger.
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "scripts/coding_discovery_tools/ai_tools_discovery.py",
+                "--api-key", "test-key-000000",
+                "--domain", f"http://127.0.0.1:{self.port}",
+                "--timeout", "600",
+            ],
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            # The run is underway and has not reported finishing, so an abort now
+            # is a genuine one rather than a late timer over a completed run.
+            waited_until = time.monotonic() + 60
+            while "in_progress" not in self.server.events:
+                self.assertIsNone(
+                    proc.poll(), "the run exited before it started scanning"
+                )
+                self.assertLess(
+                    time.monotonic(), waited_until, "the run never reported starting"
+                )
+                time.sleep(0.1)
+            proc.terminate()
+            stdout, stderr = proc.communicate(timeout=60)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+        self.assertNotEqual(proc.returncode, 0, f"stdout={stdout}\nstderr={stderr}")
+        self.assertLess(time.monotonic() - start, 90, "the abort did not finish promptly")
+        # The abort runs on its own thread and exits the process itself, but only
+        # after telling the backend. A main thread that finished first and exited
+        # over it would take that report with it, and the run would be invisible.
+        self.assertIn("failed", self.server.events,
+                      "the aborted run never reported its failure")
+        # Lock cleaned up so a subsequent rerun isn't blocked.
+        lock = Path(self._home) / ".unbound" / "discovery.lock"
+        self.assertFalse(lock.exists(), "discovery.lock left behind after an abort")
+
     @unittest.skipUnless(os.name == "posix", "watchdog timing asserted on POSIX")
-    def test_self_timeout_exits_nonzero_and_cleans_lock(self):
+    def test_the_watchdog_aborts_a_run_that_cannot_finish_in_its_budget(self):
+        """The other trigger, end to end, on its own thread rather than the main
+        one. The first send is held past its own clip, so the run reaches
+        detection with only a quarter of the budget left.
+
+        That margin cannot be nil: every bounded step is deliberately clipped to
+        finish before the watchdog, so only work that outlasts the whole budget
+        trips it. A 1s budget leaves 0.25s for detection and everything after it,
+        where the 12s budget this replaces left 1.5s."""
+        self.server.hold_event = "in_progress"
         env = os.environ.copy()
         env["HOME"] = self._home
         env["USERPROFILE"] = self._home
@@ -374,15 +444,7 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 "scripts/coding_discovery_tools/ai_tools_discovery.py",
                 "--api-key", "test-key-000000",
                 "--domain", f"http://127.0.0.1:{self.port}",
-                # The run has to still be working when the watchdog fires, which
-                # happens one of two ways: it is parked in the stalled sweep, or it
-                # is still detecting. The sweep is skipped in the last eighth of
-                # the budget, so a detection pass ending inside that eighth would
-                # let the run finish normally and prove nothing. 12s puts that
-                # window at roughly 10-11.5s, far from both a bare runner's
-                # detection (a few seconds, so the sweep is reached) and a machine
-                # with tools installed (tens of seconds, so the watchdog is first).
-                "--timeout", "12",
+                "--timeout", "1",
             ],
             cwd=str(REPO_ROOT),
             capture_output=True,
@@ -390,23 +452,17 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
             timeout=90,
             env=env,
         )
-        elapsed = time.monotonic() - start
-        # Aborted by its own watchdog (non-zero) rather than completing the scan.
+
         self.assertNotEqual(
             result.returncode, 0,
-            "the run finished inside its budget, so nothing exercised the abort"
-            " path: detection ended in the last eighth, where the sweep is"
-            f" skipped.\nstdout={result.stdout}\nstderr={result.stderr}",
+            "the run finished inside a 1s budget, so the watchdog had nothing to"
+            f" abort.\nstdout={result.stdout}\nstderr={result.stderr}",
         )
-        self.assertLess(elapsed, 60, "self-timeout did not abort promptly")
-        # The abort runs on its own thread and exits the process itself, but only
-        # after telling the backend. A main thread that finished first and exited
-        # over it would take that report with it, and the run would be invisible.
+        self.assertLess(time.monotonic() - start, 60, "the abort was not prompt")
         self.assertIn("failed", self.server.events,
-                      "the aborted run never reported its failure")
-        # Lock cleaned up so a subsequent rerun isn't blocked.
+                      "the timed-out run never reported its failure")
         lock = Path(self._home) / ".unbound" / "discovery.lock"
-        self.assertFalse(lock.exists(), "discovery.lock left behind after self-timeout")
+        self.assertFalse(lock.exists(), "discovery.lock left behind after a timeout")
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
     def test_main_traps_and_restores_termination_signals(self):

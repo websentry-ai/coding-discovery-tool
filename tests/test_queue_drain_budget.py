@@ -484,6 +484,36 @@ class TheDrainIsBoundedByTheRunBudget(_DrivesMain, unittest.TestCase):
         self.assertEqual(self.queue_now(), [r["device_id"] for r in pending])
 
 
+class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
+    """The connector sweep runs after the completed event, and its own requests
+    are not bounded by the run deadline. The watchdog is what used to fire over
+    it, sending "failed" for a run the backend had already been told completed --
+    and exiting non-zero over a scan that did all its work."""
+
+    def test_a_sweep_that_outlives_the_run_does_not_undo_the_completed_event(self):
+        swept = threading.Event()
+
+        def _slow_sweep(_domain, _api_key):
+            swept.set()
+            # Outlives the run's deadline, as a real sweep can: its fetch alone is
+            # allowed 45s and each connector report 90s.
+            threading.Event().wait(3)
+            return (0, 0, 0)
+
+        backend, _ = self.run_main(
+            timeout="2",
+            patches=(patch.object(adm, "run_sweep", _slow_sweep),),
+        )
+
+        self.assertTrue(swept.is_set(), "the sweep never ran, so nothing was tested")
+        self.assertIn("completed", backend.events())
+        self.assertNotIn(
+            "failed", backend.events(),
+            "the backend was told the run completed and then that it failed, so a"
+            " scan that did all its work is recorded as a timeout",
+        )
+
+
 class ADeliveredReportLeavesTheQueue(unittest.TestCase):
     """The queue file is rewritten from what is still owed. Merging onto it left
     every delivered report in place, to be re-sent on every run for 24 hours."""

@@ -4793,15 +4793,19 @@ def main():
         # next run starts fresh (won't resume), independent of the completed-event
         # send result above.
         discovery_cache.mark_run_completed()
+        # The run's outcome is now reported and must not change. What follows is
+        # best-effort, and a watchdog firing over it would send "failed" for a run
+        # the backend has already been told completed.
+        _finished[0] = True
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            # Its requests are unbounded and it runs with the watchdog still armed,
-            # so a run with nothing left to spare skips it rather than being killed
-            # inside it. Best-effort by design: the next run picks it up.
+            # Its requests are unbounded and nothing can abort them now, so a run
+            # with nothing left to spare skips it rather than overrunning on work
+            # it does not owe. Best-effort by design: the next run picks it up.
             out_of_budget = run_deadline is not None and time.monotonic() > (
                 run_deadline - tail_grace
             )

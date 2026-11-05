@@ -4798,17 +4798,22 @@ def main():
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
 
-        # Local scan finished cleanly -> flip the checkpoint to "completed" so the
-        # next run starts fresh (won't resume), independent of the completed-event
-        # send result above.
-        discovery_cache.mark_run_completed()
         # Only an outcome the backend may hold silences a later failure report.
         # A lost answer counts: the send path's rule is that such an attempt may
         # already have been accepted, and a failure afterwards would contradict
         # it. A refusal, or a connection that never opened, leaves the run in
         # progress there -- and an abort saying so is the only thing that will
         # ever correct that.
+        #
+        # Set before the checkpoint below, which reads the cache and can report a
+        # read failure to Sentry: an abort in that stretch would otherwise call a
+        # run the backend has accepted a failure. A kill there costs a resume.
         _reported[0] = success or completed_failure.get("kind") == "uncertain"
+
+        # Local scan finished cleanly -> flip the checkpoint to "completed" so the
+        # next run starts fresh (won't resume), independent of the completed-event
+        # send result above.
+        discovery_cache.mark_run_completed()
 
         # Resolve any bare Claude connector UUIDs the backend still needs: read
         # this device's local session files and report real names + tools. Runs
@@ -4832,7 +4837,11 @@ def main():
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal
         # paths may have already reported, in which case this is a no-op).
-        if device_id and run_id:
+        if _reported[0]:
+            # The backend already has this run's outcome, so a failure now would
+            # contradict a scan that did its work.
+            logger.error("Not sending scan failed event - the outcome is already reported")
+        elif device_id and run_id:
             logger.error("Sending scan failed event due to error...")
             _report_failed_bounded(type(e).__name__, str(e))
         else:

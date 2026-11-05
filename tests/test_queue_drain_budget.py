@@ -614,6 +614,53 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " failure over it contradicts a run the backend has",
         )
 
+    def test_an_abort_during_the_checkpoint_write_does_not_report_failure(self):
+        """The window between the completed event landing and the local
+        checkpoint being flipped. That write reads the cache and can report a
+        read failure to Sentry, so it is not instant -- and the backend already
+        has the run by then."""
+        armed = {}
+
+        def _fire_during_checkpoint(*_a, **_kw):
+            armed["fired"] = True
+            armed["fire"]()
+
+        backend, _ = self.run_main(
+            timeout="900",
+            patches=(
+                _capturing_timer(armed),
+                patch.object(adm.discovery_cache, "mark_run_completed",
+                             _fire_during_checkpoint),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "the checkpoint never ran")
+        self.assertIn("completed", backend.events())
+        self.assertNotIn(
+            "failed", backend.events(),
+            "the completed event was already with the backend, so reporting a"
+            " failure during the checkpoint write contradicts it",
+        )
+
+    def test_a_crash_after_the_outcome_landed_does_not_report_failure(self):
+        """The crash path reported a failure without looking at what the backend
+        had already been told."""
+        def _boom(*_a, **_kw):
+            raise RuntimeError("checkpoint exploded")
+
+        backend, _ = self.run_main(
+            timeout="900",
+            patches=(patch.object(adm.discovery_cache, "mark_run_completed", _boom),),
+        )
+
+        self.assertIn("completed", backend.events())
+        self.assertNotIn(
+            "failed", backend.events(),
+            "a crash after the run was reported complete told the backend it"
+            " failed as well",
+        )
+
     def test_an_abort_in_the_sweep_still_ends_the_run(self):
         """Not reporting the failure is one thing; ignoring the abort is another.
         Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and

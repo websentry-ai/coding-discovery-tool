@@ -40,9 +40,6 @@ DRAIN_BUDGET_SECONDS = 600
 # of the run trips the watchdog; never more than a quarter of the budget, or a
 # short scan cannot report what it found.
 RUN_SEND_RESERVE_SECONDS = 300
-# Retryable failures in a row that mean the backend is down rather than one
-# report being bad. Each one costs a full five-attempt retry cycle.
-DRAIN_FAILURES_BEFORE_STOP = 2
 # Kept clear at the end of the run so the completed event finishes before the
 # watchdog: one that fires over it reports a run that did its work as failed.
 RUN_TAIL_GRACE_SECONDS = 30
@@ -4034,7 +4031,6 @@ def main():
                     args.timeout, time.monotonic() - t_start
                 )
                 drain_deadline = time.monotonic() + drain_budget
-                consecutive_failures = 0
                 for index, queued_report in enumerate(pending):
                     if _report_identity(queued_report) in resume_reported:
                         logger.info("  · Queued report superseded; dropped unsent")
@@ -4065,7 +4061,6 @@ def main():
                         failure=failure, stop_if_unreachable=True,
                     )
                     if success:
-                        consecutive_failures = 0
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
                         requeued_pending.append(queued_report)
@@ -4078,25 +4073,7 @@ def main():
                                 f" {len(requeued_pending)} report(s) stay queued."
                             )
                             break
-                        if failure.get("too_large"):
-                            # The wrong route for this body, not a backend in
-                            # trouble -- and an answer at all is evidence it is
-                            # well, so it breaks the run of failures rather than
-                            # being passed over silently.
-                            consecutive_failures = 0
-                            continue
-                        # Answered and refused can be about this payload, so it must
-                        # not hold up the queue behind it; a run of them is not.
-                        consecutive_failures += 1
-                        if consecutive_failures >= DRAIN_FAILURES_BEFORE_STOP:
-                            requeued_pending.extend(pending[index + 1:])
-                            logger.info(
-                                f"  Backend failing; {len(requeued_pending)}"
-                                " report(s) stay queued."
-                            )
-                            break
                     else:
-                        consecutive_failures = 0
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # An early stop requeues the untried tail wholesale, which can hold
                 # a pair the resumed run already reported.

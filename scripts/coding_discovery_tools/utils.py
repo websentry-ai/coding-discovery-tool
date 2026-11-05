@@ -1616,13 +1616,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     # refuses. Retrying here cannot help, but discarding loses the report.
     PAYLOAD_TOO_LARGE = 413
 
-    def _note_too_large() -> None:
-        """Which endpoint refused the body, recorded apart from whether anything
-        was delivered: a report can both be too large for this route and have
-        reached the backend by the other one."""
-        if failure is not None:
-            failure["too_large"] = True
-
     def _note(kind: str) -> bool:
         """Record why this failed, and say whether to abandon it straight away.
 
@@ -1763,7 +1756,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     # Says nothing about the backend's health, so a caller draining
                     # a backlog must not read it as one. Kept out of "kind", which
                     # carries delivery uncertainty and is deliberately sticky.
-                    _note_too_large()
                     try:
                         raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
                     except RuntimeError as exc:

@@ -337,10 +337,9 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
         )
 
     def test_a_lost_notification_does_not_mask_an_oversized_body(self):
-        """Both facts have to survive: the payload may be on the backend already,
-        AND the legacy endpoint cannot take it. Carried in one field, the sticky
-        uncertainty hides the refusal, and a caller draining a backlog reads two
-        oversized reports as a backend in trouble and stops."""
+        """The stored object may already have been ingested, so a refusal from
+        the legacy fallback afterwards must not erase that: the report is kept
+        either way, and the pair's cached hash can no longer be trusted."""
         self.server.legacy_code = 413
         failure = {}
         with patch("time.sleep", Mock()):
@@ -352,9 +351,6 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
 
         self.assertEqual(failure.get("kind"), "uncertain",
                          "the stored object may have been ingested")
-        self.assertTrue(failure.get("too_large"),
-                        "the legacy endpoint's refusal was lost behind the"
-                        " uncertainty, so the drain will count it as a failure")
 
     def test_a_refusal_on_the_notification_is_not(self):
         """The counterweight: a 4xx is the backend declining to ingest it, which

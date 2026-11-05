@@ -34,6 +34,8 @@ from scripts.coding_discovery_tools.utils import (
     send_report_to_backend,
 )
 
+_REAL_SLEEP = time.sleep
+
 SENT_OK = (True, False)
 FAILED_RETRYABLE = (False, True)
 FAILED_PERMANENT = (False, False)
@@ -126,6 +128,17 @@ class _Backend:
     def events(self):
         with self._lock:
             return [b.get("scan_event") for b in self.received if b.get("scan_event")]
+
+
+def _posted_device(cmd):
+    """The device_id in the body a curl command is posting, or None."""
+    try:
+        data = cmd[cmd.index("-d") + 1]
+        if not data.startswith("@"):
+            return None
+        return json.loads(Path(data[1:]).read_text()).get("device_id")
+    except (ValueError, IndexError, OSError, json.JSONDecodeError):
+        return None
 
 
 def _posted_event(cmd):
@@ -313,55 +326,96 @@ class TheDrainCannotStarveDetection(_DrivesMain, unittest.TestCase):
         )
 
     def test_an_undrainable_queue_does_not_cost_the_run(self):
-        """What timed out in production: a full queue, none of it sendable."""
+        """What timed out in production: a full queue, none of it sendable.
+
+        Two things hold the line here and either is enough: the drain stops when
+        its budget is spent, and a send started past the deadline reports that it
+        never reached the backend, which settles the queue behind it. So this
+        asserts the outcome rather than one mechanism -- it fails only when the
+        drain is unbounded, which is how it behaved before.
+
+        The backoff has to really elapse for any of that to be reached, so it is
+        shortened but actually slept; a mocked sleep would let the drain walk the
+        whole queue for free and the test would pass with no bound at all."""
         pending = _queued(100)
         self.seed_queue(pending)
 
-        backend, detected = self.run_main(rule=status_for())
+        backend, detected = self.run_main(
+            rule=status_for(),
+            patches=(
+                patch("time.sleep", _REAL_SLEEP),
+                patch.dict(os.environ, {
+                    "AI_DISCOVERY_BACKOFF_BASE_SECONDS": "0.05",
+                    "AI_DISCOVERY_BACKOFF_CAP_SECONDS": "0.1",
+                }),
+                patch.object(adm, "DRAIN_BUDGET_SECONDS", 2),
+            ),
+        )
 
-        self.assertEqual(
-            len(backend.device_ids()), adm.DRAIN_FAILURES_BEFORE_STOP,
-            "the drain paid a retry cycle per queued report before detecting anything",
+        self.assertLess(
+            len(backend.device_ids()), len(pending),
+            "the drain worked through the whole queue before detecting anything",
         )
         self.assertTrue(detected, "the run never reached detection")
-        self.assertEqual(len(self.queue_now()), len(pending))
+        self.assertEqual(
+            len(self.queue_now()), len(pending),
+            "a report was dropped rather than left for the next run",
+        )
 
 
 class AnUnreachableBackendStopsTheDrain(_DrivesMain, unittest.TestCase):
-    """Retryable failures in a row are the transport, not the payloads: every
-    report behind them would pay its own retry cycle to fail the same way."""
+    """A report that never reached the backend settles it for the whole queue:
+    every report behind it would pay its own attempt to learn the same thing.
+    This is the one failure that says anything about the reports behind it -- an
+    answered one is about its own payload, so it does not stop the drain."""
 
-    def test_a_run_of_failures_leaves_the_rest_untried(self):
+    def test_a_host_that_was_never_there_leaves_the_rest_untried(self):
         pending = _queued(5)
         self.seed_queue(pending)
+        tried = []
+        real_run = utils_mod.subprocess.run
 
-        backend, _ = self.run_main(rule=status_for())
+        def _spy(cmd, *a, **kw):
+            if isinstance(cmd, list):
+                device = _posted_device(cmd)
+                if isinstance(device, str) and device.startswith("QUEUED-"):
+                    tried.append(device)
+            return real_run(cmd, *a, **kw)
+
+        # Nothing listens, so every attempt is refused without connecting.
+        self.run_main(
+            domain="http://127.0.0.1:1",
+            patches=(patch.object(utils_mod.subprocess, "run", _spy),),
+        )
 
         self.assertEqual(
-            backend.device_ids(), ["QUEUED-0", "QUEUED-1"],
-            "the drain kept going after the backend proved unreachable",
+            sorted(set(tried)), ["QUEUED-0"],
+            "the queue behind the first unreachable report was tried anyway,"
+            " each one paying an attempt to fail the same way",
         )
         self.assertEqual(self.queue_now(), [r["device_id"] for r in pending])
 
-    def test_each_failure_really_paid_its_retry_cycle(self):
-        """Through the real transport: one unreachable report is five curl calls,
-        which is the cost the budget and the early stop exist to bound."""
+    def test_each_answered_failure_really_paid_its_retry_cycle(self):
+        """Through the real transport: a report the backend answers badly costs
+        five curl calls, which is the cost the drain budget exists to bound."""
         self.seed_queue(_queued(5))
 
         backend, _ = self.run_main(rule=status_for())
 
         self.assertEqual(backend.attempts("QUEUED-0"), utils_mod.MAX_ATTEMPTS)
-        self.assertEqual(backend.attempts("QUEUED-2"), 0, "a report past the stop was tried")
 
     def test_a_failure_part_way_through_requeues_only_what_is_left(self):
         self.seed_queue(_queued(5))
 
         backend, _ = self.run_main(rule=status_for(ok={"QUEUED-0", "QUEUED-1"}))
 
-        self.assertEqual(backend.device_ids(), ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3"])
+        self.assertEqual(
+            backend.device_ids(),
+            ["QUEUED-0", "QUEUED-1", "QUEUED-2", "QUEUED-3", "QUEUED-4"],
+        )
         self.assertEqual(
             self.queue_now(), ["QUEUED-2", "QUEUED-3", "QUEUED-4"],
-            "delivered reports were re-queued, or the untried tail was dropped",
+            "delivered reports were re-queued, or a failed one was dropped",
         )
 
     def test_one_report_that_keeps_failing_does_not_block_the_queue(self):
@@ -729,7 +783,6 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             users=("alice",),
             fresh_report=fresh,
             patches=(
-                patch.object(adm, "DRAIN_FAILURES_BEFORE_STOP", 99),
                 patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
                 patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
                 patch.object(adm, "_install_in_another_users_home", return_value=False),
@@ -1508,25 +1561,6 @@ class ABodyTooLargeForOneRouteIsNotALostReport(_DrivesMain, unittest.TestCase):
         self.assertEqual(sorted(self.queue_now()), ["QUEUED-0", "QUEUED-1"],
                          "the two it could not place stay for the S3 route;"
                          " the delivered one is gone")
-
-    def test_an_answered_refusal_breaks_the_run_of_failures(self):
-        """A 413 is an answer, so the backend is plainly up. Skipped but not
-        counted, it still leaves one failure either side of it looking like two in
-        a row, and the drain stops over a backend it just heard from."""
-        queued = [dict(self.BIG, device_id=f"QUEUED-{i}") for i in range(4)]
-        self.seed_queue(queued)
-
-        backend, _ = self.run_main(rule=statuses({
-            "QUEUED-0": 500,    # one failure
-            "QUEUED-1": 413,    # answered: too large for this route
-            "QUEUED-2": 500,    # one failure again, not two in a row
-        }))
-
-        self.assertEqual(
-            backend.device_ids(prefix="QUEUED-")[-1], "QUEUED-3",
-            "the drain stopped after a refusal it had already decided says"
-            " nothing about the backend's health",
-        )
 
     def test_a_report_the_backend_will_never_accept_is_still_discarded(self):
         """The counterweight: 422 is about the report, so keeping it would mean

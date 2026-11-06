@@ -772,6 +772,45 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " accepted, so the backend was told the run failed as well",
         )
 
+    def test_an_abort_between_completion_attempts_reports_the_failure(self):
+        """Nothing is on the wire during the wait between attempts, and the last
+        one was refused, so the backend does not have this run -- the failure
+        report is the only thing that will say so. Marking the whole attempt as
+        in flight, rather than the request inside it, swallowed that."""
+        armed, refused = {}, {"n": 0}
+
+        def _refuse_and_abort_in_the_wait(body):
+            if body.get("scan_event") != "completed":
+                return 200
+            refused["n"] += 1
+            if refused["n"] == 1 and "fire" in armed:
+                armed["fired"] = True
+            return 500                      # refused; a retry will follow
+
+        def _abort_in_the_wait(_seconds):
+            # Stands in for a signal arriving while the run is sleeping between
+            # attempts: no request is outstanding here.
+            if armed.get("fired") and not armed.get("aborted"):
+                armed["aborted"] = True
+                armed["fire"]()
+
+        backend, _ = self.run_main(
+            timeout="900",
+            rule=_refuse_and_abort_in_the_wait,
+            patches=(
+                _capturing_timer(armed),
+                patch("time.sleep", _abort_in_the_wait),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("aborted"), "the abort never fired in the wait")
+        self.assertIn(
+            "failed", backend.events(),
+            "the wait between attempts was read as a request still in flight, so"
+            " the backend was left holding a run that never ends",
+        )
+
     def test_an_abort_in_the_sweep_still_ends_the_run(self):
         """Not reporting the failure is one thing; ignoring the abort is another.
         Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and

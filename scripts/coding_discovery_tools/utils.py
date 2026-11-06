@@ -1716,30 +1716,35 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 if request_timeout < 1:
                     _note("unreachable")
                     return (False, True)
-            _in_flight(True)
             try:
-                result = subprocess.run(
-                    [
-                        "curl", "-s",
-                        "-X", "POST",
-                        "-H", f"Authorization: Bearer {api_key}",
-                        "-H", "Content-Type: application/json",
-                        "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                        "-d", f"@{tmp_path}",
-                        "--max-time", str(request_timeout),
-                        "--connect-timeout",
-                        str(min(CONNECT_TIMEOUT_SECONDS, request_timeout)),
-                        "-w", "\n%{num_connects} %{http_code}",
-                        url,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    # A backstop for curl ignoring --max-time. It stays just
-                    # inside a caller's deadline: a short budget's end-of-run
-                    # tail can be under five seconds, and overrunning by more
-                    # than that leaves the call running when the watchdog fires.
-                    timeout=request_timeout + (1 if deadline is not None else 5),
-                )
+                try:
+                    _in_flight(True)
+                    result = subprocess.run(
+                        [
+                            "curl", "-s",
+                            "-X", "POST",
+                            "-H", f"Authorization: Bearer {api_key}",
+                            "-H", "Content-Type: application/json",
+                            "-H", "User-Agent: AI-Tools-Discovery/1.0",
+                            "-d", f"@{tmp_path}",
+                            "--max-time", str(request_timeout),
+                            "--connect-timeout",
+                            str(min(CONNECT_TIMEOUT_SECONDS, request_timeout)),
+                            "-w", "\n%{num_connects} %{http_code}",
+                            url,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        # A backstop for curl ignoring --max-time. It stays just
+                        # inside a caller's deadline: a short budget's end-of-run
+                        # tail can be under five seconds, and overrunning by more
+                        # than that leaves the call running when the watchdog fires.
+                        timeout=request_timeout + (1 if deadline is not None else 5),
+                    )
+                finally:
+                    # Cleared as soon as curl is done, so the backoff that
+                    # may follow is not read as a request still out there.
+                    _in_flight(False)
 
                 # Parse response: stdout = body + "\n" + connections + " " + http_code
                 lines = result.stdout.rsplit("\n", 1)
@@ -1834,10 +1839,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                 return (False, True)
 
-            finally:
-                # Whatever the attempt did, nothing of it is on the wire now --
-                # including when this returns or continues from inside the try.
-                _in_flight(False)
 
         return (False, True)
     finally:

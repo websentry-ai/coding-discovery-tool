@@ -58,14 +58,23 @@ class _CLIMockHandler(BaseHTTPRequestHandler):
         pass
 
 
-def _child_env(home):
+def _child_env(home, queue_file=None):
     """The environment for a CLI run under test: its state goes to a throwaway
-    HOME, and Sentry is off. The DSN falls back to the production one when unset,
-    so a test that aborts the CLI would otherwise file a real event every run."""
+    HOME, its report queue to a throwaway file, and Sentry is off.
+
+    Both overrides are deliberate rather than incidental. The DSN falls back to
+    the production one when unset, so a test that aborts the CLI would file a
+    real event every run. And the queue does not live under HOME -- it is a
+    per-UID file in /var/tmp -- so isolating HOME leaves a run under test
+    draining a developer's own backlog to this server and rewriting the file
+    without it."""
     env = os.environ.copy()
     env["HOME"] = home
     env["USERPROFILE"] = home
     env["AI_DISCOVERY_SENTRY_DSN"] = ""
+    env["AI_DISCOVERY_QUEUE_FILE"] = str(
+        queue_file or Path(home) / "report-queue.json"
+    )
     return env
 
 
@@ -76,6 +85,19 @@ class TestChildEnvFilesNoSentryEvents(unittest.TestCase):
 
     def test_a_child_has_sentry_switched_off(self):
         self.assertEqual(_child_env("/tmp/throwaway")["AI_DISCOVERY_SENTRY_DSN"], "")
+
+    def test_a_child_queues_its_reports_somewhere_disposable(self):
+        """The queue is a per-UID file in /var/tmp, so redirecting HOME does not
+        move it. A run under test would drain the real backlog and rewrite it."""
+        home = "/tmp/throwaway"
+        queue = _child_env(home)["AI_DISCOVERY_QUEUE_FILE"]
+
+        self.assertTrue(
+            queue.startswith(home),
+            f"a CLI run under test would use {queue}, which is not the"
+            " throwaway home it was given",
+        )
+        self.assertNotEqual(queue, str(utils_mod._get_queue_file_path()))
 
 
 class TestDetector(unittest.TestCase):
@@ -238,7 +260,7 @@ class TestMainCLI(unittest.TestCase):
         shutil.rmtree(self._home_dir, ignore_errors=True)
 
     def _run_cli(self, extra_env=None, timeout=600):
-        env = _child_env(self._home_dir)
+        env = _child_env(self._home_dir, self._queue_file)
         # Forced-failure cases burn a 5-attempt jittered backoff per upload (548s of
         # the 600s budget before any tool was added); these assert queueing, not sleeping.
         env.setdefault("AI_DISCOVERY_BACKOFF_BASE_SECONDS", "0.01")

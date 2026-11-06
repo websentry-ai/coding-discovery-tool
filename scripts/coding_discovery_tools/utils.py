@@ -1572,6 +1572,8 @@ def never_connected(returncode: int, connects: str) -> bool:
 # attempt for the whole request budget. Generous for a laptop on a slow link,
 # and never longer than the request itself is allowed to take.
 CONNECT_TIMEOUT_SECONDS = 10
+# One Sentry event's own budget when the caller has not given it a tighter one.
+SENTRY_EVENT_TIMEOUT_SECONDS = 3
 # The metrics POST's own budget when the run has not given it a tighter one.
 METRICS_TIMEOUT_SECONDS = 10
 
@@ -1624,6 +1626,14 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     # data report tries S3 first, and S3 exists for bodies the legacy endpoint
     # refuses. Retrying here cannot help, but discarding loses the report.
     PAYLOAD_TOO_LARGE = 413
+
+    def _left_for_telemetry() -> Optional[float]:
+        """What a failure report may spend. None when the caller set no
+        deadline; otherwise whatever is left of it, so telemetry cannot take the
+        time detection and the completed event still need."""
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
 
     def _in_flight(state: bool) -> None:
         """Whether a request is on the wire right now. A caller deciding whether
@@ -1708,7 +1718,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-payload-", suffix=".json")
     except OSError as e:
         logger.error(f"Could not create temp file for payload: {e}")
-        report_to_sentry(e, {**ctx, "phase": "send_report_tmpfile"}, level="warning")
+        report_to_sentry(e, {**ctx, "phase": "send_report_tmpfile"}, level="warning",
+                                        max_seconds=_left_for_telemetry())
         return (False, True)
 
     try:
@@ -1770,7 +1781,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     try:
                         raise RuntimeError(error_msg)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning",
+                                        max_seconds=_left_for_telemetry())
                     return (False, True)
 
                 http_code = int(status_str)
@@ -1791,7 +1803,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     try:
                         raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning",
+                                        max_seconds=_left_for_telemetry())
                     return (False, True)
 
                 # Cloudflare 403s with error 1010 are transient rate limits — allow retry
@@ -1803,7 +1816,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                             error_detail += f": {response_body[:200]}"
                         raise RuntimeError(error_detail)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning",
+                                        max_seconds=_left_for_telemetry())
                     return (False, False)
 
                 if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
@@ -1814,7 +1828,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         error_detail += f": {response_body[:200]}"
                     raise RuntimeError(error_detail)
                 except RuntimeError as exc:
-                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning",
+                                        max_seconds=_left_for_telemetry())
                 return (False, True)
 
             except subprocess.TimeoutExpired:
@@ -1825,14 +1840,16 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 try:
                     raise RuntimeError("curl timeout")
                 except RuntimeError as exc:
-                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
+                                        max_seconds=_left_for_telemetry())
                 return (False, True)
 
             except OSError as e:
                 # curl missing or not executable: local, not transient, so sleeping cannot help.
                 logger.error(f"Cannot execute curl: {e}")
                 _note("unreachable")
-                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
+                                        max_seconds=_left_for_telemetry())
                 return (False, True)
 
             except Exception as e:
@@ -1840,7 +1857,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 _note("uncertain")
                 if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
                     continue
-                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
+                                        max_seconds=_left_for_telemetry())
                 return (False, True)
 
 
@@ -3569,6 +3587,7 @@ def report_to_sentry(
     context: Optional[Dict] = None,
     level: str = "error",
     priority: bool = False,
+    max_seconds: Optional[float] = None,
 ) -> None:
     """Send an event to Sentry using the raw HTTP store endpoint.
 
@@ -3649,6 +3668,16 @@ def report_to_sentry(
                 os.write(fd, json.dumps(payload).encode("utf-8"))
             finally:
                 os.close(fd)
+            # An event is a request of its own, taken after the send that
+            # failed has already spent its budget. A caller working to a
+            # deadline never budgeted for it, so it is clipped to what is left
+            # rather than coming out of what detection and the completed event
+            # still need.
+            event_timeout = SENTRY_EVENT_TIMEOUT_SECONDS
+            if max_seconds is not None:
+                event_timeout = int(min(event_timeout, max_seconds))
+                if event_timeout < 1:
+                    return
             result = subprocess.run(
                 [
                     "curl", "-s", "-o", "/dev/null",
@@ -3657,12 +3686,12 @@ def report_to_sentry(
                     "-H", "Content-Type: application/json",
                     "-H", f"X-Sentry-Auth: {sentry_auth}",
                     "-d", f"@{tmp_path}",
-                    "--max-time", "3",
+                    "--max-time", str(event_timeout),
                     dsn["store_url"],
                 ],
                 capture_output=True,
                 text=True,
-                timeout=4,
+                timeout=event_timeout + 1,
             )
             sent_ok = (result.returncode == 0)
             if sent_ok:

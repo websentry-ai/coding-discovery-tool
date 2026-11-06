@@ -129,17 +129,53 @@ class OldCallersStillWork(_ServesABackend):
 
     def _max_times(self, call):
         """The --max-time values curl was actually given, in order."""
+        return [given for given, _cap in self._budgets(call)]
+
+    def _budgets(self, call):
+        """Per request: the --max-time curl was given, and the process-level cap
+        behind it."""
         seen = []
         real_run = s3_mod.subprocess.run
 
         def spy(cmd, *a, **kw):
             if isinstance(cmd, list) and "--max-time" in cmd:
-                seen.append(int(cmd[cmd.index("--max-time") + 1]))
+                seen.append((int(cmd[cmd.index("--max-time") + 1]), kw.get("timeout")))
             return real_run(cmd, *a, **kw)
 
         with patch.object(s3_mod.subprocess, "run", spy):
             call()
         return seen
+
+    def test_an_s3_request_cannot_outlive_its_deadline_by_the_tail(self):
+        """The legacy send keeps its process cap within a second of a deadline,
+        because an end-of-run tail can be under five seconds on a short budget.
+        The S3 steps are clipped by the same deadline and need the same bound."""
+        self.server.code = 500
+
+        budgets = self._budgets(lambda: s3_mod.try_s3_upload(
+            self.url, "test-key-000000",
+            {"device_id": "D", "tools": [{"name": "T"}]}, {"phase": "t"},
+            deadline=time.monotonic() + 20,
+        ))
+
+        self.assertTrue(budgets, "no request was made")
+        for given, cap in budgets:
+            self.assertLessEqual(
+                cap - given, 1,
+                f"a request clipped to {given}s could be held {cap}s, past a"
+                " tail that is under five seconds on a short budget",
+            )
+
+    def test_an_s3_request_without_a_deadline_keeps_its_own_backstop(self):
+        self.server.code = 500
+
+        budgets = self._budgets(lambda: s3_mod.try_s3_upload(
+            self.url, "test-key-000000",
+            {"device_id": "D", "tools": [{"name": "T"}]}, {"phase": "t"},
+        ))
+
+        self.assertTrue(budgets, "no request was made")
+        self.assertEqual([cap - given for given, cap in budgets], [5] * len(budgets))
 
     def test_an_s3_upload_without_a_deadline_keeps_its_own_timeouts(self):
         """try_s3_upload gained a deadline; a caller passing four positionals must
@@ -450,6 +486,63 @@ class TheInFlightMarkMatchesWhatIsOnTheWire(_ServesABackend):
 
         self.assertEqual(failure.get("kind"), "delivered")
         self.assertFalse(failure.get("in_flight"))
+
+
+class FailureTelemetryStaysInsideTheDeadline(_ServesABackend):
+    """Each Sentry event is a request of its own, taken after the send that
+    failed has already spent its budget. A caller working to a deadline never
+    budgeted for it, so unbounded it comes out of the time detection and the
+    completed event still need."""
+
+    REPORT = {"device_id": "D", "home_user": "u", "tools": []}
+
+    def setUp(self):
+        super().setUp()
+        # Events are deduped by signature for the life of a run, so without this
+        # the second case here files nothing and proves nothing.
+        utils_mod.reset_sentry_run_state()
+        self.addCleanup(utils_mod.reset_sentry_run_state)
+
+    def _events(self, deadline):
+        """The --max-time each Sentry POST was handed, over real curl."""
+        seen = []
+        real_run = utils_mod.subprocess.run
+
+        def _spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and "X-Sentry-Auth" in " ".join(map(str, cmd)):
+                seen.append(int(cmd[cmd.index("--max-time") + 1]))
+                return subprocess.CompletedProcess(cmd, 0, stdout="200", stderr="")
+            return real_run(cmd, *a, **kw)
+
+        self.server.code = 500
+        with patch.object(utils_mod, "_SENTRY_DSN",
+                          "https://k@127.0.0.1:1/1"), \
+             patch.object(utils_mod.subprocess, "run", _spy), \
+             patch("time.sleep", Mock()):
+            utils_mod.send_report_to_backend(
+                self.url, "test-key-000000", dict(self.REPORT), deadline=deadline,
+            )
+        return seen
+
+    def test_an_event_is_clipped_to_what_the_run_has_left(self):
+        seen = self._events(time.monotonic() + 2)
+
+        self.assertTrue(seen, "the failed send filed no event")
+        for given in seen:
+            self.assertLessEqual(
+                given, 2,
+                f"an event was given {given}s inside a 2s remainder, so"
+                " telemetry spends what detection and the completion need",
+            )
+
+    def test_without_a_deadline_an_event_keeps_its_own_budget(self):
+        seen = self._events(None)
+
+        self.assertTrue(seen, "the failed send filed no event")
+        self.assertEqual(
+            set(seen), {utils_mod.SENTRY_EVENT_TIMEOUT_SECONDS},
+            "nothing to stay inside, so the event keeps the budget it had",
+        )
 
 
 class AQueueRewriteIsAllOrNothing(unittest.TestCase):

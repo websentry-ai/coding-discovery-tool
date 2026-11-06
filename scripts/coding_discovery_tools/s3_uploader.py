@@ -41,6 +41,15 @@ def _within(timeout: int, deadline):
     return min(timeout, left) if left >= 1 else None
 
 
+def _kill_grace(deadline) -> int:
+    """How long past its own timeout curl gets before the process gives up on
+    it. A backstop for curl ignoring --max-time, so it stays inside a caller's
+    deadline: an end-of-run tail can be under five seconds on a short budget,
+    and overrunning by more than that leaves the call running when the watchdog
+    fires."""
+    return 1 if deadline is not None else 5
+
+
 META_TIMEOUT_SECONDS = 30
 UPLOAD_TIMEOUT_SECONDS = 180
 
@@ -173,6 +182,7 @@ def try_s3_upload(
         return False, True
     ok, status, body, err = _curl_post_json(
         f"{base}{UPLOAD_URL_PATH}", api_key, meta_body, meta_timeout,
+        kill_grace=_kill_grace(deadline),
     )
     if not ok:
         _report_step_failure("upload_url_request", status, body, err, ctx)
@@ -202,7 +212,10 @@ def try_s3_upload(
     upload_timeout = _within(UPLOAD_TIMEOUT_SECONDS, deadline)
     if upload_timeout is None:
         return False, True
-    ok, status, body, err = _curl_put_to_s3(upload_url, s3_payload_json, upload_timeout)
+    ok, status, body, err = _curl_put_to_s3(
+        upload_url, s3_payload_json, upload_timeout,
+        kill_grace=_kill_grace(deadline),
+    )
     if not ok or status is None or not (200 <= status < 300):
         _report_step_failure("s3_put", status, body, err, ctx)
         return False, True
@@ -230,6 +243,7 @@ def try_s3_upload(
         return False, True
     ok, status, body, err = _curl_post_json(
         f"{base}{FROM_S3_PATH}", api_key, notify_body, notify_timeout,
+        kill_grace=_kill_grace(deadline),
     )
     if not ok:
         # The upload itself succeeded, so the backend may well have taken this
@@ -254,7 +268,8 @@ def try_s3_upload(
 # Internal helpers
 # ───────────────────────────────────────────────────────────────────────
 
-def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int):
+def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int,
+                    kill_grace: int = 5):
     """
     Returns (ok, status_code_or_None, response_body, stderr_or_None).
     `ok` is False when curl itself errored (DNS, connection, SSL).
@@ -280,7 +295,7 @@ def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int):
             ],
             capture_output=True,
             text=True,
-            timeout=timeout + 5,
+            timeout=timeout + kill_grace,
         )
     except subprocess.TimeoutExpired:
         return False, None, "", "timeout"
@@ -290,7 +305,9 @@ def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int):
     return _parse_curl(result)
 
 
-def _curl_put_to_s3(upload_url: str, body_json: str, timeout: int = UPLOAD_TIMEOUT_SECONDS):
+def _curl_put_to_s3(upload_url: str, body_json: str,
+                    timeout: int = UPLOAD_TIMEOUT_SECONDS,
+                    kill_grace: int = 5):
     """
     PUT the JSON body to a presigned S3 URL.
     Writes to a temp file first to avoid ARG_MAX exhaustion on large payloads.
@@ -320,7 +337,7 @@ def _curl_put_to_s3(upload_url: str, body_json: str, timeout: int = UPLOAD_TIMEO
                 ],
                 capture_output=True,
                 text=True,
-                timeout=timeout + 5,
+                timeout=timeout + kill_grace,
             )
         except subprocess.TimeoutExpired:
             return False, None, "", "timeout"

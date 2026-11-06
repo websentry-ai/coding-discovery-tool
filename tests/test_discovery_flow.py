@@ -83,21 +83,28 @@ class TestChildEnvFilesNoSentryEvents(unittest.TestCase):
     back to the real one when unset: a test that aborts the CLI would otherwise
     file an event against production on every run, from every CI job."""
 
+    def setUp(self):
+        self._home = tempfile.mkdtemp(prefix="child-env-")
+        self.addCleanup(shutil.rmtree, self._home, ignore_errors=True)
+
     def test_a_child_has_sentry_switched_off(self):
-        self.assertEqual(_child_env("/tmp/throwaway")["AI_DISCOVERY_SENTRY_DSN"], "")
+        self.assertEqual(_child_env(self._home)["AI_DISCOVERY_SENTRY_DSN"], "")
 
     def test_a_child_queues_its_reports_somewhere_disposable(self):
-        """The queue is a per-UID file in /var/tmp, so redirecting HOME does not
-        move it. A run under test would drain the real backlog and rewrite it."""
-        home = "/tmp/throwaway"
-        queue = _child_env(home)["AI_DISCOVERY_QUEUE_FILE"]
+        """The queue is a per-UID file outside HOME, so redirecting HOME does not
+        move it. A run under test would drain the real backlog and rewrite it.
 
-        self.assertTrue(
-            queue.startswith(home),
+        Compared as paths, and against a directory this platform actually uses:
+        a POSIX literal renders with backslashes on Windows, where a string
+        prefix would fail over nothing."""
+        queue = Path(_child_env(self._home)["AI_DISCOVERY_QUEUE_FILE"])
+
+        self.assertEqual(
+            queue.parent, Path(self._home),
             f"a CLI run under test would use {queue}, which is not the"
             " throwaway home it was given",
         )
-        self.assertNotEqual(queue, str(utils_mod._get_queue_file_path()))
+        self.assertNotEqual(queue, utils_mod._get_queue_file_path())
 
 
 class TestDetector(unittest.TestCase):

@@ -393,6 +393,51 @@ class _SweepBackend(BaseHTTPRequestHandler):
         pass
 
 
+class TheProcessBackstopStaysInsideTheDeadline(_ServesABackend):
+    """curl's own --max-time is what should end a request; the timeout on
+    subprocess.run behind it is only a backstop for curl ignoring that. On a
+    short budget the end-of-run tail can be under five seconds, so a backstop
+    five seconds past the deadline leaves the call running when the watchdog
+    fires -- over an event the backend may already have taken."""
+
+    REPORT = {"device_id": "D", "home_user": "u", "tools": []}
+
+    def _caps(self, deadline):
+        """The --max-time and process cap curl was handed, per attempt."""
+        seen = []
+        real_run = utils_mod.subprocess.run
+
+        def _spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and "--max-time" in cmd:
+                seen.append((int(cmd[cmd.index("--max-time") + 1]), kw.get("timeout")))
+            return real_run(cmd, *a, **kw)
+
+        with patch.object(utils_mod.subprocess, "run", _spy), \
+             patch("time.sleep", Mock()):
+            utils_mod.send_report_to_backend(
+                self.url, "test-key-000000", dict(self.REPORT), deadline=deadline,
+            )
+        return seen
+
+    def test_a_bounded_send_cannot_outlive_its_deadline_by_the_tail(self):
+        seen = self._caps(time.monotonic() + 20)
+
+        self.assertTrue(seen, "no request was made")
+        for given, cap in seen:
+            self.assertLessEqual(
+                cap - given, 1,
+                f"a request clipped to {given}s could be held {cap}s, past a"
+                " tail that is under five seconds on a short budget",
+            )
+
+    def test_an_unbounded_send_keeps_its_own_backstop(self):
+        """Nothing to stay inside, so curl keeps the slack it always had."""
+        seen = self._caps(None)
+
+        self.assertTrue(seen, "no request was made")
+        self.assertEqual([cap - given for given, cap in seen], [5] * len(seen))
+
+
 class TheConnectorSweepStaysInsideTheRunBudget(unittest.TestCase):
     """The sweep runs after the outcome is reported, so a run with a long
     connector list could keep the process alive well past the budget it was

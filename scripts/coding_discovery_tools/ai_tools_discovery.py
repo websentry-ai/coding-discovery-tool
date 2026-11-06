@@ -3819,7 +3819,8 @@ def main():
     # safely even if they fire before capture (in which case it is still None).
     system_user = None
 
-    def _mark_run_failed(error_type: str, message: str) -> None:
+    def _mark_run_failed(error_type: str, message: str,
+                         deadline: Optional[float] = None) -> None:
         """Best-effort: tell the backend this run failed. Idempotent (a flag race
         at worst double-sends one idempotent event). No-ops until run_id exists
         (nothing to correlate)."""
@@ -3839,6 +3840,7 @@ def main():
                 },
                 sentry_context=sentry_ctx,
                 system_user=system_user,
+                deadline=deadline,
             )
         except Exception:
             pass
@@ -3858,9 +3860,17 @@ def main():
     def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15) -> None:
         """Run the best-effort failure report on a daemon thread bounded by
         join_timeout, so a slow/retrying backend can't block exit. Used by both
-        the abort path and the normal except path (which were asymmetric)."""
+        the abort path and the normal except path (which were asymmetric).
+
+        The send carries that bound as its deadline. Without one it keeps the
+        whole retry curve, and the process exits during the first backoff sleep --
+        so a refused first attempt was the only one that ever happened, for the
+        one report that closes a run the backend does not yet have."""
         t = threading.Thread(
-            target=_mark_run_failed, args=(error_type, message), daemon=True,
+            target=_mark_run_failed,
+            args=(error_type, message),
+            kwargs={"deadline": time.monotonic() + join_timeout},
+            daemon=True,
         )
         t.start()
         t.join(timeout=join_timeout)

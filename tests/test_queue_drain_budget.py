@@ -661,6 +661,48 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " failed as well",
         )
 
+    def test_the_failure_report_is_bounded_by_the_wait_it_is_given(self):
+        """This is the one send that closes a run the backend does not have, and
+        it runs on a thread the abort waits a bounded time for. Unbounded, each
+        attempt takes the full 60s request timeout and the first backoff sleeps
+        7.5-15s, so the process exits mid-sleep and a refused first attempt is
+        all a timed-out run ever sends.
+
+        Asserted on what curl is handed rather than on how many attempts happen:
+        with sleeps mocked every attempt runs either way, so a count proves
+        nothing about the bound."""
+        armed, given = {}, []
+        real_run = utils_mod.subprocess.run
+
+        def _spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and "--max-time" in cmd \
+                    and _posted_event(cmd) == "failed":
+                given.append(int(cmd[cmd.index("--max-time") + 1]))
+            return real_run(cmd, *a, **kw)
+
+        def _fire_mid_run(*_a, **_kw):
+            armed["fired"] = True
+            armed["fire"]()
+            return ["alice"]
+
+        self.run_main(
+            timeout="900",
+            patches=(
+                _capturing_timer(armed),
+                patch.object(adm, "get_all_users_linux", _fire_mid_run),
+                patch.object(utils_mod.subprocess, "run", _spy),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "no abort was triggered")
+        self.assertTrue(given, "the aborted run sent no failure report")
+        self.assertLessEqual(
+            max(given), 15,
+            f"an attempt was given {max(given)}s inside a 15s bound, so the"
+            " process exits before the send or its retry can finish",
+        )
+
     def test_an_abort_in_the_sweep_still_ends_the_run(self):
         """Not reporting the failure is one thing; ignoring the abort is another.
         Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and

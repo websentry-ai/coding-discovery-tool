@@ -1722,7 +1722,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=request_timeout + 5,
+                    # A backstop for curl ignoring --max-time. It stays just
+                    # inside a caller's deadline: a short budget's end-of-run
+                    # tail can be under five seconds, and overrunning by more
+                    # than that leaves the call running when the watchdog fires.
+                    timeout=request_timeout + (1 if deadline is not None else 5),
                 )
 
                 # Parse response: stdout = body + "\n" + connections + " " + http_code

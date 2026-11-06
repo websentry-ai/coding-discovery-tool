@@ -393,6 +393,58 @@ class _SweepBackend(BaseHTTPRequestHandler):
         pass
 
 
+class AQueueRewriteIsAllOrNothing(unittest.TestCase):
+    """The queue is rewritten several times during a run -- after the drain, and
+    again whenever an upload supersedes a backlog entry -- and the watchdog can
+    end the process between any two instructions. A half-written file loads as
+    nothing, so writing in place would cost the whole backlog rather than one
+    rewrite."""
+
+    def setUp(self):
+        self._prior = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+        self._dir = tempfile.mkdtemp(prefix="queue-atomic-")
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(self._dir) / "queue.json")
+        self.queue_file = utils_mod._get_queue_file_path()
+        utils_mod._SENTRY_DSN = ""
+
+    def tearDown(self):
+        if self._prior is None:
+            os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+        else:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = self._prior
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _owed(self, n):
+        return [{"device_id": f"Q-{i}", "home_user": "u", "tools": []}
+                for i in range(n)]
+
+    def test_a_rewrite_cut_short_leaves_the_previous_queue_readable(self):
+        utils_mod.save_failed_reports(self._owed(3), replace=True)
+        before = self.queue_file.read_bytes()
+
+        # The process ending mid-rewrite, from the queue file's point of view.
+        with patch.object(utils_mod.os, "replace", side_effect=OSError("killed")):
+            utils_mod.save_failed_reports(self._owed(1), replace=True)
+
+        self.assertEqual(
+            self.queue_file.read_bytes(), before,
+            "the destination was written over rather than swapped, so a kill"
+            " mid-write leaves a partial file that loads as nothing",
+        )
+        self.assertEqual(
+            len(utils_mod.load_pending_reports()), 3,
+            "the backlog did not survive an interrupted rewrite",
+        )
+
+    def test_a_rewrite_that_completes_leaves_no_temporary_behind(self):
+        utils_mod.save_failed_reports(self._owed(2), replace=True)
+
+        leftovers = [q.name for q in Path(self._dir).iterdir()
+                     if q.name != "queue.json"]
+        self.assertEqual(leftovers, [], f"temporary files left in place: {leftovers}")
+        self.assertEqual(len(utils_mod.load_pending_reports()), 2)
+
+
 class TheProcessBackstopStaysInsideTheDeadline(_ServesABackend):
     """curl's own --max-time is what should end a request; the timeout on
     subprocess.run behind it is only a backstop for curl ignoring that. On a

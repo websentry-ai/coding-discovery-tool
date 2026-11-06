@@ -2010,16 +2010,33 @@ def _load_queue_file_safe() -> List[Dict]:
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
-    """Write data to a file with restricted permissions (0600 on Unix)."""
+    """Write data to a file with restricted permissions (0600 on Unix), swapping
+    it into place rather than writing over it.
+
+    The queue is rewritten several times during a run, and the watchdog can end
+    the process between any two instructions. Writing in place would leave a
+    half-written file behind, which loads as nothing -- so a kill mid-write would
+    cost the whole backlog instead of one rewrite."""
     # Ensure the parent exists so a queue-path override with a missing parent
     # doesn't silently drop the write (and lose the failed reports).
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-    # Restrict permissions to owner-only (rw-------) on Unix systems
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                               dir=str(path.parent))
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        try:
+            # mkstemp is already 0600; keep it that way through the rename.
+            os.fchmod(fd, 0o600)
+        except (OSError, AttributeError):
+            pass
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------

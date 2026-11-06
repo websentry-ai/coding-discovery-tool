@@ -1605,9 +1605,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         deadline: Optional time.monotonic() value. No upload or backoff is started
             past it, and every request's own timeout is clipped to what is left, so
             a caller working to a budget is never held beyond it by one report.
-        failure: Optional dict the caller owns; on failure its "kind" becomes
+        failure: Optional dict the caller owns, updated as each attempt resolves
+            rather than only at the end. Its "kind" becomes "delivered" (accepted),
             "unreachable" (nothing reached the backend), "uncertain" (sent, but no
-            answer came, so it may have landed) or "rejected" (answered and refused).
+            answer came, so it may have landed) or "rejected" (answered and
+            refused). A caller deciding mid-send whether the backend may hold this
+            can read it from another thread.
         stop_if_unreachable: give up on the first failure that never reached the
             backend, without retrying or sleeping. A caller whose queue is itself
             the retry gains nothing from a curve that cannot connect.
@@ -1755,6 +1758,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 http_code = int(status_str)
 
                 if 200 <= http_code < 300:
+                    # Recorded, not just returned: a caller that has to decide
+                    # mid-send whether the backend may hold this reads the dict.
+                    _note("delivered")
                     return (True, False)
 
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")

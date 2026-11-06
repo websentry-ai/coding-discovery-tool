@@ -3806,10 +3806,11 @@ def main():
     # Set once the watchdog or a signal has decided this run failed. Finishing the
     # step it interrupted afterwards does not make the run a success, and the
     # abort's own exit can still be waiting on a bounded failure report.
-    # Set once the backend has been told how the run ended, so a later abort
-    # does not contradict it. Distinct from _finished, which means the run is over
-    # and an abort has nothing left to do at all.
-    _reported = [False]
+    # How the completed event has fared so far, written by the send as each
+    # attempt resolves, and whether it has been started at all. An abort reads
+    # both to decide whether the backend may already hold this run's outcome.
+    completed_failure: Dict = {}
+    completion_started = [False]
     _aborting = [False]
     # Set by the abort once it is about to exit, so a main thread that finishes
     # first waits for the failure report rather than cutting it off.
@@ -3875,6 +3876,27 @@ def main():
         t.start()
         t.join(timeout=join_timeout)
 
+    def _outcome_may_be_on_the_backend() -> bool:
+        """Whether the backend may already hold this run's outcome, so that a
+        failure report now would contradict it.
+
+        The send records each attempt as it resolves, so whenever it has an
+        answer that answer decides: accepted or lost means the backend may hold
+        it, refused or never-connected means it does not and the failure report
+        is the only thing that will ever correct that.
+
+        In between -- a request gone out with no answer yet -- nothing can tell
+        the two apart, and this says it may have landed. That way a scan that did
+        its work is never recorded as failed, which is the error this whole path
+        exists to prevent; the cost is a run left in progress until the next one
+        supersedes it."""
+        kind = completed_failure.get("kind")
+        if kind in ("delivered", "uncertain"):
+            return True
+        if kind in ("unreachable", "rejected"):
+            return False
+        return completion_started[0]
+
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between
         # the try-body completing and finally cancelling the watchdog, where a
@@ -3897,7 +3919,7 @@ def main():
             )
         except Exception:
             pass
-        if not _reported[0]:
+        if not _outcome_may_be_on_the_backend():
             # Already told it the run completed; a failure now would contradict
             # a scan that did its work. The cleanup above still has to happen.
             _report_failed_bounded(error_type, message)
@@ -4799,12 +4821,9 @@ def main():
                     for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
         covered = [u for u in all_users
                    if u not in unreadable_users and u not in incomplete_users]
-        # The request is about to leave, so from here on the backend may have
-        # taken it: an abort while it is in flight must not contradict it. The
-        # result below only ever walks this back, once a refusal or a connection
-        # that never opened proves the backend does not have it.
-        _reported[0] = True
-        completed_failure = {}
+        # From here the request may be in flight; the helper above says what
+        # that means for an abort.
+        completion_started[0] = True
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
@@ -4818,13 +4837,6 @@ def main():
         else:
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
-
-        # Only an outcome the backend may hold silences a later failure report.
-        # A lost answer counts: the send path's rule is that such an attempt may
-        # already have been accepted. A refusal, or a connection that never
-        # opened, leaves the run in progress there -- and an abort saying so is
-        # the only thing that will ever correct that.
-        _reported[0] = success or completed_failure.get("kind") == "uncertain"
 
         # Local scan finished cleanly -> flip the checkpoint to "completed" so the
         # next run starts fresh (won't resume), independent of the completed-event
@@ -4853,9 +4865,9 @@ def main():
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal
         # paths may have already reported, in which case this is a no-op).
-        if _reported[0]:
-            # The backend already has this run's outcome, so a failure now would
-            # contradict a scan that did its work.
+        if _outcome_may_be_on_the_backend():
+            # The backend already has this run's outcome, or may have, so a
+            # failure now would contradict a scan that did its work.
             logger.error("Not sending scan failed event - the outcome is already reported")
         elif device_id and run_id:
             logger.error("Sending scan failed event due to error...")

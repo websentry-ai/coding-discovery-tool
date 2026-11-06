@@ -556,33 +556,40 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
         )
 
     def test_an_undelivered_outcome_does_not_silence_the_failure(self):
-        """The completed event can fail like any other send -- refused, or out of
-        budget. The backend then still has the run in progress, and the failure
-        report is the only thing that will ever correct it, so it must not be
-        suppressed on the strength of a send that never landed."""
-        armed = {}
+        """The completed event can fail like any other send. Having started it is
+        not having delivered it: the backend still holds the run in progress, and
+        the failure report is the only thing that will ever correct that.
 
-        def _fire_during_sweep(*_a, **_kw):
-            armed["fired"] = True
-            armed["fire"]()
-            return (0, 0, 0)
+        Both shapes of refusal -- a 500 retried to exhaustion, and a 422 refused
+        outright on the first attempt."""
+        for code in (500, 422):
+            with self.subTest(completed_answer=code):
+                armed = {}
 
-        backend, _ = self.run_main(
-            timeout="900",
-            rule=lambda body: 500 if body.get("scan_event") == "completed" else 200,
-            patches=(
-                _capturing_timer(armed),
-                patch.object(adm, "run_sweep", _fire_during_sweep),
-                patch.object(adm.os, "_exit", Mock()),
-            ),
-        )
+                def _fire_during_sweep(*_a, **_kw):
+                    armed["fired"] = True
+                    armed["fire"]()
+                    return (0, 0, 0)
 
-        self.assertTrue(armed.get("fired"), "the sweep never ran, so nothing was tested")
-        self.assertIn(
-            "failed", backend.events(),
-            "the completed event was refused and the failure suppressed anyway,"
-            " so the backend is left holding a run that never ends",
-        )
+                backend, _ = self.run_main(
+                    timeout="900",
+                    rule=lambda body, c=code: (
+                        c if body.get("scan_event") == "completed" else 200
+                    ),
+                    patches=(
+                        _capturing_timer(armed),
+                        patch.object(adm, "run_sweep", _fire_during_sweep),
+                        patch.object(adm.os, "_exit", Mock()),
+                    ),
+                )
+
+                self.assertTrue(armed.get("fired"),
+                                "the sweep never ran, so nothing was tested")
+                self.assertIn(
+                    "failed", backend.events(),
+                    "the completed event was refused and the failure suppressed"
+                    " anyway, so the backend holds a run that never ends",
+                )
 
     def test_a_completion_that_may_have_landed_silences_the_failure(self):
         """The counterweight to the test above. A completed event whose answer

@@ -1633,13 +1633,21 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             failure["in_flight"] = state
 
     def _note(kind: str) -> bool:
-        """Record why this failed, and say whether to abandon it straight away.
+        """Record how this attempt resolved, and say whether to abandon the send
+        straight away.
+
+        This is also what ends the attempt's in-flight state, in the same step:
+        a reader on another thread that saw the mark gone before the outcome was
+        recorded would take a stale one for this attempt's, and a request just
+        accepted would look like the refusal before it.
 
         "uncertain" is sticky across attempts: once one of them may have reached
         the backend, a later attempt that cannot connect does not make that
         untrue, and the caller still has to assume the report landed."""
-        if failure is not None and failure.get("kind") != "uncertain":
-            failure["kind"] = kind
+        if failure is not None:
+            if failure.get("kind") != "uncertain":
+                failure["kind"] = kind
+            failure["in_flight"] = False
         return stop_if_unreachable and kind == "unreachable" and (
             failure is None or failure.get("kind") != "uncertain"
         )
@@ -1717,34 +1725,30 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     _note("unreachable")
                     return (False, True)
             try:
-                try:
-                    _in_flight(True)
-                    result = subprocess.run(
-                        [
-                            "curl", "-s",
-                            "-X", "POST",
-                            "-H", f"Authorization: Bearer {api_key}",
-                            "-H", "Content-Type: application/json",
-                            "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                            "-d", f"@{tmp_path}",
-                            "--max-time", str(request_timeout),
-                            "--connect-timeout",
-                            str(min(CONNECT_TIMEOUT_SECONDS, request_timeout)),
-                            "-w", "\n%{num_connects} %{http_code}",
-                            url,
-                        ],
-                        capture_output=True,
-                        text=True,
-                        # A backstop for curl ignoring --max-time. It stays just
-                        # inside a caller's deadline: a short budget's end-of-run
-                        # tail can be under five seconds, and overrunning by more
-                        # than that leaves the call running when the watchdog fires.
-                        timeout=request_timeout + (1 if deadline is not None else 5),
-                    )
-                finally:
-                    # Cleared as soon as curl is done, so the backoff that
-                    # may follow is not read as a request still out there.
-                    _in_flight(False)
+                # Dropped again by _note below, together with the outcome.
+                _in_flight(True)
+                result = subprocess.run(
+                    [
+                        "curl", "-s",
+                        "-X", "POST",
+                        "-H", f"Authorization: Bearer {api_key}",
+                        "-H", "Content-Type: application/json",
+                        "-H", "User-Agent: AI-Tools-Discovery/1.0",
+                        "-d", f"@{tmp_path}",
+                        "--max-time", str(request_timeout),
+                        "--connect-timeout",
+                        str(min(CONNECT_TIMEOUT_SECONDS, request_timeout)),
+                        "-w", "\n%{num_connects} %{http_code}",
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    # A backstop for curl ignoring --max-time. It stays just
+                    # inside a caller's deadline: a short budget's end-of-run
+                    # tail can be under five seconds, and overrunning by more
+                    # than that leaves the call running when the watchdog fires.
+                    timeout=request_timeout + (1 if deadline is not None else 5),
+                )
 
                 # Parse response: stdout = body + "\n" + connections + " " + http_code
                 lines = result.stdout.rsplit("\n", 1)

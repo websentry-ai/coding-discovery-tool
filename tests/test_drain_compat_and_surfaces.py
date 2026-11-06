@@ -393,6 +393,65 @@ class _SweepBackend(BaseHTTPRequestHandler):
         pass
 
 
+class TheInFlightMarkMatchesWhatIsOnTheWire(_ServesABackend):
+    """A caller on another thread decides whether the backend may hold a report
+    from this dict alone, and it can read it at any instant. So at every instant
+    the dict has to match what is actually happening: a wait between attempts is
+    not a request out there, and an attempt's outcome has to be published before
+    that wait begins, or a reader takes the previous attempt's for it."""
+
+    REPORT = {"device_id": "D", "home_user": "u", "tools": []}
+
+    def test_between_attempts_nothing_is_in_flight_and_the_outcome_is_published(self):
+        self.server.code = 500
+        failure, seen = {}, []
+        real_backoff = utils_mod._backoff
+
+        def _look(attempt, deadline=None):
+            # Entered once per retry decision, on the sending thread, after the
+            # attempt resolved and before the wait: exactly what an aborting
+            # thread would see between two attempts.
+            #
+            # Hooked here rather than on time.sleep, which subprocess.run also
+            # uses to poll its own wait -- snapshots from there come from the
+            # middle of a request, where in-flight is true for good reason.
+            seen.append(dict(failure))
+            return real_backoff(attempt, deadline)
+
+        with patch.object(utils_mod, "_backoff", _look), patch("time.sleep", Mock()):
+            utils_mod.send_report_to_backend(
+                self.url, "test-key-000000", dict(self.REPORT), failure=failure,
+            )
+
+        self.assertEqual(
+            len(seen), utils_mod.MAX_ATTEMPTS - 1,
+            "a retry decision was not observed, so the gaps between attempts"
+            f" were not all checked: {seen}",
+        )
+        for n, snapshot in enumerate(seen, start=1):
+            self.assertFalse(
+                snapshot.get("in_flight"),
+                f"wait {n}: a pause between attempts looked like a request still"
+                " out there, so an abort there says nothing and the backend keeps"
+                " a run that never ends",
+            )
+            self.assertEqual(
+                snapshot.get("kind"), "rejected",
+                f"wait {n}: the attempt's outcome was not published before the"
+                " wait, so a reader takes the attempt before it for this one",
+            )
+
+    def test_a_delivered_report_says_so_and_is_not_in_flight(self):
+        failure = {}
+
+        utils_mod.send_report_to_backend(
+            self.url, "test-key-000000", dict(self.REPORT), failure=failure,
+        )
+
+        self.assertEqual(failure.get("kind"), "delivered")
+        self.assertFalse(failure.get("in_flight"))
+
+
 class AQueueRewriteIsAllOrNothing(unittest.TestCase):
     """The queue is rewritten several times during a run -- after the drain, and
     again whenever an upload supersedes a backlog entry -- and the watchdog can

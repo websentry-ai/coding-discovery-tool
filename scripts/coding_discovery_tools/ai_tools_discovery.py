@@ -4829,6 +4829,22 @@ def main():
             logger.warning("✗ Failed to send scan completed event")
         logger.info("")
 
+        if not _outcome_may_be_on_the_backend():
+            # The backend never heard how this run ended, and nothing else is
+            # going to tell it: the checkpoint below stops the next run resuming
+            # this one, and the watchdog is cancelled on the way out, so no abort
+            # follows either. Closing it is better than leaving it running for
+            # ever, and the error type says the work was done -- only the report
+            # of it was lost.
+            logger.warning(
+                "Completed event never reached the backend; closing the run so it"
+                " does not sit in progress for ever"
+            )
+            _report_failed_bounded(
+                "CompletedEventUndelivered",
+                "the scan finished, but its completed event could not be delivered",
+            )
+
         # Local scan finished cleanly -> flip the checkpoint to "completed" so the
         # next run starts fresh (won't resume), independent of the completed-event
         # send result above.

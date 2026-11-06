@@ -772,6 +772,32 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " accepted, so the backend was told the run failed as well",
         )
 
+    def test_a_run_whose_completion_never_landed_closes_itself_on_the_way_out(self):
+        """No abort here at all -- the run finishes normally. Its completed event
+        was refused, so the backend has it in progress, and nothing else will
+        correct that: the local checkpoint stops the next run resuming it and the
+        watchdog is cancelled on the way out."""
+        backend, _ = self.run_main(
+            timeout="900",
+            rule=lambda body: 422 if body.get("scan_event") == "completed" else 200,
+        )
+
+        self.assertIn(
+            "failed", backend.events(),
+            "the run exited without telling the backend anything, so that run"
+            " sits in progress for ever",
+        )
+
+    def test_a_run_whose_completion_landed_closes_as_completed(self):
+        """The counterweight: nothing is wrong, so nothing extra is said."""
+        backend, _ = self.run_main(timeout="900")
+
+        self.assertIn("completed", backend.events())
+        self.assertNotIn(
+            "failed", backend.events(),
+            "a run the backend accepted was also reported as failed",
+        )
+
     def test_an_abort_in_the_sweep_still_ends_the_run(self):
         """Not reporting the failure is one thing; ignoring the abort is another.
         Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and

@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -56,6 +56,104 @@ class _CLIMockHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
+
+_QUEUE_DIR = None
+_PRIOR_QUEUE_ENV = None
+
+
+def setUpModule():
+    """Point the report queue at a throwaway file for every test in this module.
+
+    The real one lives outside HOME -- a per-UID file in /var/tmp -- so
+    redirecting HOME does not move it, and a run that ends owing nothing deletes
+    it. Any test here that reached it would drain a developer's pending reports
+    into a mock backend and then remove them.
+    """
+    global _QUEUE_DIR, _PRIOR_QUEUE_ENV
+    _PRIOR_QUEUE_ENV = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+    _QUEUE_DIR = tempfile.mkdtemp(prefix="discovery-flow-queue-")
+    os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(_QUEUE_DIR) / "report-queue.json")
+
+
+def tearDownModule():
+    if _PRIOR_QUEUE_ENV is None:
+        os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+    else:
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = _PRIOR_QUEUE_ENV
+    shutil.rmtree(_QUEUE_DIR, ignore_errors=True)
+
+
+def _real_queue_path():
+    """Where the queue lives with no override, which is what must never be
+    touched by a test."""
+    prior = os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+    try:
+        return utils_mod._get_queue_file_path()
+    finally:
+        if prior is not None:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = prior
+
+
+def _child_env(home, queue_file=None):
+    """The environment for a CLI run under test: its state goes to a throwaway
+    HOME, its report queue to a throwaway file, and Sentry is off.
+
+    Both overrides are deliberate rather than incidental. The DSN falls back to
+    the production one when unset, so a test that aborts the CLI would file a
+    real event every run. And the queue does not live under HOME -- it is a
+    per-UID file in /var/tmp -- so isolating HOME leaves a run under test
+    draining a developer's own backlog to this server and rewriting the file
+    without it."""
+    env = os.environ.copy()
+    env["HOME"] = home
+    env["USERPROFILE"] = home
+    env["AI_DISCOVERY_SENTRY_DSN"] = ""
+    env["AI_DISCOVERY_QUEUE_FILE"] = str(
+        queue_file or Path(home) / "report-queue.json"
+    )
+    return env
+
+
+class TestChildEnvFilesNoSentryEvents(unittest.TestCase):
+    """Every CLI run under test goes through `_child_env`, because the DSN falls
+    back to the real one when unset: a test that aborts the CLI would otherwise
+    file an event against production on every run, from every CI job."""
+
+    def setUp(self):
+        self._home = tempfile.mkdtemp(prefix="child-env-")
+        self.addCleanup(shutil.rmtree, self._home, ignore_errors=True)
+
+    def test_a_child_has_sentry_switched_off(self):
+        self.assertEqual(_child_env(self._home)["AI_DISCOVERY_SENTRY_DSN"], "")
+
+    def test_no_test_in_this_module_can_reach_the_real_queue(self):
+        """The subprocess helper covers the child; this covers the tests that run
+        main() in process, which resolve the queue from the environment
+        themselves and delete it when a run ends owing nothing."""
+        in_force = Path(os.environ["AI_DISCOVERY_QUEUE_FILE"])
+
+        self.assertEqual(in_force.parent, Path(_QUEUE_DIR))
+        self.assertNotEqual(
+            in_force, _real_queue_path(),
+            "a test running main() in process would delete the real queue",
+        )
+
+    def test_a_child_queues_its_reports_somewhere_disposable(self):
+        """The queue is a per-UID file outside HOME, so redirecting HOME does not
+        move it. A run under test would drain the real backlog and rewrite it.
+
+        Compared as paths, and against a directory this platform actually uses:
+        a POSIX literal renders with backslashes on Windows, where a string
+        prefix would fail over nothing."""
+        queue = Path(_child_env(self._home)["AI_DISCOVERY_QUEUE_FILE"])
+
+        self.assertEqual(
+            queue.parent, Path(self._home),
+            f"a CLI run under test would use {queue}, which is not the"
+            " throwaway home it was given",
+        )
+        self.assertNotEqual(queue, _real_queue_path())
 
 
 class TestDetector(unittest.TestCase):
@@ -218,10 +316,7 @@ class TestMainCLI(unittest.TestCase):
         shutil.rmtree(self._home_dir, ignore_errors=True)
 
     def _run_cli(self, extra_env=None, timeout=600):
-        env = os.environ.copy()
-        # Send the CLI's ~/.unbound state + lock to the throwaway HOME from setUp.
-        env["HOME"] = self._home_dir
-        env["USERPROFILE"] = self._home_dir
+        env = _child_env(self._home_dir, self._queue_file)
         # Forced-failure cases burn a 5-attempt jittered backoff per upload (548s of
         # the 600s budget before any tool was added); these assert queueing, not sleeping.
         env.setdefault("AI_DISCOVERY_BACKOFF_BASE_SECONDS", "0.01")
@@ -315,11 +410,28 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
     (instead of hanging until a parent force-kills it) and removes its lock so
     the next run isn't blocked."""
 
-    class _SlowHandler(BaseHTTPRequestHandler):
+    class _RecordsLifecycleEvents(BaseHTTPRequestHandler):
+        """Records the run's lifecycle events and, for whichever one the test
+        names, holds the response. Recording before holding is what lets the test
+        know the child is inside that send: answered at once, the child could
+        finish the whole scan before a signal reached it."""
+
+        def do_GET(self):
+            self._ok()
+
         def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            self.rfile.read(length)
-            time.sleep(4)  # stall every call so the scan can't finish under the timeout
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                event = json.loads(raw).get("scan_event")
+            except Exception:
+                event = None
+            if event:
+                self.server.events.append(event)
+            if event and event == self.server.hold_event:
+                self.server.stalling.wait(60)
+            self._ok()
+
+        def _ok(self):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -329,44 +441,93 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
             pass
 
     def setUp(self):
-        self.server = HTTPServer(("127.0.0.1", 0), self._SlowHandler)
+        # Threading, so the abort's own failure report is not queued behind the
+        # sweep request the run is stuck in.
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._RecordsLifecycleEvents)
+        # Released in tearDown so a stalled handler cannot hold up the suite.
+        self.server.stalling = threading.Event()
+        self.server.hold_event = None
+        self.server.events = []
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self._home = tempfile.mkdtemp(prefix="ai-discovery-timeout-home-")
 
     def tearDown(self):
+        self.server.stalling.set()
         self.server.shutdown()
         self.thread.join(timeout=5)
         shutil.rmtree(self._home, ignore_errors=True)
 
-    @unittest.skipUnless(os.name == "posix", "watchdog timing asserted on POSIX")
-    def test_self_timeout_exits_nonzero_and_cleans_lock(self):
-        env = os.environ.copy()
-        env["HOME"] = self._home
-        env["USERPROFILE"] = self._home
+    @unittest.skipUnless(os.name == "posix", "POSIX signals")
+    def test_an_aborted_run_reports_failure_exits_nonzero_and_cleans_the_lock(self):
+        """What the abort has to do, whichever trigger reaches it: tell the
+        backend, release the lock, and exit non-zero. The watchdog and the signal
+        handler both call the same `_abort`, and the signal is what can be aimed
+        precisely -- so it drives this.
+
+        The watchdog cannot: every bounded step is clipped to finish before it
+        fires, so whether the run is still working at that instant depends on how
+        fast the machine detects. A test built on that races the machine.
+
+        The first send is held so the signal cannot race the child either. Seeing
+        the event only says it was sent; answered at once, the child could finish
+        the scan and report completing before the signal arrives, and the abort
+        would then rightly stay quiet."""
+        self.server.hold_event = "in_progress"
+        env = _child_env(self._home)
         start = time.monotonic()
-        result = subprocess.run(
+        # Long enough that the watchdog never fires: the signal is the trigger.
+        proc = subprocess.Popen(
             [
                 sys.executable,
                 "scripts/coding_discovery_tools/ai_tools_discovery.py",
                 "--api-key", "test-key-000000",
                 "--domain", f"http://127.0.0.1:{self.port}",
-                "--timeout", "2",
+                "--timeout", "600",
             ],
             cwd=str(REPO_ROOT),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=90,
             env=env,
         )
-        elapsed = time.monotonic() - start
-        # Aborted by its own watchdog (non-zero) rather than completing the scan.
-        self.assertNotEqual(result.returncode, 0, f"stdout={result.stdout}\nstderr={result.stderr}")
-        self.assertLess(elapsed, 60, "self-timeout did not abort promptly")
+        try:
+            # The run is underway and has not reported finishing, so an abort now
+            # is a genuine one rather than a late timer over a completed run.
+            waited_until = time.monotonic() + 60
+            while "in_progress" not in self.server.events:
+                self.assertIsNone(
+                    proc.poll(), "the run exited before it started scanning"
+                )
+                self.assertLess(
+                    time.monotonic(), waited_until, "the run never reported starting"
+                )
+                time.sleep(0.1)
+            proc.terminate()
+            stdout, stderr = proc.communicate(timeout=60)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+        self.assertNotEqual(proc.returncode, 0, f"stdout={stdout}\nstderr={stderr}")
+        self.assertLess(time.monotonic() - start, 90, "the abort did not finish promptly")
+        # The abort runs on its own thread and exits the process itself, but only
+        # after telling the backend. A main thread that finished first and exited
+        # over it would take that report with it, and the run would be invisible.
+        # The precondition, stated rather than assumed: the run had not reported
+        # finishing, so the abort was a genuine one and had something to say.
+        self.assertNotIn(
+            "completed", self.server.events,
+            "the child finished before the signal reached it, so suppressing the"
+            " failure was right and this run tested nothing",
+        )
+        self.assertIn("failed", self.server.events,
+                      "the aborted run never reported its failure")
         # Lock cleaned up so a subsequent rerun isn't blocked.
         lock = Path(self._home) / ".unbound" / "discovery.lock"
-        self.assertFalse(lock.exists(), "discovery.lock left behind after self-timeout")
+        self.assertFalse(lock.exists(), "discovery.lock left behind after an abort")
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal handling")
     def test_main_traps_and_restores_termination_signals(self):

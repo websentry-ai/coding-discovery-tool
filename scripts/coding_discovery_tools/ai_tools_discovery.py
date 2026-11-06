@@ -4566,14 +4566,20 @@ def main():
                             # of the backlog, or an earlier write never landed.
                             if len(requeued_pending) != owed or not queue_on_disk[0]:
                                 queue_on_disk[0] = _rewrite_queue()
-                            if queue_on_disk[0]:
-                                discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
-                            else:
+                            # The checkpoint is recorded either way: it only says
+                            # this run reported the pair, which is true, and it is
+                            # what lets a resumed run skip re-processing it. Only
+                            # the hash waits for the queue write.
+                            if not queue_on_disk[0]:
                                 logger.warning(
                                     f"  Queue still holds an older {tool_name} report for"
                                     f" {user_name}; not storing its hash, so the next run"
                                     f" re-uploads rather than skipping it"
                                 )
+                            discovery_cache.record_report(
+                                tool_name, user_name, tool_key,
+                                payload_hash=hash_to_store if queue_on_disk[0] else None,
+                            )
 
                         if args.dump:
                             logger.info("")
@@ -4793,6 +4799,11 @@ def main():
                     for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
         covered = [u for u in all_users
                    if u not in unreadable_users and u not in incomplete_users]
+        # The request is about to leave, so from here on the backend may have
+        # taken it: an abort while it is in flight must not contradict it. The
+        # result below only ever walks this back, once a refusal or a connection
+        # that never opened proves the backend does not have it.
+        _reported[0] = True
         completed_failure = {}
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
@@ -4810,14 +4821,9 @@ def main():
 
         # Only an outcome the backend may hold silences a later failure report.
         # A lost answer counts: the send path's rule is that such an attempt may
-        # already have been accepted, and a failure afterwards would contradict
-        # it. A refusal, or a connection that never opened, leaves the run in
-        # progress there -- and an abort saying so is the only thing that will
-        # ever correct that.
-        #
-        # Set before the checkpoint below, which reads the cache and can report a
-        # read failure to Sentry: an abort in that stretch would otherwise call a
-        # run the backend has accepted a failure. A kill there costs a resume.
+        # already have been accepted. A refusal, or a connection that never
+        # opened, leaves the run in progress there -- and an abort saying so is
+        # the only thing that will ever correct that.
         _reported[0] = success or completed_failure.get("kind") == "uncertain"
 
         # Local scan finished cleanly -> flip the checkpoint to "completed" so the

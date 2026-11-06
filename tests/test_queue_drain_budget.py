@@ -703,6 +703,34 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " process exits before the send or its retry can finish",
         )
 
+    def test_an_abort_while_the_completion_is_in_flight_stays_quiet(self):
+        """The request has left, so the backend may have taken it already. Its
+        result is only known once the send returns, and an abort can arrive
+        before that -- the send is allowed most of the run's tail."""
+        armed = {}
+
+        def _fire_mid_send(body):
+            if body.get("scan_event") == "completed" and "fire" in armed:
+                armed["fired"] = True
+                armed["fire"]()          # the watchdog, while this send is open
+            return 200
+
+        backend, _ = self.run_main(
+            timeout="900",
+            rule=_fire_mid_send,
+            patches=(
+                _capturing_timer(armed),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "the completed send never opened")
+        self.assertNotIn(
+            "failed", backend.events(),
+            "the completed request was already with the backend when the abort"
+            " fired, and it was told the run failed as well",
+        )
+
     def test_an_abort_in_the_sweep_still_ends_the_run(self):
         """Not reporting the failure is one thing; ignoring the abort is another.
         Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and
@@ -1132,12 +1160,17 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
                 patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
                 patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
                 patch.object(adm.discovery_cache, "record_report",
-                             side_effect=lambda *a, **k: recorded.append(a)),
+                             side_effect=lambda *a, **k: recorded.append(k)),
             ),
         )
 
+        self.assertTrue(
+            recorded,
+            "the resume checkpoint went with the hash, so a resumed run"
+            " re-processes a pair it has already reported",
+        )
         self.assertEqual(
-            recorded, [],
+            [k.get("payload_hash") for k in recorded], [None] * len(recorded),
             "the hash was stored although the queue write failed, so the stale"
             " report is both queued and hidden",
         )
@@ -1167,7 +1200,7 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
                 patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
                 patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
                 patch.object(adm.discovery_cache, "record_report",
-                             side_effect=lambda *a, **k: recorded.append(a)),
+                             side_effect=lambda *a, **k: recorded.append(k)),
             ),
         )
 
@@ -1175,8 +1208,9 @@ class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
             "Q-DELIVERED", backend.device_ids(prefix="Q-"),
             "the drain never delivered it",
         )
+        self.assertTrue(recorded, "the resume checkpoint went with the hash")
         self.assertEqual(
-            recorded, [],
+            [k.get("payload_hash") for k in recorded], [None] * len(recorded),
             "a hash was stored although the write that should have cleared the"
             " delivered report from disk had failed",
         )

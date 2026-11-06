@@ -333,8 +333,10 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
     the next run isn't blocked."""
 
     class _RecordsLifecycleEvents(BaseHTTPRequestHandler):
-        """Answers every send at once and records the run's lifecycle events, so a
-        test can say what the backend was told and in what order."""
+        """Records the run's lifecycle events and, for whichever one the test
+        names, holds the response. Recording before holding is what lets the test
+        know the child is inside that send: answered at once, the child could
+        finish the whole scan before a signal reached it."""
 
         def do_GET(self):
             self._ok()
@@ -347,6 +349,8 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
                 event = None
             if event:
                 self.server.events.append(event)
+            if event and event == self.server.hold_event:
+                self.server.stalling.wait(60)
             self._ok()
 
         def _ok(self):
@@ -364,6 +368,7 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._RecordsLifecycleEvents)
         # Released in tearDown so a stalled handler cannot hold up the suite.
         self.server.stalling = threading.Event()
+        self.server.hold_event = None
         self.server.events = []
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -385,7 +390,13 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
 
         The watchdog cannot: every bounded step is clipped to finish before it
         fires, so whether the run is still working at that instant depends on how
-        fast the machine detects. A test built on that races the machine."""
+        fast the machine detects. A test built on that races the machine.
+
+        The first send is held so the signal cannot race the child either. Seeing
+        the event only says it was sent; answered at once, the child could finish
+        the scan and report completing before the signal arrives, and the abort
+        would then rightly stay quiet."""
+        self.server.hold_event = "in_progress"
         env = _child_env(self._home)
         start = time.monotonic()
         # Long enough that the watchdog never fires: the signal is the trigger.
@@ -427,6 +438,13 @@ class TestSelfTimeoutCleanup(unittest.TestCase):
         # The abort runs on its own thread and exits the process itself, but only
         # after telling the backend. A main thread that finished first and exited
         # over it would take that report with it, and the run would be invisible.
+        # The precondition, stated rather than assumed: the run had not reported
+        # finishing, so the abort was a genuine one and had something to say.
+        self.assertNotIn(
+            "completed", self.server.events,
+            "the child finished before the signal reached it, so suppressing the"
+            " failure was right and this run tested nothing",
+        )
         self.assertIn("failed", self.server.events,
                       "the aborted run never reported its failure")
         # Lock cleaned up so a subsequent rerun isn't blocked.

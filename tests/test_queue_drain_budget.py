@@ -738,6 +738,40 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " fired, and it was told the run failed as well",
         )
 
+    def test_an_abort_during_a_retried_completion_stays_quiet(self):
+        """A refused attempt and a retry that is being accepted. What the first
+        attempt resolved to says nothing about the second one still on the wire,
+        so reading only the last recorded result reports a failure over a
+        completion the backend is taking as it is read."""
+        armed, seen = {}, {"n": 0}
+
+        def _refuse_then_accept_mid_abort(body):
+            if body.get("scan_event") != "completed":
+                return 200
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return 500                 # refused: recorded as rejected
+            armed["fired"] = True
+            armed["fire"]()                # abort while this retry is in flight
+            return 200
+
+        backend, _ = self.run_main(
+            timeout="900",
+            rule=_refuse_then_accept_mid_abort,
+            patches=(
+                _capturing_timer(armed),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "the completed event was never retried")
+        self.assertGreaterEqual(seen["n"], 2, "there was no second attempt to be in")
+        self.assertNotIn(
+            "failed", backend.events(),
+            "the earlier refusal was read as the state of a retry that was being"
+            " accepted, so the backend was told the run failed as well",
+        )
+
     def test_an_abort_in_the_sweep_still_ends_the_run(self):
         """Not reporting the failure is one thing; ignoring the abort is another.
         Swallowed, a signal cannot end a sweep at all -- only SIGKILL can, and

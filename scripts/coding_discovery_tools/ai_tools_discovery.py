@@ -3806,11 +3806,10 @@ def main():
     # Set once the watchdog or a signal has decided this run failed. Finishing the
     # step it interrupted afterwards does not make the run a success, and the
     # abort's own exit can still be waiting on a bounded failure report.
-    # How the completed event has fared so far, written by the send as each
-    # attempt resolves, and whether it has been started at all. An abort reads
-    # both to decide whether the backend may already hold this run's outcome.
+    # How the completed event is faring, written by the send: what the last
+    # attempt resolved to, and whether a request is on the wire right now. An
+    # abort reads it to decide whether the backend may already hold the outcome.
     completed_failure: Dict = {}
-    completion_started = [False]
     _aborting = [False]
     # Set by the abort once it is about to exit, so a main thread that finishes
     # first waits for the failure report rather than cutting it off.
@@ -3880,22 +3879,17 @@ def main():
         """Whether the backend may already hold this run's outcome, so that a
         failure report now would contradict it.
 
-        The send records each attempt as it resolves, so whenever it has an
-        answer that answer decides: accepted or lost means the backend may hold
-        it, refused or never-connected means it does not and the failure report
-        is the only thing that will ever correct that.
+        A request on the wire may be being accepted as this is read, so it
+        counts -- and it counts per attempt, since a refusal recorded by one
+        attempt says nothing about the next one still out there.
 
-        In between -- a request gone out with no answer yet -- nothing can tell
-        the two apart, and this says it may have landed. That way a scan that did
-        its work is never recorded as failed, which is the error this whole path
-        exists to prevent; the cost is a run left in progress until the next one
-        supersedes it."""
-        kind = completed_failure.get("kind")
-        if kind in ("delivered", "uncertain"):
+        Otherwise the last resolved attempt decides: accepted or lost means the
+        backend may hold the run, refused or never-connected means it does not
+        and the failure report is the only thing that will ever correct that.
+        Nothing sent at all, and nothing resolved, means it does not."""
+        if completed_failure.get("in_flight"):
             return True
-        if kind in ("unreachable", "rejected"):
-            return False
-        return completion_started[0]
+        return completed_failure.get("kind") in ("delivered", "uncertain")
 
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between
@@ -4821,9 +4815,6 @@ def main():
                     for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
         covered = [u for u in all_users
                    if u not in unreadable_users and u not in incomplete_users]
-        # From here the request may be in flight; the helper above says what
-        # that means for an abort.
-        completion_started[0] = True
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,

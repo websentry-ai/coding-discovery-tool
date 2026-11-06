@@ -1609,8 +1609,9 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             rather than only at the end. Its "kind" becomes "delivered" (accepted),
             "unreachable" (nothing reached the backend), "uncertain" (sent, but no
             answer came, so it may have landed) or "rejected" (answered and
-            refused). A caller deciding mid-send whether the backend may hold this
-            can read it from another thread.
+            refused), and its "in_flight" says whether a request is on the wire
+            right now. A caller deciding mid-send whether the backend may hold
+            this reads both, from another thread.
         stop_if_unreachable: give up on the first failure that never reached the
             backend, without retrying or sleeping. A caller whose queue is itself
             the retry gains nothing from a curve that cannot connect.
@@ -1623,6 +1624,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     # data report tries S3 first, and S3 exists for bodies the legacy endpoint
     # refuses. Retrying here cannot help, but discarding loses the report.
     PAYLOAD_TOO_LARGE = 413
+
+    def _in_flight(state: bool) -> None:
+        """Whether a request is on the wire right now. A caller deciding whether
+        the backend may hold this needs it per attempt: the kind below describes
+        the last attempt that resolved, which says nothing about the next one."""
+        if failure is not None:
+            failure["in_flight"] = state
 
     def _note(kind: str) -> bool:
         """Record why this failed, and say whether to abandon it straight away.
@@ -1708,6 +1716,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 if request_timeout < 1:
                     _note("unreachable")
                     return (False, True)
+            _in_flight(True)
             try:
                 result = subprocess.run(
                     [
@@ -1824,6 +1833,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     continue
                 report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
                 return (False, True)
+
+            finally:
+                # Whatever the attempt did, nothing of it is on the wire now --
+                # including when this returns or continues from inside the try.
+                _in_flight(False)
 
         return (False, True)
     finally:

@@ -12,6 +12,7 @@ TestJetBrainsNamingDeterminism (prune-key naming). Only HTTP/HOME/_SENTRY_DSN/di
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,32 @@ from scripts.coding_discovery_tools.utils import send_scan_event
 from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import MacOSJetBrainsDetector
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+_QUEUE_DIR = None
+_PRIOR_QUEUE_ENV = None
+
+
+def setUpModule():
+    """Point the report queue at a throwaway file for every test in this module.
+
+    The real one lives outside HOME -- a per-UID file in /var/tmp -- so
+    redirecting HOME does not move it, and a run that ends owing nothing deletes
+    it. Any test here that reached it would drain a developer's pending reports
+    into a mock backend and then remove them.
+    """
+    global _QUEUE_DIR, _PRIOR_QUEUE_ENV
+    _PRIOR_QUEUE_ENV = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+    _QUEUE_DIR = tempfile.mkdtemp(prefix="manifest-queue-")
+    os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(_QUEUE_DIR) / "report-queue.json")
+
+
+def tearDownModule():
+    if _PRIOR_QUEUE_ENV is None:
+        os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+    else:
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = _PRIOR_QUEUE_ENV
+    shutil.rmtree(_QUEUE_DIR, ignore_errors=True)
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):

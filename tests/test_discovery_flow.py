@@ -58,6 +58,43 @@ class _CLIMockHandler(BaseHTTPRequestHandler):
         pass
 
 
+_QUEUE_DIR = None
+_PRIOR_QUEUE_ENV = None
+
+
+def setUpModule():
+    """Point the report queue at a throwaway file for every test in this module.
+
+    The real one lives outside HOME -- a per-UID file in /var/tmp -- so
+    redirecting HOME does not move it, and a run that ends owing nothing deletes
+    it. Any test here that reached it would drain a developer's pending reports
+    into a mock backend and then remove them.
+    """
+    global _QUEUE_DIR, _PRIOR_QUEUE_ENV
+    _PRIOR_QUEUE_ENV = os.environ.get("AI_DISCOVERY_QUEUE_FILE")
+    _QUEUE_DIR = tempfile.mkdtemp(prefix="discovery-flow-queue-")
+    os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(Path(_QUEUE_DIR) / "report-queue.json")
+
+
+def tearDownModule():
+    if _PRIOR_QUEUE_ENV is None:
+        os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+    else:
+        os.environ["AI_DISCOVERY_QUEUE_FILE"] = _PRIOR_QUEUE_ENV
+    shutil.rmtree(_QUEUE_DIR, ignore_errors=True)
+
+
+def _real_queue_path():
+    """Where the queue lives with no override, which is what must never be
+    touched by a test."""
+    prior = os.environ.pop("AI_DISCOVERY_QUEUE_FILE", None)
+    try:
+        return utils_mod._get_queue_file_path()
+    finally:
+        if prior is not None:
+            os.environ["AI_DISCOVERY_QUEUE_FILE"] = prior
+
+
 def _child_env(home, queue_file=None):
     """The environment for a CLI run under test: its state goes to a throwaway
     HOME, its report queue to a throwaway file, and Sentry is off.
@@ -90,6 +127,18 @@ class TestChildEnvFilesNoSentryEvents(unittest.TestCase):
     def test_a_child_has_sentry_switched_off(self):
         self.assertEqual(_child_env(self._home)["AI_DISCOVERY_SENTRY_DSN"], "")
 
+    def test_no_test_in_this_module_can_reach_the_real_queue(self):
+        """The subprocess helper covers the child; this covers the tests that run
+        main() in process, which resolve the queue from the environment
+        themselves and delete it when a run ends owing nothing."""
+        in_force = Path(os.environ["AI_DISCOVERY_QUEUE_FILE"])
+
+        self.assertEqual(in_force.parent, Path(_QUEUE_DIR))
+        self.assertNotEqual(
+            in_force, _real_queue_path(),
+            "a test running main() in process would delete the real queue",
+        )
+
     def test_a_child_queues_its_reports_somewhere_disposable(self):
         """The queue is a per-UID file outside HOME, so redirecting HOME does not
         move it. A run under test would drain the real backlog and rewrite it.
@@ -104,7 +153,7 @@ class TestChildEnvFilesNoSentryEvents(unittest.TestCase):
             f"a CLI run under test would use {queue}, which is not the"
             " throwaway home it was given",
         )
-        self.assertNotEqual(queue, utils_mod._get_queue_file_path())
+        self.assertNotEqual(queue, _real_queue_path())
 
 
 class TestDetector(unittest.TestCase):

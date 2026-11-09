@@ -1665,6 +1665,8 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
         )
 
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")
+    @unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0,
+                     "root writes through the directory mode this relies on")
     def test_an_unwritable_cache_cannot_leave_a_row_nothing_corrects(self):
         """The whole scenario, with the real cache and a really unwritable state
         directory -- the one place the hash lives, so there is nowhere else a note

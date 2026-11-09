@@ -50,6 +50,12 @@ class _Recorder(BaseHTTPRequestHandler):
         if getattr(self.server, "stall", 0):
             self.server.stalling.wait(self.server.stall)
         code = self.server.code
+        if code is None:
+            # Hang up without answering. curl then exits non-zero, which is what
+            # the send path counts as the transport failing -- an answered 500
+            # does not, since curl itself succeeded.
+            self.connection.close()
+            return
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -583,9 +589,10 @@ class DecliningAnEventForLackOfTimeCostsNothing(_ServesABackend):
     never be reported -- spends one of the run's events, and counts against the
     breaker, which turns Sentry off for the rest of the run after three.
 
-    Real curl to the localhost endpoint already serving these tests, answering
-    500 so a real attempt is a real failure to count. The spy records which
-    attempts happen and calls through."""
+    Real curl to the localhost endpoint already serving these tests, told to
+    hang up so a real attempt is a real failure to count -- an answered 500 is
+    not, since curl itself succeeds. The spy records which attempts happen and
+    calls through."""
 
     def setUp(self):
         super().setUp()
@@ -599,7 +606,7 @@ class DecliningAnEventForLackOfTimeCostsNothing(_ServesABackend):
                 self.calls.append(cmd)
             return real_run(cmd, *a, **kw)
 
-        self.server.code = 500
+        self.server.code = None
         port = self.server.server_address[1]
         self._patches = [
             patch.object(utils_mod, "_SENTRY_DSN", f"http://k@127.0.0.1:{port}/1"),
@@ -630,6 +637,11 @@ class DecliningAnEventForLackOfTimeCostsNothing(_ServesABackend):
         for i in range(utils_mod._SENTRY_BREAKER_THRESHOLD - 1):
             utils_mod.report_to_sentry(RuntimeError("real"), {"phase": f"r{i}"})
         before = utils_mod._sentry_consecutive_fails
+        self.assertEqual(
+            before, utils_mod._SENTRY_BREAKER_THRESHOLD - 1,
+            "the attempts above did not register as the transport failing, so"
+            " the skip below increments from zero and nothing is at stake",
+        )
 
         utils_mod.report_to_sentry(RuntimeError("skipped"), {"phase": "s"},
                                    max_seconds=0)
@@ -818,18 +830,28 @@ class TheConnectorSweepStaysInsideTheRunBudget(unittest.TestCase):
         self.assertEqual(seen, [], "the sweep started work the run had no time for")
         self.assertEqual(result, (0, 0, 0))
 
-    def test_a_hung_request_cannot_hold_the_run_much_past_the_deadline(self):
+    def test_a_hung_request_cannot_hold_the_run_past_the_tail(self):
         """curl's own timeout is what should end a request; the process-level cap
-        is only a backstop for it not doing so, and the deadline is only as real
-        as the longest a single request can hold it."""
+        is only a backstop for it not doing so. The end-of-run tail can be under
+        five seconds, so a backstop five seconds past a clipped request leaves
+        the sweep running when the watchdog fires."""
         seen, _ = self._run(deadline_in=120, cost=40)
 
         for given, cap in zip(seen, self.caps):
             self.assertLessEqual(
-                cap, given + sweep_mod.CURL_KILL_GRACE,
-                f"a request clipped to {given}s could be held {cap}s, well past"
-                " what the run had left",
+                cap - given, 1,
+                f"a request clipped to {given}s could be held {cap}s, past a"
+                " tail that is under five seconds on a short budget",
             )
+
+    def test_an_unbounded_sweep_keeps_its_own_backstop(self):
+        """The standalone entry point has no run to stay inside, so curl keeps
+        the slack it always had."""
+        seen, _ = self._run()
+
+        self.assertTrue(seen, "no request was made")
+        self.assertEqual([cap - given for given, cap in zip(seen, self.caps)],
+                         [sweep_mod.CURL_KILL_GRACE] * len(seen))
 
     def test_no_deadline_leaves_the_ceilings_alone(self):
         """The standalone entry point has no run to stay inside."""

@@ -154,6 +154,13 @@ def _auth_header(api_key):
     )
 
 
+def _kill_grace(deadline) -> int:
+    """The backstop for one request, inside a caller's deadline when there is
+    one: an end-of-run tail can be under five seconds on a short budget, and
+    overrunning by more leaves the call running when the watchdog fires."""
+    return 1 if deadline is not None else CURL_KILL_GRACE
+
+
 def _budget(ceiling, deadline):
     """A request's timeout clipped to what the deadline leaves, or None when too
     little is left to be worth starting."""
@@ -163,13 +170,14 @@ def _budget(ceiling, deadline):
     return min(ceiling, remaining) if remaining >= 1 else None
 
 
-def fetch_unresolved_uuids(domain, api_key, max_time=LIST_MAX_TIME):
+def fetch_unresolved_uuids(domain, api_key, max_time=LIST_MAX_TIME,
+                           kill_grace=CURL_KILL_GRACE):
     """GET the opaque list of UUIDs the backend still needs resolved."""
     url = f"{_normalize_url(domain)}{LIST_PATH}"
     http_code, body = _run_curl(
         ["curl", "-s", "--config", "-", "--max-time", str(max_time),
          "-w", "\n%{http_code}", url],
-        _auth_header(api_key), timeout=max_time + CURL_KILL_GRACE,
+        _auth_header(api_key), timeout=max_time + kill_grace,
     )
     if not http_code.startswith("2"):
         raise RuntimeError(f"list endpoint http {http_code}: {body[:200]}")
@@ -178,7 +186,7 @@ def fetch_unresolved_uuids(domain, api_key, max_time=LIST_MAX_TIME):
 
 
 def report_connector(domain, api_key, connector_uuid, name, tools,
-                     max_time=REPORT_MAX_TIME):
+                     max_time=REPORT_MAX_TIME, kill_grace=CURL_KILL_GRACE):
     """POST one resolved connector to the single-server scan endpoint.
     Returns (http_code, body)."""
     endpoint = f"{_normalize_url(domain)}{REPORT_PATH}"
@@ -199,7 +207,7 @@ def report_connector(domain, api_key, connector_uuid, name, tools,
     return _run_curl(
         ["curl", "-s", "-X", "POST", "--config", "-", "--max-time", str(max_time),
          "-w", "\n%{http_code}", endpoint],
-        curl_config, timeout=max_time + CURL_KILL_GRACE,
+        curl_config, timeout=max_time + kill_grace,
     )
 
 
@@ -218,7 +226,8 @@ def run_sweep(domain, api_key, deadline=None):
         print("info: connector sweep — no run budget left", file=sys.stderr)
         return (0, 0, 0)
     needed = {u.strip().lower()
-              for u in fetch_unresolved_uuids(domain, api_key, max_time=list_budget)
+              for u in fetch_unresolved_uuids(domain, api_key, max_time=list_budget,
+                                              kill_grace=_kill_grace(deadline))
               if u}
     if not needed:
         print("info: connector sweep — nothing to resolve", file=sys.stderr)
@@ -239,8 +248,10 @@ def run_sweep(domain, api_key, deadline=None):
                   f" {len(matches)}; the rest waits for the next run", file=sys.stderr)
             break
         try:
-            http_code, body = report_connector(domain, api_key, uuid, info["name"],
-                                               info.get("tools"), max_time=report_budget)
+            http_code, body = report_connector(
+                domain, api_key, uuid, info["name"], info.get("tools"),
+                max_time=report_budget, kill_grace=_kill_grace(deadline),
+            )
         except Exception as e:
             failed += 1
             print(f"error: report failed for {uuid}: {e}", file=sys.stderr)

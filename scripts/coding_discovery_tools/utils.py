@@ -3622,6 +3622,18 @@ def report_to_sentry(
         # outage doesn't silently drop the terminal diagnostic.
         if _sentry_dead_this_run and not priority:
             return
+        # An event is a request of its own, taken after the send that failed has
+        # already spent its budget. A caller working to a deadline never
+        # budgeted for it, so with too little left this declines before spending
+        # anything on it: recording the signature would stop the same failure
+        # ever being reported, the per-run cap would be charged for nothing, and
+        # the breaker below would count a skip as the transport being broken.
+        event_timeout = SENTRY_EVENT_TIMEOUT_SECONDS
+        if max_seconds is not None:
+            event_timeout = int(min(event_timeout, max_seconds))
+            if event_timeout < 1:
+                logger.debug("Sentry event skipped: no time left in the run's budget")
+                return
         # Collapse duplicate events and hard-cap the synchronous curls per run.
         # priority events skip the count cap + breaker (but never dedup) so a
         # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
@@ -3668,16 +3680,6 @@ def report_to_sentry(
                 os.write(fd, json.dumps(payload).encode("utf-8"))
             finally:
                 os.close(fd)
-            # An event is a request of its own, taken after the send that
-            # failed has already spent its budget. A caller working to a
-            # deadline never budgeted for it, so it is clipped to what is left
-            # rather than coming out of what detection and the completed event
-            # still need.
-            event_timeout = SENTRY_EVENT_TIMEOUT_SECONDS
-            if max_seconds is not None:
-                event_timeout = int(min(event_timeout, max_seconds))
-                if event_timeout < 1:
-                    return
             result = subprocess.run(
                 [
                     "curl", "-s", "-o", "/dev/null",

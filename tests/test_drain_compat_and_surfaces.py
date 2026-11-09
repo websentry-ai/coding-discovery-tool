@@ -577,6 +577,76 @@ class FailureTelemetryStaysInsideTheDeadline(_ServesABackend):
         )
 
 
+class DecliningAnEventForLackOfTimeCostsNothing(unittest.TestCase):
+    """The bound on telemetry has to be decided before anything is spent on the
+    event. Charged late, a skip burns the signature -- so that same failure can
+    never be reported -- spends one of the run's events, and counts against the
+    breaker, which turns Sentry off for the rest of the run after three."""
+
+    def setUp(self):
+        utils_mod.reset_sentry_run_state()
+        self.addCleanup(utils_mod.reset_sentry_run_state)
+        self.calls = []
+        real_run = utils_mod.subprocess.run
+
+        def _spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and any(_STORE_PATH in str(c) for c in cmd):
+                self.calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, stdout="200", stderr="")
+            return real_run(cmd, *a, **kw)
+
+        # A DSN nothing listens on: every real attempt would fail, and the point
+        # here is which attempts happen at all.
+        self._patches = [
+            patch.object(utils_mod, "_SENTRY_DSN", "http://k@127.0.0.1:1/1"),
+            patch.object(utils_mod.subprocess, "run", _spy),
+        ]
+        for pt in self._patches:
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def test_a_skipped_event_does_not_burn_its_signature(self):
+        """Otherwise the same failure is deduped away for the rest of the run,
+        and the one time it mattered is the time it was skipped."""
+        err = RuntimeError("boom")
+        utils_mod.report_to_sentry(err, {"phase": "p"}, max_seconds=0)
+        self.assertEqual(self.calls, [], "it tried to send with no time left")
+
+        utils_mod.report_to_sentry(err, {"phase": "p"}, max_seconds=None)
+
+        self.assertEqual(
+            len(self.calls), 1,
+            "the skipped event recorded its signature, so the same failure was"
+            " never reported once there was time for it",
+        )
+
+    def test_a_skipped_event_does_not_count_against_the_breaker(self):
+        """Two real failures and one skip would otherwise be three, and Sentry
+        goes dark for the rest of the run -- including the abort report."""
+        for i in range(utils_mod._SENTRY_BREAKER_THRESHOLD - 1):
+            utils_mod.report_to_sentry(RuntimeError("real"), {"phase": f"r{i}"})
+        before = utils_mod._sentry_consecutive_fails
+
+        utils_mod.report_to_sentry(RuntimeError("skipped"), {"phase": "s"},
+                                   max_seconds=0)
+
+        self.assertEqual(
+            utils_mod._sentry_consecutive_fails, before,
+            "a skip counted as the transport failing, so the breaker trips one"
+            " event early and the run reports nothing further",
+        )
+        self.assertFalse(utils_mod._sentry_dead_this_run)
+
+    def test_a_skipped_event_does_not_spend_one_of_the_run_s_events(self):
+        before = utils_mod._sentry_event_count
+
+        utils_mod.report_to_sentry(RuntimeError("boom"), {"phase": "p"},
+                                   max_seconds=0)
+
+        self.assertEqual(utils_mod._sentry_event_count, before,
+                         "the run was charged for an event it never sent")
+
+
 class AQueueRewriteIsAllOrNothing(unittest.TestCase):
     """The queue is rewritten several times during a run -- after the drain, and
     again whenever an upload supersedes a backlog entry -- and the watchdog can

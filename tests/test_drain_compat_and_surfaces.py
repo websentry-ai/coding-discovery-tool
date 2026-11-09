@@ -577,13 +577,18 @@ class FailureTelemetryStaysInsideTheDeadline(_ServesABackend):
         )
 
 
-class DecliningAnEventForLackOfTimeCostsNothing(unittest.TestCase):
+class DecliningAnEventForLackOfTimeCostsNothing(_ServesABackend):
     """The bound on telemetry has to be decided before anything is spent on the
     event. Charged late, a skip burns the signature -- so that same failure can
     never be reported -- spends one of the run's events, and counts against the
-    breaker, which turns Sentry off for the rest of the run after three."""
+    breaker, which turns Sentry off for the rest of the run after three.
+
+    Real curl to the localhost endpoint already serving these tests, answering
+    500 so a real attempt is a real failure to count. The spy records which
+    attempts happen and calls through."""
 
     def setUp(self):
+        super().setUp()
         utils_mod.reset_sentry_run_state()
         self.addCleanup(utils_mod.reset_sentry_run_state)
         self.calls = []
@@ -592,13 +597,12 @@ class DecliningAnEventForLackOfTimeCostsNothing(unittest.TestCase):
         def _spy(cmd, *a, **kw):
             if isinstance(cmd, list) and any(_STORE_PATH in str(c) for c in cmd):
                 self.calls.append(cmd)
-                return subprocess.CompletedProcess(cmd, 0, stdout="200", stderr="")
             return real_run(cmd, *a, **kw)
 
-        # A DSN nothing listens on: every real attempt would fail, and the point
-        # here is which attempts happen at all.
+        self.server.code = 500
+        port = self.server.server_address[1]
         self._patches = [
-            patch.object(utils_mod, "_SENTRY_DSN", "http://k@127.0.0.1:1/1"),
+            patch.object(utils_mod, "_SENTRY_DSN", f"http://k@127.0.0.1:{port}/1"),
             patch.object(utils_mod.subprocess, "run", _spy),
         ]
         for pt in self._patches:

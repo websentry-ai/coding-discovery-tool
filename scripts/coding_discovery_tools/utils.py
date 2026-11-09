@@ -3795,7 +3795,9 @@ def send_discovery_metrics(
             ],
             capture_output=True,
             text=True,
-            timeout=max_time + 5,
+            # Inside the caller's deadline, as the report send and the S3 steps
+            # are: a short budget's end-of-run tail can be under five seconds.
+            timeout=max_time + (1 if deadline is not None else 5),
         )
         status = result.stdout.rsplit("\n", 1)[-1].strip()
         ok = result.returncode == 0 and status.isdigit() and status.startswith("2")

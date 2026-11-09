@@ -222,6 +222,31 @@ class OldCallersStillWork(_ServesABackend):
         self.assertEqual(len(used), 1)
         self.assertLessEqual(used[0], 3)
 
+    def test_the_metrics_post_cannot_outlive_its_deadline_by_the_tail(self):
+        """The last of the deadline-clipped sends to get this. Its backstop sat
+        five seconds past a tail that can be under five on a short budget, so a
+        curl ignoring --max-time outlived the window the completed event needs."""
+        budgets = self._budgets(lambda: utils_mod.send_discovery_metrics(
+            self.url, "test-key-000000", "D", {"t": 1},
+            deadline=time.monotonic() + 8,
+        ))
+
+        self.assertTrue(budgets, "no request was made")
+        for given, cap in budgets:
+            self.assertLessEqual(
+                cap - given, 1,
+                f"a request clipped to {given}s could be held {cap}s, past the"
+                " tail the completed event is holding",
+            )
+
+    def test_the_metrics_post_without_a_deadline_keeps_its_own_backstop(self):
+        budgets = self._budgets(lambda: utils_mod.send_discovery_metrics(
+            self.url, "test-key-000000", "D", {"t": 1},
+        ))
+
+        self.assertTrue(budgets, "no request was made")
+        self.assertEqual([cap - given for given, cap in budgets], [5] * len(budgets))
+
     def test_the_s3_put_helper_still_takes_two_arguments(self):
         """_curl_put_to_s3 gained a defaulted timeout; the old two-argument call
         has to keep working and ask curl for the module's upload budget."""
@@ -488,6 +513,10 @@ class TheInFlightMarkMatchesWhatIsOnTheWire(_ServesABackend):
         self.assertFalse(failure.get("in_flight"))
 
 
+# Where a Sentry event goes, so a spy can tell one from a report send.
+_STORE_PATH = "/api/1/store/"
+
+
 class FailureTelemetryStaysInsideTheDeadline(_ServesABackend):
     """Each Sentry event is a request of its own, taken after the send that
     failed has already spent its budget. A caller working to a deadline never
@@ -504,19 +533,22 @@ class FailureTelemetryStaysInsideTheDeadline(_ServesABackend):
         self.addCleanup(utils_mod.reset_sentry_run_state)
 
     def _events(self, deadline):
-        """The --max-time each Sentry POST was handed, over real curl."""
+        """The --max-time each Sentry POST was handed.
+
+        Real curl to a real endpoint: the DSN keeps its scheme through the
+        parser, so an http one aimed at the backend already serving these tests
+        gives the event somewhere to go. The spy records and calls through."""
         seen = []
         real_run = utils_mod.subprocess.run
 
         def _spy(cmd, *a, **kw):
-            if isinstance(cmd, list) and "X-Sentry-Auth" in " ".join(map(str, cmd)):
+            if isinstance(cmd, list) and any(_STORE_PATH in str(c) for c in cmd):
                 seen.append(int(cmd[cmd.index("--max-time") + 1]))
-                return subprocess.CompletedProcess(cmd, 0, stdout="200", stderr="")
             return real_run(cmd, *a, **kw)
 
         self.server.code = 500
-        with patch.object(utils_mod, "_SENTRY_DSN",
-                          "https://k@127.0.0.1:1/1"), \
+        port = self.server.server_address[1]
+        with patch.object(utils_mod, "_SENTRY_DSN", f"http://k@127.0.0.1:{port}/1"), \
              patch.object(utils_mod.subprocess, "run", _spy), \
              patch("time.sleep", Mock()):
             utils_mod.send_report_to_backend(

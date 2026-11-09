@@ -3914,8 +3914,10 @@ def main():
         except Exception:
             pass
         if not _outcome_may_be_on_the_backend():
-            # Already told it the run completed; a failure now would contradict
-            # a scan that did its work. The cleanup above still has to happen.
+            # The backend has not heard how this run ended, so this event is the
+            # only thing that will tell it. Once the outcome may already be
+            # there, a failure now would contradict a scan that did its work --
+            # but the cleanup above happens either way.
             _report_failed_bounded(error_type, message)
         _abort_exiting.set()
         os._exit(1)

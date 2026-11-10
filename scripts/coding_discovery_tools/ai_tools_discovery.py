@@ -4535,6 +4535,20 @@ def main():
                         # user) so a kill afterward lets the next quick re-run skip
                         # re-processing it.
                         if reported_ok:
+                            # A report still queued for this pair would replay over
+                            # what was just sent, and an interruption before the
+                            # persist step below leaves it on disk to do exactly
+                            # that. Written only when the backlog actually held the
+                            # pair, so the common run does not re-serialise the
+                            # queue once per upload.
+                            owed = len(owed_from_queue)
+                            owed_from_queue[:] = _drop_superseded(
+                                owed_from_queue, reported_pairs
+                            )
+                            if len(owed_from_queue) != owed:
+                                save_failed_reports(
+                                    owed_from_queue + failed_reports, replace=True
+                                )
                             discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:

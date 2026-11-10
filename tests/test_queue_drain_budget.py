@@ -1538,6 +1538,78 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             " superseded and keeping it would only overwrite that report later",
         )
 
+class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
+    """The queue is authoritative for what is still owed, and the run can end at
+    any instruction. Between uploading a pair and the persist step at the end of
+    the run, a queued report for that pair is an overwrite sitting on disk: the
+    next run's drain would deliver it over what this run just sent."""
+
+    TOOLS = ({"name": "Claude Code", "version": "1.0",
+              "install_path": "/usr/local/bin/claude"},)
+    FRESH = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+             "tools": [{"name": "Claude Code", "projects": []}]}
+
+    def _live(self):
+        return (
+            patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+            patch.object(adm, "_install_in_another_users_home", return_value=False),
+            patch.object(adm, "_machine_global_install_disowned", return_value=False),
+            patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+            # Left untried, so it is still owed when detection reaches the pair.
+            patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
+        )
+
+    def test_the_queue_is_clear_of_the_pair_when_its_hash_is_stored(self):
+        """Observed at the instant the checkpoint is written, which is the first
+        moment a kill could strand the queue entry."""
+        on_disk = {}
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        def _record(*_a, **_k):
+            on_disk["queue"] = self.queue_now()
+
+        self.run_main(
+            tools=self.TOOLS, users=("alice",), fresh_report=self.FRESH,
+            patches=self._live() + (
+                patch.object(adm.discovery_cache, "record_report",
+                             side_effect=_record),
+            ),
+        )
+
+        self.assertIn("queue", on_disk, "the pair was never reported at all")
+        self.assertNotIn(
+            "QUEUED-0", on_disk["queue"],
+            "the superseded report was still on disk when this run recorded the"
+            " pair, so an interruption there replays it over what was just sent",
+        )
+
+    def test_a_pair_the_backlog_never_held_costs_no_extra_write(self):
+        """The counterweight: rewriting per upload would re-read and re-serialise
+        the whole queue for every tool on the device, for nothing."""
+        writes = []
+        real_save = adm.save_failed_reports
+        self.seed_queue([{"device_id": "Q-OTHER", "home_user": "bob",
+                          "tools": [{"name": "Cursor"}]}])
+
+        def _spy(reports, **kw):
+            writes.append(len(reports))
+            return real_save(reports, **kw)
+
+        self.run_main(
+            tools=self.TOOLS, users=("alice",), fresh_report=self.FRESH,
+            patches=self._live() + (
+                patch.object(adm, "save_failed_reports", side_effect=_spy),
+            ),
+        )
+
+        self.assertEqual(
+            len(writes), 1,
+            "the queue was rewritten for a pair it never held a report for, so"
+            f" every upload pays for it: {writes}",
+        )
+
+
 class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
     """The cache says what we last uploaded. A queued older report says the drain
     may since have replaced that row with it -- in this run or a previous one whose

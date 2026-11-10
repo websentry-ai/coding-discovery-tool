@@ -1584,9 +1584,36 @@ class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
             " pair, so an interruption there replays it over what was just sent",
         )
 
+    def test_what_the_drain_settled_is_off_disk_before_detection(self):
+        """An abort later in the run skips the persist step entirely -- the
+        watchdog calls os._exit -- so a report the drain has already delivered has
+        to leave the file straight away. Left on it, the next run delivers that
+        older snapshot again, over whatever this run uploaded in between."""
+        at_detection = {}
+        self.seed_queue([{"device_id": "Q-GONE", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        def _probe():
+            at_detection["queue"] = self.queue_now()
+            return []
+
+        backend, _ = self.run_main(
+            patches=(patch.object(adm, "get_all_users_linux", side_effect=_probe),),
+        )
+
+        self.assertEqual(backend.device_ids(prefix="Q-"), ["Q-GONE"],
+                         "the drain never delivered it, so nothing was settled")
+        self.assertEqual(
+            at_detection.get("queue"), [],
+            "a report the drain had already delivered was still on disk when"
+            " detection began, so an abort there sends it a second time",
+        )
+
     def test_a_pair_the_backlog_never_held_costs_no_extra_write(self):
         """The counterweight: rewriting per upload would re-read and re-serialise
-        the whole queue for every tool on the device, for nothing."""
+        the whole queue for every tool on the device, for nothing. Two writes
+        belong to the run itself -- one settling what the drain delivered, one
+        persisting what is still owed -- and the pair's upload must add none."""
         writes = []
         real_save = adm.save_failed_reports
         self.seed_queue([{"device_id": "Q-OTHER", "home_user": "bob",
@@ -1604,9 +1631,10 @@ class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
         )
 
         self.assertEqual(
-            len(writes), 1,
-            "the queue was rewritten for a pair it never held a report for, so"
-            f" every upload pays for it: {writes}",
+            len(writes), 2,
+            "the run's own two writes are the post-drain settle and the final"
+            " persist; a third means the queue was rewritten for a pair it never"
+            f" held a report for, so every upload pays for it: {writes}",
         )
 
 

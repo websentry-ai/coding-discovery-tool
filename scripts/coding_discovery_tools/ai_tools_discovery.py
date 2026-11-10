@@ -4081,6 +4081,11 @@ def main():
                             break
                     else:
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                # What the drain settled leaves the file now rather than at the end
+                # of the run: an abort during detection skips the persist step
+                # altogether, and the next run would deliver these again over
+                # whatever this run has uploaded since.
+                save_failed_reports(owed_from_queue, replace=True)
                 logger.info("")
 
         with time_step("enumerate_users", "detect"):

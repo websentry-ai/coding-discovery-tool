@@ -1623,10 +1623,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         deadline: Optional time.monotonic() value. No upload or backoff is started
             past it, and every request's own timeout is clipped to what is left, so
             a caller working to a budget is never held beyond it by one report.
-        failure: Optional dict the caller owns, whose "kind" records how the last
-            attempt resolved: "delivered" (accepted), "unreachable" (nothing
-            reached the backend), "uncertain" (sent, but no answer came) or
-            "rejected" (answered and refused).
+        failure: Optional dict the caller owns, whose "kind" records how the send
+            resolved: "delivered" (accepted), "unreachable" (nothing reached the
+            backend), "uncertain" (sent, but no answer came, so it may have
+            landed) or "rejected" (answered and refused). "uncertain" wins over
+            a later attempt, since it cannot be made untrue by one.
         stop_if_unreachable: give up on the first failure that never reached the
             backend, without retrying or sleeping. A caller whose queue is itself
             the retry gains nothing from a curve that cannot connect.
@@ -1649,8 +1650,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         return max(0.0, deadline - time.monotonic())
 
     def _note(kind: str) -> bool:
-        """Record how this attempt resolved; True means abandon the send now."""
-        if failure is not None:
+        """Record how this attempt resolved; True means abandon the send now.
+
+        "uncertain" is not downgraded by a later attempt: once one of them may
+        have reached the backend, a refusal afterwards does not make that
+        untrue, and a caller reading this decides whether to contradict it."""
+        if failure is not None and failure.get("kind") != "uncertain":
             failure["kind"] = kind
         return stop_if_unreachable and kind == "unreachable"
 
@@ -1692,8 +1697,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         if s3_success:
             return (True, False)
         # A lost answer from the from-s3 notification means the backend may hold
-        # this payload already, which stands unless the legacy path below
-        # resolves differently.
+        # this payload already; the legacy attempts below cannot make that untrue.
         if s3_failure.get("kind") == "uncertain":
             _note("uncertain")
         logger.info("S3 upload path failed; falling back to legacy /api/v1/ai-tools/report/")

@@ -1311,6 +1311,37 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             " left holding the snapshot the drain delivered",
         )
 
+    def test_a_delivered_report_is_only_dropped_once_something_replaced_it(self):
+        """The drain delivers the older snapshot and the correcting upload then
+        fails. The queue has to end up holding the fresh report: dropping the
+        delivered one without it would leave the backend on the older snapshot
+        with nothing owed for the pair."""
+        tools = ({"name": "Claude Code", "version": "1.0",
+                  "install_path": "/usr/local/bin/claude"},)
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            tools=tools, users=("alice",), fresh_report=fresh,
+            rule=statuses({"THIS-RUN": 500}),
+            patches=(
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+            ),
+        )
+
+        self.assertIn("QUEUED-0", backend.device_ids(),
+                      "the drain never delivered it, so nothing replaced a row")
+        self.assertEqual(
+            self.queue_now(), ["THIS-RUN"],
+            "the delivered report left the queue and its correction did not take"
+            " its place, so the pair is owed nothing and the row stays wrong",
+        )
+
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")
     @unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0,
                      "root writes through the directory mode this relies on")

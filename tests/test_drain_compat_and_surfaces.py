@@ -49,6 +49,11 @@ class _Recorder(BaseHTTPRequestHandler):
         if getattr(self.server, "stall", 0):
             self.server.stalling.wait(self.server.stall)
         code = self.server.code
+        if getattr(self.server, "first_hangs_up", False) and len(self.server.bodies) == 1:
+            # Connected, took the body, answered nothing: the one outcome that
+            # means the backend may have accepted it after all.
+            self.connection.close()
+            return
         if code is None:
             # Hang up without answering. curl then exits non-zero, which is what
             # the send path counts as the transport failing -- an answered 500
@@ -72,6 +77,7 @@ class _ServesABackend(unittest.TestCase):
         self.server = HTTPServer(("127.0.0.1", 0), _Recorder)
         self.server.bodies = []
         self.server.code = 200
+        self.server.first_hangs_up = False
         self.server.stall = 0
         self.server.stalling = threading.Event()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -477,6 +483,29 @@ class TheRecordedOutcomeIsTheOneTheDrainActsOn(_ServesABackend):
             failure.get("kind"), "rejected",
             "the backend answered every attempt, so reading this as never having"
             " connected would stop the drain over a reachable backend",
+        )
+
+    def test_a_refusal_after_a_lost_answer_stays_uncertain(self):
+        """An attempt that connected and never answered may have been accepted.
+        A later attempt refusing cannot make that untrue, and the completed
+        event's caller reads this to decide whether to report the run failed --
+        so a downgrade here tells the backend a delivered scan failed."""
+        self.server.code = 500
+        self.server.first_hangs_up = True
+        failure = {}
+
+        with patch("time.sleep", Mock()):
+            utils_mod.send_report_to_backend(
+                self.url, "test-key-000000", dict(self.REPORT), failure=failure,
+            )
+
+        self.assertGreater(len(self.server.bodies), 1,
+                           "the lost answer was never retried, so this is not"
+                           " the path under test")
+        self.assertEqual(
+            failure.get("kind"), "uncertain",
+            "a refusal after a lost answer downgraded the outcome, so a run whose"
+            " completion may have landed is reported as failed",
         )
 
     def test_a_delivered_report_says_so(self):

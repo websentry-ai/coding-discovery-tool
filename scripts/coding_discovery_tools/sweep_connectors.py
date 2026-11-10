@@ -17,6 +17,10 @@ This sweep:
 
 Only UUIDs the backend explicitly asked for are sent; nothing else from the
 session files leaves the device. HTTP uses curl per the Zscaler constraint.
+
+Stdlib only, which is why a few small helpers here also exist in utils.py: this
+module is run directly as a script too, where a package-relative import of them
+would fail.
 """
 import argparse
 import json

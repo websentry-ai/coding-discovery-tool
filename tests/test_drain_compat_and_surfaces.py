@@ -20,7 +20,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import scripts.coding_discovery_tools.cache as cache_mod
 import scripts.coding_discovery_tools.s3_uploader as s3_mod
 import scripts.coding_discovery_tools.sweep_connectors as sweep_mod
 import scripts.coding_discovery_tools.utils as utils_mod
@@ -367,9 +366,9 @@ class _RunsTheWholeS3Flow(BaseHTTPRequestHandler):
 
 class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
     """Once the PUT has landed, the payload exists in S3 and the backend may pick
-    it up. A server error on the notification therefore has to be read as "it may
-    be there", or the caller clears nothing and detection goes on trusting a hash
-    that no longer describes the row."""
+    it up. A server error on the notification is therefore read as "it may be
+    there" rather than as nothing having arrived, and either way the report is
+    kept: the only thing that must not happen is losing it."""
 
     def setUp(self):
         # The legacy fallback below reports its refusal, so the DSN has to go or
@@ -401,28 +400,26 @@ class AStoredObjectWhoseNotificationFailsIsNotNothing(unittest.TestCase):
         self.assertEqual(
             self._upload().get("kind"), "uncertain",
             "the object is in S3 and the backend answered 500, so it may have"
-            " ingested it -- read as 'never arrived', the stale hash survives",
+            " ingested it -- which is not the same as never having arrived",
         )
 
-    def test_a_lost_notification_does_not_mask_an_oversized_body(self):
-        """The stored object may already have been ingested, so a refusal from
-        the legacy fallback afterwards must not erase that: the report is kept
-        either way, and the pair's cached hash can no longer be trusted."""
+    def test_an_oversized_body_is_kept_rather_than_discarded(self):
+        """413 from the legacy endpoint is "too large for this endpoint", which is
+        what S3 exists for -- not a bad report. Retrying there cannot help, but
+        discarding it loses the only copy."""
         self.server.legacy_code = 413
-        failure = {}
         with patch("time.sleep", Mock()):
-            utils_mod.send_report_to_backend(
+            success, retryable = utils_mod.send_report_to_backend(
                 self.url, "test-key-000000",
                 {"device_id": "D", "home_user": "u", "tools": [{"name": "T"}]},
-                failure=failure,
             )
 
-        self.assertEqual(failure.get("kind"), "uncertain",
-                         "the stored object may have been ingested")
+        self.assertFalse(success)
+        self.assertTrue(retryable, "the report was dropped, so nothing will resend it")
 
     def test_a_refusal_on_the_notification_is_not(self):
         """The counterweight: a 4xx is the backend declining to ingest it, which
-        is not a maybe. Calling that uncertain would clear hashes for nothing."""
+        is not a maybe."""
         self.server.notify_code = 400
 
         self.assertIsNone(self._upload().get("kind"))
@@ -460,55 +457,29 @@ class _SweepBackend(BaseHTTPRequestHandler):
         pass
 
 
-class TheInFlightMarkMatchesWhatIsOnTheWire(_ServesABackend):
-    """A caller on another thread decides whether the backend may hold a report
-    from this dict alone, and it can read it at any instant. So at every instant
-    the dict has to match what is actually happening: a wait between attempts is
-    not a request out there, and an attempt's outcome has to be published before
-    that wait begins, or a reader takes the previous attempt's for it."""
+class TheRecordedOutcomeIsTheOneTheDrainActsOn(_ServesABackend):
+    """The drain reads this dict once the send has returned and stops the whole
+    backlog on "unreachable", so what it records has to be the outcome of the
+    attempt that ended the send, not of an earlier one."""
 
     REPORT = {"device_id": "D", "home_user": "u", "tools": []}
 
-    def test_between_attempts_nothing_is_in_flight_and_the_outcome_is_published(self):
+    def test_a_refused_report_is_rejected_not_unreachable(self):
         self.server.code = 500
-        failure, seen = {}, []
-        real_backoff = utils_mod._backoff
+        failure = {}
 
-        def _look(attempt, deadline=None):
-            # Entered once per retry decision, on the sending thread, after the
-            # attempt resolved and before the wait: exactly what an aborting
-            # thread would see between two attempts.
-            #
-            # Hooked here rather than on time.sleep, which subprocess.run also
-            # uses to poll its own wait -- snapshots from there come from the
-            # middle of a request, where in-flight is true for good reason.
-            seen.append(dict(failure))
-            return real_backoff(attempt, deadline)
-
-        with patch.object(utils_mod, "_backoff", _look), patch("time.sleep", Mock()):
+        with patch("time.sleep", Mock()):
             utils_mod.send_report_to_backend(
                 self.url, "test-key-000000", dict(self.REPORT), failure=failure,
             )
 
         self.assertEqual(
-            len(seen), utils_mod.MAX_ATTEMPTS - 1,
-            "a retry decision was not observed, so the gaps between attempts"
-            f" were not all checked: {seen}",
+            failure.get("kind"), "rejected",
+            "the backend answered every attempt, so reading this as never having"
+            " connected would stop the drain over a reachable backend",
         )
-        for n, snapshot in enumerate(seen, start=1):
-            self.assertFalse(
-                snapshot.get("in_flight"),
-                f"wait {n}: a pause between attempts looked like a request still"
-                " out there, so an abort there says nothing and the backend keeps"
-                " a run that never ends",
-            )
-            self.assertEqual(
-                snapshot.get("kind"), "rejected",
-                f"wait {n}: the attempt's outcome was not published before the"
-                " wait, so a reader takes the attempt before it for this one",
-            )
 
-    def test_a_delivered_report_says_so_and_is_not_in_flight(self):
+    def test_a_delivered_report_says_so(self):
         failure = {}
 
         utils_mod.send_report_to_backend(
@@ -516,7 +487,6 @@ class TheInFlightMarkMatchesWhatIsOnTheWire(_ServesABackend):
         )
 
         self.assertEqual(failure.get("kind"), "delivered")
-        self.assertFalse(failure.get("in_flight"))
 
 
 # Where a Sentry event goes, so a spy can tell one from a report send.
@@ -995,20 +965,6 @@ class TheFormatsSurviveARollback(_ServesABackend):
         self.assertEqual(set(envelope), {"report", "queued_at"})
         datetime.fromisoformat(envelope["queued_at"])   # parses as it always did
 
-    def test_forgetting_a_hash_leaves_a_cache_an_older_build_can_read(self):
-        """forget_tool_hash removes a user key. An older build reading that cache
-        must see a miss and re-upload, not trip over a hole."""
-        cache = {"tools": {"Claude Code": {"alice": {"payload_hash": "h1"},
-                                           "bob": {"payload_hash": "h2"}}}}
-        written = {}
-        with patch.object(cache_mod, "read_cache", return_value=cache), \
-             patch.object(cache_mod, "atomic_write_cache",
-                          side_effect=lambda c: written.update(c)):
-            cache_mod.forget_tool_hash("Claude Code", "alice")
-
-        self.assertIsNone(cache_mod.get_cached_hash("Claude Code", "alice", written))
-        self.assertEqual(cache_mod.get_cached_hash("Claude Code", "bob", written), "h2")
-
     def test_the_wire_payload_gained_no_keys(self):
         """The deadline work is client-side. A key appearing here means the
         backend contract moved and ingestion has to be considered."""
@@ -1026,17 +982,21 @@ class TheDrainSurvivesADegradedDevice(_ServesABackend):
     """What a real device throws at it: a queue it cannot write, a queue file
     something corrupted, and payloads big enough that rewriting costs."""
 
-    def test_a_queue_path_it_cannot_write_is_reported_not_raised(self):
+    def test_a_queue_path_it_cannot_write_is_swallowed_not_raised(self):
         """The writer creates the parent directory, so a parent that is already a
         file fails on every platform. chmod would not do: on Windows it only sets
-        the read-only attribute and files inside the directory still write."""
+        the read-only attribute and files inside the directory still write.
+
+        A raise here would take down the run at its last step, after every report
+        has already been sent."""
         blocker = Path(self._dir) / "not-a-directory"
         blocker.write_text("i am a file")
         os.environ["AI_DISCOVERY_QUEUE_FILE"] = str(blocker / "queue.json")
 
-        landed = save_failed_reports([{"device_id": "D"}], replace=True)
+        save_failed_reports([{"device_id": "D"}], replace=True)
 
-        self.assertFalse(landed, "an unwritable queue path reported success")
+        self.assertEqual(load_pending_reports(), [],
+                         "something was read back from a path that cannot be written")
 
     def test_a_corrupt_queue_file_does_not_stop_the_run(self):
         for junk in (b"", b"{", b"not json at all", b'{"a": 1}', b"[1, 2, 3]"):
@@ -1052,7 +1012,8 @@ class TheDrainSurvivesADegradedDevice(_ServesABackend):
                     "tools": [{"name": "T", "projects": [{"rules": big}]}]}
                    for i in range(utils_mod.MAX_QUEUE_SIZE)]
 
-        self.assertTrue(save_failed_reports(reports, replace=True))
+        save_failed_reports(reports, replace=True)
+
         self.assertEqual(len(load_pending_reports()), utils_mod.MAX_QUEUE_SIZE)
 
 

@@ -711,9 +711,8 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
         )
 
     def test_an_abort_while_the_completion_is_in_flight_stays_quiet(self):
-        """The request has left, so the backend may have taken it already. Its
-        result is only known once the send returns, and an abort can arrive
-        before that -- the send is allowed most of the run's tail."""
+        """The request has left, so the backend may have taken it already, and an
+        abort can arrive before the send returns to say either way."""
         armed = {}
 
         def _fire_mid_send(body):
@@ -739,10 +738,10 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
         )
 
     def test_an_abort_during_a_retried_completion_stays_quiet(self):
-        """A refused attempt and a retry that is being accepted. What the first
-        attempt resolved to says nothing about the second one still on the wire,
-        so reading only the last recorded result reports a failure over a
-        completion the backend is taking as it is read."""
+        """A refused attempt and a retry that is being accepted. Reading the first
+        attempt's refusal as the state of the send reports a failure over a
+        completion the backend is taking as it is read -- which is why the flag
+        is set before the send rather than written as each attempt resolves."""
         armed, seen = {}, {"n": 0}
 
         def _refuse_then_accept_mid_abort(body):
@@ -1105,12 +1104,12 @@ class TheS3PathIsBoundedByTheSameDeadline(unittest.TestCase):
     30/180/30s limits could each outlast a short run's whole budget."""
 
     def test_each_step_is_clipped_to_what_is_left(self):
-        self.assertEqual(s3_mod._within(30, None), 30)
-        self.assertEqual(s3_mod._within(30, time.monotonic() + 100), 30)
-        self.assertIn(s3_mod._within(180, time.monotonic() + 10), (9, 10))
+        self.assertEqual(utils_mod.clip_to_deadline(30, None), 30)
+        self.assertEqual(utils_mod.clip_to_deadline(30, time.monotonic() + 100), 30)
+        self.assertIn(utils_mod.clip_to_deadline(180, time.monotonic() + 10), (9, 10))
 
     def test_a_passed_deadline_starts_no_step(self):
-        self.assertIsNone(s3_mod._within(30, time.monotonic() - 1))
+        self.assertIsNone(utils_mod.clip_to_deadline(30, time.monotonic() - 1))
         self.assertEqual(
             s3_mod.try_s3_upload(
                 "http://127.0.0.1:1", "k", {"device_id": "D", "tools": [{"name": "T"}]},
@@ -1118,269 +1117,6 @@ class TheS3PathIsBoundedByTheSameDeadline(unittest.TestCase):
             ),
             (False, True),
         )
-
-
-class ASupersededReportIsNeverSent(_DrivesMain, unittest.TestCase):
-    """Dropping a superseded report only at the final queue write is too late: the
-    payload hash is stored the moment an upload succeeds, so a kill in between
-    leaves the older report to replace that snapshot on the next run -- and it
-    stays, because the stored hash makes detection skip the correcting upload."""
-
-    def test_the_queue_is_settled_before_the_hash_that_hides_the_pair(self):
-        """The invariant, observed where it matters: at the instant the payload hash
-        is stored, the older queued report is already out of the file."""
-        superseded = {"device_id": "Q-OLD", "home_user": "alice",
-                      "tools": [{"name": "Claude Code"}]}
-        self.seed_queue([superseded])
-        # The stored hash is the thing that makes a later run skip the correcting
-        # upload, so the queue file is observed at the moment it is written.
-        at_hash_write = {}
-
-        def _record_report(*_a, **_k):
-            at_hash_write["queue"] = (
-                [e["report"]["device_id"]
-                 for e in json.loads(self.queue_file.read_text())]
-                if self.queue_file.exists() else []
-            )
-
-        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
-                 "tools": [{"name": "Claude Code", "projects": []}]}
-        self.run_main(
-            rule=statuses({"Q-OLD": 500}),
-            tools=({"name": "Claude Code", "version": "1.0",
-                    "install_path": "/usr/local/bin/claude"},),
-            users=("alice",),
-            fresh_report=fresh,
-            patches=(
-                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
-                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-                patch.object(adm, "_install_in_another_users_home", return_value=False),
-                patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
-                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
-                patch.object(adm.discovery_cache, "record_report",
-                             side_effect=_record_report),
-            ),
-        )
-
-        self.assertIn("queue", at_hash_write, "no hash was ever stored")
-        self.assertNotIn(
-            "Q-OLD", at_hash_write["queue"],
-            "the superseded report was still on disk when the hash was stored, so a"
-            " kill in between would restore stale data for good",
-        )
-
-    def test_a_delivered_report_leaves_the_file_before_detection_begins(self):
-        """A report the drain has settled must reach disk straight away. An abort
-        later in the run skips the persist step entirely (the watchdog calls
-        os._exit), and the next run would send that delivered report again -- after
-        a stored hash has already stopped detection from correcting it."""
-        delivered = {"device_id": "Q-GONE", "home_user": "alice",
-                     "tools": [{"name": "Claude Code"}]}
-        self.seed_queue([delivered])
-        at_detection = {}
-
-        def _probe():
-            at_detection["queue"] = (
-                [e["report"]["device_id"]
-                 for e in json.loads(self.queue_file.read_text())]
-                if self.queue_file.exists() else []
-            )
-            return []
-
-        backend, _ = self.run_main(
-            patches=(patch.object(adm, "get_all_users_linux", side_effect=_probe),),
-        )
-
-        self.assertEqual(
-            backend.device_ids(prefix="Q-"), ["Q-GONE"], "the drain never sent it"
-        )
-        self.assertEqual(
-            at_detection.get("queue"), [],
-            "a report the drain had already delivered was still on disk when"
-            " detection began, so an abort would send it a second time",
-        )
-
-    def test_a_failed_queue_write_stops_the_hash_being_stored(self):
-        """The ordering only helps if the write actually landed. Storing the hash
-        after a failed rewrite would hide the pair while the stale report is still
-        queued -- the exact outcome the ordering exists to prevent."""
-        superseded = {"device_id": "Q-OLD", "home_user": "alice",
-                      "tools": [{"name": "Claude Code"}]}
-        self.seed_queue([superseded])
-        recorded = []
-        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
-                 "tools": [{"name": "Claude Code", "projects": []}]}
-
-        self.run_main(
-            rule=statuses({"Q-OLD": 500}),
-            tools=({"name": "Claude Code", "version": "1.0",
-                    "install_path": "/usr/local/bin/claude"},),
-            users=("alice",),
-            fresh_report=fresh,
-            patches=(
-                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
-                patch.object(adm, "save_failed_reports", return_value=False),
-                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-                patch.object(adm, "_install_in_another_users_home", return_value=False),
-                patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
-                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
-                patch.object(adm.discovery_cache, "record_report",
-                             side_effect=lambda *a, **k: recorded.append(k)),
-            ),
-        )
-
-        self.assertTrue(
-            recorded,
-            "the resume checkpoint went with the hash, so a resumed run"
-            " re-processes a pair it has already reported",
-        )
-        self.assertEqual(
-            [k.get("payload_hash") for k in recorded], [None] * len(recorded),
-            "the hash was stored although the queue write failed, so the stale"
-            " report is both queued and hidden",
-        )
-
-    def test_a_failed_post_drain_write_also_stops_the_hash(self):
-        """The drain delivering a report leaves nothing to drop later, so the
-        per-upload rewrite would not fire and the post-drain write is the only one
-        that cleaned the file. Its failure has to count too, or a delivered report
-        stays on disk while hashes hide the pairs that would correct it."""
-        delivered = {"device_id": "Q-DELIVERED", "home_user": "bob",
-                     "tools": [{"name": "Cursor"}]}
-        self.seed_queue([delivered])
-        recorded = []
-        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
-                 "tools": [{"name": "Claude Code", "projects": []}]}
-
-        backend, _ = self.run_main(
-            tools=({"name": "Claude Code", "version": "1.0",
-                    "install_path": "/usr/local/bin/claude"},),
-            users=("alice",),
-            fresh_report=fresh,
-            patches=(
-                patch.object(adm, "save_failed_reports", return_value=False),
-                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-                patch.object(adm, "_install_in_another_users_home", return_value=False),
-                patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
-                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
-                patch.object(adm.discovery_cache, "record_report",
-                             side_effect=lambda *a, **k: recorded.append(k)),
-            ),
-        )
-
-        self.assertIn(
-            "Q-DELIVERED", backend.device_ids(prefix="Q-"),
-            "the drain never delivered it",
-        )
-        self.assertTrue(recorded, "the resume checkpoint went with the hash")
-        self.assertEqual(
-            [k.get("payload_hash") for k in recorded], [None] * len(recorded),
-            "a hash was stored although the write that should have cleared the"
-            " delivered report from disk had failed",
-        )
-
-    def test_a_pair_the_backlog_does_not_hold_costs_no_extra_write(self):
-        """Once the post-drain write has landed, the file holds only what is owed,
-        so a pair that is not in it needs no further write. Rewriting per upload
-        re-reads and re-serialises every queued report, which on a device with a
-        backlog and several tools is pure cost."""
-        unrelated = {"device_id": "Q-OTHER", "home_user": "bob",
-                     "tools": [{"name": "Cursor"}]}
-        self.seed_queue([unrelated])
-        writes = []
-        real_save = utils_mod.save_failed_reports
-        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
-                 "tools": [{"name": "Claude Code", "projects": []}]}
-
-        self.run_main(
-            rule=statuses({"Q-OLD": 500}),
-            tools=({"name": "Claude Code", "version": "1.0",
-                    "install_path": "/usr/local/bin/claude"},),
-            users=("alice",),
-            fresh_report=fresh,
-            patches=(
-                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
-                patch.object(adm, "save_failed_reports",
-                             side_effect=lambda *a, **k: (
-                                 writes.append(1), real_save(*a, **k))[1]),
-                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-                patch.object(adm, "_install_in_another_users_home", return_value=False),
-                patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
-                patch.object(adm.discovery_cache, "get_cached_hash", return_value=None),
-                patch.object(adm.discovery_cache, "record_report", Mock()),
-            ),
-        )
-
-        # Two: once when the drain finishes, once at persist. A third would be a
-        # rewrite for a pair the file never held.
-        self.assertEqual(
-            len(writes), 2,
-            "the queue was rewritten for a pair it never held",
-        )
-
-    def test_the_untried_tail_is_filtered_before_it_is_requeued(self):
-        """An early stop requeues the tail wholesale. A pair the resumed run has
-        already reported must not go back on the queue to overwrite it next run."""
-        other = {"device_id": "Q-KEEP", "home_user": "bob",
-                 "tools": [{"name": "Cursor"}]}
-        superseded = {"device_id": "Q-OLD", "home_user": "alice",
-                      "tools": [{"name": "Claude Code"}]}
-        # The superseded one sits BEHIND the stop point, so it reaches the queue as
-        # part of the untried tail rather than being skipped report by report.
-        self.seed_queue([other, superseded])
-
-        at_detection = {}
-
-        def _probe():
-            at_detection["queue"] = (
-                [e["report"]["device_id"]
-                 for e in json.loads(self.queue_file.read_text())]
-                if self.queue_file.exists() else []
-            )
-            return []
-
-        self.run_main(
-            patches=(
-                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
-                patch.object(adm, "get_all_users_linux", side_effect=_probe),
-                patch.object(adm.discovery_cache, "resumable_done",
-                             return_value={("Claude Code:/usr/local/bin/claude", "alice")}),
-            ),
-        )
-
-        # The filter at persist would catch it, but an abort never reaches persist.
-        self.assertEqual(
-            at_detection.get("queue"), ["Q-KEEP"],
-            "the untried tail went to disk without checking what this run had"
-            " already reported, so an abort would leave it there",
-        )
-
-    def test_a_pair_the_resumed_run_already_reported_is_dropped_unsent(self):
-
-        """Known before the drain starts, so the drain can refuse it outright
-        rather than send it and rely on the requeue filter afterwards."""
-        superseded = {"device_id": "Q-OLD", "home_user": "alice",
-                      "tools": [{"name": "Claude Code"}]}
-        other = {"device_id": "Q-KEEP", "home_user": "bob",
-                 "tools": [{"name": "Cursor"}]}
-        self.seed_queue([superseded, other])
-
-        backend, _ = self.run_main(
-            patches=(
-                patch.object(adm.discovery_cache, "resumable_done",
-                             return_value={("Claude Code:/usr/local/bin/claude", "alice")}),
-            ),
-        )
-
-        self.assertEqual(
-            backend.device_ids(prefix="Q-"), ["Q-KEEP"],
-            "a report the resumed run had already superseded was sent anyway",
-        )
-        self.assertFalse(self.queue_file.exists(), "the dropped report was re-queued")
 
 
 class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
@@ -1446,9 +1182,10 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
             "the reserve ate the whole budget, so a short scan uploaded nothing",
         )
 
-    def test_the_completed_event_finishes_before_the_watchdog(self):
-        """It carries the manifest the backend prunes against, and a watchdog that
-        fires over it reports the run failed even though it did its work.
+    def test_the_completed_event_gets_the_whole_budget(self):
+        """It carries the manifest the backend prunes against, so it is the one
+        send that must not be skipped. Holding back an end-of-run tail from it
+        left a scan that finished inside that tail with no time to send at all.
 
         Read off the real send: curl is given the smaller of its own timeout and
         what is left of the deadline, so raising that timeout past the budget
@@ -1473,10 +1210,10 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
         self.assertTrue(bounds, "no completed event was sent")
         sent_at, max_time = bounds[0]
         watchdog_at = started + 900
-        self.assertLess(
-            sent_at + max_time, watchdog_at - 5,
-            "the completed event is given until the watchdog fires, so it can"
-            " still be in flight when the run is killed over it",
+        self.assertAlmostEqual(
+            sent_at + max_time, watchdog_at, delta=2,
+            msg="the event was handed less than the run had left, which is what"
+                " leaves a scan finishing inside the tail unable to send at all",
         )
 
     def test_a_short_run_still_reports_completion(self):
@@ -1528,35 +1265,16 @@ class ThisRunsOwnReportsAreBoundedToo(_DrivesMain, unittest.TestCase):
         )
 
 
-class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
-    """A queued report exists because its upload failed, so the cache still holds
-    the hash of an *earlier* upload. Delivering it replaces the backend snapshot
-    with that older payload, and the stale hash would then make detection skip
-    the upload that would correct it -- for good, because the hash keeps matching
-    until something changes on the device.
+class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
+    """The hard half of the rule. A queued report exists because its upload
+    failed, so the cache still holds the hash of an *earlier* upload. Delivering
+    it replaces the backend snapshot with that older payload -- and a matching
+    hash would then make detection skip the upload that would correct it, for
+    good, because the hash keeps matching until something changes on the device.
 
-    So the hash goes first and the send only follows a confirmed clear. A hash
-    that cannot be cleared keeps its report queued instead: the delivery is what
-    would make the hash a lie, and declining it is the one outcome that needs
-    nothing remembered afterwards."""
-
-    def test_the_pair_is_no_longer_treated_as_current_before_it_is_sent(self):
-        forgotten = []
-        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
-                          "tools": [{"name": "Claude Code"}]}])
-
-        self.run_main(
-            patches=(patch.object(
-                adm.discovery_cache, "forget_tool_hash",
-                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
-            ),),
-        )
-
-        self.assertIn(
-            ("alice", "Claude Code"), forgotten,
-            "the drain left a hash in place that no longer describes the backend,"
-            " so detection will skip the upload that would correct it",
-        )
+    The queue having mentioned the pair at all is what settles this: the hash is
+    not consulted for it, whether the drain delivered that report or left it
+    owed. Nothing is written to the cache, so there is no write that can fail."""
 
     def test_the_correcting_upload_actually_goes_out(self):
         """End to end with the real cache: run one uploads and records its hash,
@@ -1593,90 +1311,14 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
             " left holding the snapshot the drain delivered",
         )
 
-    def test_a_hash_that_cannot_be_cleared_stops_the_delivery(self):
-        """The write is reported as failed and the stale hash survives on disk, so
-        the older snapshot must not go out behind it -- that is the combination
-        that would leave a wrong row nothing can correct. This run still corrects
-        the pair itself, which is why dropping the queue entry is right."""
-        tools = ({"name": "Claude Code", "version": "1.0",
-                  "install_path": "/usr/local/bin/claude"},)
-        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
-                 "tools": [{"name": "Claude Code", "projects": []}]}
-        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
-                          "tools": [{"name": "Claude Code"}]}])
-        # The cached hash has to be the one production will actually compute for
-        # this payload, or the dedup branch is never reached and the test passes
-        # whether the guard exists or not.
-        stale_hash = compute_payload_hash(fresh["tools"][0])
-
-        backend, _ = self.run_main(
-            tools=tools, users=("alice",), fresh_report=fresh,
-            patches=(
-                # The invalidation reports that it never reached disk, and the old
-                # hash still matches. A bare Mock would not do: it is truthy, so
-                # main() would read it as a successful write.
-                patch.object(adm.discovery_cache, "forget_tool_hash",
-                             return_value=False),
-                patch.object(adm.discovery_cache, "get_cached_hash",
-                             return_value=stale_hash),
-                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
-                patch.object(adm, "_install_in_another_users_home", return_value=False),
-                patch.object(adm, "_machine_global_install_disowned", return_value=False),
-                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
-                patch.object(adm.discovery_cache, "record_report", Mock()),
-            ),
-        )
-
-        self.assertEqual(
-            backend.device_ids(), [],
-            "the older snapshot went to the backend while a hash still claimed"
-            " the pair was current, so a run interrupted here leaves a wrong row"
-            " that the surviving hash hides until the tool's config changes",
-        )
-        self.assertIn(
-            "THIS-RUN", backend.device_ids(prefix="THIS-RUN"),
-            "a stale hash on disk suppressed the correcting upload",
-        )
-
-    def test_an_invalidation_that_did_not_land_keeps_the_report_queued(self):
-        """Nothing this run records about a failed clear would outlive it, so the
-        report stays queued and unsent for a later run to try again -- when the
-        clear may well land."""
-        stale = {"device_id": "QUEUED-0", "home_user": "alice",
-                 "tools": [{"name": "Claude Code"}]}
-        self.seed_queue([stale])
-
-        backend, _ = self.run_main(
-            patches=(
-                # The cache says the hash never left disk.
-                patch.object(adm.discovery_cache, "forget_tool_hash",
-                             return_value=False),
-            ),
-        )
-
-        self.assertEqual(
-            backend.device_ids(), [],
-            "it went out behind a hash that still described the row it replaced",
-        )
-        self.assertEqual(
-            self.queue_now(), ["QUEUED-0"],
-            "the report was dropped although it was never delivered, so nothing"
-            " will send it again",
-        )
-
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")
     @unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0,
                      "root writes through the directory mode this relies on")
     def test_an_unwritable_cache_cannot_leave_a_row_nothing_corrects(self):
-        """The whole scenario, with the real cache and a really unwritable state
-        directory -- the one place the hash lives, so there is nowhere else a note
-        about it could have been kept either.
-
-        Run one uploads and stores the hash. The directory then goes read-only, so
-        the hash can no longer be removed, and a day later the queue entry expires
-        and is gone. If the drain had delivered the older snapshot in between, the
-        surviving hash would match the unchanged payload for good and the backend
-        would keep a row nothing re-uploads."""
+        """The same scenario with the real cache and a really unwritable state
+        directory, which is the one place the hash lives. The rule needs no write
+        to hold: run one stores the hash, the directory goes read-only, and run
+        two still delivers the queued report and corrects the row behind it."""
         tools = ({"name": "Claude Code", "version": "1.0",
                   "install_path": "/usr/local/bin/claude"},)
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
@@ -1697,7 +1339,7 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
             "run one stored no hash, so there is no stale hash to survive",
         )
 
-        # Readable, not writable: the hash can be read and cannot be removed.
+        # Readable, not writable: the hash can be read and nothing can change it.
         self.addCleanup(os.chmod, state_dir, 0o700)
         os.chmod(state_dir, 0o500)
         self.seed_queue(
@@ -1710,117 +1352,20 @@ class DeliveringAQueuedReportInvalidatesItsHash(_DrivesMain, unittest.TestCase):
                                   fresh_report=fresh, patches=live)
 
         self.assertEqual(
-            second.device_ids(), [],
-            "the drain replaced the row with the older snapshot while the hash"
-            " describing the newer one was still on disk and unremovable",
-        )
-        self.assertEqual(
             adm.discovery_cache.get_cached_hash("Claude Code", "alice"),
             compute_payload_hash(fresh["tools"][0]),
             "the hash this test is about never survived, so it proves nothing",
         )
-
-    def test_a_refusal_after_a_lost_answer_still_clears_the_hash(self):
-        """413 is final, so the report is rightly discarded -- but an earlier
-        attempt may already have put it on the backend, and the stored hash would
-        then describe a row that is no longer there. Nothing would be left to
-        correct it: the report is gone."""
-        forgotten = []
-        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
-                          "tools": [{"name": "Claude Code"}]}])
-
-        backend, _ = self.run_main(
-            rule=lost_then_refused(),
-            patches=(patch.object(
-                adm.discovery_cache, "forget_tool_hash",
-                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
-            ),),
-        )
-
-        self.assertEqual(backend.attempts("QUEUED-0"), 2,
-                         "the lost answer has to be retried for this to be the"
-                         " uncertain-then-refused path at all")
         self.assertEqual(
-            forgotten, [("alice", "Claude Code")],
-            "a report that may have reached the backend was discarded with its"
-            " hash intact, so detection trusts a row that may be stale",
+            second.device_ids(), ["QUEUED-0"],
+            "the queued report was held back, so this is not the case where an"
+            " older snapshot reaches the backend",
         )
-        self.assertEqual(self.queue_now(), [],
-                         "413 is permanent; requeueing it would never end")
-
-    def test_a_refusal_whose_invalidation_failed_keeps_the_report(self):
-        """The set that remembers the pair dies with the process, so when the write
-        does not land the report has to stay -- its presence is what makes the next
-        run distrust the hash, whatever that run manages to send."""
-        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
-                          "tools": [{"name": "Claude Code"}]}])
-
-        self.run_main(
-            rule=lost_then_refused(),
-            patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
-                                  return_value=False),),
+        self.assertIn(
+            "THIS-RUN", second.device_ids(prefix="THIS-RUN"),
+            "the surviving hash matched the unchanged payload and suppressed the"
+            " upload, so the backend keeps the row the drain delivered",
         )
-
-        self.assertEqual(
-            self.queue_now(), ["QUEUED-0"],
-            "the hash stayed on disk and the report that would have exposed it was"
-            " discarded, so an interrupted run leaves the row hidden for good",
-        )
-
-    def test_giving_up_on_a_report_still_clears_the_hash(self):
-        """No lost answer anywhere -- just a refusal the drain will not retry. The
-        queue disagreed with the stored hash, and dropping the report does not
-        settle that disagreement, so the pair has to be re-uploaded once."""
-        forgotten = []
-        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
-                          "tools": [{"name": "Claude Code"}]}])
-
-        self.run_main(
-            rule=statuses({"QUEUED-0": 422}),
-            patches=(patch.object(
-                adm.discovery_cache, "forget_tool_hash",
-                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
-            ),),
-        )
-
-        self.assertEqual(
-            forgotten, [("alice", "Claude Code")],
-            "the report that disagreed with the hash is gone and the hash is"
-            " still trusted, so nothing will ever check that row again",
-        )
-
-    def test_a_report_it_could_not_deliver_leaves_the_hash_alone(self):
-        """Only a delivery makes the hash wrong. Clearing it on a failure would
-        force a pointless re-upload of a pair the backend never heard about."""
-        forgotten = []
-        self.seed_queue(_queued(1))
-
-        self.run_main(
-            rule=status_for(),
-            patches=(patch.object(
-                adm.discovery_cache, "forget_tool_hash",
-                side_effect=lambda t, u: (forgotten.append((u, t)), True)[1],
-            ),),
-        )
-
-        self.assertEqual(forgotten, [])
-
-    def test_forgetting_leaves_other_pairs_and_the_rest_of_the_cache(self):
-        cache = {"tools": {"Claude Code": {"alice": {"payload_hash": "h1"},
-                                           "bob": {"payload_hash": "h2"}},
-                           "Cursor": {"alice": {"payload_hash": "h3"}}},
-                 "run": {"run_id": "keep-me"}}
-        written = {}
-        with patch.object(adm.discovery_cache, "read_cache", return_value=cache), \
-             patch.object(adm.discovery_cache, "atomic_write_cache",
-                          side_effect=lambda c: written.update(c)):
-            adm.discovery_cache.forget_tool_hash("Claude Code", "alice")
-
-        self.assertNotIn("alice", written["tools"]["Claude Code"])
-        self.assertIn("bob", written["tools"]["Claude Code"])
-        self.assertEqual(written["tools"]["Cursor"]["alice"]["payload_hash"], "h3")
-        self.assertEqual(written["run"]["run_id"], "keep-me")
-
 
 class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
     """The cache says what we last uploaded. A queued older report says the drain

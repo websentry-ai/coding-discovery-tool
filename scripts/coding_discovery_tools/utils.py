@@ -1510,9 +1510,7 @@ def send_scan_event(
             "completed" so the backend set-diffs it to prune the rest.
         covered_home_users: Optional home users covered; sent only on "completed" to
             bound the prune scope.
-        failure: Optional dict the caller owns, filled in as send_report_to_backend
-            describes. A caller that has to know whether an event may have landed
-            needs more than the success flag.
+        failure: Optional dict, as send_report_to_backend describes it.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1581,6 +1579,24 @@ MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 15
 BACKOFF_CAP_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 60
+# How long past its own timeout curl gets before the process gives up on it: a
+# backstop for curl ignoring --max-time. It drops to a second inside a caller's
+# deadline, whose end-of-run tail can itself be under five seconds.
+CURL_KILL_GRACE_SECONDS = 5
+
+
+def clip_to_deadline(timeout: int, deadline: Optional[float]) -> Optional[int]:
+    """A request timeout clipped to what the deadline leaves, or None past it."""
+    if deadline is None:
+        return timeout
+    left = int(deadline - time.monotonic())
+    return min(timeout, left) if left >= 1 else None
+
+
+def curl_kill_grace(deadline: Optional[float]) -> int:
+    """The process-level backstop for one request, kept inside a caller's
+    deadline when there is one."""
+    return 1 if deadline is not None else CURL_KILL_GRACE_SECONDS
 
 
 def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None, failure: Optional[Dict] = None, stop_if_unreachable: bool = False) -> Tuple[bool, bool]:
@@ -1607,13 +1623,10 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         deadline: Optional time.monotonic() value. No upload or backoff is started
             past it, and every request's own timeout is clipped to what is left, so
             a caller working to a budget is never held beyond it by one report.
-        failure: Optional dict the caller owns, updated as each attempt resolves
-            rather than only at the end. Its "kind" becomes "delivered" (accepted),
-            "unreachable" (nothing reached the backend), "uncertain" (sent, but no
-            answer came, so it may have landed) or "rejected" (answered and
-            refused), and its "in_flight" says whether a request is on the wire
-            right now. A caller deciding mid-send whether the backend may hold
-            this reads both, from another thread.
+        failure: Optional dict the caller owns, whose "kind" records how the last
+            attempt resolved: "delivered" (accepted), "unreachable" (nothing
+            reached the backend), "uncertain" (sent, but no answer came) or
+            "rejected" (answered and refused).
         stop_if_unreachable: give up on the first failure that never reached the
             backend, without retrying or sleeping. A caller whose queue is itself
             the retry gains nothing from a curve that cannot connect.
@@ -1635,32 +1648,11 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             return None
         return max(0.0, deadline - time.monotonic())
 
-    def _in_flight(state: bool) -> None:
-        """Whether a request is on the wire right now. A caller deciding whether
-        the backend may hold this needs it per attempt: the kind below describes
-        the last attempt that resolved, which says nothing about the next one."""
-        if failure is not None:
-            failure["in_flight"] = state
-
     def _note(kind: str) -> bool:
-        """Record how this attempt resolved, and say whether to abandon the send
-        straight away.
-
-        This is also what ends the attempt's in-flight state, in the same step:
-        a reader on another thread that saw the mark gone before the outcome was
-        recorded would take a stale one for this attempt's, and a request just
-        accepted would look like the refusal before it.
-
-        "uncertain" is sticky across attempts: once one of them may have reached
-        the backend, a later attempt that cannot connect does not make that
-        untrue, and the caller still has to assume the report landed."""
+        """Record how this attempt resolved; True means abandon the send now."""
         if failure is not None:
-            if failure.get("kind") != "uncertain":
-                failure["kind"] = kind
-            failure["in_flight"] = False
-        return stop_if_unreachable and kind == "unreachable" and (
-            failure is None or failure.get("kind") != "uncertain"
-        )
+            failure["kind"] = kind
+        return stop_if_unreachable and kind == "unreachable"
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     ctx = sentry_context or {}
@@ -1700,7 +1692,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         if s3_success:
             return (True, False)
         # A lost answer from the from-s3 notification means the backend may hold
-        # this payload already; the legacy retry below must not erase that.
+        # this payload already, which stands unless the legacy path below
+        # resolves differently.
         if s3_failure.get("kind") == "uncertain":
             _note("uncertain")
         logger.info("S3 upload path failed; falling back to legacy /api/v1/ai-tools/report/")
@@ -1719,7 +1712,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     except OSError as e:
         logger.error(f"Could not create temp file for payload: {e}")
         report_to_sentry(e, {**ctx, "phase": "send_report_tmpfile"}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                         max_seconds=_left_for_telemetry())
         return (False, True)
 
     try:
@@ -1736,8 +1729,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     _note("unreachable")
                     return (False, True)
             try:
-                # Dropped again by _note below, together with the outcome.
-                _in_flight(True)
                 result = subprocess.run(
                     [
                         "curl", "-s",
@@ -1758,7 +1749,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     # inside a caller's deadline: a short budget's end-of-run
                     # tail can be under five seconds, and overrunning by more
                     # than that leaves the call running when the watchdog fires.
-                    timeout=request_timeout + (1 if deadline is not None else 5),
+                    timeout=request_timeout + curl_kill_grace(deadline),
                 )
 
                 # Parse response: stdout = body + "\n" + connections + " " + http_code
@@ -1782,7 +1773,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         raise RuntimeError(error_msg)
                     except RuntimeError as exc:
                         report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                                         max_seconds=_left_for_telemetry())
                     return (False, True)
 
                 http_code = int(status_str)
@@ -1804,7 +1795,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
                     except RuntimeError as exc:
                         report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                                         max_seconds=_left_for_telemetry())
                     return (False, True)
 
                 # Cloudflare 403s with error 1010 are transient rate limits — allow retry
@@ -1817,7 +1808,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         raise RuntimeError(error_detail)
                     except RuntimeError as exc:
                         report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                                         max_seconds=_left_for_telemetry())
                     return (False, False)
 
                 if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
@@ -1829,7 +1820,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     raise RuntimeError(error_detail)
                 except RuntimeError as exc:
                     report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                                     max_seconds=_left_for_telemetry())
                 return (False, True)
 
             except subprocess.TimeoutExpired:
@@ -1841,7 +1832,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     raise RuntimeError("curl timeout")
                 except RuntimeError as exc:
                     report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                                     max_seconds=_left_for_telemetry())
                 return (False, True)
 
             except OSError as e:
@@ -1849,7 +1840,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 logger.error(f"Cannot execute curl: {e}")
                 _note("unreachable")
                 report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                                 max_seconds=_left_for_telemetry())
                 return (False, True)
 
             except Exception as e:
@@ -1858,7 +1849,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
                     continue
                 report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
-                                        max_seconds=_left_for_telemetry())
+                                 max_seconds=_left_for_telemetry())
                 return (False, True)
 
 
@@ -1960,18 +1951,11 @@ def _queued_at_by_report(envelopes: List[Dict]) -> Dict[str, str]:
     return found
 
 
-def save_failed_reports(reports: List[Dict], replace: bool = False) -> bool:
+def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
     """Write failed report envelopes to the queue file, merging with any existing
-    entries unless replace=True.
-
-    Pass replace=True when ``reports`` is the complete set still owed, so entries
-    the caller has since delivered are dropped rather than re-sent every run. A
-    report already in the queue then keeps its original queued_at, so requeueing
-    it cannot refresh it past QUEUE_MAX_AGE_SECONDS.
-
-    Returns whether the queue reached disk, for a caller whose next step is only
-    safe once it has.
-    """
+    entries unless replace=True, which treats ``reports`` as the complete set
+    still owed. A report already queued keeps its original queued_at, so
+    requeueing it cannot refresh it past QUEUE_MAX_AGE_SECONDS."""
     try:
         existing = _load_queue_file_safe()
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1985,11 +1969,9 @@ def save_failed_reports(reports: List[Dict], replace: bool = False) -> bool:
         queue_file = _get_queue_file_path()
         _write_file_secure(queue_file, json.dumps(envelopes).encode())
         logger.info(f"Saved {len(reports)} failed report(s) to {queue_file}")
-        return True
     except Exception as e:
         logger.warning(f"Could not save failed reports: {e}")
         report_to_sentry(e, {"phase": "queue"}, level="warning")
-        return False
 
 
 def load_pending_reports() -> List[Dict]:
@@ -2054,12 +2036,8 @@ def _load_queue_file_safe() -> List[Dict]:
 
 def _write_file_secure(path: Path, data: bytes) -> None:
     """Write data to a file with restricted permissions (0600 on Unix), swapping
-    it into place rather than writing over it.
-
-    The queue is rewritten several times during a run, and the watchdog can end
-    the process between any two instructions. Writing in place would leave a
-    half-written file behind, which loads as nothing -- so a kill mid-write would
-    cost the whole backlog instead of one rewrite."""
+    it into place: the watchdog can end the process mid-write, and a
+    half-written queue file loads as nothing, costing the whole backlog."""
     # Ensure the parent exists so a queue-path override with a missing parent
     # doesn't silently drop the write (and lose the failed reports).
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3799,7 +3777,7 @@ def send_discovery_metrics(
             text=True,
             # Inside the caller's deadline, as the report send and the S3 steps
             # are: a short budget's end-of-run tail can be under five seconds.
-            timeout=max_time + (1 if deadline is not None else 5),
+            timeout=max_time + curl_kill_grace(deadline),
         )
         status = result.stdout.rsplit("\n", 1)[-1].strip()
         ok = result.returncode == 0 and status.isdigit() and status.startswith("2")

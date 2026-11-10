@@ -40,12 +40,10 @@ DRAIN_BUDGET_SECONDS = 600
 # of the run trips the watchdog; never more than a quarter of the budget, or a
 # short scan cannot report what it found.
 RUN_SEND_RESERVE_SECONDS = 300
-# Kept clear at the end of the run so the completed event finishes before the
-# watchdog: one that fires over it reports a run that did its work as failed.
+# Kept clear at the end of the run for the best-effort work that follows the
+# completed event, so none of it trips the watchdog. The event itself is not
+# held back by it: it gets the whole budget.
 RUN_TAIL_GRACE_SECONDS = 30
-# Longest the main thread waits for an abort on another thread to finish its
-# failure report and exit. Covers that report's own bound with slack.
-ABORT_EXIT_GRACE_SECONDS = 20
 
 SCRIPT_VERSION = "1.2.0"
 
@@ -3638,12 +3636,10 @@ def _report_identity(report) -> Optional[tuple]:
     return (report.get("home_user"), tools[0].get("name"))
 
 
-def _drop_superseded(queued: List[Dict], uploaded_this_run: set) -> List[Dict]:
-    """Queued reports this run has not uploaded a newer snapshot for. Sending one
-    it has would overwrite that snapshot. Only an upload counts: a hash match can
-    describe a row an earlier drain replaced, and the queued report is then the
-    only thing left that will correct it."""
-    return [r for r in queued if _report_identity(r) not in uploaded_this_run]
+def _drop_superseded(queued: List[Dict], reported_pairs: set) -> List[Dict]:
+    """Queued reports for pairs no fresher report has gone out for. Sending one
+    behind a fresher report would overwrite it."""
+    return [r for r in queued if _report_identity(r) not in reported_pairs]
 
 
 def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
@@ -3803,17 +3799,11 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
-    # Set once the watchdog or a signal has decided this run failed. Finishing the
-    # step it interrupted afterwards does not make the run a success, and the
-    # abort's own exit can still be waiting on a bounded failure report.
-    # How the completed event is faring, written by the send: what the last
-    # attempt resolved to, and whether a request is on the wire right now. An
-    # abort reads it to decide whether the backend may already hold the outcome.
-    completed_failure: Dict = {}
-    _aborting = [False]
-    # Set by the abort once it is about to exit, so a main thread that finishes
-    # first waits for the failure report rather than cutting it off.
-    _abort_exiting = threading.Event()
+    # Set just before the completed event goes out, and read by the abort and
+    # except paths below: once that send has started, the backend may already
+    # hold this run's outcome, and a "failed" event afterwards would contradict
+    # a scan that did its work.
+    _completed_attempted = [False]
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
     # safely even if they fire before capture (in which case it is still None).
@@ -3875,29 +3865,12 @@ def main():
         t.start()
         t.join(timeout=join_timeout)
 
-    def _outcome_may_be_on_the_backend() -> bool:
-        """Whether the backend may already hold this run's outcome, so that a
-        failure report now would contradict it.
-
-        A request on the wire may be being accepted as this is read, so it
-        counts -- and it counts per attempt, since a refusal recorded by one
-        attempt says nothing about the next one still out there.
-
-        Otherwise the last resolved attempt decides: accepted or lost means the
-        backend may hold the run, refused or never-connected means it does not
-        and the failure report is the only thing that will ever correct that.
-        Nothing sent at all, and nothing resolved, means it does not."""
-        if completed_failure.get("in_flight"):
-            return True
-        return completed_failure.get("kind") in ("delivered", "uncertain")
-
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between
         # the try-body completing and finally cancelling the watchdog, where a
         # late Timer fire would otherwise os._exit(1) over a successful exit 0.
         if _finished[0]:
             return
-        _aborting[0] = True
         logger.error(message)
         # Release the lock FIRST so a follow-up run is never blocked even if the
         # reports below stall. Surface the abort to Sentry (the observability path
@@ -3913,13 +3886,10 @@ def main():
             )
         except Exception:
             pass
-        if not _outcome_may_be_on_the_backend():
+        if not _completed_attempted[0]:
             # The backend has not heard how this run ended, so this event is the
-            # only thing that will tell it. Once the outcome may already be
-            # there, a failure now would contradict a scan that did its work --
-            # but the cleanup above happens either way.
+            # only thing that will tell it. The cleanup above happens either way.
             _report_failed_bounded(error_type, message)
-        _abort_exiting.set()
         os._exit(1)
 
     def _on_watchdog_timeout() -> None:
@@ -4010,9 +3980,9 @@ def main():
             run_deadline - min(RUN_SEND_RESERVE_SECONDS, args.timeout / 4)
             if run_deadline is not None else None
         )
-        # The tail grace scales with the budget for the same reason: a flat margin
-        # puts a short scan's completed event behind its own deadline, so the run
-        # does its work and never reports it.
+        # Scaled to the budget for the same reason: a flat margin is already
+        # spent on a short run, leaving the best-effort work after the completed
+        # event a deadline in the past and no chance to run at all.
         tail_grace = (
             min(RUN_TAIL_GRACE_SECONDS, args.timeout / 8)
             if run_deadline is not None else 0
@@ -4023,17 +3993,17 @@ def main():
         # Queued reports this run did not get to. Separate so they go back ahead of
         # this run's own failures, and are the first dropped when the queue is capped.
         requeued_pending = []
-        # (home_user, tool) the resumed run already reported and this run skips.
-        # The drain must not send a queued older report for one of them: that would
-        # overwrite the newer snapshot nothing would then correct.
-        resume_reported = {
+        # (home_user, tool) a fresher report has already gone out for -- by this
+        # run, or by the run this one resumed. A queued report for one of them is
+        # an overwrite waiting to happen, so it is dropped rather than sent.
+        reported_pairs = {
             (home_user, tool_key.split(":", 1)[0])
             for tool_key, home_user in resume_done
         }
-        # (home_user, tool) this run uploaded itself. Only an upload authorises
-        # dropping a report the drain could not deliver: a hash match describes a
-        # snapshot the drain may already have replaced with an older one.
-        uploaded_this_run = set()
+        # (home_user, tool) the queue holds a report for. Their cached hash
+        # describes a row the drain may be about to replace with that older
+        # report, so it cannot stand in for an upload this run.
+        queued_pairs = set()
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -4041,17 +4011,6 @@ def main():
         incomplete_reasons = []
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
-
-        # Whether the queue file is known to hold only what is still owed. False
-        # means a write failed, so nothing may store a hash until one lands.
-        queue_on_disk = [True]
-
-        def _rewrite_queue() -> bool:
-            """Put what is still owed on disk now, reporting whether it got there. A
-            report the drain has settled must leave the file before anything can
-            store a payload hash that would make a later run skip the upload that
-            would correct it."""
-            return save_failed_reports(requeued_pending + failed_reports, replace=True)
 
         # --- Drain pending reports from earlier runs ---
         # Time-bounded: a backlog must neither delay detection nor outlive the run
@@ -4062,12 +4021,15 @@ def main():
             pending = load_pending_reports()
             if pending:
                 logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
+                queued_pairs.update(
+                    pair for pair in map(_report_identity, pending) if pair
+                )
                 drain_budget = _drain_budget_seconds(
                     args.timeout, time.monotonic() - t_start
                 )
                 drain_deadline = time.monotonic() + drain_budget
                 for index, queued_report in enumerate(pending):
-                    if _report_identity(queued_report) in resume_reported:
+                    if _report_identity(queued_report) in reported_pairs:
                         logger.info("  · Queued report superseded; dropped unsent")
                         continue
                     if time.monotonic() >= drain_deadline:
@@ -4077,18 +4039,6 @@ def main():
                             f" {len(requeued_pending)} report(s) stay queued."
                         )
                         break
-                    # Delivering this older snapshot leaves the pair's stored
-                    # hash describing a row the backend no longer holds, and a
-                    # note to correct that later would not outlive the process.
-                    # So clear the hash first and confirm it is gone.
-                    pair = _report_identity(queued_report)
-                    if pair and not discovery_cache.forget_tool_hash(pair[1], pair[0]):
-                        requeued_pending.append(queued_report)
-                        logger.info(
-                            "  · Cached hash for this pair could not be cleared;"
-                            " report stays queued rather than going out behind it"
-                        )
-                        continue
                     failure = {}
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
@@ -4110,12 +4060,6 @@ def main():
                             break
                     else:
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
-                # An early stop requeues the untried tail wholesale, which can hold
-                # a pair the resumed run already reported.
-                requeued_pending[:] = _drop_superseded(
-                    requeued_pending, resume_reported
-                )
-                queue_on_disk[0] = _rewrite_queue()
                 logger.info("")
 
         with time_step("enumerate_users", "detect"):
@@ -4530,15 +4474,12 @@ def main():
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        # A report still owed for this pair is an overwrite of its
-                        # row waiting to happen, so skipping the upload on a hash
-                        # match would leave nothing to correct it once that lands.
-                        older_report_queued = any(
-                            _report_identity(r) == (user_name, tool_name)
-                            for r in requeued_pending
-                        )
+                        # The queue held a report for this pair, so the backend's
+                        # row for it is not what the cached hash describes --
+                        # whether the drain delivered that older snapshot or left
+                        # it owed. Upload rather than trust the hash.
                         cached_hash = (
-                            None if older_report_queued
+                            None if (user_name, tool_name) in queued_pairs
                             else discovery_cache.get_cached_hash(tool_name, user_name)
                         )
                         reported_ok = False
@@ -4559,7 +4500,7 @@ def main():
                                 )
                             if success:
                                 reported_ok = True
-                                uploaded_this_run.add((user_name, tool_name))
+                                reported_pairs.add((user_name, tool_name))
                                 hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
@@ -4573,31 +4514,7 @@ def main():
                         # user) so a kill afterward lets the next quick re-run skip
                         # re-processing it.
                         if reported_ok:
-                            # The stored hash is what makes a later run skip the
-                            # correcting upload, so it waits until the queue write
-                            # lands. Failing that way round costs a re-upload.
-                            owed = len(requeued_pending)
-                            requeued_pending[:] = _drop_superseded(
-                                requeued_pending, uploaded_this_run
-                            )
-                            # The file already lacks this pair unless it just came out
-                            # of the backlog, or an earlier write never landed.
-                            if len(requeued_pending) != owed or not queue_on_disk[0]:
-                                queue_on_disk[0] = _rewrite_queue()
-                            # The checkpoint is recorded either way: it only says
-                            # this run reported the pair, which is true, and it is
-                            # what lets a resumed run skip re-processing it. Only
-                            # the hash waits for the queue write.
-                            if not queue_on_disk[0]:
-                                logger.warning(
-                                    f"  Queue still holds an older {tool_name} report for"
-                                    f" {user_name}; not storing its hash, so the next run"
-                                    f" re-uploads rather than skipping it"
-                                )
-                            discovery_cache.record_report(
-                                tool_name, user_name, tool_key,
-                                payload_hash=hash_to_store if queue_on_disk[0] else None,
-                            )
+                            discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
                             logger.info("")
@@ -4657,7 +4574,7 @@ def main():
         # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
             # Backlog first: the queue keeps its newest entries when it hits the cap.
-            still_owed = _drop_superseded(requeued_pending, uploaded_this_run) + failed_reports
+            still_owed = _drop_superseded(requeued_pending, reported_pairs) + failed_reports
             superseded = len(requeued_pending) + len(failed_reports) - len(still_owed)
             if superseded:
                 logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
@@ -4817,35 +4734,37 @@ def main():
                     for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
         covered = [u for u in all_users
                    if u not in unreadable_users and u not in incomplete_users]
+        # The one send a run must not skip, so it gets the whole budget rather
+        # than the budget less the tail: its manifest is what the backend
+        # set-diffs to prune tools that are no longer installed.
+        _completed_attempted[0] = True
+        completed_outcome = {}
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
             manifest=manifest, covered_home_users=covered,
-            deadline=(run_deadline - tail_grace
-                      if run_deadline is not None else None),
-            failure=completed_failure,
+            deadline=run_deadline, failure=completed_outcome,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")
+        elif completed_outcome.get("kind") == "uncertain":
+            # Sent, but no answer came, so the backend may be holding this run as
+            # completed. Saying it failed would contradict a scan that did its work.
+            logger.warning("✗ Scan completed event went unanswered; leaving the run as it is")
         else:
-            logger.warning("✗ Failed to send scan completed event")
-        logger.info("")
-
-        if not _outcome_may_be_on_the_backend():
-            # The backend never heard how this run ended, and nothing else is
-            # going to tell it: the checkpoint below stops the next run resuming
-            # this one, and the watchdog is cancelled on the way out, so no abort
-            # follows either. Closing it is better than leaving it running for
-            # ever, and the error type says the work was done -- only the report
-            # of it was lost.
+            # The backend does not have it, and nothing else will correct that:
+            # the checkpoint below stops the next run resuming it and the watchdog
+            # is cancelled on the way out. Closing it with an error type that says
+            # the work was done beats leaving it in progress for ever.
             logger.warning(
-                "Completed event never reached the backend; closing the run so it"
-                " does not sit in progress for ever"
+                "✗ Failed to send scan completed event; closing the run so it does"
+                " not sit in progress for ever"
             )
             _report_failed_bounded(
                 "CompletedEventUndelivered",
                 "the scan finished, but its completed event could not be delivered",
             )
+        logger.info("")
 
         # Local scan finished cleanly -> flip the checkpoint to "completed" so the
         # next run starts fresh (won't resume), independent of the completed-event
@@ -4857,11 +4776,8 @@ def main():
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            # Given the run's deadline less the tail the watchdog needs, so it
-            # stops short of that rather than being killed at it: each request is
-            # clipped to what is left, the worklist stops when that is spent, and
-            # nothing starts with no room. A signal still ends it, and whatever is
-            # left is picked up by the next run.
+            # Best-effort, so it gets the deadline less the tail and stops short
+            # of the watchdog rather than being killed at it.
             sent, failed, matched = run_sweep(
                 args.domain, args.api_key,
                 deadline=(run_deadline - tail_grace
@@ -4874,9 +4790,7 @@ def main():
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal
         # paths may have already reported, in which case this is a no-op).
-        if _outcome_may_be_on_the_backend():
-            # The backend already has this run's outcome, or may have, so a
-            # failure now would contradict a scan that did its work.
+        if _completed_attempted[0]:
             logger.error("Not sending scan failed event - the outcome is already reported")
         elif device_id and run_id:
             logger.error("Sending scan failed event due to error...")
@@ -4892,12 +4806,6 @@ def main():
         # (cancel() doesn't stop an already-dispatched callback) no-ops in _abort
         # instead of os._exit(1)-ing over a clean finish.
         _finished[0] = True
-        if _aborting[0]:
-            # The abort exits the process itself, but only once it has tried to
-            # tell the backend. Exiting here cuts that report off; returning 0 calls
-            # an aborted run a success. So wait for it, then fail loudly.
-            _abort_exiting.wait(ABORT_EXIT_GRACE_SECONDS)
-            os._exit(1)
         if _watchdog is not None:
             _watchdog.cancel()
         for _sig, _prev in _prev_signal_handlers.items():

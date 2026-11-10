@@ -11,10 +11,15 @@ purpose, so that it can be run directly as a script.
 Everything here invokes the shipped artifact as a subprocess against a local
 backend. Nothing is simulated: a door that cannot be opened on this platform is
 skipped out loud rather than reasoned about.
+
+`install.sh` is deliberately absent. It clones the repository at `main` into a
+temp directory and scans from there, so running it here would exercise whatever
+is already released rather than this checkout -- it would pass on a branch whose
+imports are broken, and fail when GitHub is unreachable. What it ends up calling
+is the module form below, which these do run against this tree.
 """
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -22,6 +27,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -141,10 +147,12 @@ class TheModuleFormIsTheOneInstallShRuns(_RunsAFrontDoor):
     def test_the_module_form_drains_a_queue_left_by_a_previous_run(self):
         """The drain is the change under test, it runs before detection, and the
         module form is how most devices reach it."""
+        # Stamped from the clock: the loader drops anything older than a day, so
+        # a literal here would quietly stop being drained at all.
         self.queue_file.write_text(json.dumps([
             {"report": {"device_id": "QUEUED-OLD", "home_user": "alice",
                         "tools": [{"name": "Claude Code"}]},
-             "queued_at": "2026-11-10T00:00:00+00:00"},
+             "queued_at": datetime.now(timezone.utc).isoformat()},
         ]))
 
         out = self._run_module()
@@ -157,49 +165,6 @@ class TheModuleFormIsTheOneInstallShRuns(_RunsAFrontDoor):
             self.queue_file.exists() and json.loads(self.queue_file.read_text()),
             "the delivered report was left on the queue, so the next run sends"
             " it again over whatever this one uploaded",
-        )
-
-
-@unittest.skipIf(platform.system() == "Windows", "install.sh is the POSIX door")
-class TheShellInstallerIsAFrontDoor(_RunsAFrontDoor):
-    """The real shipped script, run as `bash install.sh …`. It is what
-    `unbound discover` downloads from main and what the scheduled wrapper calls,
-    and it forwards its arguments straight into the module form."""
-
-    def _run_installer(self, *args, **kwargs):
-        return subprocess.run(
-            ["bash", str(REPO_ROOT / "install.sh"), *args],
-            cwd=str(REPO_ROOT), capture_output=True, text=True,
-            timeout=600, **kwargs,
-        )
-
-    def test_the_installer_runs_a_scan_with_flags(self):
-        out = self._run_installer(
-            "--api-key", "test-key-000000", "--domain", self.url,
-            "--timeout", "30", env=self.env(),
-        )
-
-        self.assertIn(
-            "in_progress", self.events(),
-            "the shipped installer reached nothing: its arguments are forwarded"
-            f" straight into the module form, so this is that contract breaking:"
-            f" {out.stderr[-700:]}",
-        )
-
-    def test_the_installer_takes_the_key_from_the_environment(self):
-        """The scheduled wrapper passes the key this way rather than on argv, so
-        the installer injects `--api-key` itself. A scan started from cron reaches
-        the tool through this path and no other -- and without that injection the
-        tool refuses before it sends anything, which is what this would catch."""
-        out = self._run_installer(
-            "--domain", self.url, "--timeout", "30",
-            env=self.env(UNBOUND_API_KEY="test-key-000000"),
-        )
-
-        self.assertIn(
-            "in_progress", self.events(),
-            "a cron-style run reported nothing: the key is not being taken from"
-            f" the environment: {out.stderr[-700:]}",
         )
 
 

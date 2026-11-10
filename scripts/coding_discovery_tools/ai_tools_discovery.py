@@ -38,8 +38,7 @@ DRAIN_BUDGET_SECONDS = 600
 # Held back for the end-of-run sends: must fit a whole retry cycle, and never
 # more than a quarter of the budget or a short scan reports nothing it found.
 RUN_SEND_RESERVE_SECONDS = 300
-# Kept clear for the best-effort work after the completed event. The event
-# itself is not held back by it.
+# Kept clear for the best-effort work that follows the completed event.
 RUN_TAIL_GRACE_SECONDS = 30
 
 SCRIPT_VERSION = "1.2.0"
@@ -3890,8 +3889,6 @@ def main():
         except Exception:
             pass
         if not _completed_attempted[0] or _backend_lacks_the_outcome():
-            # Nothing has reached the backend, so this event is the only thing
-            # that will ever tell it how the run ended.
             _report_failed_bounded(error_type, message)
         os._exit(1)
 

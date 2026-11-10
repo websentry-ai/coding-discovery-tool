@@ -230,28 +230,33 @@ class TheRunStopsWellInsideTheKillGrace(_RunsAFrontDoor):
         """The worst case for overrun: nothing answers, so every send spends its
         whole budget and the watchdog fires on a run that is still trying."""
         timeout = 20
+        # Deliberately far beyond the grace: if the harness were the thing that
+        # stopped the run, the assertion below could never fail.
+        harness_cap = timeout + 3 * self.MDM_KILL_GRACE_SECONDS
         started = time.monotonic()
 
-        out = subprocess.run(
-            [sys.executable, "-m", MODULE,
-             "--api-key", "test-key-000000",
-             # A port nothing listens on: connections are refused outright.
-             "--domain", "http://127.0.0.1:1",
-             "--timeout", str(timeout)],
-            cwd=str(REPO_ROOT), capture_output=True, text=True,
-            timeout=timeout + self.MDM_KILL_GRACE_SECONDS,
-            env=self.env(),
-        )
-        spent = time.monotonic() - started
+        try:
+            subprocess.run(
+                [sys.executable, "-m", MODULE,
+                 "--api-key", "test-key-000000",
+                 # A port nothing listens on: connections are refused outright.
+                 "--domain", "http://127.0.0.1:1",
+                 "--timeout", str(timeout)],
+                cwd=str(REPO_ROOT), capture_output=True, text=True,
+                timeout=harness_cap, env=self.env(),
+            )
+        except subprocess.TimeoutExpired:
+            self.fail(
+                f"still running {harness_cap}s into a {timeout}s budget, so the"
+                " MDM backstop would have SIGKILLed it long before this"
+            )
+        overrun = time.monotonic() - started - timeout
 
         self.assertLess(
-            spent, timeout + self.MDM_KILL_GRACE_SECONDS,
-            f"the run took {spent:.0f}s against a {timeout}s budget, so the MDM"
-            " backstop would SIGKILL it mid-report rather than let it clean up",
-        )
-        self.assertNotEqual(
-            out.returncode, None,
-            "the process never exited on its own",
+            overrun, self.MDM_KILL_GRACE_SECONDS,
+            f"the run ran {overrun:.0f}s past its own {timeout}s deadline, and the"
+            f" MDM backstop kills at {self.MDM_KILL_GRACE_SECONDS}s past it -- so it"
+            " would be killed mid-report rather than cleaning up and reporting",
         )
 
 

@@ -3991,7 +3991,13 @@ def main():
         failed_reports = []
         # Queued reports this run did not get to. Separate so they go back ahead of
         # this run's own failures, and are the first dropped when the queue is capped.
-        requeued_pending = []
+        owed_from_queue = []
+        # Snapshots the drain did deliver, by pair. The backend now holds each of
+        # these older payloads, so one is owed again when the pair is still on the
+        # device and this run never managed to report it: the cached hash describes
+        # a newer payload and would stop the next run correcting the row. A pair
+        # that is gone needs no correction -- the manifest prunes it.
+        delivered_from_queue = {}
         # (home_user, tool) a fresher report has already gone out for -- by this
         # run, or by the run this one resumed. A queued report for one of them is
         # an overwrite waiting to happen, so it is dropped rather than sent.
@@ -4030,10 +4036,10 @@ def main():
                         logger.info("  · Queued report superseded; dropped unsent")
                         continue
                     if time.monotonic() >= drain_deadline:
-                        requeued_pending.extend(pending[index:])
+                        owed_from_queue.extend(pending[index:])
                         logger.info(
                             f"  Drain budget of {drain_budget:.0f}s spent;"
-                            f" {len(requeued_pending)} report(s) stay queued."
+                            f" {len(owed_from_queue)} report(s) stay queued."
                         )
                         break
                     failure = {}
@@ -4043,16 +4049,19 @@ def main():
                         failure=failure, stop_if_unreachable=True,
                     )
                     if success:
+                        delivered_pair = _report_identity(queued_report)
+                        if delivered_pair:
+                            delivered_from_queue[delivered_pair] = queued_report
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        requeued_pending.append(queued_report)
+                        owed_from_queue.append(queued_report)
                         if failure.get("kind") == "unreachable":
                             # Nothing reached the backend, so nothing behind this
                             # will either. One is conclusive; no point in a second.
-                            requeued_pending.extend(pending[index + 1:])
+                            owed_from_queue.extend(pending[index + 1:])
                             logger.info(
                                 "  Backend unreachable;"
-                                f" {len(requeued_pending)} report(s) stay queued."
+                                f" {len(owed_from_queue)} report(s) stay queued."
                             )
                             break
                     else:
@@ -4571,8 +4580,13 @@ def main():
         # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
             # Backlog first: the queue keeps its newest entries when it hits the cap.
-            still_owed = _drop_superseded(requeued_pending, reported_pairs) + failed_reports
-            superseded = len(requeued_pending) + len(failed_reports) - len(still_owed)
+            present_pairs = {(hu, tn) for hu, tn, _ in scanned_manifest}
+            uncorrected = [r for pair, r in delivered_from_queue.items()
+                           if pair in present_pairs and pair not in reported_pairs]
+            still_owed = (_drop_superseded(owed_from_queue, reported_pairs)
+                          + uncorrected + failed_reports)
+            superseded = (len(owed_from_queue) + len(failed_reports)
+                          - len(still_owed) + len(uncorrected))
             if superseded:
                 logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
             if still_owed:

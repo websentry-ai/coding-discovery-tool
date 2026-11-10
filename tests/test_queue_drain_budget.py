@@ -1311,6 +1311,42 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             " left holding the snapshot the drain delivered",
         )
 
+    def test_a_pair_that_errors_after_its_snapshot_landed_stays_owed(self):
+        """The drain replaces the row with the older payload and this run then
+        errors on that pair, so it never gets to correct it. The cached hash still
+        describes the newer payload, so unless the report stays owed the next run
+        reads a match, skips the upload, and the backend keeps the old snapshot
+        for good -- a per-tool permission error is enough to get here."""
+        tools = ({"name": "Claude Code", "version": "1.0",
+                  "install_path": "/usr/local/bin/claude"},)
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            tools=tools, users=("alice",), fresh_report=fresh,
+            patches=(
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                # Errors where a real per-tool failure does, inside the try that
+                # reports it: this one runs before the upload is even considered.
+                patch.object(adm, "_refresh_mcp_tools_cache",
+                             side_effect=PermissionError("alice's home is not readable")),
+            ),
+        )
+
+        self.assertIn("QUEUED-0", backend.device_ids(),
+                      "the drain never delivered it, so no row was replaced")
+        self.assertEqual(backend.device_ids(prefix="THIS-RUN"), [],
+                         "the pair did not error, so this is not the path tested")
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "the pair errored after its older snapshot reached the backend and"
+            " nothing stayed owed for it, so the cached hash hides a stale row",
+        )
+
     def test_a_delivered_report_is_only_dropped_once_something_replaced_it(self):
         """The drain delivers the older snapshot and the correcting upload then
         fails. The queue has to end up holding the fresh report: dropping the
@@ -1337,9 +1373,10 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
         self.assertIn("QUEUED-0", backend.device_ids(),
                       "the drain never delivered it, so nothing replaced a row")
         self.assertEqual(
-            self.queue_now(), ["THIS-RUN"],
-            "the delivered report left the queue and its correction did not take"
-            " its place, so the pair is owed nothing and the row stays wrong",
+            sorted(self.queue_now()), ["QUEUED-0", "THIS-RUN"],
+            "the correcting upload failed, so both are still owed: dropping the"
+            " delivered one leaves the backend on its payload with a cached hash"
+            " that stops the next run correcting it",
         )
 
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")

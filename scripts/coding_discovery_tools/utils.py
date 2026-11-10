@@ -1555,12 +1555,16 @@ def send_scan_event(
 
 # curl exit codes meaning nothing was ever handed to the backend. Anything else
 # reads as "it may have arrived": a redundant upload beats a row left stale.
-CURL_NEVER_CONNECTED = frozenset({6, 7})
+# 6/7 never opened a socket; the rest failed the TLS handshake, which happens
+# after the socket opens but before any request is written -- the ordinary
+# outcome on a machine whose proxy presents a CA this host does not trust.
+CURL_NEVER_CONNECTED = frozenset({6, 7, 35, 51, 58, 59, 60, 83})
 
 
 def never_connected(returncode: int, connects: str) -> bool:
-    """Whether curl got no connection at all. A dropped packet reports the same
-    timeout as a stalled server, so only the connection count separates them."""
+    """Whether the backend was ever handed a request. A dropped packet reports the
+    same timeout as a stalled server, so only the connection count separates
+    those two; a TLS failure has a connection and still sent nothing."""
     return returncode in CURL_NEVER_CONNECTED or connects == "0"
 
 

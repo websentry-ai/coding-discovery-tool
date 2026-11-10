@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import subprocess
 import threading
 import unittest
 import time
@@ -1933,6 +1934,45 @@ class AHashMatchDoesNotSupersedeThisRunsFailures(_DrivesMain, unittest.TestCase)
             " install of the same tool matched an older stored hash",
         )
 
+
+class ATlsFailureIsNothingReachingTheBackend(_DrivesMain, unittest.TestCase):
+    """A proxy presenting a CA this host does not trust is the documented failure
+    mode for this tool, and it fails *after* the socket opens: curl reports a
+    connection and a TLS exit code, having written no request.
+
+    Read as "it may have arrived", every queued report looks worth retrying, so
+    the drain works through the whole backlog on a device that cannot deliver a
+    single byte -- spending the budget this change exists to protect."""
+
+    def _drain_with_curl_exit(self, code):
+        attempts = []
+        real_run = utils_mod.subprocess.run
+
+        def _fake_curl(cmd, *a, **kw):
+            if isinstance(cmd, list) and "curl" in cmd[0]:
+                attempts.append(cmd)
+                return subprocess.CompletedProcess(
+                    cmd, code, stdout="\n1 000", stderr="simulated")
+            return real_run(cmd, *a, **kw)
+
+        self.seed_queue(_queued(6))
+        with patch.object(utils_mod.subprocess, "run", _fake_curl), \
+             patch("time.sleep", Mock()):
+            self.run_main()
+        # One report may be retried; what matters is that the backlog behind it
+        # is not walked report by report.
+        return len({c[c.index("-d") + 1] for c in attempts if "-d" in c})
+
+    def test_an_untrusted_ca_stops_the_drain_like_a_refusal(self):
+        untrusted = self._drain_with_curl_exit(60)
+        refused = self._drain_with_curl_exit(7)
+
+        self.assertEqual(
+            untrusted, refused,
+            f"a refused connection stopped the drain after {refused} payload(s)"
+            f" and an untrusted CA walked {untrusted}, so the one failure this"
+            " tool is documented to hit is the one that spends the budget",
+        )
 
 class AFullQueueIsNotEvictedByItsOwnRetries(_DrivesMain, unittest.TestCase):
     """The queue is capped and the cap keeps the newest entries, so anything this

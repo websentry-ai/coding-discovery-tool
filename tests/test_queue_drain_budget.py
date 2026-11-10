@@ -1703,7 +1703,7 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
         directory, which is the one place the hash lives. Run one stores the hash,
         the directory goes read-only, and run two then holds the snapshot back
         rather than replacing a row behind a hash it cannot clear -- so nothing
-        stale reaches the backend and the report stays owed."""
+        stale reaches the backend."""
         tools = ({"name": "Claude Code", "version": "1.0",
                   "install_path": "/usr/local/bin/claude"},)
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
@@ -1746,11 +1746,9 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             "the older snapshot replaced the row while the hash describing the"
             " newer one was still on disk and could not be removed",
         )
-        self.assertEqual(
-            self.queue_now(), ["QUEUED-0"],
-            "it was dropped without being delivered, so nothing will send it once"
-            " the directory is writable again",
-        )
+        # Dropped rather than kept, and rightly: the row still holds run one's
+        # payload, so this older one would only take it backwards.
+        self.assertEqual(self.queue_now(), [])
 
 class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
     """The queue is authoritative for what is still owed, and the run can end at
@@ -2075,14 +2073,15 @@ class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
             **kwargs,
         )
 
-    def test_a_report_the_drain_never_reached_leaves_the_hash_alone(self):
-        """The queue holding a report is not itself a reason to distrust the hash.
-        Until the drain actually sends one, the backend's row is whatever this
-        device last uploaded, and the hash describes it correctly.
+    def test_an_untried_report_is_trusted_and_then_superseded(self):
+        """A report the drain never reached has replaced nothing, so the pair's
+        hash still describes the row and is trusted -- no upload is forced, which
+        on an unreachable device would only manufacture a fresh failure.
 
-        Forcing an upload here is not merely wasted: on a device whose backend is
-        unreachable it manufactures one fresh failure per queued pair, and the
-        queue cap then evicts older unique reports to make room for them."""
+        And a hash match says the row already holds this run's payload, so that
+        untried older report is superseded exactly as an upload would supersede
+        it. Kept, the next drain posts it over what is there and the row goes
+        backwards."""
         backend, _ = self._run(
             patch.object(adm.discovery_cache, "get_cached_hash",
                          return_value=self.matching),
@@ -2093,11 +2092,12 @@ class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
         self.assertEqual(
             backend.device_ids(prefix="THIS-RUN"), [],
             "an upload went out for a row nothing had replaced, which on an"
-            " unreachable backend is a new queue entry for every queued pair",
+            " unreachable backend is a fresh queue entry for nothing",
         )
         self.assertEqual(
-            self.queue_now(), ["QUEUED-0"],
-            "the untried report stopped being owed, so nothing will deliver it",
+            self.queue_now(), [],
+            "the row is current and the older report was kept anyway, so the"
+            " next run's drain replaces today's row with it",
         )
 
     def test_the_upload_is_what_drops_the_queued_copy(self):

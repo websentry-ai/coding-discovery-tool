@@ -4505,6 +4505,10 @@ def main():
                         hash_to_store = None
                         if local_payload_hash and cached_hash == local_payload_hash:
                             reported_ok = True  # unchanged -> already current on the backend
+                            # Current on the backend supersedes a queued older
+                            # report for the row just as an upload does, or the
+                            # next drain posts that payload over what is there.
+                            reported_pairs.add((user_name, tool_name))
                             if args.dump:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:

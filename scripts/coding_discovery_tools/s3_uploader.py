@@ -228,9 +228,8 @@ def try_s3_upload(
         kill_grace=curl_kill_grace(deadline),
     )
     if not ok:
-        # The upload itself succeeded, so the backend may well have taken this
-        # payload and only the answer was lost. Say so rather than letting the
-        # caller read it as "never arrived".
+        # The object is in S3, so a lost answer is not the same as never
+        # arriving: the backend may have ingested it already.
         if failure is not None:
             failure["kind"] = "uncertain"
         _report_step_failure("from_s3_request", status, body, err, ctx)

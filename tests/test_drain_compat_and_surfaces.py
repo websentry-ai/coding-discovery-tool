@@ -9,6 +9,7 @@ show, because nothing was renamed.
 
 import json
 import os
+import sys
 import shutil
 import tempfile
 import subprocess
@@ -20,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import scripts.coding_discovery_tools.cache as cache_mod
 import scripts.coding_discovery_tools.s3_uploader as s3_mod
 import scripts.coding_discovery_tools.sweep_connectors as sweep_mod
 import scripts.coding_discovery_tools.utils as utils_mod
@@ -966,10 +968,47 @@ class AConnectedSendThatTimesOutIsStillAMaybe(_ServesABackend):
         self.assertEqual(len(self.server.bodies), 1, "the backend did receive it")
 
 
+def _previous_release_worktree(case):
+    """A checkout of the branch this one merges into, so the *previous release's*
+    own code can be run against files this one wrote. Skips rather than guesses
+    when that ref is not fetched, which is how a shallow CI clone looks."""
+    base = os.environ.get("ROLLBACK_BASE_REF", "origin/staging")
+    have = subprocess.run(["git", "rev-parse", "--verify", f"{base}^{{commit}}"],
+                          capture_output=True, text=True)
+    if have.returncode != 0:
+        case.skipTest(f"{base} is not fetched, so the previous release cannot be run")
+    path = tempfile.mkdtemp(prefix="rollback-base-")
+    shutil.rmtree(path)                      # git wants to create it itself
+    made = subprocess.run(["git", "worktree", "add", "--detach", path, base],
+                          capture_output=True, text=True)
+    if made.returncode != 0:
+        case.skipTest(f"could not check out {base}: {made.stderr[-300:]}")
+
+    def _cleanup():
+        subprocess.run(["git", "worktree", "remove", "--force", path],
+                       capture_output=True, text=True)
+        shutil.rmtree(path, ignore_errors=True)
+
+    case.addCleanup(_cleanup)
+    return path
+
+
 class TheFormatsSurviveARollback(_ServesABackend):
     """The queue and cache files on a device outlive a release. A rollback has to
     read what the new code wrote, and the new code has to read what the old one
     left behind."""
+
+    def setUp(self):
+        super().setUp()
+        # A real temp state dir: these tests write the cache, and the real one is
+        # the developer's own ~/.unbound on this machine.
+        state = Path(self._dir) / ".unbound"
+        state.mkdir(parents=True, exist_ok=True)
+        for attr, value in (("UNBOUND_DIR", state),
+                            ("CACHE_PATH", state / "discovery-cache.json")):
+            patcher = patch.object(cache_mod, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_the_new_code_reads_an_envelope_the_old_code_wrote(self):
         stamp = datetime.now(timezone.utc).isoformat()
@@ -993,6 +1032,91 @@ class TheFormatsSurviveARollback(_ServesABackend):
         [envelope] = json.loads(self.queue_file.read_text())
         self.assertEqual(set(envelope), {"report", "queued_at"})
         datetime.fromisoformat(envelope["queued_at"])   # parses as it always did
+
+    def test_the_old_loader_really_reads_what_the_new_writer_wrote(self):
+        """The test above asserts the envelope's *shape*, which is a proxy. This
+        runs the previous release's own `load_pending_reports` -- the loader an
+        actual rollback would use -- against a file this code wrote."""
+        save_failed_reports(
+            [{"device_id": "NEW", "home_user": "alice",
+              "tools": [{"name": "Claude Code"}]}],
+            replace=True,
+        )
+        base = _previous_release_worktree(self)
+        driver = (
+            "import json;"
+            "from scripts.coding_discovery_tools.utils import load_pending_reports;"
+            "print(json.dumps(load_pending_reports()))"
+        )
+
+        out = subprocess.run(
+            [sys.executable, "-c", driver],
+            cwd=base, capture_output=True, text=True, timeout=120,
+            env={**os.environ,
+                 "AI_DISCOVERY_QUEUE_FILE": str(self.queue_file),
+                 "AI_DISCOVERY_SENTRY_DSN": ""},
+        )
+
+        self.assertEqual(out.returncode, 0,
+                         f"the previous release could not load the file: {out.stderr[-600:]}")
+        self.assertEqual(
+            json.loads(out.stdout.strip()),
+            [{"device_id": "NEW", "home_user": "alice",
+              "tools": [{"name": "Claude Code"}]}],
+            "a rollback reads this queue with the loader above and gets something"
+            " else, so the backlog is lost or mangled on the way back",
+        )
+
+    def test_a_pruned_cache_still_reads_as_a_miss(self):
+        """Clearing a pair's hash deletes a user key from the cache file. An older
+        build reading that file has to see a miss for the pruned pair -- and keep
+        every other pair -- rather than trip over the hole.
+
+        `get_cached_hash` and `read_cache` are byte-identical to the previous
+        release, so the reader here is the one a rollback would use."""
+        cache_mod.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        cache_mod.atomic_write_cache({
+            "tools": {"Claude Code": {"alice": {"payload_hash": "h-alice"},
+                                      "bob": {"payload_hash": "h-bob"}},
+                      "Cursor": {"alice": {"payload_hash": "h-cursor"}}},
+            "run": {"run_id": "keep-me"},
+        })
+
+        self.assertTrue(cache_mod.forget_tool_hash("Claude Code", "alice"))
+
+        self.assertIsNone(
+            cache_mod.get_cached_hash("Claude Code", "alice"),
+            "the pruned pair still reads as current, so the correcting upload is"
+            " skipped and the row the drain replaced stays wrong",
+        )
+        self.assertEqual(cache_mod.get_cached_hash("Claude Code", "bob"), "h-bob",
+                         "pruning one user took another user's hash with it")
+        self.assertEqual(cache_mod.get_cached_hash("Cursor", "alice"), "h-cursor",
+                         "pruning one tool took another tool's hash with it")
+        self.assertEqual(
+            cache_mod.read_cache().get("run", {}).get("run_id"), "keep-me",
+            "pruning a hash dropped the resume checkpoint beside it",
+        )
+
+    def test_a_report_the_old_code_queued_is_actually_delivered(self):
+        """Loading an old-format entry is not sending it. The drain has to put the
+        unwrapped shape on the wire, or a backlog written before the upgrade sits
+        there until it expires."""
+        self.queue_file.write_text(json.dumps([
+            {"device_id": "ANCIENT", "home_user": "alice",
+             "tools": [{"name": "Claude Code"}]},
+        ]))
+
+        [queued] = load_pending_reports()
+        ok, _ = send_report_to_backend(self.url, "test-key-000000", queued)
+
+        self.assertTrue(ok, "the pre-upgrade entry could not be sent at all")
+        # Twice over: a report carrying tools tries the S3 route first, and this
+        # stub does not serve it, so the legacy endpoint sees the same body again.
+        self.assertIn(
+            "ANCIENT", [b.get("device_id") for b in self.sent_bodies()],
+            "the old-format report never reached the backend",
+        )
 
     def test_the_wire_payload_gained_no_keys(self):
         """The deadline work is client-side. A key appearing here means the

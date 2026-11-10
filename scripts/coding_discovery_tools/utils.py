@@ -1553,22 +1553,19 @@ def send_scan_event(
     )
 
 
-# curl exit codes that mean nothing was ever handed to the backend. Any other
-# failure is read as "it may have arrived", which costs a redundant upload at
-# worst, where the opposite mistake leaves a row stale for good.
+# curl exit codes meaning nothing was ever handed to the backend. Anything else
+# reads as "it may have arrived": a redundant upload beats a row left stale.
 CURL_NEVER_CONNECTED = frozenset({6, 7})
 
 
 def never_connected(returncode: int, connects: str) -> bool:
-    """Whether curl got no connection at all. A dropped packet is not in the set
-    above -- curl reports the plain timeout it reports for a stalled server, so
-    the connection count is the only thing that tells those two apart."""
+    """Whether curl got no connection at all. A dropped packet reports the same
+    timeout as a stalled server, so only the connection count separates them."""
     return returncode in CURL_NEVER_CONNECTED or connects == "0"
 
 
 # A host that drops packets rather than refusing them would otherwise hold each
-# attempt for the whole request budget. Generous for a laptop on a slow link,
-# and never longer than the request itself is allowed to take.
+# attempt for the whole request budget.
 CONNECT_TIMEOUT_SECONDS = 10
 # One Sentry event's own budget when the caller has not given it a tighter one.
 SENTRY_EVENT_TIMEOUT_SECONDS = 3
@@ -1579,9 +1576,8 @@ MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 15
 BACKOFF_CAP_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 60
-# How long past its own timeout curl gets before the process gives up on it: a
-# backstop for curl ignoring --max-time. It drops to a second inside a caller's
-# deadline, whose end-of-run tail can itself be under five seconds.
+# How long past its own timeout curl gets before the process gives up on it.
+# Drops to a second inside a deadline, whose tail can be under five.
 CURL_KILL_GRACE_SECONDS = 5
 
 
@@ -1639,15 +1635,13 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
     NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
-    # Too large for THIS endpoint, which is not the same as a bad report: every
-    # data report tries S3 first, and S3 exists for bodies the legacy endpoint
-    # refuses. Retrying here cannot help, but discarding loses the report.
+    # Too large for THIS endpoint, not a bad report: S3 exists for these bodies.
+    # Retrying cannot help, but discarding loses the only copy.
     PAYLOAD_TOO_LARGE = 413
 
     def _left_for_telemetry() -> Optional[float]:
-        """What a failure report may spend. None when the caller set no
-        deadline; otherwise whatever is left of it, so telemetry cannot take the
-        time detection and the completed event still need."""
+        """What a failure report may spend: whatever is left of the deadline, so
+        telemetry cannot take the time detection and the completed event need."""
         if deadline is None:
             return None
         return max(0.0, deadline - time.monotonic())
@@ -1660,16 +1654,12 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
     def _note(kind: str) -> bool:
         """Record how this attempt resolved; True means abandon the send now.
-
-        "uncertain" is not downgraded by a later attempt: once one of them may
-        have reached the backend, a refusal afterwards does not make that
-        untrue, and a caller reading this decides whether to contradict it."""
+        "uncertain" survives a later refusal, which cannot make it untrue."""
         if failure is not None:
             if failure.get("kind") != "uncertain":
                 failure["kind"] = kind
-            # Dropped with the outcome, not before it: a reader that saw the mark
-            # go while the kind still described the previous attempt would take
-            # that stale one for this one's.
+            # Dropped with the outcome, not before: a reader between the two
+            # would take the previous attempt's for this one's.
             failure["sending"] = False
         return stop_if_unreachable and kind == "unreachable"
 
@@ -1767,7 +1757,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     timeout=request_timeout + curl_kill_grace(deadline),
                 )
 
-                # Parse response: stdout = body + "\n" + connections + " " + http_code
                 lines = result.stdout.rsplit("\n", 1)
                 connects, _, status_str = (lines[-1] if lines else "").strip().partition(" ")
                 status_str = status_str.strip()
@@ -1794,8 +1783,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 http_code = int(status_str)
 
                 if 200 <= http_code < 300:
-                    # Recorded, not just returned: a caller that has to decide
-                    # mid-send whether the backend may hold this reads the dict.
                     _note("delivered")
                     return (True, False)
 
@@ -1967,10 +1954,8 @@ def _queued_at_by_report(envelopes: List[Dict]) -> Dict[str, str]:
 
 
 def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
-    """Write failed report envelopes to the queue file, merging with any existing
-    entries unless replace=True, which treats ``reports`` as the complete set
-    still owed. A report already queued keeps its original queued_at, so
-    requeueing it cannot refresh it past QUEUE_MAX_AGE_SECONDS."""
+    """Write report envelopes to the queue, merging unless replace=True, which treats
+    ``reports`` as all that is owed. An entry keeps its queued_at, so it still ages out."""
     try:
         existing = _load_queue_file_safe()
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -2050,9 +2035,8 @@ def _load_queue_file_safe() -> List[Dict]:
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
-    """Write data to a file with restricted permissions (0600 on Unix), swapping
-    it into place: the watchdog can end the process mid-write, and a
-    half-written queue file loads as nothing, costing the whole backlog."""
+    """Write 0600 and swap into place: the watchdog can end the process mid-write,
+    and a half-written queue file loads as nothing, costing the whole backlog."""
     # Ensure the parent exists so a queue-path override with a missing parent
     # doesn't silently drop the write (and lose the failed reports).
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3615,10 +3599,8 @@ def report_to_sentry(
         # outage doesn't silently drop the terminal diagnostic.
         if _sentry_dead_this_run and not priority:
             return
-        # Declined before anything is spent, rather than attempted and dropped:
-        # a skip must not record the signature (which would suppress the same
-        # failure for good), charge the per-run cap, or count against the
-        # breaker below as if the transport were broken.
+        # Declined before anything is spent: a skip must not record the signature,
+        # charge the per-run cap, or count against the breaker as a transport fault.
         event_timeout = SENTRY_EVENT_TIMEOUT_SECONDS
         if max_seconds is not None:
             event_timeout = int(min(event_timeout, max_seconds))
@@ -3765,9 +3747,8 @@ def send_discovery_metrics(
         finally:
             os.close(fd)
 
-        # Metrics run immediately before the completed event, which the backend
-        # needs for its prune manifest. Unbounded, a slow POST here spends the
-        # run's last seconds and the event never goes.
+        # Immediately before the completed event: unbounded, a slow POST here
+        # spends the run's last seconds and the manifest never goes.
         max_time = METRICS_TIMEOUT_SECONDS
         if deadline is not None:
             max_time = int(min(max_time, deadline - time.monotonic()))
@@ -3788,8 +3769,6 @@ def send_discovery_metrics(
             ],
             capture_output=True,
             text=True,
-            # Inside the caller's deadline, as the report send and the S3 steps
-            # are: a short budget's end-of-run tail can be under five seconds.
             timeout=max_time + curl_kill_grace(deadline),
         )
         status = result.stdout.rsplit("\n", 1)[-1].strip()

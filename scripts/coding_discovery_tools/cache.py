@@ -277,8 +277,7 @@ def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:
 
 def forget_tool_hash(tool_name: str, home_user: str) -> bool:
     """Drop the recorded hash for one (tool, home_user) so the next detection
-    uploads instead of treating the backend as already current. Returns whether
-    it is gone afterwards; False means a later run would still read it."""
+    uploads. False means the write did not land and a later run still reads it."""
     cache = read_cache()
     if not cache and CACHE_PATH.exists():
         # read_cache() flattens a read failure into an empty dict, so a file that

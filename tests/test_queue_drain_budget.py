@@ -1477,6 +1477,31 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             " the backend is left on the delivered payload with no correction",
         )
 
+    def test_a_cache_that_cannot_be_read_holds_the_snapshot_back(self):
+        """A different failure from an unwritable directory: the file is there and
+        readable as nothing. `read_cache` flattens a read error into an empty
+        dict, so a corrupt cache looks exactly like a cache with no hash in it --
+        and clearing a hash out of a file we cannot parse is not something we can
+        claim to have done. The snapshot has to stay put."""
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+        cache_path = adm.discovery_cache.CACHE_PATH
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text("{ this is not json")
+
+        backend, _ = self.run_main()
+
+        self.assertEqual(
+            backend.device_ids(), [],
+            "the older snapshot replaced the backend's row while the pair's hash"
+            " could neither be read nor cleared, so nothing can correct it",
+        )
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "it was dropped without being delivered, so nothing will send it"
+            " once the cache is readable again",
+        )
+
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")
     @unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0,
                      "root writes through the directory mode this relies on")

@@ -31,14 +31,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# A request's own ceiling. The run that calls this can lower it: the sweep is
-# best-effort work after the scan has already reported, so it must not keep the
-# process alive past the budget the run was given.
+# A request's own ceiling, which the calling run can lower: the sweep is
+# best-effort and must not outlive the budget that run was given.
 LIST_MAX_TIME = 30
 REPORT_MAX_TIME = 60
-# How long past its own timeout curl is given before the process gives up on it.
-# A backstop for curl not honouring --max-time, so it stays small: the run's
-# deadline is only as real as the longest a single request can hold it.
+# How long past its own timeout curl gets before the process gives up on it:
+# a backstop for --max-time, small because the deadline is only as real as this.
 CURL_KILL_GRACE = 5
 
 REPORT_PATH = "/api/v1/ai-tools/mcp-server-scan/"
@@ -159,9 +157,8 @@ def _auth_header(api_key):
 
 
 def _kill_grace(deadline) -> int:
-    """The backstop for one request, inside a caller's deadline when there is
-    one: an end-of-run tail can be under five seconds on a short budget, and
-    overrunning by more leaves the call running when the watchdog fires."""
+    """The backstop for one request, kept inside a caller's deadline: a short
+    budget's end-of-run tail can itself be under five seconds."""
     return 1 if deadline is not None else CURL_KILL_GRACE
 
 

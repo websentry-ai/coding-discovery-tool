@@ -1745,10 +1745,6 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     ],
                     capture_output=True,
                     text=True,
-                    # A backstop for curl ignoring --max-time. It stays just
-                    # inside a caller's deadline: a short budget's end-of-run
-                    # tail can be under five seconds, and overrunning by more
-                    # than that leaves the call running when the watchdog fires.
                     timeout=request_timeout + curl_kill_grace(deadline),
                 )
 
@@ -3600,12 +3596,10 @@ def report_to_sentry(
         # outage doesn't silently drop the terminal diagnostic.
         if _sentry_dead_this_run and not priority:
             return
-        # An event is a request of its own, taken after the send that failed has
-        # already spent its budget. A caller working to a deadline never
-        # budgeted for it, so with too little left this declines before spending
-        # anything on it: recording the signature would stop the same failure
-        # ever being reported, the per-run cap would be charged for nothing, and
-        # the breaker below would count a skip as the transport being broken.
+        # Declined before anything is spent, rather than attempted and dropped:
+        # a skip must not record the signature (which would suppress the same
+        # failure for good), charge the per-run cap, or count against the
+        # breaker below as if the transport were broken.
         event_timeout = SENTRY_EVENT_TIMEOUT_SECONDS
         if max_seconds is not None:
             event_timeout = int(min(event_timeout, max_seconds))

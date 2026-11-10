@@ -3799,10 +3799,9 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
-    # Set just before the completed event goes out, and read by the abort and
-    # except paths below: once that send has started, the backend may already
-    # hold this run's outcome, and a "failed" event afterwards would contradict
-    # a scan that did its work.
+    # Set just before the completed event goes out: from then on the backend may
+    # already hold this run's outcome, so the abort and except paths below must
+    # not report it as failed.
     _completed_attempted = [False]
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
@@ -4013,10 +4012,8 @@ def main():
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
         # --- Drain pending reports from earlier runs ---
-        # Time-bounded: a backlog must neither delay detection nor outlive the run
-        # budget, and what is left stays queued. Kept ahead of this run's sends,
-        # since the backend replaces rows per tool name and an older report
-        # landing after a fresh one would overwrite it.
+        # Kept ahead of this run's own sends: the backend replaces rows per tool
+        # name, so an older report landing after a fresh one would overwrite it.
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
             if pending:

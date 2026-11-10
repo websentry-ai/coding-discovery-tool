@@ -1700,9 +1700,10 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
                      "root writes through the directory mode this relies on")
     def test_an_unwritable_cache_cannot_leave_a_row_nothing_corrects(self):
         """The same scenario with the real cache and a really unwritable state
-        directory, which is the one place the hash lives. The rule needs no write
-        to hold: run one stores the hash, the directory goes read-only, and run
-        two still delivers the queued report and corrects the row behind it."""
+        directory, which is the one place the hash lives. Run one stores the hash,
+        the directory goes read-only, and run two then holds the snapshot back
+        rather than replacing a row behind a hash it cannot clear -- so nothing
+        stale reaches the backend and the report stays owed."""
         tools = ({"name": "Claude Code", "version": "1.0",
                   "install_path": "/usr/local/bin/claude"},)
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
@@ -1745,15 +1746,10 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             "the older snapshot replaced the row while the hash describing the"
             " newer one was still on disk and could not be removed",
         )
-        self.assertIn(
-            "THIS-RUN", second.device_ids(prefix="THIS-RUN"),
-            "the surviving hash matched the unchanged payload and suppressed this"
-            " run's upload too, so nothing corrected the pair at all",
-        )
         self.assertEqual(
-            self.queue_now(), [],
-            "this run reported the pair itself, so the held-back snapshot is"
-            " superseded and keeping it would only overwrite that report later",
+            self.queue_now(), ["QUEUED-0"],
+            "it was dropped without being delivered, so nothing will send it once"
+            " the directory is writable again",
         )
 
 class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
@@ -1893,6 +1889,71 @@ class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
         )
 
 
+class AFullQueueIsNotEvictedByItsOwnRetries(_DrivesMain, unittest.TestCase):
+    """The queue is capped and the cap keeps the newest entries, so anything this
+    run adds evicts something older. On a device whose backend is unreachable the
+    drain delivers nothing, so no row holds a queued payload and no cached hash is
+    wrong -- and treating every queued identity as a hash miss there manufactured
+    one fresh failure per detected pair, each evicting a unique older report.
+
+    One still gets through: the pair the drain attempted had its hash cleared
+    before the send, which is deliberate -- a kill between delivering and clearing
+    would otherwise leave a stale hash -- so detection sees a real miss for it.
+    That is one entry per run rather than one per pair.
+    """
+
+    TOOLS = tuple({"name": f"Tool{i}", "version": "1.0",
+                   "install_path": f"/usr/local/bin/tool{i}"} for i in range(5))
+
+    def test_an_unreachable_run_does_not_add_one_entry_per_queued_pair(self):
+        sent = {"n": 0}
+
+        def _report_per_tool(*_a, **_k):
+            sent["n"] += 1
+            return {"home_user": "alice", "system_user": None,
+                    "device_id": f"MINE-{sent['n']}",
+                    "tools": [{"name": f"Tool{(sent['n'] - 1) % 5}", "projects": []}]}
+
+        live = (
+            patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+            patch.object(adm, "_install_in_another_users_home", return_value=False),
+            patch.object(adm, "_machine_global_install_disowned", return_value=False),
+            patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+            patch("time.sleep", Mock()),
+        )
+
+        # Run one lands, so every pair has a stored hash. Without that the pairs
+        # are a genuine miss and nothing below is about the queue at all.
+        first, _ = self.run_main(tools=self.TOOLS, users=("alice",),
+                                 fresh_report=_report_per_tool, patches=live)
+        self.assertEqual(len(first.device_ids(prefix="MINE-")), len(self.TOOLS),
+                         "run one did not report every tool, so some pair has no"
+                         " stored hash and would upload regardless")
+
+        sent["n"] = 0            # the same payloads again, so the hashes match
+        self.seed_queue([{"device_id": f"Q-{i:03}", "home_user": "alice",
+                          "tools": [{"name": f"Tool{i % 5}"}]}
+                         for i in range(utils_mod.MAX_QUEUE_SIZE)])
+
+        # Nothing listens: the drain stops on its first send and this run can
+        # deliver nothing either, so no row holds a queued payload.
+        second, _ = self.run_main(
+            domain="http://127.0.0.1:1", tools=self.TOOLS, users=("alice",),
+            fresh_report=_report_per_tool, patches=live,
+        )
+
+        self.assertEqual(second.device_ids(), [],
+                         "something reached the backend, so this is not the"
+                         " unreachable case the cap interacts with")
+        mine = [q for q in self.queue_now() if q.startswith("MINE-")]
+        self.assertLessEqual(
+            len(mine), 1,
+            f"this run added {len(mine)} entries to a full queue against a backend"
+            " it could not reach, and the cap evicted that many unique older"
+            f" reports to hold them: {mine}",
+        )
+
+
 class TwoInstallsOfOneToolShareOneRow(_DrivesMain, unittest.TestCase):
     """The resume key carries the install path, so two installs of the same tool
     name are separate iterations -- but the backend replaces rows per tool name,
@@ -2014,20 +2075,29 @@ class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
             **kwargs,
         )
 
-    def test_the_correcting_upload_goes_out_despite_a_matching_hash(self):
+    def test_a_report_the_drain_never_reached_leaves_the_hash_alone(self):
+        """The queue holding a report is not itself a reason to distrust the hash.
+        Until the drain actually sends one, the backend's row is whatever this
+        device last uploaded, and the hash describes it correctly.
+
+        Forcing an upload here is not merely wasted: on a device whose backend is
+        unreachable it manufactures one fresh failure per queued pair, and the
+        queue cap then evicts older unique reports to make room for them."""
         backend, _ = self._run(
             patch.object(adm.discovery_cache, "get_cached_hash",
                          return_value=self.matching),
         )
 
         self.assertEqual(backend.device_ids(prefix="QUEUED-"), [],
-                         "the drain delivered it, so the queue is not what made"
-                         " detection distrust the hash")
-        self.assertIn(
-            "THIS-RUN", backend.device_ids(prefix="THIS-RUN"),
-            "a matching hash suppressed the upload while an older report for the"
-            " same pair sat in the queue, so a row the drain may already have"
-            " replaced stays wrong until the tool's config changes",
+                         "the drain delivered it, so this is not the untried case")
+        self.assertEqual(
+            backend.device_ids(prefix="THIS-RUN"), [],
+            "an upload went out for a row nothing had replaced, which on an"
+            " unreachable backend is a new queue entry for every queued pair",
+        )
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "the untried report stopped being owed, so nothing will deliver it",
         )
 
     def test_the_upload_is_what_drops_the_queued_copy(self):

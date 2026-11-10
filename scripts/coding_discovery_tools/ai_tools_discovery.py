@@ -4005,8 +4005,10 @@ def main():
             (home_user, tool_key.split(":", 1)[0])
             for tool_key, home_user in resume_done
         }
-        # (home_user, tool) the queue holds a report for. The drain may replace
-        # those rows, so their cached hash cannot stand in for an upload.
+        # (home_user, tool) whose row may now hold a queued older payload: the
+        # drain delivered one, or discarded one an earlier attempt may have put in
+        # S3. Their cached hash cannot stand in for an upload. A report that is
+        # still owed has replaced nothing, and its hash is cleared before it goes.
         queued_pairs = set()
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
@@ -4022,9 +4024,6 @@ def main():
             pending = load_pending_reports()
             if pending:
                 logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
-                queued_pairs.update(
-                    pair for pair in map(_report_identity, pending) if pair
-                )
                 drain_budget = _drain_budget_seconds(
                     args.timeout, time.monotonic() - t_start
                 )
@@ -4057,6 +4056,8 @@ def main():
                         failure=failure, stop_if_unreachable=True,
                     )
                     if success:
+                        if pair:
+                            queued_pairs.add(pair)
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
                         owed_from_queue.append(queued_report)
@@ -4069,6 +4070,10 @@ def main():
                             )
                             break
                     else:
+                        # Discarded, but an earlier attempt may have reached S3 and
+                        # been ingested, so the row may hold this payload after all.
+                        if pair:
+                            queued_pairs.add(pair)
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # Now, not at the end: an abort during detection skips the persist
                 # step, and the next run would replay these over this run's uploads.

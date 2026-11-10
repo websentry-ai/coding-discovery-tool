@@ -1796,41 +1796,29 @@ class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
             " pair, so an interruption there replays it over what was just sent",
         )
 
-    def test_the_untried_tail_is_filtered_before_it_is_requeued(self):
-        """An early stop requeues the tail wholesale. A pair the resumed run has
-        already reported must not go back on the queue to overwrite it next run."""
-        other = {"device_id": "Q-KEEP", "home_user": "bob",
-                 "tools": [{"name": "Cursor"}]}
+    def test_a_resumed_install_does_not_drop_a_queued_report_for_its_name(self):
+        """The resume checkpoint records installs; the backend keys rows by name.
+        So a resumed install having been reported says nothing about whether a
+        queued report for the same name is the older payload or a newer one that
+        failed after it -- and dropping it when it is newer loses it for good,
+        where delivering it when it is older costs one run, since its hash is
+        cleared before it goes and the next run re-uploads."""
         superseded = {"device_id": "Q-OLD", "home_user": "alice",
                       "tools": [{"name": "Claude Code"}]}
-        # The superseded one sits BEHIND the stop point, so it reaches the queue as
-        # part of the untried tail rather than being skipped report by report.
-        self.seed_queue([other, superseded])
+        self.seed_queue([superseded])
 
-        at_detection = {}
-
-        def _probe():
-            at_detection["queue"] = (
-                [e["report"]["device_id"]
-                 for e in json.loads(self.queue_file.read_text())]
-                if self.queue_file.exists() else []
-            )
-            return []
-
-        self.run_main(
+        backend, _ = self.run_main(
             patches=(
-                patch.object(adm, "DRAIN_BUDGET_SECONDS", 0),
-                patch.object(adm, "get_all_users_linux", side_effect=_probe),
                 patch.object(adm.discovery_cache, "resumable_done",
-                             return_value={("Claude Code:/usr/local/bin/claude", "alice")}),
+                             return_value={("Claude Code:/usr/local/bin/claude",
+                                            "alice")}),
             ),
         )
 
-        # The filter at persist would catch it, but an abort never reaches persist.
         self.assertEqual(
-            at_detection.get("queue"), ["Q-KEEP"],
-            "the untried tail went to disk without checking what this run had"
-            " already reported, so an abort would leave it there",
+            backend.device_ids(prefix="Q-"), ["Q-OLD"],
+            "the resumed install's name claimed the row, so a report that may be"
+            " the newer payload was dropped unsent and is gone",
         )
 
     def test_what_the_drain_settled_is_off_disk_before_detection(self):

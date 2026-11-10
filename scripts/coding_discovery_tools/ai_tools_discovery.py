@@ -3999,12 +3999,13 @@ def main():
         # Separate from this run's own failures so they requeue ahead of them,
         # and so the cap drops the oldest first.
         owed_from_queue = []
-        # (home_user, tool) a fresher report has gone out for, by this run or the
-        # run it resumed. A queued report for one is an overwrite, so it is dropped.
-        reported_pairs = {
-            (home_user, tool_key.split(":", 1)[0])
-            for tool_key, home_user in resume_done
-        }
+        # (home_user, tool) this run has sent a fresher report for. Not seeded from
+        # the resume checkpoint: that records installs, while the backend keys rows
+        # by name, so a resumed install cannot say whether a queued report for the
+        # same name is older than the row or newer than it. Delivering one that is
+        # older costs a single run -- its hash is cleared before it goes, so the
+        # next run re-uploads -- where dropping one that is newer loses it for good.
+        reported_pairs = set()
         # (home_user, tool) whose row may now hold a queued older payload: the
         # drain delivered one, or discarded one an earlier attempt may have put in
         # S3. Their cached hash cannot stand in for an upload. A report that is
@@ -4077,9 +4078,6 @@ def main():
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # Now, not at the end: an abort during detection skips the persist
                 # step, and the next run would replay these over this run's uploads.
-                # Filtered first, because an early stop above requeues the untried
-                # tail wholesale and this write is what puts it back on disk.
-                owed_from_queue[:] = _drop_superseded(owed_from_queue, reported_pairs)
                 save_failed_reports(owed_from_queue, replace=True)
                 logger.info("")
 

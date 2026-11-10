@@ -4069,6 +4069,9 @@ def main():
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
                 # Now, not at the end: an abort during detection skips the persist
                 # step, and the next run would replay these over this run's uploads.
+                # Filtered first, because an early stop above requeues the untried
+                # tail wholesale and this write is what puts it back on disk.
+                owed_from_queue[:] = _drop_superseded(owed_from_queue, reported_pairs)
                 save_failed_reports(owed_from_queue, replace=True)
                 logger.info("")
 

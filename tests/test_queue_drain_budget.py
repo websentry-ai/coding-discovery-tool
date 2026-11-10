@@ -1887,6 +1887,65 @@ class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
         )
 
 
+class AHashMatchDoesNotSupersedeThisRunsFailures(_DrivesMain, unittest.TestCase):
+    """A hash match and a successful upload both say the row is current, but they
+    do not supersede the same things.
+
+    An upload is the newest thing that happened, so a failure recorded before it
+    is stale. A hash match only says the current payload equals what some earlier
+    run uploaded -- it is not a fresh send. A failure recorded this run carries a
+    payload the backend has never seen, which is newer than the row, so it has to
+    stay owed. Dropping it would discard today's data in favour of older state.
+
+    Reachable because two installs of one tool name are separate iterations over
+    the same row, with different payloads."""
+
+    TOOLS = ({"name": "Claude Code", "version": "1.0",
+              "install_path": "/usr/local/bin/claude"},
+             {"name": "Claude Code", "version": "1.0",
+              "install_path": "/opt/homebrew/bin/claude"})
+
+    def test_a_failure_for_one_install_survives_a_hash_match_on_the_other(self):
+        sent = {"n": 0}
+
+        def _report_per_install(*_a, **_k):
+            sent["n"] += 1
+            return {"home_user": "alice", "system_user": None,
+                    "device_id": f"INSTALL-{sent['n']}",
+                    "tools": [{"name": "Claude Code", "projects": [],
+                               "install_path": self.TOOLS[sent["n"] - 1]["install_path"]}]}
+
+        # The stored hash matches the SECOND install's payload only, so the first
+        # is a real miss that uploads and fails, and the second is skipped.
+        second_payload = {"name": "Claude Code", "projects": [],
+                          "install_path": self.TOOLS[1]["install_path"]}
+
+        backend, _ = self.run_main(
+            tools=self.TOOLS, users=("alice",), fresh_report=_report_per_install,
+            rule=statuses({"INSTALL-1": 500}),
+            patches=(
+                patch.object(adm.discovery_cache, "get_cached_hash",
+                             return_value=compute_payload_hash(second_payload)),
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch("time.sleep", Mock()),
+            ),
+        )
+
+        self.assertEqual(
+            backend.device_ids(prefix="INSTALL-2"), [],
+            "the second install uploaded, so its hash did not match and this is"
+            " not the skip the asymmetry is about",
+        )
+        self.assertEqual(
+            self.queue_now(), ["INSTALL-1"],
+            "a payload the backend has never seen was dropped because another"
+            " install of the same tool matched an older stored hash",
+        )
+
+
 class AFullQueueIsNotEvictedByItsOwnRetries(_DrivesMain, unittest.TestCase):
     """The queue is capped and the cap keeps the newest entries, so anything this
     run adds evicts something older. On a device whose backend is unreachable the

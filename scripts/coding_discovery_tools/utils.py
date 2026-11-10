@@ -1627,7 +1627,10 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             resolved: "delivered" (accepted), "unreachable" (nothing reached the
             backend), "uncertain" (sent, but no answer came, so it may have
             landed) or "rejected" (answered and refused). "uncertain" wins over
-            a later attempt, since it cannot be made untrue by one.
+            a later attempt, since it cannot be made untrue by one. Its
+            "sending" says whether a request is on the wire right now, which a
+            reader on another thread needs: between attempts the kind describes
+            the send, while during one it describes only the attempt before.
         stop_if_unreachable: give up on the first failure that never reached the
             backend, without retrying or sleeping. A caller whose queue is itself
             the retry gains nothing from a curve that cannot connect.
@@ -1649,14 +1652,25 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             return None
         return max(0.0, deadline - time.monotonic())
 
+    def _sending(state: bool) -> None:
+        """Whether a request is on the wire. Set around each attempt, because a
+        request that has not resolved may still be being accepted."""
+        if failure is not None:
+            failure["sending"] = state
+
     def _note(kind: str) -> bool:
         """Record how this attempt resolved; True means abandon the send now.
 
         "uncertain" is not downgraded by a later attempt: once one of them may
         have reached the backend, a refusal afterwards does not make that
         untrue, and a caller reading this decides whether to contradict it."""
-        if failure is not None and failure.get("kind") != "uncertain":
-            failure["kind"] = kind
+        if failure is not None:
+            if failure.get("kind") != "uncertain":
+                failure["kind"] = kind
+            # Dropped with the outcome, not before it: a reader that saw the mark
+            # go while the kind still described the previous attempt would take
+            # that stale one for this one's.
+            failure["sending"] = False
         return stop_if_unreachable and kind == "unreachable"
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
@@ -1733,6 +1747,7 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                     _note("unreachable")
                     return (False, True)
             try:
+                _sending(True)
                 result = subprocess.run(
                     [
                         "curl", "-s",

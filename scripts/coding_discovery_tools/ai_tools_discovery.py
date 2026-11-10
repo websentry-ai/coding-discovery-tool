@@ -3801,8 +3801,10 @@ def main():
     _finished = [False]
     # Set just before the completed event goes out: from then on the backend may
     # already hold this run's outcome, so the abort and except paths below must
-    # not report it as failed.
+    # not report it as failed -- unless the send itself says otherwise, below.
     _completed_attempted = [False]
+    # How that send is faring, written by it and read from the aborting thread.
+    completed_outcome: Dict = {}
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
     # safely even if they fire before capture (in which case it is still None).
@@ -3864,6 +3866,15 @@ def main():
         t.start()
         t.join(timeout=join_timeout)
 
+    def _backend_lacks_the_outcome() -> bool:
+        """Whether the completed event definitely never reached the backend, so
+        saying the run failed cannot contradict it. A request on the wire has not
+        resolved and may be being accepted as this is read, so it does not
+        count; only the last resolved attempt does."""
+        if completed_outcome.get("sending"):
+            return False
+        return completed_outcome.get("kind") in ("unreachable", "rejected")
+
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between
         # the try-body completing and finally cancelling the watchdog, where a
@@ -3885,9 +3896,10 @@ def main():
             )
         except Exception:
             pass
-        if not _completed_attempted[0]:
+        if not _completed_attempted[0] or _backend_lacks_the_outcome():
             # The backend has not heard how this run ended, so this event is the
-            # only thing that will tell it. The cleanup above happens either way.
+            # only thing that will tell it -- a retry curve that has reached
+            # nothing included. The cleanup above happens either way.
             _report_failed_bounded(error_type, message)
         os._exit(1)
 
@@ -3992,12 +4004,6 @@ def main():
         # Queued reports this run did not get to. Separate so they go back ahead of
         # this run's own failures, and are the first dropped when the queue is capped.
         owed_from_queue = []
-        # Snapshots the drain did deliver, by pair. The backend now holds each of
-        # these older payloads, so one is owed again when the pair is still on the
-        # device and this run never managed to report it: the cached hash describes
-        # a newer payload and would stop the next run correcting the row. A pair
-        # that is gone needs no correction -- the manifest prunes it.
-        delivered_from_queue = {}
         # (home_user, tool) a fresher report has already gone out for -- by this
         # run, or by the run this one resumed. A queued report for one of them is
         # an overwrite waiting to happen, so it is dropped rather than sent.
@@ -4042,6 +4048,18 @@ def main():
                             f" {len(owed_from_queue)} report(s) stay queued."
                         )
                         break
+                    # Sending this replaces the row with an older payload, and
+                    # even a discarded report may have landed via S3 -- so the
+                    # pair's hash goes first, and if it cannot be removed then
+                    # nothing is sent behind it.
+                    pair = _report_identity(queued_report)
+                    if pair and not discovery_cache.forget_tool_hash(pair[1], pair[0]):
+                        owed_from_queue.append(queued_report)
+                        logger.info(
+                            "  · Cached hash for this pair could not be cleared;"
+                            " report stays queued rather than going out behind it"
+                        )
+                        continue
                     failure = {}
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
@@ -4049,9 +4067,6 @@ def main():
                         failure=failure, stop_if_unreachable=True,
                     )
                     if success:
-                        delivered_pair = _report_identity(queued_report)
-                        if delivered_pair:
-                            delivered_from_queue[delivered_pair] = queued_report
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
                         owed_from_queue.append(queued_report)
@@ -4580,13 +4595,8 @@ def main():
         # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
             # Backlog first: the queue keeps its newest entries when it hits the cap.
-            present_pairs = {(hu, tn) for hu, tn, _ in scanned_manifest}
-            uncorrected = [r for pair, r in delivered_from_queue.items()
-                           if pair in present_pairs and pair not in reported_pairs]
-            still_owed = (_drop_superseded(owed_from_queue, reported_pairs)
-                          + uncorrected + failed_reports)
-            superseded = (len(owed_from_queue) + len(failed_reports)
-                          - len(still_owed) + len(uncorrected))
+            still_owed = _drop_superseded(owed_from_queue, reported_pairs) + failed_reports
+            superseded = len(owed_from_queue) + len(failed_reports) - len(still_owed)
             if superseded:
                 logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
             if still_owed:
@@ -4749,7 +4759,6 @@ def main():
         # than the budget less the tail: its manifest is what the backend
         # set-diffs to prune tools that are no longer installed.
         _completed_attempted[0] = True
-        completed_outcome = {}
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
@@ -4801,7 +4810,7 @@ def main():
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal
         # paths may have already reported, in which case this is a no-op).
-        if _completed_attempted[0]:
+        if _completed_attempted[0] and not _backend_lacks_the_outcome():
             logger.error("Not sending scan failed event - the outcome is already reported")
         elif device_id and run_id:
             logger.error("Sending scan failed event due to error...")

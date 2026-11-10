@@ -737,6 +737,49 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             " fired, and it was told the run failed as well",
         )
 
+    def test_an_abort_between_failed_completion_attempts_reports(self):
+        """The counterweight to the two above. Between attempts there is nothing
+        on the wire, and the last one never reached the backend -- so the run has
+        no terminal outcome anywhere and this report is the only thing that will
+        give it one. Suppressing here leaves the scan in progress."""
+        armed = {}
+        real_backoff = utils_mod._backoff
+
+        def _fire_between_attempts(attempt, deadline=None):
+            # Entered after an attempt resolved and before the wait, which is
+            # exactly where an abort finds no request on the wire.
+            if "fire" in armed and not armed.get("fired"):
+                armed["fired"] = True
+                armed["fire"]()
+            return real_backoff(attempt, deadline)
+
+        backend, _ = self.run_main(
+            timeout="900",
+            # Hangs up on the completed event, read as never having connected, so
+            # every attempt resolves with the backend holding nothing.
+            rule=lambda body: None if body.get("scan_event") == "completed" else 200,
+            patches=(
+                _capturing_timer(armed),
+                patch.object(utils_mod, "_backoff", _fire_between_attempts),
+                patch.object(utils_mod, "never_connected",
+                             side_effect=lambda rc, c: True),
+                patch.object(adm.os, "_exit", Mock()),
+                patch("time.sleep", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"), "no abort fired between attempts")
+        # The post-send path reports this scenario too, as CompletedEventUndelivered,
+        # so the error type is the only thing that shows the abort itself spoke --
+        # and it goes first, which is what makes the run's outcome the abort's.
+        reported = [b.get("scan_error", {}).get("error_type")
+                    for b in backend.received if b.get("scan_event") == "failed"]
+        self.assertEqual(
+            reported[:1], ["Timeout"],
+            "the abort found nothing on the wire and nothing delivered, and still"
+            f" said nothing; the run's outcome was reported as {reported}",
+        )
+
     def test_an_abort_during_a_retried_completion_stays_quiet(self):
         """A refused attempt and a retry that is being accepted. Reading the first
         attempt's refusal as the state of the send reports a failure over a
@@ -1276,6 +1319,61 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
     not consulted for it, whether the drain delivered that report or left it
     owed. Nothing is written to the cache, so there is no write that can fail."""
 
+    def test_the_hash_goes_before_the_snapshot_does(self):
+        """Clearing after the send leaves a window where the backend already holds
+        the older payload and a kill stops the clear. And a report the endpoint
+        refuses outright is discarded, so for that one the clear is the only thing
+        left that stops detection trusting a row an earlier attempt may have
+        replaced over S3."""
+        backend = _Backend(statuses({"QUEUED-0": 422}))
+        posted_when_cleared = []
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        def _spy(tool, user):
+            posted_when_cleared.append((user, tool, len(backend.received)))
+            return True
+
+        try:
+            self.run_main(
+                backend=backend,
+                patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
+                                      side_effect=_spy),),
+            )
+        finally:
+            backend.close()
+
+        self.assertEqual(
+            posted_when_cleared, [("alice", "Claude Code", 0)],
+            "the pair's hash was not cleared ahead of everything this run sends,"
+            " so a discarded or half-delivered snapshot can leave a row that"
+            " detection goes on treating as current",
+        )
+        self.assertEqual(self.queue_now(), [],
+                         "422 is permanent; requeueing it would never end")
+
+    def test_a_clear_that_did_not_land_holds_the_snapshot_back(self):
+        """Nothing this run remembers about a failed clear outlives it, so the
+        older snapshot must not go out behind a hash that still describes the row
+        it would replace. The report stays for a later run to try again."""
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
+                                  return_value=False),),
+        )
+
+        self.assertEqual(
+            backend.device_ids(), [],
+            "it went out behind a hash that still described the row it replaced",
+        )
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "the report was dropped although it was never delivered, so nothing"
+            " will ever send it again",
+        )
+
     def test_the_correcting_upload_actually_goes_out(self):
         """End to end with the real cache: run one uploads and records its hash,
         then run two finds an older report queued for the same pair. The backend
@@ -1311,12 +1409,12 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             " left holding the snapshot the drain delivered",
         )
 
-    def test_a_pair_that_errors_after_its_snapshot_landed_stays_owed(self):
+    def test_a_pair_that_errors_after_its_snapshot_landed_loses_its_hash(self):
         """The drain replaces the row with the older payload and this run then
-        errors on that pair, so it never gets to correct it. The cached hash still
-        describes the newer payload, so unless the report stays owed the next run
-        reads a match, skips the upload, and the backend keeps the old snapshot
-        for good -- a per-tool permission error is enough to get here."""
+        errors on that pair, so it never gets to correct it -- a per-tool
+        permission error is enough. What stops the next run reading a hash match
+        and skipping the upload for good is that the hash is already gone from
+        disk, which no error later in this run can undo."""
         tools = ({"name": "Claude Code", "version": "1.0",
                   "install_path": "/usr/local/bin/claude"},)
         fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
@@ -1341,10 +1439,11 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
                       "the drain never delivered it, so no row was replaced")
         self.assertEqual(backend.device_ids(prefix="THIS-RUN"), [],
                          "the pair did not error, so this is not the path tested")
-        self.assertEqual(
-            self.queue_now(), ["QUEUED-0"],
+        self.assertIsNone(
+            adm.discovery_cache.get_cached_hash("Claude Code", "alice"),
             "the pair errored after its older snapshot reached the backend and"
-            " nothing stayed owed for it, so the cached hash hides a stale row",
+            " its hash survived, so the next run reads a match and never"
+            " corrects the row",
         )
 
     def test_a_delivered_report_is_only_dropped_once_something_replaced_it(self):
@@ -1373,10 +1472,9 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
         self.assertIn("QUEUED-0", backend.device_ids(),
                       "the drain never delivered it, so nothing replaced a row")
         self.assertEqual(
-            sorted(self.queue_now()), ["QUEUED-0", "THIS-RUN"],
-            "the correcting upload failed, so both are still owed: dropping the"
-            " delivered one leaves the backend on its payload with a cached hash"
-            " that stops the next run correcting it",
+            self.queue_now(), ["THIS-RUN"],
+            "the correcting upload failed and nothing is owed for the pair, so"
+            " the backend is left on the delivered payload with no correction",
         )
 
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")
@@ -1425,14 +1523,19 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             "the hash this test is about never survived, so it proves nothing",
         )
         self.assertEqual(
-            second.device_ids(), ["QUEUED-0"],
-            "the queued report was held back, so this is not the case where an"
-            " older snapshot reaches the backend",
+            second.device_ids(), [],
+            "the older snapshot replaced the row while the hash describing the"
+            " newer one was still on disk and could not be removed",
         )
         self.assertIn(
             "THIS-RUN", second.device_ids(prefix="THIS-RUN"),
-            "the surviving hash matched the unchanged payload and suppressed the"
-            " upload, so the backend keeps the row the drain delivered",
+            "the surviving hash matched the unchanged payload and suppressed this"
+            " run's upload too, so nothing corrected the pair at all",
+        )
+        self.assertEqual(
+            self.queue_now(), [],
+            "this run reported the pair itself, so the held-back snapshot is"
+            " superseded and keeping it would only overwrite that report later",
         )
 
 class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):

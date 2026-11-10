@@ -780,6 +780,46 @@ class AReportedRunStaysReported(_DrivesMain, unittest.TestCase):
             f" said nothing; the run's outcome was reported as {reported}",
         )
 
+    def test_an_abort_before_the_completion_leaves_the_wire_reports(self):
+        """The window between claiming the completed send and putting anything on
+        the wire: building the payload, serialising it, opening the temp file. An
+        abort there has nothing recorded to read -- no request in flight and no
+        attempt resolved -- and nothing has reached the backend, so the failure
+        report is the only thing that will ever close the run.
+
+        Fired from the serialisation of the completed payload itself, which is in
+        that window and is the one send this is about -- keyed on the payload so it
+        cannot land on the in_progress or metrics send instead."""
+        armed = {}
+        real_dumps = utils_mod.json.dumps
+
+        def _fire_while_serialising_the_completion(obj, *a, **kw):
+            if (isinstance(obj, dict) and obj.get("scan_event") == "completed"
+                    and "fire" in armed and not armed.get("fired")):
+                armed["fired"] = True
+                armed["fire"]()
+            return real_dumps(obj, *a, **kw)
+
+        backend, _ = self.run_main(
+            timeout="900",
+            patches=(
+                _capturing_timer(armed),
+                patch.object(utils_mod.json, "dumps",
+                             _fire_while_serialising_the_completion),
+                patch.object(adm.os, "_exit", Mock()),
+            ),
+        )
+
+        self.assertTrue(armed.get("fired"),
+                        "the abort never fired inside the window under test")
+        reported = [b.get("scan_error", {}).get("error_type")
+                    for b in backend.received if b.get("scan_event") == "failed"]
+        self.assertIn(
+            "Timeout", reported,
+            "the abort read an unsent completion as one the backend might hold,"
+            f" so it said nothing and the run has no outcome of its own: {reported}",
+        )
+
     def test_an_abort_during_a_retried_completion_stays_quiet(self):
         """A refused attempt and a retry that is being accepted. Reading the first
         attempt's refusal as the state of the send reports a failure over a

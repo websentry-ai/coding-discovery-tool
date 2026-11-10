@@ -3870,10 +3870,13 @@ def main():
 
     def _backend_lacks_the_outcome() -> bool:
         """Whether the completed event definitely never reached the backend. One
-        still on the wire may be being accepted, so only a resolved attempt counts."""
+        still on the wire may be being accepted, so only a resolved attempt counts;
+        nothing resolved and nothing on the wire means nothing has gone out yet,
+        which includes the stretch between the flag above and the first request."""
         if completed_outcome.get("sending"):
             return False
-        return completed_outcome.get("kind") in ("unreachable", "rejected")
+        kind = completed_outcome.get("kind")
+        return kind is None or kind in ("unreachable", "rejected")
 
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between

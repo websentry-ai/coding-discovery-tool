@@ -4598,7 +4598,11 @@ def main():
         # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
             # Backlog first: the queue keeps its newest entries when it hits the cap.
-            still_owed = _drop_superseded(owed_from_queue, reported_pairs) + failed_reports
+            # This run's own failures are filtered too: two installs of one tool
+            # name are separate iterations but a single row on the backend, so a
+            # failure for the first can outlive a success for the second.
+            still_owed = _drop_superseded(owed_from_queue + failed_reports,
+                                          reported_pairs)
             superseded = len(owed_from_queue) + len(failed_reports) - len(still_owed)
             if superseded:
                 logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")

@@ -302,7 +302,8 @@ class _DrivesMain:
         )
         if fresh_report is not None:
             detector.generate_single_tool_report.side_effect = (
-                lambda *_a, **_k: dict(fresh_report)
+                fresh_report if callable(fresh_report)
+                else (lambda *_a, **_k: dict(fresh_report))
             )
 
         argv = [
@@ -1891,6 +1892,49 @@ class ASupersededReportLeavesDiskAtOnce(_DrivesMain, unittest.TestCase):
             f" held a report for, so every upload pays for it: {writes}",
         )
 
+
+class TwoInstallsOfOneToolShareOneRow(_DrivesMain, unittest.TestCase):
+    """The resume key carries the install path, so two installs of the same tool
+    name are separate iterations -- but the backend replaces rows per tool name,
+    so they are one row. A failure for one of them must not outlive a success for
+    the other: queued, it goes out on the next run and replaces what did land."""
+
+    TOOLS = ({"name": "Claude Code", "version": "1.0",
+              "install_path": "/usr/local/bin/claude"},
+             {"name": "Claude Code", "version": "1.0",
+              "install_path": "/opt/homebrew/bin/claude"})
+
+    def test_a_failure_for_one_install_does_not_outlive_the_other_s_success(self):
+        sent = {"n": 0}
+
+        def _report_per_install(*_a, **_k):
+            sent["n"] += 1
+            return {"home_user": "alice", "system_user": None,
+                    "device_id": f"INSTALL-{sent['n']}",
+                    "tools": [{"name": "Claude Code", "projects": []}]}
+
+        # The first install's report fails every attempt; the second's lands.
+        backend, _ = self.run_main(
+            tools=self.TOOLS, users=("alice",), fresh_report=_report_per_install,
+            rule=statuses({"INSTALL-1": 500}),
+            patches=(
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch("time.sleep", Mock()),
+            ),
+        )
+
+        self.assertIn("INSTALL-2", backend.device_ids(prefix="INSTALL-2"),
+                      "the second install never landed, so nothing superseded the"
+                      " first and this is not the case under test")
+        self.assertEqual(
+            self.queue_now(), [],
+            "the failed report for the other install stayed owed after a send for"
+            " the same row succeeded, so the next run replaces what landed today"
+            " with it",
+        )
 
 class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
     """The cache says what we last uploaded. A queued older report says the drain

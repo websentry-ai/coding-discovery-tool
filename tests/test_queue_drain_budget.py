@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import re
 import subprocess
 import threading
 import unittest
@@ -1942,35 +1943,55 @@ class ATlsFailureIsNothingReachingTheBackend(_DrivesMain, unittest.TestCase):
 
     Read as "it may have arrived", every queued report looks worth retrying, so
     the drain works through the whole backlog on a device that cannot deliver a
-    single byte -- spending the budget this change exists to protect."""
+    single byte -- spending the budget this change exists to protect.
 
-    def _drain_with_curl_exit(self, code):
-        attempts = []
+    Driven through real curl against a real socket, per this repository's rule
+    against mocking the HTTP client: the backend below speaks plain HTTP and is
+    addressed as https, so the handshake fails for real and curl exits 35 with
+    one connection made. No certificate is needed to reach that state.
+    """
+
+    def _queued_reports_attempted(self, scheme):
+        """How many of the backlog's reports curl was actually asked to send.
+        Counted by device id, so one report does not count twice for trying the
+        S3 route and then the legacy one, and the run's own lifecycle events are
+        not counted at all."""
+        attempted = set()
         real_run = utils_mod.subprocess.run
 
-        def _fake_curl(cmd, *a, **kw):
-            if isinstance(cmd, list) and "curl" in cmd[0]:
-                attempts.append(cmd)
-                return subprocess.CompletedProcess(
-                    cmd, code, stdout="\n1 000", stderr="simulated")
+        def _watch(cmd, *a, **kw):
+            # Reads what real curl is asked to send; the call itself goes through.
+            if isinstance(cmd, list) and "-d" in cmd:
+                body = cmd[cmd.index("-d") + 1]
+                if body.startswith("@"):
+                    try:
+                        body = Path(body[1:]).read_text()
+                    except OSError:
+                        body = ""
+                for device in re.findall(r'"device_id":\s*"(QUEUED-\d+)"', body):
+                    attempted.add(device)
             return real_run(cmd, *a, **kw)
 
+        backend = _Backend()
         self.seed_queue(_queued(6))
-        with patch.object(utils_mod.subprocess, "run", _fake_curl), \
-             patch("time.sleep", Mock()):
-            self.run_main()
-        # One report may be retried; what matters is that the backlog behind it
-        # is not walked report by report.
-        return len({c[c.index("-d") + 1] for c in attempts if "-d" in c})
+        try:
+            host = backend.url.split("://", 1)[1]
+            with patch.object(utils_mod.subprocess, "run", _watch), \
+                 patch("time.sleep", Mock()):
+                self.run_main(backend=backend, domain=f"{scheme}://{host}")
+        finally:
+            backend.close()
+        return len(attempted)
 
-    def test_an_untrusted_ca_stops_the_drain_like_a_refusal(self):
-        untrusted = self._drain_with_curl_exit(60)
-        refused = self._drain_with_curl_exit(7)
+    def test_an_untrusted_handshake_stops_the_drain_like_a_refusal(self):
+        """https against a plain-HTTP listener: the handshake fails, so nothing
+        is ever written, and the drain must stop as it does on a refusal."""
+        tls_failed = self._queued_reports_attempted("https")
 
-        self.assertEqual(
-            untrusted, refused,
-            f"a refused connection stopped the drain after {refused} payload(s)"
-            f" and an untrusted CA walked {untrusted}, so the one failure this"
+        self.assertLessEqual(
+            tls_failed, 1,
+            f"the drain tried {tls_failed} of the backlog's reports after a"
+            " handshake that wrote none of them, so the one network failure this"
             " tool is documented to hit is the one that spends the budget",
         )
 

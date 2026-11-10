@@ -1909,9 +1909,13 @@ class TwoInstallsOfOneToolShareOneRow(_DrivesMain, unittest.TestCase):
 
         def _report_per_install(*_a, **_k):
             sent["n"] += 1
+            # The payloads differ, as two real installs do: identical ones hash the
+            # same, so the second would be skipped by the dedup branch and never
+            # sent at all, and nothing below would be exercised.
             return {"home_user": "alice", "system_user": None,
                     "device_id": f"INSTALL-{sent['n']}",
-                    "tools": [{"name": "Claude Code", "projects": []}]}
+                    "tools": [{"name": "Claude Code", "projects": [],
+                               "install_path": self.TOOLS[sent["n"] - 1]["install_path"]}]}
 
         # The first install's report fails every attempt; the second's lands.
         backend, _ = self.run_main(
@@ -1935,6 +1939,45 @@ class TwoInstallsOfOneToolShareOneRow(_DrivesMain, unittest.TestCase):
             " the same row succeeded, so the next run replaces what landed today"
             " with it",
         )
+
+    def test_a_failure_after_the_other_install_landed_is_still_owed(self):
+        """The counterweight, and the direction that loses data if it is wrong.
+        The order is reversed: the first install lands and the second one's upload
+        fails. Nothing has superseded that failure -- it is the newer payload --
+        so dropping it discards a report the backend never received."""
+        sent = {"n": 0}
+
+        def _report_per_install(*_a, **_k):
+            sent["n"] += 1
+            # The payloads differ, as two real installs do: identical ones hash the
+            # same, so the second would be skipped by the dedup branch and never
+            # sent at all, and nothing below would be exercised.
+            return {"home_user": "alice", "system_user": None,
+                    "device_id": f"INSTALL-{sent['n']}",
+                    "tools": [{"name": "Claude Code", "projects": [],
+                               "install_path": self.TOOLS[sent["n"] - 1]["install_path"]}]}
+
+        backend, _ = self.run_main(
+            tools=self.TOOLS, users=("alice",), fresh_report=_report_per_install,
+            rule=statuses({"INSTALL-2": 500}),
+            patches=(
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                patch("time.sleep", Mock()),
+            ),
+        )
+
+        self.assertIn("INSTALL-1", backend.device_ids(prefix="INSTALL-1"),
+                      "the first install never landed, so nothing came before the"
+                      " failure and this is not the case under test")
+        self.assertEqual(
+            self.queue_now(), ["INSTALL-2"],
+            "the later failure was dropped because an earlier send for the same"
+            " row had succeeded, so a report the backend never got is gone",
+        )
+
 
 class AQueuedReportOverridesTheCachedHash(_DrivesMain, unittest.TestCase):
     """The cache says what we last uploaded. A queued older report says the drain

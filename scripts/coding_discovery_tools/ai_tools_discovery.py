@@ -4515,6 +4515,14 @@ def main():
                             if success:
                                 reported_ok = True
                                 reported_pairs.add((user_name, tool_name))
+                                # Another install of this tool name is a separate
+                                # iteration but the same row, so a failure recorded
+                                # for it earlier in this run is superseded. Done
+                                # here rather than at the end, because one recorded
+                                # after this send is not.
+                                failed_reports[:] = _drop_superseded(
+                                    failed_reports, {(user_name, tool_name)}
+                                )
                                 hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
@@ -4598,11 +4606,7 @@ def main():
         # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
             # Backlog first: the queue keeps its newest entries when it hits the cap.
-            # This run's own failures are filtered too: two installs of one tool
-            # name are separate iterations but a single row on the backend, so a
-            # failure for the first can outlive a success for the second.
-            still_owed = _drop_superseded(owed_from_queue + failed_reports,
-                                          reported_pairs)
+            still_owed = _drop_superseded(owed_from_queue, reported_pairs) + failed_reports
             superseded = len(owed_from_queue) + len(failed_reports) - len(still_owed)
             if superseded:
                 logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")

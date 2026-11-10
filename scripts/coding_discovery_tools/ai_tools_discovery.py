@@ -3795,6 +3795,8 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
+    # The thread already telling the backend this run failed, if any.
+    _failure_report: List = [None]
     # Set just before the completed event goes out: from then on the backend
     # may already hold this run's outcome.
     _completed_attempted = [False]
@@ -3847,16 +3849,22 @@ def main():
         join_timeout, so a slow/retrying backend can't block exit. Used by both
         the abort path and the normal except path (which were asymmetric).
 
-        The send carries that bound as its deadline. Without one it keeps the
-        whole retry curve, and the process exits during the first backoff sleep --
-        so a refused first attempt was the only one that ever happened, for the
-        one report that closes a run the backend does not yet have."""
+        The send carries that bound as its deadline, or it keeps the whole retry
+        curve and the process exits during the first backoff sleep."""
+        running = _failure_report[0]
+        if running is not None and running.is_alive():
+            # Another path is already reporting. _mark_run_failed claims the
+            # run before it delivers, so a second worker would return at once
+            # and let the process exit with the real report still on the wire.
+            running.join(timeout=join_timeout)
+            return
         t = threading.Thread(
             target=_mark_run_failed,
             args=(error_type, message),
             kwargs={"deadline": time.monotonic() + join_timeout},
             daemon=True,
         )
+        _failure_report[0] = t
         t.start()
         t.join(timeout=join_timeout)
 

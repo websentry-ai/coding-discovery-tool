@@ -1374,6 +1374,158 @@ class ADeliveredQueuedReportStillGetsCorrected(_DrivesMain, unittest.TestCase):
             " will ever send it again",
         )
 
+    def test_a_delivered_snapshot_cannot_hide_behind_a_matching_hash(self):
+        """The state a failed queue write leaves behind: the pair's hash is
+        recorded, and the superseded report is still in the queue because the
+        write that should have dropped it never landed. This run's drain then
+        delivers that older snapshot, so the backend holds it -- and the hash
+        matches this run's payload exactly, which is what would suppress the
+        upload that corrects it.
+
+        It must not, and what prevents it is the queue naming the pair at all --
+        which is true precisely because the write failed."""
+        tools = ({"name": "Claude Code", "version": "1.0",
+                  "install_path": "/usr/local/bin/claude"},)
+        fresh = {"home_user": "alice", "device_id": "THIS-RUN", "system_user": None,
+                 "tools": [{"name": "Claude Code", "projects": []}]}
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            tools=tools, users=("alice",), fresh_report=fresh,
+            patches=(
+                patch.object(adm, "_refresh_mcp_tools_cache", Mock()),
+                patch.object(adm, "_install_in_another_users_home", return_value=False),
+                patch.object(adm, "_machine_global_install_disowned", return_value=False),
+                patch.object(adm, "_home_for_user", return_value=Path(self._dir)),
+                # The hash production really computes for this payload: a literal
+                # would never reach the dedup branch and would prove nothing.
+                patch.object(adm.discovery_cache, "get_cached_hash",
+                             return_value=compute_payload_hash(fresh["tools"][0])),
+            ),
+        )
+
+        self.assertEqual(
+            backend.device_ids(), ["QUEUED-0"],
+            "the drain never delivered it, so no row was replaced and this is not"
+            " the state a failed write leaves behind",
+        )
+        self.assertIn(
+            "THIS-RUN", backend.device_ids(prefix="THIS-RUN"),
+            "a matching hash suppressed the correcting upload after the drain had"
+            " already replaced the row, so the stale snapshot stands",
+        )
+
+    def test_the_hash_goes_before_the_snapshot_does(self):
+        """Clearing after the send leaves a window where the backend already holds
+        the older payload and a kill stops the clear. And a report the endpoint
+        refuses outright is discarded, so for that one the clear is the only thing
+        left that stops detection trusting a row an earlier attempt may have
+        replaced over S3."""
+        backend = _Backend(statuses({"QUEUED-0": 422}))
+        posted_when_cleared = []
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        def _spy(tool, user):
+            posted_when_cleared.append((user, tool, len(backend.received)))
+            return True
+
+        try:
+            self.run_main(
+                backend=backend,
+                patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
+                                      side_effect=_spy),),
+            )
+        finally:
+            backend.close()
+
+        self.assertEqual(
+            posted_when_cleared, [("alice", "Claude Code", 0)],
+            "the pair's hash was not cleared ahead of everything this run sends,"
+            " so a discarded or half-delivered snapshot can leave a row that"
+            " detection goes on treating as current",
+        )
+        self.assertEqual(self.queue_now(), [],
+                         "422 is permanent; requeueing it would never end")
+
+    def test_a_clear_that_did_not_land_holds_the_snapshot_back(self):
+        """Nothing this run remembers about a failed clear outlives it, so the
+        older snapshot must not go out behind a hash that still describes the row
+        it would replace. The report stays for a later run to try again."""
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
+                                  return_value=False),),
+        )
+
+        self.assertEqual(
+            backend.device_ids(), [],
+            "it went out behind a hash that still described the row it replaced",
+        )
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "the report was dropped although it was never delivered, so nothing"
+            " will ever send it again",
+        )
+
+    def test_the_hash_goes_before_the_snapshot_does(self):
+        """Clearing after the send leaves a window where the backend already holds
+        the older payload and a kill stops the clear. And a report the endpoint
+        refuses outright is discarded, so for that one the clear is the only thing
+        left that stops detection trusting a row an earlier attempt may have
+        replaced over S3."""
+        backend = _Backend(statuses({"QUEUED-0": 422}))
+        posted_when_cleared = []
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        def _spy(tool, user):
+            posted_when_cleared.append((user, tool, len(backend.received)))
+            return True
+
+        try:
+            self.run_main(
+                backend=backend,
+                patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
+                                      side_effect=_spy),),
+            )
+        finally:
+            backend.close()
+
+        self.assertEqual(
+            posted_when_cleared, [("alice", "Claude Code", 0)],
+            "the pair's hash was not cleared ahead of everything this run sends,"
+            " so a discarded or half-delivered snapshot can leave a row that"
+            " detection goes on treating as current",
+        )
+        self.assertEqual(self.queue_now(), [],
+                         "422 is permanent; requeueing it would never end")
+
+    def test_a_clear_that_did_not_land_holds_the_snapshot_back(self):
+        """Nothing this run remembers about a failed clear outlives it, so the
+        older snapshot must not go out behind a hash that still describes the row
+        it would replace. The report stays for a later run to try again."""
+        self.seed_queue([{"device_id": "QUEUED-0", "home_user": "alice",
+                          "tools": [{"name": "Claude Code"}]}])
+
+        backend, _ = self.run_main(
+            patches=(patch.object(adm.discovery_cache, "forget_tool_hash",
+                                  return_value=False),),
+        )
+
+        self.assertEqual(
+            backend.device_ids(), [],
+            "it went out behind a hash that still described the row it replaced",
+        )
+        self.assertEqual(
+            self.queue_now(), ["QUEUED-0"],
+            "the report was dropped although it was never delivered, so nothing"
+            " will ever send it again",
+        )
+
     def test_the_correcting_upload_actually_goes_out(self):
         """End to end with the real cache: run one uploads and records its hash,
         then run two finds an older report queued for the same pair. The backend

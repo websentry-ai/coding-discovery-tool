@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts.coding_discovery_tools import utils as utils_mod
 from scripts.coding_discovery_tools.hooks_extractor import _HOOK_FILES
 from scripts.coding_discovery_tools.mcp_extraction_helpers import (
     extract_managed_mcp_config,
@@ -19,6 +20,23 @@ from scripts.coding_discovery_tools.mcp_extraction_helpers import (
 )
 
 _MCP_HELPER = "scripts.coding_discovery_tools.mcp_extraction_helpers"
+
+_PRIOR_DSN = None
+
+
+def setUpModule():
+    """Keep the extraction these tests run from reaching the real Sentry.
+
+    The shared test setup stubs the MCP scanner and home enumeration but leaves
+    the DSN alone, so it is silenced here.
+    """
+    global _PRIOR_DSN
+    _PRIOR_DSN = utils_mod._SENTRY_DSN
+    utils_mod._SENTRY_DSN = ""
+
+
+def tearDownModule():
+    utils_mod._SENTRY_DSN = _PRIOR_DSN
 
 
 def _hooks_managed_dir(os_name: str) -> Path:

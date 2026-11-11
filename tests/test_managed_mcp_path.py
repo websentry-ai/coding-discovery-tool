@@ -5,7 +5,6 @@ nothing surfaces when this is broken. Two places here read the same system
 directory and are free to disagree, which is what the drift guard covers.
 """
 import json
-import os
 import platform
 import shutil
 import tempfile
@@ -168,11 +167,17 @@ class TheRealExtractorSurfacesTheManagedServer(unittest.TestCase):
     def test_an_unreadable_file_is_survived(self):
         """Discovery runs elevated, but not always: a root-owned file it cannot
         read must not end the scan."""
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            self.skipTest("running as root, which reads the file regardless")
         managed = self._managed_file({"mcpServers": {"locked": {"command": "s"}}})
         managed.chmod(0o000)
         self.addCleanup(managed.chmod, 0o600)
+        try:
+            managed.read_text()
+        except OSError:
+            pass
+        else:
+            # Root reads regardless, and Windows chmod does not revoke reads, so
+            # the state this asserts on cannot be built here.
+            self.skipTest("this platform or user can read the file anyway")
 
         self.assertNotIn("locked", self._names(self._projects_from(managed)))
 

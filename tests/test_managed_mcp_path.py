@@ -123,16 +123,25 @@ class TheRealExtractorSurfacesTheManagedServer(unittest.TestCase):
             result = LinuxClaudeMCPConfigExtractor().extract_mcp_config() or {}
         return result.get("projects", []) if isinstance(result, dict) else []
 
-    def _names(self, projects):
-        return {s.get("name") for p in projects
-                for s in (p.get("mcpServers") or [])}
+    def _names_at(self, projects, managed: Path):
+        """Servers reported for the managed file itself.
+
+        Scoped to that one path on purpose: a scan walks this machine's real
+        homes, so asserting over every project would answer to whatever MCP
+        servers happen to be configured here.
+        """
+        return {
+            s.get("name")
+            for p in projects if p.get("path") == str(managed)
+            for s in (p.get("mcpServers") or [])
+        }
 
     def test_a_deployed_server_reaches_the_extractor_output(self):
         managed = self._managed_file(
             {"mcpServers": {"corp-gateway": {"command": "corp-mcp"}}})
 
         self.assertIn(
-            "corp-gateway", self._names(self._projects_from(managed)),
+            "corp-gateway", self._names_at(self._projects_from(managed), managed),
             "the extractor a scan runs did not surface the managed server",
         )
 
@@ -158,7 +167,7 @@ class TheRealExtractorSurfacesTheManagedServer(unittest.TestCase):
 
         projects = self._projects_from(managed)
 
-        self.assertNotIn("half", self._names(projects))
+        self.assertEqual(self._names_at(projects, managed), set())
         self.assertFalse(
             any(p.get("path") == str(managed) for p in projects),
             "an unparseable managed file was reported as though it had been read",
@@ -179,7 +188,10 @@ class TheRealExtractorSurfacesTheManagedServer(unittest.TestCase):
             # the state this asserts on cannot be built here.
             self.skipTest("this platform or user can read the file anyway")
 
-        self.assertNotIn("locked", self._names(self._projects_from(managed)))
+        self.assertEqual(
+            self._names_at(self._projects_from(managed), managed), set(),
+            "a file the scan could not read was reported anyway",
+        )
 
 
 if __name__ == "__main__":

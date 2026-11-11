@@ -2686,9 +2686,8 @@ def get_managed_mcp_path() -> Optional[Path]:
     elif system == "Windows":
         return Path("C:/Program Files/ClaudeCode/managed-mcp.json")
     elif system == "Linux":
-        # Lower-case, matching the directory Claude Code itself reads and the one
-        # the hooks extractor already uses. Linux is case-sensitive, so the other
-        # spelling never resolves.
+        # Lower-case, as Claude Code and the hooks extractor both use it. Linux
+        # is case-sensitive, so the other spelling never resolves.
         return Path("/etc/claude-code/managed-mcp.json")
     return None
 

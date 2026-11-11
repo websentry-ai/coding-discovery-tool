@@ -1,15 +1,8 @@
 """Where the organization-deployed MCP config is read from, per platform.
 
-The failure these guard against is invisible from the outside: a path that is
-spelled wrong and a file that simply isn't deployed look identical to a scan,
-which is why this went unnoticed. On a case-sensitive filesystem the wrong
-spelling can never resolve, so the managed MCP servers an organization deploys
-are silently absent from every report.
-
-The drift guard matters as much as the path assertion. This repository reads the
-same system directory from two places, and they disagreed: the hooks extractor
-had it right and the MCP helper did not. Asserting the two agree is what stops
-them separating again.
+A path spelled wrong and a file never deployed look identical to a scan, so
+nothing surfaces when this is broken. Two places here read the same system
+directory and are free to disagree, which is what the drift guard covers.
 """
 import json
 import platform
@@ -73,9 +66,8 @@ class TheManagedMcpPathIsTheOneClaudeCodeReads(unittest.TestCase):
 
 
 class AManagedFileInThatDirectoryIsActuallyRead(unittest.TestCase):
-    """The path being right is only half of it -- the file behind it has to be
-    parsed into the MCP inventory. This exercises the reader against a real file
-    on disk, so a correct path with a broken reader cannot pass."""
+    """The reader had no tests of its own. Exercised against a real file on disk,
+    so a correct path behind a broken reader cannot pass."""
 
     def test_the_servers_in_it_reach_the_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:

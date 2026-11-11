@@ -2686,8 +2686,10 @@ def get_managed_mcp_path() -> Optional[Path]:
     elif system == "Windows":
         return Path("C:/Program Files/ClaudeCode/managed-mcp.json")
     elif system == "Linux":
-        # System-wide managed MCP location on Linux (MDM/system-config convention).
-        return Path("/etc/ClaudeCode/managed-mcp.json")
+        # Lower-case, matching the directory Claude Code itself reads and the one
+        # the hooks extractor already uses. Linux is case-sensitive, so the other
+        # spelling never resolves.
+        return Path("/etc/claude-code/managed-mcp.json")
     return None
 
 

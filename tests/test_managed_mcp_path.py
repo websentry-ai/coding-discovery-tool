@@ -5,7 +5,9 @@ nothing surfaces when this is broken. Two places here read the same system
 directory and are free to disagree, which is what the drift guard covers.
 """
 import json
+import os
 import platform
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,6 +103,78 @@ class AManagedFileInThatDirectoryIsActuallyRead(unittest.TestCase):
                 extract_managed_mcp_config(projects)
 
         self.assertEqual(projects, [])
+
+
+class TheRealExtractorSurfacesTheManagedServer(unittest.TestCase):
+    """The class a scan actually instantiates, not the helper underneath it.
+    A correct path the platform extractor never consults still reports nothing."""
+
+    def _managed_file(self, payload) -> Path:
+        tmp = tempfile.mkdtemp(prefix="managed-mcp-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = Path(tmp) / "managed-mcp.json"
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        return path
+
+    def _projects_from(self, managed: Path):
+        from scripts.coding_discovery_tools.linux.claude_code.mcp_config_extractor import (
+            LinuxClaudeMCPConfigExtractor,
+        )
+        with patch(f"{_MCP_HELPER}.get_managed_mcp_path", return_value=managed):
+            result = LinuxClaudeMCPConfigExtractor().extract_mcp_config() or {}
+        return result.get("projects", []) if isinstance(result, dict) else []
+
+    def _names(self, projects):
+        return {s.get("name") for p in projects
+                for s in (p.get("mcpServers") or [])}
+
+    def test_a_deployed_server_reaches_the_extractor_output(self):
+        managed = self._managed_file(
+            {"mcpServers": {"corp-gateway": {"command": "corp-mcp"}}})
+
+        self.assertIn(
+            "corp-gateway", self._names(self._projects_from(managed)),
+            "the extractor a scan runs did not surface the managed server",
+        )
+
+    def test_every_deployed_server_is_reported_once(self):
+        managed = self._managed_file({"mcpServers": {
+            "alpha": {"command": "a"},
+            "beta": {"command": "b", "args": ["--stdio"]},
+            "gamma": {"url": "https://example.invalid/mcp"},
+        }})
+
+        projects = self._projects_from(managed)
+        reported = [s.get("name") for p in projects if p.get("path") == str(managed)
+                    for s in (p.get("mcpServers") or [])]
+
+        self.assertEqual(
+            sorted(reported), ["alpha", "beta", "gamma"],
+            f"managed servers were dropped or duplicated: {reported}",
+        )
+
+    def test_malformed_json_is_survived(self):
+        """An administrator's typo must not take the whole scan down."""
+        managed = self._managed_file('{"mcpServers": {"half": ')
+
+        projects = self._projects_from(managed)
+
+        self.assertNotIn("half", self._names(projects))
+        self.assertFalse(
+            any(p.get("path") == str(managed) for p in projects),
+            "an unparseable managed file was reported as though it had been read",
+        )
+
+    def test_an_unreadable_file_is_survived(self):
+        """Discovery runs elevated, but not always: a root-owned file it cannot
+        read must not end the scan."""
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("running as root, which reads the file regardless")
+        managed = self._managed_file({"mcpServers": {"locked": {"command": "s"}}})
+        managed.chmod(0o000)
+        self.addCleanup(managed.chmod, 0o600)
+
+        self.assertNotIn("locked", self._names(self._projects_from(managed)))
 
 
 if __name__ == "__main__":

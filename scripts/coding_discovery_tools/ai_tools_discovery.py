@@ -32,6 +32,15 @@ from typing import Dict, Iterator, List, Optional, Callable
 # 200 minutes. Pass --timeout <=0 to disable.
 DEFAULT_RUN_TIMEOUT_SECONDS = 12000
 
+# Ceiling on the queue drain (seconds). The queue is its own retry, so a backlog
+# that cannot go now waits for the next run rather than spending this one.
+DRAIN_BUDGET_SECONDS = 600
+# Held back for the end-of-run sends: must fit a whole retry cycle, and never
+# more than a quarter of the budget or a short scan reports nothing it found.
+RUN_SEND_RESERVE_SECONDS = 300
+# Kept clear for the best-effort work that follows the completed event.
+RUN_TAIL_GRACE_SECONDS = 30
+
 SCRIPT_VERSION = "1.2.0"
 
 try:
@@ -3615,6 +3624,28 @@ class AIToolsDetector:
         }
 
 
+def _report_identity(report) -> Optional[tuple]:
+    """The (home_user, tool) a single-tool report describes, or None if it is not one."""
+    tools = report.get("tools") if isinstance(report, dict) else None
+    if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+        return None
+    return (report.get("home_user"), tools[0].get("name"))
+
+
+def _drop_superseded(queued: List[Dict], reported_pairs: set) -> List[Dict]:
+    """Queued reports for pairs no fresher report has gone out for. Sending one
+    behind a fresher report would overwrite it."""
+    return [r for r in queued if _report_identity(r) not in reported_pairs]
+
+
+def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
+    """Seconds the queue drain may spend: its own ceiling, and never more than half
+    of what the run has left, since detecting tools is what the run is for."""
+    if not run_timeout or run_timeout <= 0:
+        return float(DRAIN_BUDGET_SECONDS)
+    return max(0.0, min(float(DRAIN_BUDGET_SECONDS), (run_timeout - elapsed) / 2))
+
+
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
@@ -3764,12 +3795,19 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
+    # The thread already telling the backend this run failed, if any.
+    _failure_report: List = [None]
+    # Set just before the completed event goes out: from then on the backend
+    # may already hold this run's outcome.
+    _completed_attempted = [False]
+    completed_outcome: Dict = {}
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
     # safely even if they fire before capture (in which case it is still None).
     system_user = None
 
-    def _mark_run_failed(error_type: str, message: str) -> None:
+    def _mark_run_failed(error_type: str, message: str,
+                         deadline: Optional[float] = None) -> None:
         """Best-effort: tell the backend this run failed. Idempotent (a flag race
         at worst double-sends one idempotent event). No-ops until run_id exists
         (nothing to correlate)."""
@@ -3789,6 +3827,7 @@ def main():
                 },
                 sentry_context=sentry_ctx,
                 system_user=system_user,
+                deadline=deadline,
             )
         except Exception:
             pass
@@ -3808,12 +3847,36 @@ def main():
     def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15) -> None:
         """Run the best-effort failure report on a daemon thread bounded by
         join_timeout, so a slow/retrying backend can't block exit. Used by both
-        the abort path and the normal except path (which were asymmetric)."""
+        the abort path and the normal except path (which were asymmetric).
+
+        The send carries that bound as its deadline, or it keeps the whole retry
+        curve and the process exits during the first backoff sleep."""
+        running = _failure_report[0]
+        if running is not None and running.is_alive():
+            # Another path is already reporting. _mark_run_failed claims the
+            # run before it delivers, so a second worker would return at once
+            # and let the process exit with the real report still on the wire.
+            running.join(timeout=join_timeout)
+            return
         t = threading.Thread(
-            target=_mark_run_failed, args=(error_type, message), daemon=True,
+            target=_mark_run_failed,
+            args=(error_type, message),
+            kwargs={"deadline": time.monotonic() + join_timeout},
+            daemon=True,
         )
+        _failure_report[0] = t
         t.start()
         t.join(timeout=join_timeout)
+
+    def _backend_lacks_the_outcome() -> bool:
+        """Whether the completed event definitely never reached the backend. One
+        still on the wire may be being accepted, so only a resolved attempt counts;
+        nothing resolved and nothing on the wire means nothing has gone out yet,
+        which includes the stretch between the flag above and the first request."""
+        if completed_outcome.get("sending"):
+            return False
+        kind = completed_outcome.get("kind")
+        return kind is None or kind in ("unreachable", "rejected")
 
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between
@@ -3836,7 +3899,8 @@ def main():
             )
         except Exception:
             pass
-        _report_failed_bounded(error_type, message)
+        if not _completed_attempted[0] or _backend_lacks_the_outcome():
+            _report_failed_bounded(error_type, message)
         os._exit(1)
 
     def _on_watchdog_timeout() -> None:
@@ -3918,8 +3982,35 @@ def main():
             )
         discovery_cache.start_run(run_id, done=resume_done)
 
+        run_deadline = (
+            t_start + args.timeout if args.timeout and args.timeout > 0 else None
+        )
+        send_deadline = (
+            run_deadline - min(RUN_SEND_RESERVE_SECONDS, args.timeout / 4)
+            if run_deadline is not None else None
+        )
+        tail_grace = (
+            min(RUN_TAIL_GRACE_SECONDS, args.timeout / 8)
+            if run_deadline is not None else 0
+        )
+
         # Track failed reports for persistence
         failed_reports = []
+        # Separate from this run's own failures so they requeue ahead of them,
+        # and so the cap drops the oldest first.
+        owed_from_queue = []
+        # (home_user, tool) this run has sent a fresher report for. Not seeded from
+        # the resume checkpoint: that records installs, while the backend keys rows
+        # by name, so a resumed install cannot say whether a queued report for the
+        # same name is older than the row or newer than it. Delivering one that is
+        # older costs a single run -- its hash is cleared before it goes, so the
+        # next run re-uploads -- where dropping one that is newer loses it for good.
+        reported_pairs = set()
+        # (home_user, tool) whose row may now hold a queued older payload: the
+        # drain delivered one, or discarded one an earlier attempt may have put in
+        # S3. Their cached hash cannot stand in for an upload. A report that is
+        # still owed has replaced nothing, and its hash is cleared before it goes.
+        queued_pairs = set()
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -3928,22 +4019,66 @@ def main():
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
-        # --- Drain pending reports from previous run ---
+        # --- Drain pending reports from earlier runs ---
+        # Ahead of this run's own sends: the backend replaces rows per tool name.
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
             if pending:
                 logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
-                for queued_report in pending:
+                drain_budget = _drain_budget_seconds(
+                    args.timeout, time.monotonic() - t_start
+                )
+                drain_deadline = time.monotonic() + drain_budget
+                for index, queued_report in enumerate(pending):
+                    if _report_identity(queued_report) in reported_pairs:
+                        logger.info("  · Queued report superseded; dropped unsent")
+                        continue
+                    if time.monotonic() >= drain_deadline:
+                        owed_from_queue.extend(pending[index:])
+                        logger.info(
+                            f"  Drain budget of {drain_budget:.0f}s spent;"
+                            f" {len(owed_from_queue)} report(s) stay queued."
+                        )
+                        break
+                    # Even a discarded report may have landed via S3, so the hash
+                    # goes first -- and if it will not go, neither does the report.
+                    pair = _report_identity(queued_report)
+                    if pair and not discovery_cache.forget_tool_hash(pair[1], pair[0]):
+                        owed_from_queue.append(queued_report)
+                        logger.info(
+                            "  · Cached hash for this pair could not be cleared;"
+                            " report stays queued rather than going out behind it"
+                        )
+                        continue
+                    failure = {}
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
-                        sentry_context=sentry_ctx,
+                        sentry_context=sentry_ctx, deadline=drain_deadline,
+                        failure=failure, stop_if_unreachable=True,
                     )
                     if success:
+                        if pair:
+                            queued_pairs.add(pair)
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        failed_reports.append(queued_report)
+                        owed_from_queue.append(queued_report)
+                        if failure.get("kind") == "unreachable":
+                            # Nothing reached the backend, so nothing behind this will.
+                            owed_from_queue.extend(pending[index + 1:])
+                            logger.info(
+                                "  Backend unreachable;"
+                                f" {len(owed_from_queue)} report(s) stay queued."
+                            )
+                            break
                     else:
+                        # Discarded, but an earlier attempt may have reached S3 and
+                        # been ingested, so the row may hold this payload after all.
+                        if pair:
+                            queued_pairs.add(pair)
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                # Now, not at the end: an abort during detection skips the persist
+                # step, and the next run would replay these over this run's uploads.
+                save_failed_reports(owed_from_queue, replace=True)
                 logger.info("")
 
         with time_step("enumerate_users", "detect"):
@@ -4002,7 +4137,8 @@ def main():
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
-                args.app_name, sentry_context=sentry_ctx, system_user=system_user
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user,
+                deadline=send_deadline,
             )
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
@@ -4357,11 +4493,20 @@ def main():
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        # The queue named this pair, so the backend's row is not
+                        # what the hash describes. Upload rather than trust it.
+                        cached_hash = (
+                            None if (user_name, tool_name) in queued_pairs
+                            else discovery_cache.get_cached_hash(tool_name, user_name)
+                        )
                         reported_ok = False
                         hash_to_store = None
                         if local_payload_hash and cached_hash == local_payload_hash:
                             reported_ok = True  # unchanged -> already current on the backend
+                            # Current on the backend supersedes a queued older
+                            # report for the row just as an upload does, or the
+                            # next drain posts that payload over what is there.
+                            reported_pairs.add((user_name, tool_name))
                             if args.dump:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
@@ -4369,9 +4514,22 @@ def main():
                                 logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
                             with time_step("send_report_per_tool_user", "send"):
-                                success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                                success, retryable = send_report_to_backend(
+                                    args.domain, args.api_key, single_tool_report,
+                                    args.app_name, sentry_context=sentry_ctx,
+                                    deadline=send_deadline,
+                                )
                             if success:
                                 reported_ok = True
+                                reported_pairs.add((user_name, tool_name))
+                                # Another install of this tool name is a separate
+                                # iteration but the same row, so a failure recorded
+                                # for it earlier in this run is superseded. Done
+                                # here rather than at the end, because one recorded
+                                # after this send is not.
+                                failed_reports[:] = _drop_superseded(
+                                    failed_reports, {(user_name, tool_name)}
+                                )
                                 hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
@@ -4385,6 +4543,16 @@ def main():
                         # user) so a kill afterward lets the next quick re-run skip
                         # re-processing it.
                         if reported_ok:
+                            # A report still queued for this pair would replay over
+                            # what was just sent. Only written when one was.
+                            owed = len(owed_from_queue)
+                            owed_from_queue[:] = _drop_superseded(
+                                owed_from_queue, reported_pairs
+                            )
+                            if len(owed_from_queue) != owed:
+                                save_failed_reports(
+                                    owed_from_queue + failed_reports, replace=True
+                                )
                             discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
@@ -4405,7 +4573,8 @@ def main():
                         success, _ = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
-                            sentry_context=sentry_ctx, system_user=system_user
+                            sentry_context=sentry_ctx, system_user=system_user,
+                            deadline=send_deadline,
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
@@ -4441,10 +4610,15 @@ def main():
         # Per-tool key, stale from here on; later events inherit this dict.
         sentry_ctx.pop("tool_name", None)
 
-        # --- Persist any failed reports for the next run ---
+        # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
-            if failed_reports:
-                save_failed_reports(failed_reports)
+            # Backlog first: the queue keeps its newest entries when it hits the cap.
+            still_owed = _drop_superseded(owed_from_queue, reported_pairs) + failed_reports
+            superseded = len(owed_from_queue) + len(failed_reports) - len(still_owed)
+            if superseded:
+                logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
+            if still_owed:
+                save_failed_reports(still_owed, replace=True)
             else:
                 queue_file = _get_queue_file_path()
                 if queue_file.exists():
@@ -4498,9 +4672,16 @@ def main():
                     {"tool": tool_key, **counts}
                     for tool_key, counts in sorted(detector.skills_metrics.items())
                 ]
+            metrics_deadline = None
+            if run_deadline is not None:
+                now = time.monotonic()
+                metrics_deadline = now + max(
+                    0.0, (run_deadline - tail_grace - now) / 2
+                )
             send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
+                deadline=metrics_deadline,
             )
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
@@ -4587,15 +4768,31 @@ def main():
                     for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
         covered = [u for u in all_users
                    if u not in unreadable_users and u not in incomplete_users]
+        # The one send a run must not skip -- its manifest is what the backend
+        # prunes against -- so it gets the whole budget, tail included.
+        _completed_attempted[0] = True
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
             manifest=manifest, covered_home_users=covered,
+            deadline=run_deadline, failure=completed_outcome,
         )
         if success:
             logger.info("✓ Scan completed event sent successfully")
+        elif completed_outcome.get("kind") == "uncertain":
+            # It may have landed, and contradicting that is worse than silence.
+            logger.warning("✗ Scan completed event went unanswered; leaving the run as it is")
         else:
-            logger.warning("✗ Failed to send scan completed event")
+            # The backend does not have it and nothing else will say so: the
+            # checkpoint below stops a resume and the watchdog is cancelled.
+            logger.warning(
+                "✗ Failed to send scan completed event; closing the run so it does"
+                " not sit in progress for ever"
+            )
+            _report_failed_bounded(
+                "CompletedEventUndelivered",
+                "the scan finished, but its completed event could not be delivered",
+            )
         logger.info("")
 
         # Local scan finished cleanly -> flip the checkpoint to "completed" so the
@@ -4608,7 +4805,13 @@ def main():
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            sent, failed, matched = run_sweep(args.domain, args.api_key)
+            # Best-effort, so it gets the deadline less the tail and stops short
+            # of the watchdog rather than being killed at it.
+            sent, failed, matched = run_sweep(
+                args.domain, args.api_key,
+                deadline=(run_deadline - tail_grace
+                          if run_deadline is not None else None),
+            )
             logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
         except Exception as sweep_err:
             logger.debug(f"Connector UUID sweep failed: {sweep_err}")
@@ -4616,7 +4819,9 @@ def main():
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal
         # paths may have already reported, in which case this is a no-op).
-        if device_id and run_id:
+        if _completed_attempted[0] and not _backend_lacks_the_outcome():
+            logger.error("Not sending scan failed event - the outcome is already reported")
+        elif device_id and run_id:
             logger.error("Sending scan failed event due to error...")
             _report_failed_bounded(type(e).__name__, str(e))
         else:

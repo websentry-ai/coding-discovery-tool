@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 MEMORY_CACHE_FILENAME = "memory-scan-cache.json"
 INDEX_FILE_NAME = "MEMORY.md"
 MAX_FILES_PER_MEMORY_FOLDER = 300
+MAX_DIRS_PER_MEMORY_FOLDER = 100
 MEMORY_SCAN_BUDGET_SECONDS = 10
 TRANSCRIPT_HEAD_BYTES = 256 * 1024
 TRANSCRIPT_HEAD_LINES = 40
@@ -118,12 +119,12 @@ def _owned_real_dir(folder: Path, home: Path) -> bool:
         return False
 
 
-def _memory_folders(home: Path) -> List[Dict]:
+def _memory_folders(home: Path, deadline: float) -> List[Dict]:
     """Every memory folder of this user: auto, relocated auto, then user, project and local subagent folders."""
     claude_dir = home / ".claude"
     auto_folders = [
-        {"path": claude_project_dir / "memory", "project_path": _project_path(claude_project_dir),
-         "memory_type": "auto", "scope": "user"}
+        {"path": claude_project_dir / "memory", "memory_type": "auto", "scope": "user",
+         "project_path": _project_path(claude_project_dir) if time.monotonic() < deadline else None}
         for claude_project_dir in _subdirs(claude_dir / "projects")
     ]
     relocated_folders = [
@@ -147,9 +148,11 @@ def _memory_folders(home: Path) -> List[Dict]:
     return list(first_by_path.values())
 
 
-def _markdown_files(folder: Path) -> Iterator[Path]:
+def _markdown_files(folder: Path, deadline: float) -> Iterator[Path]:
     """Every *.md under folder down to MAX_SEARCH_DEPTH, the folder's own MEMORY.md first; links are not entered."""
-    for directory, subdirs, names in os.walk(folder):
+    for directory, subdirs, names in islice(os.walk(folder), MAX_DIRS_PER_MEMORY_FOLDER):
+        if time.monotonic() >= deadline:
+            return
         within_depth = len(Path(directory).relative_to(folder).parts) < MAX_SEARCH_DEPTH
         subdirs[:] = sorted(
             name for name in subdirs if within_depth and not is_symlink_or_junction(os.path.join(directory, name)))
@@ -204,19 +207,18 @@ def _check_file(path: Path, folder: Path, cached_entry: object) -> Optional[Tupl
     return entry, item
 
 
-def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float) -> Tuple[Optional[Dict], Dict, bool]:
-    """(payload entry or None for a folder with no memory files, cache entries by file path, False if out of time)."""
+def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float) -> Tuple[Optional[Dict], Dict]:
+    """(payload entry or None for a folder with no memory files, cache entries by file path)."""
     root = folder["path"]
-    candidates = list(islice(_markdown_files(root), MAX_FILES_PER_MEMORY_FOLDER))
+    candidates = islice(_markdown_files(root, deadline), MAX_FILES_PER_MEMORY_FOLDER)
     attempted = [
         (path, _check_file(path, root, cached_entries.get(str(path))))
         for path in takewhile(lambda _: time.monotonic() < deadline, candidates)
     ]
     checked = [(path,) + result for path, result in attempted if result]
     entries = {str(path): entry for path, entry, _ in checked}
-    finished = len(attempted) == len(candidates)
     if not checked:
-        return None, entries, finished
+        return None, entries
     index_path = root / INDEX_FILE_NAME
     flagged = [entry for entry in entries.values() if entry["findings"]]
     truncated = [entry for entry in entries.values() if entry["size"] > MAX_CONFIG_FILE_SIZE]
@@ -229,7 +231,7 @@ def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float) -> Tuple[O
         "flagged": [item for path, _, item in checked if item and path != index_path],
         "counts": {"total": len(checked), "flagged": len(flagged), "clean": len(clean), "truncated": len(truncated)},
         "url_hosts": sorted({host for entry in entries.values() for host in entry["url_hosts"]}),
-    }, entries, finished
+    }, entries
 
 
 def _folders_hash(folders: List[Dict]) -> str:
@@ -276,9 +278,12 @@ def collect_claude_memories(home: Path, home_user: str) -> Optional[Dict]:
         users = _read_cache()
         cached_entries = users.get(home_user)
         cached_entries = cached_entries if isinstance(cached_entries, dict) else {}
-        scanned = [_scan_folder(folder, cached_entries, deadline) for folder in _memory_folders(home)]
-        entries = {path: entry for _, folder_entries, _ in scanned for path, entry in folder_entries.items()}
-        finished = all(folder_finished for _, _, folder_finished in scanned)
+        scanned = [
+            _scan_folder(folder, cached_entries, deadline)
+            for folder in takewhile(lambda _: time.monotonic() < deadline, _memory_folders(home, deadline))
+        ]
+        entries = {path: entry for _, folder_entries in scanned for path, entry in folder_entries.items()}
+        finished = time.monotonic() < deadline
         if not finished:
             entries = {**cached_entries, **entries}
         if entries != cached_entries:
@@ -286,7 +291,7 @@ def collect_claude_memories(home: Path, home_user: str) -> Optional[Dict]:
         if not finished:
             logger.warning(f"Claude memory scan for {home_user} ran out of time; the next run resumes it")
             return None
-        folders = [payload for payload, _, _ in scanned if payload]
+        folders = [payload for payload, _ in scanned if payload]
         return {"hash": _folders_hash(folders), "folders": folders}
     except Exception as e:
         logger.warning(f"Claude memory discovery failed for {home_user}: {e}")

@@ -123,6 +123,7 @@ try:
     from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
     from . import mcp_tools_cache
+    from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
     from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
@@ -206,6 +207,7 @@ except ImportError:
     from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
+    from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
 logger = logging.getLogger(__name__)
@@ -4199,12 +4201,14 @@ def main():
 
         # Send scan in_progress event BEFORE scanning
         logger.info("Sending scan in_progress event...")
+        scan_start_response: Dict = {}
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
                 args.app_name, sentry_context=sentry_ctx, system_user=system_user,
-                deadline=send_deadline,
+                deadline=send_deadline, response=scan_start_response,
             )
+        scan_memory = memory_scan_enabled(scan_start_response)
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
         else:
@@ -4457,6 +4461,12 @@ def main():
                             except Exception as e:
                                 logger.warning(f"    Could not detect Auggie plan for {user_name}: {e}")
 
+                        if scan_memory and tool_name.lower() == "claude code":
+                            with time_step("scan_memory_files", "process"):
+                                memories = collect_claude_memories(user_home, user_name)
+                            if memories:
+                                tool_filtered["memories"] = memories
+
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
                         with time_step("prepare_payload", "process"):
@@ -4520,6 +4530,10 @@ def main():
                             try:
                                 log_report = copy.deepcopy(single_tool_report)
                                 for t in log_report.get("tools") or []:
+                                    for folder in (t.get("memories") or {}).get("folders") or []:
+                                        for memory_file in [folder.get("index")] + (folder.get("flagged") or []):
+                                            if memory_file and "content" in memory_file:
+                                                memory_file["content"] = f"<{len(memory_file['content'])} chars>"
                                     for p in t.get("projects") or []:
                                         for r in p.get("rules") or []:
                                             if "content" in r:
@@ -4539,7 +4553,8 @@ def main():
                                     payload_logger.info(f"  {line}")
                             except Exception as e:
                                 logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                                payload_logger.info(f"  Report structure: {single_tool_report}")
+                                payload_logger.info(
+                                    f"  Report keys: {sorted(single_tool_report) if isinstance(single_tool_report, dict) else []}")
                             payload_logger.info("  " + "=" * 70)
                             payload_logger.info("")
 
@@ -4554,6 +4569,10 @@ def main():
                         # itself when local cache shows no change since last successful upload.
                         try:
                             local_payload_hash = compute_payload_hash(single_tool_report["tools"][0])
+                            # The tool hash leaves memories out, so a memory-only change must still upload.
+                            memories_hash = (single_tool_report["tools"][0].get("memories") or {}).get("hash")
+                            if memories_hash:
+                                local_payload_hash = f"{local_payload_hash}:{memories_hash}"
                         except Exception as hash_err:
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")

@@ -1698,6 +1698,7 @@ class TestResumeSkipsReprocessingInMain(unittest.TestCase):
         self.assertTrue(meta["resumed"])
         self.assertEqual(meta["resume_pairs_skipped"], 1)   # (ToolA, alice)
         self.assertEqual(meta["resume_tools_skipped"], 1)   # ToolA fully skipped
+        self.assertTrue({"total_cpu_ms", "children_cpu_ms", "peak_rss_mb"} <= set(metrics_mock.call_args.args[3]))
 
 
 class TestStateDirFallback(unittest.TestCase):

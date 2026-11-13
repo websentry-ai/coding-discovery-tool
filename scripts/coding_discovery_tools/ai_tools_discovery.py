@@ -4747,12 +4747,13 @@ def main():
                 metrics_deadline = now + max(
                     0.0, (run_deadline - tail_grace - now) / 2
                 )
-            if send_discovery_metrics(
+            # Set before the send: an abort mid-send may drop one sample but never double-counts.
+            _metrics_sent[0] = True
+            _metrics_sent[0] = send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
                 deadline=metrics_deadline,
-            ):
-                _metrics_sent[0] = True
+            )
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
 

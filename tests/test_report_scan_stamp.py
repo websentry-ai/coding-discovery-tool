@@ -94,13 +94,22 @@ class AQueuedReportKeepsItsOwnStamp(unittest.TestCase):
         )
 
     def test_a_drained_report_is_older_than_one_taken_after_it(self):
-        """What ingestion has to be able to tell apart."""
-        queued = _report()
+        """What ingestion has to be able to tell apart.
+
+        The earlier scan's clock is pinned rather than relying on time passing
+        between the two builds: Windows moves the wall clock in ~16ms steps, so
+        back-to-back calls can read identical and strict ordering would flake.
+        """
+        earlier = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with patch.object(ai_tools_discovery, "datetime") as clock:
+            clock.now.return_value = earlier
+            queued = _report()
         utils_mod.save_failed_reports([queued])
 
         fresh = _report()
         drained = utils_mod.load_pending_reports()[0]
 
+        self.assertEqual(datetime.fromisoformat(drained["scanned_at"]), earlier)
         self.assertLess(
             datetime.fromisoformat(drained["scanned_at"]),
             datetime.fromisoformat(fresh["scanned_at"]),

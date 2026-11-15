@@ -149,8 +149,6 @@ class TheStampTravelsWithTheRestOfTheReport(unittest.TestCase):
             self.assertIn(field, report)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TheS3NotificationCarriesTheStamp(unittest.TestCase):
@@ -174,3 +172,6 @@ class TheS3NotificationCarriesTheStamp(unittest.TestCase):
     def test_the_builder_supplies_what_the_notification_forwards(self):
         """The notification reads it off the payload, so the payload must have it."""
         self.assertIn("scanned_at", _report())
+
+if __name__ == "__main__":
+    unittest.main()

@@ -216,6 +216,9 @@ def try_s3_upload(
         "sentry_metrics": payload.get("sentry_metrics"),
         "tool_name": payload.get("tool_name"),
         "payload_hash": payload.get("payload_hash"),
+        # The dedup-skip answer happens before the blob is read, so the snapshot
+        # time has to travel in the notification too.
+        "scanned_at": payload.get("scanned_at"),
     }
     # Strip None values to avoid sending bogus keys.
     notify_body = {k: v for k, v in notify_body.items() if v is not None}

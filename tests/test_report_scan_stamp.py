@@ -151,3 +151,26 @@ class TheStampTravelsWithTheRestOfTheReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheS3NotificationCarriesTheStamp(unittest.TestCase):
+    """Data reports go to S3 first, and the backend answers an unchanged report
+    from the notification alone -- before the blob is ever read."""
+
+    def test_the_notify_body_includes_it(self):
+        source = (
+            __import__('pathlib').Path(ai_tools_discovery.__file__).parent
+            / "s3_uploader.py"
+        ).read_text()
+        notify = source[source.index("notify_body = {"):]
+        notify = notify[:notify.index("}")]
+
+        self.assertIn(
+            '"scanned_at"', notify,
+            "the notification omits the snapshot time, so an unchanged S3 report "
+            "cannot move the ordering clock",
+        )
+
+    def test_the_builder_supplies_what_the_notification_forwards(self):
+        """The notification reads it off the payload, so the payload must have it."""
+        self.assertIn("scanned_at", _report())

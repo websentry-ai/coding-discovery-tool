@@ -1,13 +1,8 @@
 """The report carries when its snapshot was taken.
 
-Ingestion replaces a tool's rows with whatever report arrives, and a report can
-sit in the on-disk queue for up to a day before it is delivered. Without a stamp
-describing the snapshot itself, a late delivery is indistinguishable from a fresh
-one and the older state wins.
-
-The stamp is therefore taken when the report is built, not when it is sent, and
-has to survive the queue unchanged -- that round trip is the whole point, so it
-is asserted here rather than inferred from the field being present.
+A queued report goes out on a later run, so without a stamp for the snapshot
+itself a late delivery is indistinguishable from a fresh one. It is taken at
+build time and has to survive the queue unchanged, which is what these assert.
 """
 import json
 import os

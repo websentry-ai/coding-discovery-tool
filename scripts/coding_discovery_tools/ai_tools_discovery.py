@@ -3589,10 +3589,8 @@ class AIToolsDetector:
             "system_user": system_user or home_user,
             "device_id": device_id,
             "is_container": in_container(),
-            # When this snapshot was taken, so ingestion can tell a fresh report
-            # from one the queue is delivering late. Stamped here rather than at
-            # send time: a report can sit in the queue for up to a day, and it
-            # must still describe the state it was taken from.
+            # Stamped at build time, not send time: a queued report can go out a
+            # day later and must still describe the state it was taken from.
             "scanned_at": datetime.now(timezone.utc).isoformat(),
             "tools": [tool_for_report]
         }

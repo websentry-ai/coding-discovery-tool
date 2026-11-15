@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Callable
 
@@ -3589,6 +3589,11 @@ class AIToolsDetector:
             "system_user": system_user or home_user,
             "device_id": device_id,
             "is_container": in_container(),
+            # When this snapshot was taken, so ingestion can tell a fresh report
+            # from one the queue is delivering late. Stamped here rather than at
+            # send time: a report can sit in the queue for up to a day, and it
+            # must still describe the state it was taken from.
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
             "tools": [tool_for_report]
         }
 

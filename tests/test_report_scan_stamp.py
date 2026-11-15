@@ -117,6 +117,21 @@ class AQueuedReportKeepsItsOwnStamp(unittest.TestCase):
         )
 
 
+class TheFrozenWireRecordKnowsAboutTheStamp(unittest.TestCase):
+    """The wire-key guard builds its own payload, so it is blind to a key the
+    real builder adds. Checked against the builder here instead."""
+
+    def test_every_key_the_builder_emits_is_recorded(self):
+        from tests.test_drain_compat_and_surfaces import REPORT_KEYS
+
+        unrecorded = set(_report()) - REPORT_KEYS
+
+        self.assertEqual(
+            unrecorded, set(),
+            f"the report gained keys the frozen wire record does not list: {unrecorded}",
+        )
+
+
 class TheStampTravelsWithTheRestOfTheReport(unittest.TestCase):
 
     def test_it_survives_json_as_the_wire_does_it(self):

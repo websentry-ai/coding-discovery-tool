@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Callable
+from typing import Dict, Iterator, List, Optional, Callable, Tuple
 
 # Self-imposed run timeout (seconds). Discovery enforces its OWN deadline rather
 # than only being force-killed by the parent onboard/setup subprocess timeout, so
@@ -1374,6 +1374,43 @@ class AIToolsDetector:
         except Exception as e:
             logger.debug(f"Error extracting claude.ai connectors for desktop surface: {e}")
 
+    @staticmethod
+    def _merge_plugin_skills_by_owner(
+        plugin_groups: List[Tuple[str, Path, List[Dict]]],
+        projects_dict: Dict[str, Dict],
+    ) -> int:
+        """File plugin-bundled skills under the home that owns each plugins dir.
+
+        ``plugin_groups`` is a list of ``(owner_home, plugins_dir, plugins)``
+        triples, one per scanned ``<home>/.<tool>/plugins`` dir. Each skill gets
+        its owner's home as ``project_path`` and is keyed under that home, the
+        same as standalone user skills. Keying by ``Path.home()`` instead breaks
+        root/all-users scans: Path.home() is the scanner's home (e.g. /var/root),
+        so the per-user filter drops every skill.
+
+        A skill is kept only if its real path is inside the owner's own plugins
+        dir. ``installPath`` comes from a user-writable ``installed_plugins.json``,
+        so under a root scan one user could point it (or a symlink) at another
+        user's files and have root file them under the wrong user.
+        Returns the number of skills merged.
+        """
+        merged = 0
+        for owner_home, plugins_dir, group in plugin_groups:
+            plugins_real = os.path.realpath(str(plugins_dir))
+            for skill in extract_plugin_skills(group):
+                file_real = os.path.realpath(str(skill.get("file_path", "")))
+                if not file_real.startswith(plugins_real + os.sep):
+                    logger.debug(f"Skipping plugin skill outside {plugins_dir}: {skill.get('file_path')}")
+                    continue
+                skill["project_path"] = owner_home
+                project = projects_dict.setdefault(
+                    owner_home,
+                    {"path": owner_home, "rules": [], "skills": [], "mcpServers": []},
+                )
+                project.setdefault("skills", []).append(skill)
+                merged += 1
+        return merged
+
     def _extract_and_merge_tool_skills(
         self,
         tool_name: str,
@@ -1515,7 +1552,7 @@ class AIToolsDetector:
         """Record per-flow skills counts for a tool that merges skills INLINE.
 
         The legacy Claude Code / Cursor / Cline / Augment / Copilot CLI / Copilot
-        (VS Code) / Cowork paths predate ``_extract_and_merge_tool_skills`` and merge
+        (VS Code) paths predate ``_extract_and_merge_tool_skills`` and merge
         skills with bespoke code, so they don't go through the shared recorder. This
         puts them in the same metrics payload as the 8 newer tools (same
         ``{user_skills, project_skills, projects}`` shape) so fleet-wide drop
@@ -1967,9 +2004,14 @@ class AIToolsDetector:
                 except Exception:
                     pass
 
+            # Remember which home each plugins dir belongs to (<home>/.claude/plugins),
+            # so plugin-bundled skills are filed under their owner, not Path.home().
+            plugin_groups = []
             for plugins_dir in plugins_dirs_to_scan:
                 user_plugins = extract_claude_code_plugins(plugins_dir)
                 plugins.extend(user_plugins)
+                if user_plugins:
+                    plugin_groups.append((str(plugins_dir.parent.parent), plugins_dir, user_plugins))
 
             plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
             if plugins:
@@ -1981,6 +2023,7 @@ class AIToolsDetector:
             logger.debug(f"Error extracting {tool_name} plugins: {e}")
             report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
             plugins = []
+            plugin_groups = []
             plugin_lookup = {}
 
         # Extract and merge MCP configs
@@ -2074,17 +2117,11 @@ class AIToolsDetector:
             logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
         # Extract skills bundled inside plugins (separate from standalone skills walker)
-        if plugins:
+        if plugin_groups:
             try:
-                plugin_skills = extract_plugin_skills(plugins)
-                if plugin_skills:
-                    logger.info(f"  ✓ Found {len(plugin_skills)} plugin-bundled skill(s)")
-                    user_home = str(Path.home())
-                    if user_home not in projects_dict:
-                        projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
-                    if "skills" not in projects_dict[user_home]:
-                        projects_dict[user_home]["skills"] = []
-                    projects_dict[user_home]["skills"].extend(plugin_skills)
+                count = self._merge_plugin_skills_by_owner(plugin_groups, projects_dict)
+                if count:
+                    logger.info(f"  ✓ Found {count} plugin-bundled skill(s)")
             except Exception as e:
                 logger.debug(f"Error extracting plugin-bundled skills: {e}")
                 report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
@@ -3200,9 +3237,15 @@ class AIToolsDetector:
                     except Exception:
                         pass
 
+                # (owner home, plugins) per <home>/.cursor/plugins dir, so plugin
+                # skills are filed under their owner, not Path.home().
+                cursor_plugin_groups = []
                 for cursor_plugins_dir in cursor_plugins_dirs:
                     user_plugins = extract_cursor_plugins(cursor_plugins_dir)
                     cursor_plugins.extend(user_plugins)
+                    if user_plugins:
+                        cursor_plugin_groups.append(
+                            (str(cursor_plugins_dir.parent.parent), cursor_plugins_dir, user_plugins))
 
                 cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
                 if cursor_plugins:
@@ -3213,6 +3256,7 @@ class AIToolsDetector:
             except Exception as e:
                 logger.debug(f"Error extracting {tool_name} plugins: {e}")
                 cursor_plugins = []
+                cursor_plugin_groups = []
                 cursor_plugin_lookup = {}
 
             logger.info(f"  Extracting {tool_name} settings...")
@@ -3269,17 +3313,11 @@ class AIToolsDetector:
                 logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
             # Extract skills bundled inside Cursor plugins
-            if cursor_plugins:
+            if cursor_plugin_groups:
                 try:
-                    plugin_skills = extract_plugin_skills(cursor_plugins)
-                    if plugin_skills:
-                        logger.info(f"  ✓ Found {len(plugin_skills)} Cursor plugin-bundled skill(s)")
-                        user_home = str(Path.home())
-                        if user_home not in projects_dict:
-                            projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
-                        if "skills" not in projects_dict[user_home]:
-                            projects_dict[user_home]["skills"] = []
-                        projects_dict[user_home]["skills"].extend(plugin_skills)
+                    count = self._merge_plugin_skills_by_owner(cursor_plugin_groups, projects_dict)
+                    if count:
+                        logger.info(f"  ✓ Found {count} Cursor plugin-bundled skill(s)")
                 except Exception as e:
                     logger.debug(f"Error extracting Cursor plugin-bundled skills: {e}")
 
@@ -3291,24 +3329,11 @@ class AIToolsDetector:
             logger.info("=" * 70)
             logger.info(f"Processing: {tool.get('name', 'Claude Cowork')}")
             logger.info("=" * 70)
-            logger.info(f"  Extracting Claude Cowork skills...")
-            try:
-                skills_result = self.extract_all_cowork_skills()
-                self._record_skills_result_metric("Claude Cowork", skills_result)
-                user_skills = skills_result.get("user_skills", []) if skills_result else []
-                if user_skills:
-                    logger.info(f"  ✓ Found {len(user_skills)} Claude Cowork skill(s)")
-                    user_home = str(Path.home())
-                    projects_dict[user_home] = {
-                        "path": user_home,
-                        "rules": [],
-                        "skills": user_skills,
-                        "mcpServers": [],
-                    }
-                else:
-                    logger.info("  ℹ No Claude Cowork skills found")
-            except Exception as e:
-                logger.error(f"Error extracting Claude Cowork skills: {e}", exc_info=True)
+            # Shared path: each skill is keyed under its owner's home (its
+            # project_path), so a root/all-users scan keeps every user's skills.
+            self._extract_and_merge_tool_skills(
+                "Claude Cowork", self._cowork_skills_extractor, self.extract_all_cowork_skills, projects_dict
+            )
             self._merge_desktop_surface_claudeai_connectors(projects_dict)
 
         elif tool_name == "windsurf":

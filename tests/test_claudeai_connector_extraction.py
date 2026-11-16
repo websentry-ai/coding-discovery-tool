@@ -326,6 +326,7 @@ class ClaudeAIDesktopSurfaceMirrorTest(unittest.TestCase):
             mock.patch.object(utils, "_SENTRY_DSN", ""),
             mock.patch.object(Path, "home", return_value=self.home),
             mock.patch("platform.system", return_value="Darwin"),
+            mock.patch.object(helpers, "_iter_admin_user_homes", return_value=[]),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

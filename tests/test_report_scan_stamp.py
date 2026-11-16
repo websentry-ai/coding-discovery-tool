@@ -11,7 +11,11 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 from scripts.coding_discovery_tools import ai_tools_discovery
+from scripts.coding_discovery_tools import s3_uploader
 from scripts.coding_discovery_tools import utils as utils_mod
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 
@@ -26,6 +30,37 @@ def setUpModule():
 
 def tearDownModule():
     utils_mod._SENTRY_DSN = _PRIOR_DSN
+
+
+class _CapturingBackend(BaseHTTPRequestHandler):
+    """Serves the three steps and keeps whatever the notification sent."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        if self.path.endswith("/upload-url/"):
+            body = json.dumps({
+                "upload_url": f"http://127.0.0.1:{self.server.port}/put",
+                "object_key": "reports/test.json",
+            }).encode()
+        else:
+            try:
+                self.server.notified.append(json.loads(raw))
+            except ValueError:
+                self.server.notified.append({"unparsed": True})
+            body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_PUT(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *_a):
+        pass
 
 
 def _report(tool_name="dummy-tool"):
@@ -152,26 +187,46 @@ class TheStampTravelsWithTheRestOfTheReport(unittest.TestCase):
 
 
 class TheS3NotificationCarriesTheStamp(unittest.TestCase):
-    """Data reports go to S3 first, and the backend answers an unchanged report
-    from the notification alone -- before the blob is ever read."""
+    """Data reports upload to S3 and then notify, and the backend answers an
+    unchanged report from that notification alone -- before the blob is read.
 
-    def test_the_notify_body_includes_it(self):
-        source = (
-            __import__('pathlib').Path(ai_tools_discovery.__file__).parent
-            / "s3_uploader.py"
-        ).read_text()
-        notify = source[source.index("notify_body = {"):]
-        notify = notify[:notify.index("}")]
+    The real three-step flow is run against a local server: a source check would
+    still pass if the value came from the wrong key, or arrived as None and were
+    dropped by the None filter the notification applies.
+    """
 
-        self.assertIn(
-            '"scanned_at"', notify,
-            "the notification omits the snapshot time, so an unchanged S3 report "
-            "cannot move the ordering clock",
+    def setUp(self):
+        self.server = HTTPServer(("127.0.0.1", 0), _CapturingBackend)
+        self.server.notified = []
+        self.server.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.port}"
+
+    def _upload(self, report):
+        ok, _retryable = s3_uploader.try_s3_upload(self.url, "test-key-000000", report)
+        self.assertTrue(ok, "the upload flow did not complete against the stub")
+        self.assertEqual(len(self.server.notified), 1, "no notification arrived")
+        return self.server.notified[0]
+
+    def test_the_notification_carries_the_builder_s_stamp(self):
+        report = _report()
+
+        notify = self._upload(report)
+
+        self.assertEqual(
+            notify.get("scanned_at"), report["scanned_at"],
+            "the notification did not carry the snapshot time the report was built with",
         )
 
-    def test_the_builder_supplies_what_the_notification_forwards(self):
-        """The notification reads it off the payload, so the payload must have it."""
-        self.assertIn("scanned_at", _report())
+    def test_the_stamp_is_not_dropped_as_empty(self):
+        """The notification strips None values, so a wrong key would vanish silently."""
+        notify = self._upload(_report())
+
+        self.assertIn("scanned_at", notify)
+        self.assertTrue(notify["scanned_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

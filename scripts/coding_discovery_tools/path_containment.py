@@ -16,6 +16,9 @@ import stat
 from pathlib import Path
 from typing import Optional, Union
 
+from .constants import is_symlink_or_junction
+from .rule_read_helpers import _fd_real_path
+
 PathLike = Union[str, Path]
 
 
@@ -93,40 +96,6 @@ def _walk_open(file_real: str, leaf_flags: int) -> int:
         os.close(dfd)
 
 
-def _final_path_of_fd(fd: int) -> Optional[str]:
-    """Windows: the normalised final path of an open fd, or None if unavailable."""
-    try:
-        import ctypes
-        import msvcrt
-        from ctypes import wintypes
-
-        get_final = ctypes.windll.kernel32.GetFinalPathNameByHandleW
-        get_final.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
-        get_final.restype = wintypes.DWORD
-        size = 32768
-        buf = ctypes.create_unicode_buffer(size)
-        n = get_final(msvcrt.get_osfhandle(fd), buf, size, 0)
-        if n == 0 or n >= size:
-            return None
-        final = buf.value
-        if final.startswith("\\\\?\\UNC\\"):
-            final = "\\\\" + final[8:]
-        elif final.startswith("\\\\?\\"):
-            final = final[4:]
-        return os.path.normcase(final)
-    except Exception:
-        return None
-
-
-def _is_link(path: PathLike) -> bool:
-    try:
-        st = os.lstat(str(path))
-    except OSError:
-        return False
-    return stat.S_ISLNK(st.st_mode) or bool(
-        getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-
-
 def open_contained(path: PathLike, boundary_real: str) -> int:
     """Open ``path`` for reading only if it really lives inside ``boundary_real``.
 
@@ -155,18 +124,23 @@ def open_contained(path: PathLike, boundary_real: str) -> int:
                 raise
             fd = os.open(file_real, leaf_flags | os.O_NOFOLLOW)
     else:
-        if _is_link(file_real):
+        # Symlink/junction tags only, so OneDrive cloud placeholders (other
+        # reparse tags) stay readable.
+        if is_symlink_or_junction(file_real):
             raise NotContainedError(f"{path} is a link")
         fd = os.open(file_real, leaf_flags | getattr(os, "O_BINARY", 0))
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
             raise NotContainedError(f"{path} is not a single-link regular file")
-        if not _CAN_WALK and os.name == "nt":
-            # Check the file actually opened, not the path checked before the open.
-            final = _final_path_of_fd(fd)
-            if final is not None and (not _inside(final, boundary_real)
-                                      or os.path.basename(final) != os.path.normcase(path.name)):
+        if not _CAN_WALK:
+            # No component-wise open here, so check the file actually opened
+            # (the kernel's path for the handle), and fail closed if unknown.
+            final = _fd_real_path(fd)
+            if final is None:
+                raise NotContainedError(f"{path}: cannot verify the opened file's path")
+            final = os.path.normcase(os.path.normpath(final))
+            if not _inside(final, boundary_real) or os.path.basename(final) != os.path.normcase(path.name):
                 raise NotContainedError(f"{path} opened as {final}, outside {boundary_real}")
     except BaseException:
         os.close(fd)

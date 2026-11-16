@@ -271,6 +271,53 @@ class TestOpenContainedRace(unittest.TestCase):
             os.close(fd)
 
 
+class TestOpenContainedHandleCheck(unittest.TestCase):
+    """The no-dir_fd branch (Windows) checks the opened handle's path and fails closed.
+
+    Run on any OS by turning the component walk off, so this branch is covered
+    even where the Windows CI legs cannot create symlinks.
+    """
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="handle-")))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.boundary = self.tmp / "bob"
+        _write_skill(self.boundary / "x", "bob-skill")
+        no_walk = mock.patch.object(path_containment, "_CAN_WALK", False)
+        no_walk.start()
+        self.addCleanup(no_walk.stop)
+
+    def _open(self, path):
+        return path_containment.open_contained(path, os.path.normcase(str(self.boundary)))
+
+    def test_clean_file_opens(self):
+        fd = self._open(self.boundary / "x" / "SKILL.md")
+        try:
+            self.assertIn(b"bob-skill", os.read(fd, 4096))
+        finally:
+            os.close(fd)
+
+    def test_linked_file_is_refused(self):
+        key = self.boundary / ".ssh" / "id_test"
+        key.parent.mkdir()
+        key.write_text("PRIVATE\n", encoding="utf-8")
+        _symlink(self, self.boundary / "y" / "SKILL.md", key)
+        with self.assertRaises(path_containment.NotContainedError):
+            self._open(self.boundary / "y" / "SKILL.md")
+
+    def test_unknown_handle_path_fails_closed(self):
+        with mock.patch.object(path_containment, "_fd_real_path", return_value=None):
+            with self.assertRaises(path_containment.NotContainedError):
+                self._open(self.boundary / "x" / "SKILL.md")
+
+    def test_handle_outside_boundary_is_refused(self):
+        # The handle reports a path outside the boundary (a swapped-in junction).
+        with mock.patch.object(path_containment, "_fd_real_path",
+                               return_value=str(self.tmp / "alice" / "x" / "SKILL.md")):
+            with self.assertRaises(path_containment.NotContainedError):
+                self._open(self.boundary / "x" / "SKILL.md")
+
+
 class TestNoScannerHomeGrouping(unittest.TestCase):
     """Static guard: the merge layer must not bind Path.home() to a variable.
 

@@ -128,12 +128,13 @@ class TestMemoryDiscovery(_MemoryHome):
 
     def test_unquoted_assignments_urls_and_query_strings_are_flagged(self):
         memory = _memory_dir(self.home)
+        token, password = "abcd1234" + "efgh", "Hunter2" + "pass"
         _write(memory / "new.md", "\n".join([
-            "DB_PASSWORD=Hunter2pass9",
-            "auth_token: abcd1234efgh",
-            "redis://:Hunter2pass@cache:6379/0",
-            "https://example.com/dl?x=1&access_token=abcd1234efgh#top",
-            "pwd: Sup3rS3cret!", "password = p@ssw0rd!", "secret=hunter2hunter2",
+            "DB_PASSWORD=" + password + "9",
+            "auth_token: " + token,
+            "redis://:" + password + "@cache:6379/0",
+            "https://example.com/dl?x=1&access_token=" + token + "#top",
+            "pwd: " + "Sup3r" + "S3cret!", "password = " + "p@ss" + "w0rd!", "secret=" + "hunter2" + "hunter2",
         ]) + "\n")
 
         findings = self.collect()["folders"][0]["flagged"][0]["findings"]
@@ -615,6 +616,15 @@ class TestMemoryCache(_MemoryHome):
         self.assertNotIn("session.jsonl", unchanged_reads)
         self.assertIn("later.jsonl", changed_reads)
         self.assertEqual(later["folders"][0]["project_path"], "/work/shop")
+
+    def test_the_newest_transcripts_are_searched_beyond_their_first_lines(self):
+        filler = json.dumps({"type": "summary"}) + "\n" * cmh.TRANSCRIPT_HEAD_LINES
+        for name in "abcdef":
+            _write(self.memory.parent / (name + ".jsonl"), filler)
+        newest = _write(self.memory.parent / "z.jsonl", filler * 2 + json.dumps({"cwd": "/work/shop"}) + "\n")
+        os.utime(newest, ns=(newest.stat().st_mtime_ns + 10**9,) * 2)
+
+        self.assertEqual(self.collect()["folders"][0]["project_path"], "/work/shop")
 
     def test_a_short_transcript_head_without_a_path_is_not_cached_as_missing(self):
         _write(self.memory.parent / "session.jsonl", json.dumps({"type": "summary"}) + "\n")

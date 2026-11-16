@@ -6,7 +6,7 @@ import os
 import re
 import stat
 import time
-from heapq import nsmallest
+from heapq import nlargest, nsmallest
 from itertools import chain, islice, takewhile
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -84,11 +84,22 @@ def _subdirs(parent: Path, limit: int, deadline: float) -> List[Path]:
         return []
 
 
+def _newest_transcripts(claude_project_dir: Path, deadline: float) -> List[Path]:
+    """The most recently modified session transcripts among the entries examined, newest first."""
+    stamped = []
+    for entry in _entries(claude_project_dir, deadline):
+        if entry.name.lower().endswith(".jsonl"):
+            try:
+                stamped.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
+            except OSError:
+                continue
+    return [claude_project_dir / name for _, name in nlargest(MAX_TRANSCRIPTS_TRIED, stamped)]
+
+
 def _project_path(claude_project_dir: Path, deadline: float) -> Tuple[Optional[str], bool]:
     """(the project's real path from a session transcript's cwd or None, False when a short head may still gain one)."""
     try:
-        transcripts = [claude_project_dir / name for name in nsmallest(MAX_TRANSCRIPTS_TRIED, (
-            entry.name for entry in _entries(claude_project_dir, deadline) if entry.name.lower().endswith(".jsonl")))]
+        transcripts = _newest_transcripts(claude_project_dir, deadline)
     except (OSError, ValueError):
         return None, True
     settled = True
@@ -96,7 +107,9 @@ def _project_path(claude_project_dir: Path, deadline: float) -> Tuple[Optional[s
         read = read_rule_file_contained(transcript, claude_project_dir, max_size=TRANSCRIPT_HEAD_BYTES)
         lines = (read[0] if read else "").split("\n")
         settled = settled and (len(lines) >= TRANSCRIPT_HEAD_LINES or not read or read[1])
-        for line in lines[:TRANSCRIPT_HEAD_LINES]:
+        for line in lines:
+            if '"cwd"' not in line:
+                continue
             try:
                 cwd = json.loads(line).get("cwd")
             except (ValueError, AttributeError, RecursionError):

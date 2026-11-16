@@ -123,6 +123,11 @@ try:
     from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
     from . import mcp_tools_cache
+    from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from .mcp_extraction_helpers import (
+        claude_cli_and_desktop_share_account,
+        extract_claudeai_mcp_servers_with_root_support,
+    )
     from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
@@ -206,6 +211,11 @@ except ImportError:
     from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
+    from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+        claude_cli_and_desktop_share_account,
+        extract_claudeai_mcp_servers_with_root_support,
+    )
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
 logger = logging.getLogger(__name__)
@@ -586,7 +596,7 @@ class AIToolsDetector:
             self._claude_settings_extractor = ClaudeSettingsExtractorFactory.create(self.system)
             self._claude_skills_extractor = ClaudeSkillsExtractorFactory.create(self.system)
 
-            # Initialize Claude Cowork extractor (skills only; Cowork has no rules/MCP/settings)
+            # Initialize Claude Cowork extractor (skills only; its claude.ai connectors come from the account)
             self._cowork_skills_extractor = ClaudeCoworkSkillsExtractorFactory.create(self.system)
             
             # Initialize Windsurf extractors
@@ -1352,6 +1362,17 @@ class AIToolsDetector:
             )
 
         return projects_dict
+
+    def _merge_desktop_surface_claudeai_connectors(self, projects_dict: Dict[str, Dict]) -> None:
+        """Add the claude.ai connector project to a desktop-app surface's report."""
+        connector_projects: List[Dict] = []
+        try:
+            extract_claudeai_mcp_servers_with_root_support(
+                connector_projects, home_filter=claude_cli_and_desktop_share_account
+            )
+            self._merge_mcp_configs_into_projects(connector_projects, projects_dict)
+        except Exception as e:
+            logger.debug(f"Error extracting claude.ai connectors for desktop surface: {e}")
 
     def _extract_and_merge_tool_skills(
         self,
@@ -3288,6 +3309,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No Claude Cowork skills found")
             except Exception as e:
                 logger.error(f"Error extracting Claude Cowork skills: {e}", exc_info=True)
+            self._merge_desktop_surface_claudeai_connectors(projects_dict)
 
         elif tool_name == "windsurf":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -3367,6 +3389,7 @@ class AIToolsDetector:
                 self._claude_desktop_mcp_extractor,
                 list
             )
+            self._merge_desktop_surface_claudeai_connectors(projects_dict)
 
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -3646,6 +3669,58 @@ def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
     return max(0.0, min(float(DRAIN_BUDGET_SECONDS), (run_timeout - elapsed) / 2))
 
 
+def _windows_peak_rss_mb() -> Optional[float]:
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.K32GetProcessMemoryInfo.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD)
+    kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+    counters = PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+    if not kernel32.K32GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+        return None
+    return round(counters.PeakWorkingSetSize / (1024 * 1024), 1)
+
+
+def _process_usage() -> Dict[str, Optional[float]]:
+    usage: Dict[str, Optional[float]] = {
+        "total_cpu_ms": None, "children_cpu_ms": None, "peak_rss_mb": None,
+    }
+    try:
+        usage["total_cpu_ms"] = round(time.process_time() * 1000)
+        if platform.system() == "Windows":
+            usage["peak_rss_mb"] = _windows_peak_rss_mb()
+        else:
+            import resource
+            children = resource.getrusage(resource.RUSAGE_CHILDREN)
+            usage["children_cpu_ms"] = round((children.ru_utime + children.ru_stime) * 1000)
+            # ru_maxrss is bytes on macOS but KiB on Linux.
+            rss_unit = 1024 * 1024 if sys.platform == "darwin" else 1024
+            usage["peak_rss_mb"] = round(
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_unit, 1)
+    except Exception as e:
+        logger.debug(f"Collecting process usage failed: {e}")
+    return usage
+
+
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='AI Tools Discovery Script')
@@ -3731,22 +3806,27 @@ def main():
 
     # Client-side timing metrics, forwarded to backend once at end of run.
     # Backend (webapp.services.discovery_metrics_service) emits each step as a
-    # `discovery.step.<name>` distribution; there is no name allowlist, but the
-    # name must match Sentry's metric-key pattern [a-zA-Z_][a-zA-Z0-9_.\-]*.
+    # `discovery.step.<name>` distribution; names outside its ALLOWED_STEP_NAMES
+    # allowlist are emitted as `unknown_step`, so a new step needs a backend change.
     # Each step is tagged with a phase (detect|process|send|queue) so Sentry can
     # group leaves into broader buckets via the `phase` attribute.
     t_start = time.monotonic()
     step_durations_ms: Dict[str, float] = {}
+    step_cpu_ms: Dict[str, float] = {}
     step_phases: Dict[str, str] = {}
 
     @contextmanager
     def time_step(name: str, phase: str) -> Iterator[None]:
         _t = time.monotonic()
+        _cpu = time.process_time()
         try:
             yield
         finally:
             step_durations_ms[name] = (
                 step_durations_ms.get(name, 0.0) + (time.monotonic() - _t) * 1000.0
+            )
+            step_cpu_ms[name] = (
+                step_cpu_ms.get(name, 0.0) + (time.process_time() - _cpu) * 1000.0
             )
             step_phases[name] = phase
 
@@ -3800,6 +3880,7 @@ def main():
     # Set just before the completed event goes out: from then on the backend
     # may already hold this run's outcome.
     _completed_attempted = [False]
+    _metrics_sent = [False]
     completed_outcome: Dict = {}
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
@@ -3807,7 +3888,8 @@ def main():
     system_user = None
 
     def _mark_run_failed(error_type: str, message: str,
-                         deadline: Optional[float] = None) -> None:
+                         deadline: Optional[float] = None,
+                         usage: Optional[Dict] = None) -> None:
         """Best-effort: tell the backend this run failed. Idempotent (a flag race
         at worst double-sends one idempotent event). No-ops until run_id exists
         (nothing to correlate)."""
@@ -3824,6 +3906,7 @@ def main():
                     "error_type": error_type,
                     "message": message,
                     "timestamp": datetime.utcnow().isoformat() + "Z",
+                    **({"usage": usage} if usage else {}),
                 },
                 sentry_context=sentry_ctx,
                 system_user=system_user,
@@ -3844,7 +3927,8 @@ def main():
             except Exception:
                 pass
 
-    def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15) -> None:
+    def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15,
+                               usage: Optional[Dict] = None) -> None:
         """Run the best-effort failure report on a daemon thread bounded by
         join_timeout, so a slow/retrying backend can't block exit. Used by both
         the abort path and the normal except path (which were asymmetric).
@@ -3861,7 +3945,7 @@ def main():
         t = threading.Thread(
             target=_mark_run_failed,
             args=(error_type, message),
-            kwargs={"deadline": time.monotonic() + join_timeout},
+            kwargs={"deadline": time.monotonic() + join_timeout, "usage": usage},
             daemon=True,
         )
         _failure_report[0] = t
@@ -3900,7 +3984,11 @@ def main():
         except Exception:
             pass
         if not _completed_attempted[0] or _backend_lacks_the_outcome():
-            _report_failed_bounded(error_type, message)
+            usage = None if _metrics_sent[0] else {
+                **_process_usage(),
+                "metadata": {"os": platform.system(), "script_version": SCRIPT_VERSION},
+            }
+            _report_failed_bounded(error_type, message, usage=usage)
         os._exit(1)
 
     def _on_watchdog_timeout() -> None:
@@ -4134,12 +4222,14 @@ def main():
 
         # Send scan in_progress event BEFORE scanning
         logger.info("Sending scan in_progress event...")
+        scan_start_response: Dict = {}
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
                 args.app_name, sentry_context=sentry_ctx, system_user=system_user,
-                deadline=send_deadline,
+                deadline=send_deadline, response=scan_start_response,
             )
+        scan_memory = memory_scan_enabled(scan_start_response)
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
         else:
@@ -4392,6 +4482,12 @@ def main():
                             except Exception as e:
                                 logger.warning(f"    Could not detect Auggie plan for {user_name}: {e}")
 
+                        if scan_memory and tool_name.lower() == "claude code":
+                            with time_step("scan_memory_files", "process"):
+                                memories = collect_claude_memories(user_home, user_name)
+                            if memories:
+                                tool_filtered["memories"] = memories
+
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
                         with time_step("prepare_payload", "process"):
@@ -4455,6 +4551,10 @@ def main():
                             try:
                                 log_report = copy.deepcopy(single_tool_report)
                                 for t in log_report.get("tools") or []:
+                                    for folder in (t.get("memories") or {}).get("folders") or []:
+                                        for memory_file in [folder.get("index")] + (folder.get("flagged") or []):
+                                            if memory_file and "content" in memory_file:
+                                                memory_file["content"] = f"<{len(memory_file['content'])} chars>"
                                     for p in t.get("projects") or []:
                                         for r in p.get("rules") or []:
                                             if "content" in r:
@@ -4474,7 +4574,8 @@ def main():
                                     payload_logger.info(f"  {line}")
                             except Exception as e:
                                 logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                                payload_logger.info(f"  Report structure: {single_tool_report}")
+                                payload_logger.info(
+                                    f"  Report keys: {sorted(single_tool_report) if isinstance(single_tool_report, dict) else []}")
                             payload_logger.info("  " + "=" * 70)
                             payload_logger.info("")
 
@@ -4489,6 +4590,10 @@ def main():
                         # itself when local cache shows no change since last successful upload.
                         try:
                             local_payload_hash = compute_payload_hash(single_tool_report["tools"][0])
+                            # The tool hash leaves memories out, so a memory-only change must still upload.
+                            memories_hash = (single_tool_report["tools"][0].get("memories") or {}).get("hash")
+                            if memories_hash:
+                                local_payload_hash = f"{local_payload_hash}:{memories_hash}"
                         except Exception as hash_err:
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
@@ -4634,12 +4739,15 @@ def main():
         # Forward client-side timing metrics to backend (best-effort, success path only).
         # Backend emits these as Sentry distributions via emit_discovery_metrics.
         try:
+            elevated = os.getuid() == 0 if hasattr(os, "getuid") else _windows_process_is_elevated()
             sentry_metrics_payload = {
                 "total_duration_ms": round((time.monotonic() - t_start) * 1000),
+                **_process_usage(),
                 "steps": [
                     {
                         "name": name,
                         "duration_ms": round(duration),
+                        "cpu_ms": round(step_cpu_ms.get(name, 0.0)),
                         "phase": step_phases.get(name),
                     }
                     for name, duration in step_durations_ms.items()
@@ -4652,6 +4760,7 @@ def main():
                     "scan_incomplete": bool(incomplete_reasons),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
+                    **({} if elevated is None else {"elevated": elevated}),
                     # Observability for the kill/rerun behavior so it's visible in
                     # dashboards and alertable if the checkpoint logic misbehaves
                     # (e.g. a spike in resumed runs or in skipped pairs/tools):
@@ -4678,7 +4787,9 @@ def main():
                 metrics_deadline = now + max(
                     0.0, (run_deadline - tail_grace - now) / 2
                 )
-            send_discovery_metrics(
+            # Set before the send: an abort mid-send may drop one sample but never double-counts.
+            _metrics_sent[0] = True
+            _metrics_sent[0] = send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
                 deadline=metrics_deadline,

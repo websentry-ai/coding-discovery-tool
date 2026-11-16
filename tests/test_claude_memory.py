@@ -21,7 +21,7 @@ from scripts.coding_discovery_tools.constants import MAX_CONFIG_FILE_SIZE, MAX_S
 from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
 from tests.test_queue_drain_budget import _DrivesMain, _SimulatedClock
 
-FAKE_SECRET = "postgres://admin:Hunter2pass@db.internal:5432/shop"
+FAKE_SECRET = "ghp_" + "a1B2c3D4" * 4 + "e5F6"
 SLUG = "-work-shop"
 
 
@@ -101,7 +101,7 @@ class TestMemoryDiscovery(_MemoryHome):
         self.assertEqual(len(folder["flagged"]), 1)
         flagged = folder["flagged"][0]
         self.assertEqual(flagged["file_path"], str(memory / "db.md"))
-        self.assertEqual(flagged["findings"], [{"rule_id": "SECRET-011", "line": 3}])
+        self.assertEqual(flagged["findings"], [{"rule_id": "SECRET-002", "line": 3}])
         self.assertIn(FAKE_SECRET, flagged["content"])
         self.assertEqual(
             set(flagged), {"file_path", "file_name", "content", "size", "last_modified", "truncated", "findings"})
@@ -113,20 +113,48 @@ class TestMemoryDiscovery(_MemoryHome):
 
         folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["index"]["findings"], [{"rule_id": "SECRET-011", "line": 1}])
+        self.assertEqual(folder["index"]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
         self.assertEqual(folder["flagged"], [])
         self.assertEqual(folder["counts"], {"total": 1, "flagged": 1, "clean": 0, "truncated": 0})
         self.assertIsNone(folder["project_path"])
 
-    def test_placeholder_credentials_are_excluded_like_the_backend_does(self):
+    def test_a_credential_on_a_line_with_placeholder_words_is_still_flagged(self):
         memory = _memory_dir(self.home)
-        _write(memory / "defaults.md", "postgres://user:password@db.internal/shop\n")
-        _write(memory / "local.md", "postgres://admin:Hunter2pass@localhost:5432/shop\n")
+        _write(memory / "local.md", "test token, latest example: " + FAKE_SECRET + "\n")
 
         folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["counts"], {"total": 2, "flagged": 0, "clean": 2, "truncated": 0})
-        self.assertIsNone(folder["index"])
+        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
+
+    def test_unquoted_assignments_urls_and_query_strings_are_flagged(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "new.md", "\n".join([
+            "DB_PASSWORD=Hunter2pass9",
+            "auth_token: abcd1234efgh",
+            "redis://:Hunter2pass@cache:6379/0",
+            "https://example.com/dl?x=1&access_token=abcd1234efgh#top",
+            "pwd: Sup3rS3cret!", "password = p@ssw0rd!", "secret=hunter2hunter2",
+        ]) + "\n")
+
+        findings = self.collect()["folders"][0]["flagged"][0]["findings"]
+
+        self.assertEqual({(finding["rule_id"], finding["line"]) for finding in findings}, {
+            ("SECRET-021", 1), ("SECRET-021", 2), ("SECRET-022", 3), ("SECRET-021", 4), ("SECRET-023", 4),
+            ("SECRET-021", 5), ("SECRET-021", 6), ("SECRET-021", 7),
+        })
+
+    def test_unquoted_assignment_placeholder_values_are_not_flagged(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "env.md", "\n".join([
+            "password = $DB_PASSWORD_VALUE", "token: <your-token-here>", "secret={{ vault_secret }}",
+            "pwd=%PASSWORD_VALUE%", "api_key: **********", "password: None", "token=required",
+            "secret: changeme", "passphrase = XXXXXXXXXX", "password=short", "token: some_function_name",
+            "secret = load_secret_from_vault", "api_key: SomeFunctionName",
+        ]) + "\n")
+
+        folder = self.collect()["folders"][0]
+
+        self.assertEqual(folder["counts"], {"total": 1, "flagged": 0, "clean": 1, "truncated": 0})
 
     def test_two_matches_of_one_rule_on_one_line_are_one_finding(self):
         memory = _memory_dir(self.home)
@@ -134,7 +162,7 @@ class TestMemoryDiscovery(_MemoryHome):
 
         folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-011", "line": 1}])
+        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
 
     @unittest.skipUnless(os.name == "posix", "needs POSIX symlinks")
     def test_symlinks_and_non_markdown_files_are_skipped(self):
@@ -450,7 +478,7 @@ class TestMemoryCache(_MemoryHome):
         cache_text = self.cache_file.read_text(encoding="utf-8")
         entry = json.loads(cache_text)["users"]["alice"][str(self.memory / "db.md")]
         self.assertEqual(set(entry), {"size", "mtime", "sha256", "findings", "url_hosts"})
-        self.assertEqual(entry["findings"], [{"rule_id": "SECRET-011", "line": 1}])
+        self.assertEqual(entry["findings"], [{"rule_id": "SECRET-002", "line": 1}])
         self.assertNotIn("Hunter2pass", cache_text)
         self.assertEqual(list(self.home.rglob(cmh.MEMORY_CACHE_FILENAME)), [])
         if os.name == "posix":
@@ -753,7 +781,7 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
         self.assertEqual(tool["name"], "Claude Code")
         folder = tool["memories"]["folders"][0]
         self.assertEqual(folder["index"]["content"], "index\n")
-        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-011", "line": 1}])
+        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
         without_memories = {key: value for key, value in tool.items() if key != "memories"}
         self.assertEqual(reports[0]["payload_hash"], compute_payload_hash(without_memories))
         self.assertEqual(reports[0]["memories_hash"], tool["memories"]["hash"])

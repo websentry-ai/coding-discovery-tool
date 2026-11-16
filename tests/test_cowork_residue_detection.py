@@ -864,7 +864,7 @@ class TestMacOSCoworkDesktopPresence(unittest.TestCase):
         self.assertEqual(self._detect()["install_path"], str(sessions))
         self.assertNotIn("data_dir:present", utils_mod.cowork_probes())
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unreadable_claude_parent_is_unknown_not_absent(self):
         self._app()
         self.data_dir.mkdir(parents=True)
@@ -873,7 +873,7 @@ class TestMacOSCoworkDesktopPresence(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 self._detect()
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unreadable_data_dir_raises_through_the_desktop_rule(self):
         from scripts.coding_discovery_tools.user_tool_detector import cowork_from_desktop_presence
         self._app()
@@ -884,7 +884,7 @@ class TestMacOSCoworkDesktopPresence(unittest.TestCase):
                 cowork_from_desktop_presence(self.Cowork(), self.home, self.data_dir)
         self.assertIn("data_dir:unreadable", utils_mod.cowork_probes())
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unreadable_data_dir_in_another_users_home_is_no_row_and_no_raise(self):
         self._app()
         self.data_dir.mkdir(parents=True)
@@ -893,7 +893,7 @@ class TestMacOSCoworkDesktopPresence(unittest.TestCase):
                 patch(f"{_UTILS_MOD}._is_root", return_value=False):
             self.assertIsNone(self._detect())
 
-    @unittest.skipIf(os.geteuid() == 0, "root ignores mode bits")
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
     def test_unreadable_bundle_is_unknown_not_absent(self):
         self._app()
         self.data_dir.mkdir(parents=True)

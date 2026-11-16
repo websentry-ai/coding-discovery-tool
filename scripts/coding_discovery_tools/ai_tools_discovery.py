@@ -119,6 +119,7 @@ try:
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from .path_containment import is_within, owned_boundary
     from .s3_uploader import compute_payload_hash
     from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
@@ -207,6 +208,7 @@ except ImportError:
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from scripts.coding_discovery_tools.path_containment import is_within, owned_boundary
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
@@ -1388,18 +1390,21 @@ class AIToolsDetector:
         root/all-users scans: Path.home() is the scanner's home (e.g. /var/root),
         so the per-user filter drops every skill.
 
-        A skill is kept only if its real path is inside the owner's own plugins
-        dir. ``installPath`` comes from a user-writable ``installed_plugins.json``,
-        so under a root scan one user could point it (or a symlink) at another
-        user's files and have root file them under the wrong user.
+        A skill is kept only if its real path is inside the plugins dir AND the
+        plugins dir's real path is inside the owner's home. ``installPath`` comes
+        from a user-writable ``installed_plugins.json``, and a user can symlink
+        their ``~/.claude``, ``~/.cursor`` or plugins dir, so under a root scan one
+        user could otherwise have root file another user's files under them.
         Returns the number of skills merged.
         """
         merged = 0
         for owner_home, plugins_dir, group in plugin_groups:
-            plugins_real = os.path.realpath(str(plugins_dir))
+            plugins_real = owned_boundary(owner_home, plugins_dir)
+            if plugins_real is None:
+                logger.debug(f"Skipping plugin skills: {plugins_dir} resolves outside {owner_home}")
+                continue
             for skill in extract_plugin_skills(group):
-                file_real = os.path.realpath(str(skill.get("file_path", "")))
-                if not file_real.startswith(plugins_real + os.sep):
+                if not is_within(skill.get("file_path", ""), plugins_real):
                     logger.debug(f"Skipping plugin skill outside {plugins_dir}: {skill.get('file_path')}")
                     continue
                 skill["project_path"] = owner_home

@@ -21,6 +21,7 @@ from ...claude_cowork_skills_helpers import (
     is_marketplace_catalog_path,
 )
 from ...windows_extraction_helpers import scan_windows_user_directories
+from ...path_containment import is_within, owned_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,9 @@ class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
         collected: List[Dict] = []
 
         if self._explicit_sessions_root is not None:
-            # Explicit root (tests).
-            self._collect_from(self._explicit_sessions_root, Path.home(), collected)
+            # Explicit root (tests). The tempdir is not under a home, so the
+            # ownership check is off here; every real walk below keeps it on.
+            self._collect_from(self._explicit_sessions_root, Path.home(), collected, enforce_owner=False)
         else:
             # scan_windows_user_directories handles admin vs non-admin internally.
             # Deduplicate per-user to avoid cross-user skill name collisions.
@@ -54,13 +56,24 @@ class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
 
         return {"user_skills": collected, "project_skills": []}
 
-    def _collect_from(self, sessions_root: Path, user_home: Path, collected: List[Dict]) -> None:
-        """Walk one user's sessions tree, appending skill dicts to *collected*."""
+    def _collect_from(self, sessions_root: Path, user_home: Path, collected: List[Dict],
+                      enforce_owner: bool = True) -> None:
+        """Walk one user's sessions tree, appending skill dicts to *collected*.
+
+        With ``enforce_owner`` a SKILL.md is read only if its real path is in the
+        sessions tree and the tree's real path is in ``user_home`` (see the macOS
+        extractor for why).
+        """
         try:
             if not sessions_root.exists() or not sessions_root.is_dir():
                 return
         except OSError as e:
             logger.debug(f"Error accessing Cowork sessions dir {sessions_root}: {e}")
+            return
+
+        boundary = owned_boundary(user_home, sessions_root) if enforce_owner else None
+        if enforce_owner and boundary is None:
+            logger.debug(f"Skipping Cowork sessions dir {sessions_root}: resolves outside {user_home}")
             return
 
         try:
@@ -69,6 +82,8 @@ class WindowsClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
                     if not candidate.is_file():
                         continue
                     if candidate.name.lower() != SKILL_FILE_NAME_LOWER:
+                        continue
+                    if boundary is not None and not is_within(candidate, boundary):
                         continue
                     if is_ephemeral_session_path(candidate):
                         continue

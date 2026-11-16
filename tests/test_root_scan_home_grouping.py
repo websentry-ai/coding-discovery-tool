@@ -40,6 +40,15 @@ def _write_skill(skill_dir: Path, name: str) -> None:
     )
 
 
+def _symlink(test: unittest.TestCase, link: Path, target: Path) -> None:
+    """Create ``link`` -> ``target`` or skip (Windows CI may lack symlink rights)."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(str(target), str(link), target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError) as e:
+        test.skipTest(f"symlinks unavailable: {e}")
+
+
 def _skill_names(tool: dict) -> set:
     return {s.get("skill_name") for p in tool.get("projects", []) for s in p.get("skills", [])}
 
@@ -74,10 +83,10 @@ class _RootScanCase(unittest.TestCase):
 class TestCoworkSkillsRootScan(_RootScanCase):
     def setUp(self):
         super().setUp()
-        for user, home in self.homes.items():
-            bundle = (home / "Library" / "Application Support" / "Claude"
-                      / "local-agent-mode-sessions" / "skills-plugin" / "org" / "acct" / "skills")
-            _write_skill(bundle / f"{user}-skill", f"{user}-skill")
+        self.sessions = {u: h / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+                         for u, h in self.homes.items()}
+        for user, sessions in self.sessions.items():
+            _write_skill(sessions / "skills-plugin" / "org" / "acct" / "skills" / f"{user}-skill", f"{user}-skill")
         self.detector = AIToolsDetector(os_name="Darwin")
         self.detector._cowork_skills_extractor = MacOSClaudeCoworkSkillsExtractor()
         # The connector merge reads the real machine; not under test here.
@@ -90,9 +99,25 @@ class TestCoworkSkillsRootScan(_RootScanCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def _process(self) -> dict:
+        return self.detector.process_single_tool({"name": "Claude Cowork", "install_path": str(self.tmp)})
+
     def test_each_user_keeps_own_cowork_skills(self):
-        processed = self.detector.process_single_tool({"name": "Claude Cowork", "install_path": str(self.tmp)})
-        self.assert_each_user_keeps_own_skills(processed, {u: {f"{u}-skill"} for u in USERS})
+        self.assert_each_user_keeps_own_skills(self._process(), {u: {f"{u}-skill"} for u in USERS})
+
+    def test_skill_file_symlink_into_another_home_is_not_read(self):
+        # Bob links a SKILL.md in his own tree to a file in Alice's home.
+        secret = self.homes["alice"] / "notes" / "SKILL.md"
+        _write_skill(secret.parent, "alice-private")
+        _symlink(self, self.sessions["bob"] / "skills-plugin" / "org" / "acct" / "skills" / "planted" / "SKILL.md",
+                 secret)
+        self.assert_each_user_keeps_own_skills(self._process(), {"alice": {"alice-skill"}, "bob": {"bob-skill"}})
+
+    def test_sessions_dir_symlink_into_another_home_is_not_read(self):
+        # Bob replaces his whole sessions tree with a link to Alice's.
+        shutil.rmtree(self.sessions["bob"])
+        _symlink(self, self.sessions["bob"], self.sessions["alice"])
+        self.assert_each_user_keeps_own_skills(self._process(), {"alice": {"alice-skill"}, "bob": set()})
 
 
 class _PluginRootScanCase(_RootScanCase):
@@ -137,6 +162,13 @@ class TestClaudeCodePluginSkillsRootScan(_PluginRootScanCase):
         processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
 
+    def test_config_dir_symlink_into_another_home_is_not_attributed(self):
+        # Bob replaces his ~/.claude with a link to Alice's.
+        shutil.rmtree(self.homes["bob"] / ".claude")
+        _symlink(self, self.homes["bob"] / ".claude", self.homes["alice"] / ".claude")
+        processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
+        self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
+
 
 class TestCursorPluginSkillsRootScan(_PluginRootScanCase):
     def setUp(self):
@@ -151,6 +183,14 @@ class TestCursorPluginSkillsRootScan(_PluginRootScanCase):
     def test_each_user_keeps_own_plugin_skills(self):
         processed = self.detector.process_single_tool({"name": "Cursor", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {u: {f"{u}-plugin-skill"} for u in USERS})
+
+    def test_plugins_dir_symlink_into_another_home_is_not_attributed(self):
+        # Bob replaces his ~/.cursor/plugins with a link to Alice's.
+        bob_plugins = self.homes["bob"] / ".cursor" / "plugins"
+        shutil.rmtree(bob_plugins)
+        _symlink(self, bob_plugins, self.homes["alice"] / ".cursor" / "plugins")
+        processed = self.detector.process_single_tool({"name": "Cursor", "install_path": str(self.tmp)})
+        self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
 
 
 class TestNoScannerHomeGrouping(unittest.TestCase):

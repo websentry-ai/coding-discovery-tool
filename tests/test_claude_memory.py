@@ -26,7 +26,7 @@ SLUG = "-work-shop"
 
 def _write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     return path
 
 
@@ -184,6 +184,14 @@ class TestMemoryDiscovery(_MemoryHome):
 
         self.assertEqual(self.collect()["folders"][0]["counts"]["total"], 1)
 
+    def test_the_walk_stops_at_the_directory_bound_and_still_finishes(self):
+        memory = _memory_dir(self.home)
+        for number in range(5):
+            _write(memory / f"topic-{number}" / "note.md", "topic\n")
+
+        with patch.object(cmh, "MAX_DIRS_PER_MEMORY_FOLDER", 3):
+            self.assertEqual(self.collect()["folders"][0]["counts"]["total"], 2)
+
     def test_an_index_over_the_size_cap_is_sent_truncated(self):
         memory = _memory_dir(self.home)
         _write(memory / "MEMORY.md", "x" * (MAX_CONFIG_FILE_SIZE + 500))
@@ -207,7 +215,7 @@ class TestMemoryDiscovery(_MemoryHome):
         self.assertEqual(warm["counts"], cold["counts"])
 
     def test_subagent_folders_carry_agent_name_and_scope(self):
-        project = self._dir / "work" / "shop"
+        project = self.home / "work" / "shop"
         _write(_memory_dir(self.home).parent / "session.jsonl", json.dumps({"cwd": str(project)}) + "\n")
         user_agent = self.home / ".claude" / "agent-memory" / "reviewer"
         project_agent = project / ".claude" / "agent-memory" / "planner"
@@ -408,6 +416,15 @@ class TestMemoryCache(_MemoryHome):
 
         self.assertEqual(json.loads(self.cache_file.read_text()), cached)
 
+    def test_transcripts_are_not_read_once_out_of_time(self):
+        _write(self.memory.parent / "session.jsonl", json.dumps({"cwd": "/work/shop"}) + "\n")
+
+        with patch.object(cmh, "MEMORY_SCAN_BUDGET_SECONDS", 0):
+            memories, reads = self.collect_recording_reads()
+
+        self.assertIsNone(memories)
+        self.assertNotIn("session.jsonl", reads)
+
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")
     @unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0, "root writes through the directory mode")
     def test_an_unwritable_state_dir_still_reports_memories(self):
@@ -480,6 +497,8 @@ def _unserialisable_report(*args):
     return {**_report(*args), "not_json": {1, 2}}
 
 
+@unittest.skipIf(
+    os.name == "nt", "the main() harness pins platform.system to Linux, which breaks the Windows handle check")
 class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
     """main() against a real localhost backend: the scan-start answer is the gate."""
 

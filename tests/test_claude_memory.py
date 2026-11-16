@@ -192,6 +192,103 @@ class TestMemoryDiscovery(_MemoryHome):
         with patch.object(cmh, "MAX_DIRS_PER_MEMORY_FOLDER", 3):
             self.assertEqual(self.collect()["folders"][0]["counts"]["total"], 2)
 
+    def test_project_folders_are_capped_in_name_order(self):
+        for slug in ("-c", "-a", "-b"):
+            _write(_memory_dir(self.home, slug) / "MEMORY.md", "index\n")
+
+        with patch.object(cmh, "MAX_PROJECT_FOLDERS", 2):
+            paths = [folder["path"] for folder in self.collect()["folders"]]
+
+        self.assertEqual(paths, [str(_memory_dir(self.home, "-a")), str(_memory_dir(self.home, "-b"))])
+
+    def test_subagent_folders_per_base_directory_are_capped_in_name_order(self):
+        for name in ("c", "a", "b"):
+            _write(self.home / ".claude" / "agent-memory" / name / "MEMORY.md", "index\n")
+
+        with patch.object(cmh, "MAX_SUBAGENT_FOLDERS_PER_BASE", 2):
+            names = [folder["agent_name"] for folder in self.collect()["folders"]]
+
+        self.assertEqual(names, ["a", "b"])
+
+    def test_memory_folders_per_user_are_capped(self):
+        for slug in ("-a", "-b", "-c"):
+            _write(_memory_dir(self.home, slug) / "MEMORY.md", "index\n")
+
+        with patch.object(cmh, "MAX_MEMORY_FOLDERS", 2):
+            paths = [folder["path"] for folder in self.collect()["folders"]]
+
+        self.assertEqual(paths, [str(_memory_dir(self.home, "-a")), str(_memory_dir(self.home, "-b"))])
+
+    def test_flagged_files_beyond_the_per_folder_cap_are_counted_not_sent(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "MEMORY.md", "index\n")
+        for number in range(4):
+            _write(memory / f"db{number}.md", "url: " + FAKE_SECRET + "\n")
+
+        with patch.object(cmh, "MAX_FLAGGED_FILES_PER_FOLDER", 2):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual(folder["index"]["content"], "index\n")
+        self.assertEqual([item["file_name"] for item in folder["flagged"]], ["db0.md", "db1.md"])
+        self.assertEqual(
+            folder["counts"], {"total": 5, "flagged": 4, "clean": 1, "truncated": 0, "not_sent": 2})
+
+    def test_the_content_budget_keeps_the_index_first_and_counts_what_does_not_fit(self):
+        memory = _memory_dir(self.home)
+        flagged_text = "url: " + FAKE_SECRET + "\n"
+        _write(memory / "MEMORY.md", "index\n")
+        _write(memory / "db0.md", flagged_text)
+        _write(memory / "db1.md", flagged_text)
+
+        budget = len(json.dumps("index\n")) + len(json.dumps(flagged_text)) + 5
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", budget):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual(folder["index"]["content"], "index\n")
+        self.assertEqual([item["file_name"] for item in folder["flagged"]], ["db0.md"])
+        self.assertEqual(folder["counts"]["not_sent"], 1)
+
+    def test_the_content_budget_is_shared_across_folders(self):
+        for slug in ("-a", "-b"):
+            _write(_memory_dir(self.home, slug) / "MEMORY.md", "index\n")
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", len(json.dumps("index\n")) + 1):
+            folders = self.collect()["folders"]
+
+        self.assertEqual([bool(folder["index"]) for folder in folders], [True, False])
+        self.assertEqual([folder["counts"].get("not_sent", 0) for folder in folders], [0, 1])
+
+    def test_the_content_budget_measures_the_json_escaped_size_that_is_sent(self):
+        memory = _memory_dir(self.home)
+        escaped_text = "url: " + FAKE_SECRET + "\x01" * 20 + "\n"
+        _write(memory / "MEMORY.md", "index\n")
+        _write(memory / "db.md", escaped_text)
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", len(json.dumps("index\n")) + len(escaped_text) + 5):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual(folder["flagged"], [])
+        self.assertEqual(folder["counts"]["not_sent"], 1)
+
+    def test_url_hosts_are_capped_per_file_and_per_folder(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "one.md", "https://a.example.com https://b.example.com https://c.example.com\n")
+        _write(memory / "two.md", "https://d.example.com https://e.example.com\n")
+
+        with patch.object(cmh, "MAX_URL_HOSTS_PER_FILE", 2), patch.object(cmh, "MAX_URL_HOSTS_PER_FOLDER", 3):
+            hosts = self.collect()["folders"][0]["url_hosts"]
+
+        self.assertEqual(hosts, ["a.example.com", "b.example.com", "d.example.com"])
+
+    def test_findings_are_capped_per_file(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "db.md", "".join(f"line {number} {FAKE_SECRET}\n" for number in range(3)))
+
+        with patch.object(cmh, "MAX_FINDINGS_PER_FILE", 2):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual([finding["line"] for finding in folder["flagged"][0]["findings"]], [1, 2])
+
     def test_an_index_over_the_size_cap_is_sent_truncated(self):
         memory = _memory_dir(self.home)
         _write(memory / "MEMORY.md", "x" * (MAX_CONFIG_FILE_SIZE + 500))
@@ -394,8 +491,8 @@ class TestMemoryCache(_MemoryHome):
 
         with patch.object(cmh, "time", clock), patch.object(cmh, "find_secrets", side_effect=_slow_scan):
             self.assertIsNone(self.collect())
-        self.assertEqual(
-            list(json.loads(self.cache_file.read_text())["users"]["alice"]), [str(self.memory / "MEMORY.md")])
+        cached = json.loads(self.cache_file.read_text())["users"]["alice"]
+        self.assertEqual(set(cached), {str(self.memory.parent), str(self.memory / "MEMORY.md")})
 
         rescanned = []
         real_find_secrets = cmh.find_secrets
@@ -424,6 +521,74 @@ class TestMemoryCache(_MemoryHome):
 
         self.assertIsNone(memories)
         self.assertNotIn("session.jsonl", reads)
+
+    def test_a_project_path_is_resolved_from_transcripts_once(self):
+        _write(self.memory.parent / "session.jsonl", json.dumps({"cwd": "/work/shop"}) + "\n")
+
+        cold, cold_reads = self.collect_recording_reads()
+        warm, warm_reads = self.collect_recording_reads()
+
+        self.assertIn("session.jsonl", cold_reads)
+        self.assertNotIn("session.jsonl", warm_reads)
+        self.assertEqual(warm["folders"][0]["project_path"], "/work/shop")
+        self.assertEqual(warm, cold)
+        self.assertNotIn("session.jsonl", self.cache_file.read_text(encoding="utf-8"))
+
+    def test_a_project_without_a_path_is_read_again_only_after_the_folder_changes(self):
+        _write(self.memory.parent / "session.jsonl", json.dumps({"type": "summary"}) + "\n" * cmh.TRANSCRIPT_HEAD_LINES)
+        self.collect()
+
+        _, unchanged_reads = self.collect_recording_reads()
+        _write(self.memory.parent / "later.jsonl", json.dumps({"cwd": "/work/shop"}) + "\n")
+        old_mtime = self.memory.parent.stat().st_mtime_ns
+        os.utime(self.memory.parent, ns=(old_mtime + 10**9, old_mtime + 10**9))
+        later, changed_reads = self.collect_recording_reads()
+
+        self.assertNotIn("session.jsonl", unchanged_reads)
+        self.assertIn("later.jsonl", changed_reads)
+        self.assertEqual(later["folders"][0]["project_path"], "/work/shop")
+
+    def test_a_short_transcript_head_without_a_path_is_not_cached_as_missing(self):
+        _write(self.memory.parent / "session.jsonl", json.dumps({"type": "summary"}) + "\n")
+
+        self.collect()
+
+        self.assertNotIn(str(self.memory.parent), json.loads(self.cache_file.read_text())["users"]["alice"])
+
+    def test_a_malformed_project_path_entry_is_recomputed(self):
+        _write(self.memory.parent / "session.jsonl", json.dumps({"cwd": "/work/shop"}) + "\n")
+        self.collect()
+        cache = json.loads(self.cache_file.read_text())
+        cache["users"]["alice"][str(self.memory.parent)] = {"project_path": 5, "mtime": "x"}
+        self.cache_file.write_bytes(json.dumps(cache).encode("utf-8"))
+
+        memories, reads = self.collect_recording_reads()
+
+        self.assertIn("session.jsonl", reads)
+        self.assertEqual(memories["folders"][0]["project_path"], "/work/shop")
+
+    def test_a_finished_run_drops_entries_of_removed_files_and_folders(self):
+        other = _memory_dir(self.home, "-work-gone")
+        _write(other / "MEMORY.md", "index\n")
+        _write(other.parent / "session.jsonl", json.dumps({"cwd": "/work/gone"}) + "\n")
+        self.collect()
+        self.assertIn(str(other.parent), json.loads(self.cache_file.read_text())["users"]["alice"])
+
+        shutil.rmtree(other.parent)
+        (self.memory / "clean.md").unlink()
+        self.collect()
+
+        self.assertEqual(
+            set(json.loads(self.cache_file.read_text())["users"]["alice"]),
+            {str(self.memory.parent), str(self.memory / "MEMORY.md"), str(self.memory / "db.md")})
+
+    def test_an_unfinished_run_keeps_at_most_the_entry_cap(self):
+        self.collect()
+
+        with patch.object(cmh, "MEMORY_SCAN_BUDGET_SECONDS", 0), patch.object(cmh, "MAX_CACHE_ENTRIES_PER_USER", 2):
+            self.assertIsNone(self.collect())
+
+        self.assertEqual(len(json.loads(self.cache_file.read_text())["users"]["alice"]), 2)
 
     @unittest.skipUnless(os.name == "posix", "needs POSIX directory permissions")
     @unittest.skipIf(getattr(os, "geteuid", lambda: 1)() == 0, "root writes through the directory mode")

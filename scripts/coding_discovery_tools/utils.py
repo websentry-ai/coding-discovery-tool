@@ -3407,7 +3407,7 @@ _vscode_bundles_found = set()
 _VSCODE_BUNDLE_TAIL = frozenset({"extensions", "app", "resources", "contents"})
 
 # Both halves of the Cowork gate return a bare None, so absent, denied and never-installed read alike.
-_COWORK_PROBES_CAP = 9
+_COWORK_PROBES_CAP = 13
 _cowork_probes = set()
 
 # Same for the Xcode gate, plus the agent subfolders that say which extractors are worth building.

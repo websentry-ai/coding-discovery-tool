@@ -26,8 +26,10 @@ from typing import Any, List, Dict, Optional, Callable, Tuple, Union
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .constants import MAX_SEARCH_DEPTH, is_symlink_or_junction
+from .chromium_local_storage import FOUND, read_local_storage_value
 from .mcp_script_hash import augment_script_fields
 from .project_dir_index import dispatch_matches
+from .utils import record_cowork_probe
 from .vscode_extension_helpers import (
     extensions_dir_for_editor,
     find_extension_in_editor,
@@ -2913,22 +2915,118 @@ def claude_cli_and_desktop_share_account(home: Path) -> bool:
     return True
 
 
+_CLAUDEAI_ORIGIN = "https://claude.ai"
+_CLAUDEAI_SNAPSHOT_KEY = "claudeai.mcpBootstrapSnapshot.v1"
+_CLAUDEAI_HIDDEN_FLAG = "hide_from_connectors_list"
+_SNAPSHOT_AGE_BUCKETS = ((1, "lt1d"), (7, "lt7d"), (30, "lt30d"))
+
+
+def _parse_claudeai_snapshot(raw: str) -> Optional[Dict[str, Any]]:
+    """The desktop app's cached connector list, or None when its shape is not the one we understand."""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or type(parsed.get("version")) is not int or parsed["version"] != 1:
+        return None
+    servers = parsed.get("servers")
+    tools_by_server = parsed.get("toolsByServer")
+    saved_at_ms = parsed.get("savedAt")
+    if (not isinstance(servers, list) or not isinstance(tools_by_server, dict)
+            or type(saved_at_ms) not in (int, float) or not saved_at_ms > 0):
+        return None
+    for server in servers:
+        if (not isinstance(server, dict) or not isinstance(server.get("uuid"), str)
+                or not isinstance(server.get("name"), str) or not server["name"].strip()
+                or not isinstance(server.get("cai_flags", []), list)):
+            return None
+    try:
+        saved_at = datetime.datetime.fromtimestamp(saved_at_ms / 1000, tz=datetime.timezone.utc).replace(microsecond=0)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return {"saved_at": saved_at, "servers": servers, "tools_by_server": tools_by_server}
+
+
+def _claudeai_snapshot_servers(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Visible connectors in the same shape `extract_claudeai_mcp_servers` emits."""
+    scanned_at = snapshot["saved_at"].isoformat()
+    servers: List[Dict[str, Any]] = []
+    seen = set()
+    for server in snapshot["servers"]:
+        name = CLAUDEAI_NAME_PREFIX + server["name"]
+        if _CLAUDEAI_HIDDEN_FLAG in server.get("cai_flags", []) or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        entry: Dict[str, Any] = {"name": name, "scope": "claudeai"}
+        tools = snapshot["tools_by_server"].get(server["uuid"])
+        if isinstance(tools, list):
+            trimmed = _trim_tools(tools)
+            entry["scan"] = {
+                "scanned_at": scanned_at,
+                "tools": trimmed,
+                "tool_count": len(trimmed) if trimmed else 0,
+                "server_info": None,
+                "error": None,
+            }
+        servers.append(entry)
+    return servers
+
+
+def _snapshot_age_bucket(saved_at: datetime.datetime) -> str:
+    age_days = (datetime.datetime.now(datetime.timezone.utc) - saved_at).total_seconds() / 86400
+    return next((label for limit, label in _SNAPSHOT_AGE_BUCKETS if age_days < limit), "ge30d")
+
+
+def read_claudeai_snapshot(home: Path) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """(probe state, parsed snapshot) for the desktop app's connector cache under `home`."""
+    leveldb_dir = _claude_app_support_dir(home) / "Local Storage" / "leveldb"
+    state, raw = read_local_storage_value(leveldb_dir, _CLAUDEAI_ORIGIN, _CLAUDEAI_SNAPSHOT_KEY)
+    if state != FOUND or raw is None:
+        return state, None
+    snapshot = _parse_claudeai_snapshot(raw)
+    if snapshot is None:
+        return "unsupported", None
+    return "usable_" + _snapshot_age_bucket(snapshot["saved_at"]), snapshot
+
+
+def extract_desktop_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None:
+    """claude.ai connectors for the desktop surfaces: the shared CLI list, else the app's own cache when usable."""
+    home = claude_dir.parent
+    snapshot = None
+    if _claude_app_support_dir(home).is_dir():
+        try:
+            state, snapshot = read_claudeai_snapshot(home)
+        except Exception as e:
+            logger.debug(f"Error reading claude.ai connector snapshot under {home}: {type(e).__name__}")
+            state = "error"
+        record_cowork_probe("snapshot", state)
+    cli_projects: List[Dict] = []
+    if claude_cli_and_desktop_share_account(home):
+        extract_claudeai_mcp_servers(claude_dir, cli_projects)
+    # The snapshot is a flag-gated prefetch cache seen to go stale, so it only fills a gap.
+    if cli_projects or snapshot is None:
+        projects.extend(cli_projects)
+        return
+    servers = _claudeai_snapshot_servers(snapshot)
+    if servers:
+        projects.append({"path": str(claude_dir), "mcpServers": servers, "scope": "claudeai"})
+
+
 def extract_claudeai_mcp_servers_with_root_support(
     projects: List[Dict],
-    home_filter: Optional[Callable[[Path], bool]] = None,
+    extract_for_claude_dir: Optional[Callable[[Path, List[Dict]], None]] = None,
 ) -> None:
     """
     Extract claude.ai native connectors with root user support.
 
     When running as root/admin, scans all user directories. Otherwise checks
-    only the current user's home directory. `home_filter`, when given, skips
-    every home for which it returns False.
+    only the current user's home directory. `extract_for_claude_dir` (default
+    `extract_claudeai_mcp_servers`) runs once per home's ~/.claude.
     """
     import platform
 
     def extract_for_home(claude_dir: Path) -> None:
-        if home_filter is None or home_filter(claude_dir.parent):
-            extract_claudeai_mcp_servers(claude_dir, projects)
+        (extract_for_claude_dir or extract_claudeai_mcp_servers)(claude_dir, projects)
 
     is_admin = False
     users_dir = None

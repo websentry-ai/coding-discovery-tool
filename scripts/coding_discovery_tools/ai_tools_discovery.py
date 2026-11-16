@@ -125,7 +125,7 @@ try:
     from . import mcp_tools_cache
     from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
     from .mcp_extraction_helpers import (
-        claude_cli_and_desktop_share_account,
+        extract_desktop_claudeai_mcp_servers,
         extract_claudeai_mcp_servers_with_root_support,
     )
     from .sweep_connectors import run_sweep
@@ -213,7 +213,7 @@ except ImportError:
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
     from scripts.coding_discovery_tools.mcp_extraction_helpers import (
-        claude_cli_and_desktop_share_account,
+        extract_desktop_claudeai_mcp_servers,
         extract_claudeai_mcp_servers_with_root_support,
     )
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
@@ -1368,7 +1368,7 @@ class AIToolsDetector:
         connector_projects: List[Dict] = []
         try:
             extract_claudeai_mcp_servers_with_root_support(
-                connector_projects, home_filter=claude_cli_and_desktop_share_account
+                connector_projects, extract_for_claude_dir=extract_desktop_claudeai_mcp_servers
             )
             self._merge_mcp_configs_into_projects(connector_projects, projects_dict)
         except Exception as e:

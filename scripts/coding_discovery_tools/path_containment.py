@@ -60,9 +60,9 @@ def is_owned_file(path: PathLike, boundary: PathLike, owner_home: PathLike) -> b
     return boundary_real is not None and is_within(path, boundary_real)
 
 
-# Walking the real path with O_NOFOLLOW needs dir_fd (POSIX). Windows falls back
-# to the real-path check plus an O_NOFOLLOW-less open (Windows users need an
-# extra privilege to create symlinks, so the swap race is much harder there).
+# Walking the real path with O_NOFOLLOW needs dir_fd (POSIX). Windows has no
+# dir_fd or O_NOFOLLOW, and any user can create a directory junction, so on
+# Windows the opened handle's final path is checked against the boundary instead.
 _CAN_WALK = (
     os.name == "posix"
     and os.open in os.supports_dir_fd
@@ -74,10 +74,11 @@ _CAN_WALK = (
 def _walk_open(file_real: str, leaf_flags: int) -> int:
     """Open ``file_real`` one component at a time, refusing any symlink.
 
-    ``file_real`` came from realpath, so it has no symlinks when checked. Opening
-    each component with O_NOFOLLOW relative to its parent's fd means a symlink
-    swapped in after the check fails the open (ELOOP/ENOTDIR) instead of being
-    followed, so the file read is the file that was checked.
+    ``file_real`` is a realpath'd parent plus the file's own name, so it has no
+    dir links when checked. Opening each component with O_NOFOLLOW relative to
+    its parent's fd means a link swapped in after the check, or a linked file,
+    fails the open (ELOOP/ENOTDIR) instead of being followed, so the file read
+    is the file that was checked.
     """
     parts = Path(file_real).parts
     dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -92,15 +93,55 @@ def _walk_open(file_real: str, leaf_flags: int) -> int:
         os.close(dfd)
 
 
+def _final_path_of_fd(fd: int) -> Optional[str]:
+    """Windows: the normalised final path of an open fd, or None if unavailable."""
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        get_final = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+        get_final.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+        get_final.restype = wintypes.DWORD
+        size = 32768
+        buf = ctypes.create_unicode_buffer(size)
+        n = get_final(msvcrt.get_osfhandle(fd), buf, size, 0)
+        if n == 0 or n >= size:
+            return None
+        final = buf.value
+        if final.startswith("\\\\?\\UNC\\"):
+            final = "\\\\" + final[8:]
+        elif final.startswith("\\\\?\\"):
+            final = final[4:]
+        return os.path.normcase(final)
+    except Exception:
+        return None
+
+
+def _is_link(path: PathLike) -> bool:
+    try:
+        st = os.lstat(str(path))
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(
+        getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
 def open_contained(path: PathLike, boundary_real: str) -> int:
     """Open ``path`` for reading only if it really lives inside ``boundary_real``.
 
+    The parent dir is resolved (a dotfiles-style dir link inside the boundary is
+    fine), but the file itself must not be a link: it is opened by its own name
+    with O_NOFOLLOW, so a SKILL.md linked to e.g. ~/.ssh/id_ed25519 is refused.
+
     Returns a read-only fd for a regular, single-link file. Raises
-    ``PermissionError`` when the file resolves outside the boundary, is not a
-    regular file, or has more than one hard link (a second link could be another
-    user's file). Read the content from the fd, never by path again.
+    ``NotContainedError`` when the file is outside the boundary, is a link, is
+    not a regular file, or has more than one hard link (a second link could be
+    another user's file); other ``OSError`` when an open hits a swapped-in link.
+    Read the content from the fd, never by path again.
     """
-    file_real = _real(path)
+    path = Path(path)
+    file_real = os.path.join(_real(path.parent), os.path.normcase(path.name))
     if file_real == boundary_real.rstrip(os.sep) or not _inside(file_real, boundary_real):
         raise NotContainedError(f"{path} resolves outside {boundary_real}")
     leaf_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
@@ -114,11 +155,19 @@ def open_contained(path: PathLike, boundary_real: str) -> int:
                 raise
             fd = os.open(file_real, leaf_flags | os.O_NOFOLLOW)
     else:
-        fd = os.open(file_real, leaf_flags | getattr(os, "O_NOFOLLOW", 0))
+        if _is_link(file_real):
+            raise NotContainedError(f"{path} is a link")
+        fd = os.open(file_real, leaf_flags | getattr(os, "O_BINARY", 0))
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
             raise NotContainedError(f"{path} is not a single-link regular file")
+        if not _CAN_WALK and os.name == "nt":
+            # Check the file actually opened, not the path checked before the open.
+            final = _final_path_of_fd(fd)
+            if final is not None and (not _inside(final, boundary_real)
+                                      or os.path.basename(final) != os.path.normcase(path.name)):
+                raise NotContainedError(f"{path} opened as {final}, outside {boundary_real}")
     except BaseException:
         os.close(fd)
         raise

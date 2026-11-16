@@ -120,6 +120,15 @@ class TestCoworkSkillsRootScan(_RootScanCase):
                  secret)
         self.assert_each_user_keeps_own_skills(self._process(), {"alice": {"alice-skill"}, "bob": {"bob-skill"}})
 
+    def test_skill_file_symlink_to_own_private_file_is_not_read(self):
+        # A SKILL.md linked to the owner's own key stays inside the owner's home
+        # but must still not be read as root.
+        key = self.homes["bob"] / ".ssh" / "id_test"
+        key.parent.mkdir(parents=True)
+        key.write_text("---\nname: bob-private-key\n---\nPRIVATE\n", encoding="utf-8")
+        _symlink(self, self.sessions["bob"] / "skills-plugin" / "org" / "acct" / "skills" / "planted" / "SKILL.md", key)
+        self.assert_each_user_keeps_own_skills(self._process(), {"alice": {"alice-skill"}, "bob": {"bob-skill"}})
+
     def test_sessions_dir_symlink_into_another_home_is_not_read(self):
         # Bob replaces his whole sessions tree with a link to Alice's.
         shutil.rmtree(self.sessions["bob"])
@@ -168,6 +177,15 @@ class TestClaudeCodePluginSkillsRootScan(_PluginRootScanCase):
         }), encoding="utf-8")
         processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
+
+    def test_plugin_skill_file_symlink_to_own_private_file_is_not_read(self):
+        key = self.homes["bob"] / ".ssh" / "id_test"
+        key.parent.mkdir(parents=True)
+        key.write_text("PRIVATE\n", encoding="utf-8")
+        install = self.homes["bob"] / ".claude" / "plugins" / "cache" / "mkt" / "bob-plugin" / "1.0.0"
+        _symlink(self, install / "skills" / "planted" / "SKILL.md", key)
+        processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
+        self.assert_each_user_keeps_own_skills(processed, {u: {f"{u}-plugin-skill"} for u in USERS})
 
     def test_local_plugin_installed_elsewhere_in_own_home_is_kept(self):
         # Directory/local plugins can record an installPath outside

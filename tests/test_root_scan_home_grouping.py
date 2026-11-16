@@ -24,6 +24,8 @@ from pathlib import Path
 from unittest import mock
 
 import scripts.coding_discovery_tools.ai_tools_discovery as atd
+import scripts.coding_discovery_tools.path_containment as path_containment
+import scripts.coding_discovery_tools.utils as utils_mod
 import scripts.coding_discovery_tools.macos.claude_cowork.skills_extractor as cowork_se
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 from scripts.coding_discovery_tools.macos.claude_cowork.skills_extractor import (
@@ -64,11 +66,16 @@ class _RootScanCase(unittest.TestCase):
         self.homes = {u: self.tmp / "home" / u for u in USERS}
         for home in self.homes.values():
             home.mkdir(parents=True)
-        # Path.home() reads HOME (POSIX) or USERPROFILE (Windows).
-        env = mock.patch.dict(os.environ, {"HOME": str(self.scanner_home),
-                                           "USERPROFILE": str(self.scanner_home)})
-        env.start()
-        self.addCleanup(env.stop)
+        # Path.home() reads HOME (POSIX) or USERPROFILE (Windows). No real Sentry
+        # events from extraction error paths.
+        for patch in (
+            mock.patch.dict(os.environ, {"HOME": str(self.scanner_home),
+                                         "USERPROFILE": str(self.scanner_home),
+                                         "AI_DISCOVERY_SENTRY_DSN": ""}),
+            mock.patch.object(utils_mod, "_SENTRY_DSN", ""),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
         self.assertEqual(Path.home(), self.scanner_home)
 
     def assert_each_user_keeps_own_skills(self, processed: dict, expected: dict) -> None:
@@ -162,6 +169,19 @@ class TestClaudeCodePluginSkillsRootScan(_PluginRootScanCase):
         processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
 
+    def test_local_plugin_installed_elsewhere_in_own_home_is_kept(self):
+        # Directory/local plugins can record an installPath outside
+        # ~/.claude/plugins; inside the owner's own home they still count.
+        local = self.homes["bob"] / "dev" / "my-plugin"
+        _write_skill(local / "skills" / "bob-local-skill", "bob-local-skill")
+        (self.homes["bob"] / ".claude" / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"my-plugin@local": [{"scope": "user", "installPath": str(local), "version": "0.1.0"}]},
+        }), encoding="utf-8")
+        processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
+        self.assert_each_user_keeps_own_skills(
+            processed, {"alice": {"alice-plugin-skill"}, "bob": {"bob-local-skill"}})
+
     def test_config_dir_symlink_into_another_home_is_not_attributed(self):
         # Bob replaces his ~/.claude with a link to Alice's.
         shutil.rmtree(self.homes["bob"] / ".claude")
@@ -191,6 +211,46 @@ class TestCursorPluginSkillsRootScan(_PluginRootScanCase):
         _symlink(self, bob_plugins, self.homes["alice"] / ".cursor" / "plugins")
         processed = self.detector.process_single_tool({"name": "Cursor", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
+
+
+@unittest.skipUnless(path_containment._CAN_WALK, "component-wise O_NOFOLLOW open needs POSIX dir_fd")
+class TestOpenContainedRace(unittest.TestCase):
+    """A symlink swapped in after the real-path check must not redirect the read.
+
+    The check is made to see the pre-swap state (realpath returns the clean
+    path), while the filesystem already holds the swapped-in symlink, which is
+    the window a racing attacker aims for. open_contained must refuse.
+    """
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="race-")))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.boundary = self.tmp / "bob" / "plugins"
+        self.outside = self.tmp / "alice" / "private"
+        _write_skill(self.outside / "x", "alice-private")
+        stale_check = mock.patch.object(
+            path_containment, "_real", side_effect=lambda p: os.path.normcase(os.path.abspath(str(p))))
+        stale_check.start()
+        self.addCleanup(stale_check.stop)
+
+    def test_swapped_ancestor_dir_is_refused(self):
+        _symlink(self, self.boundary / "x", self.outside / "x")
+        with self.assertRaises(OSError):
+            os.close(path_containment.open_contained(self.boundary / "x" / "SKILL.md", str(self.boundary)))
+
+    def test_swapped_leaf_file_is_refused(self):
+        (self.boundary / "x").mkdir(parents=True)
+        _symlink(self, self.boundary / "x" / "SKILL.md", self.outside / "x" / "SKILL.md")
+        with self.assertRaises(OSError):
+            os.close(path_containment.open_contained(self.boundary / "x" / "SKILL.md", str(self.boundary)))
+
+    def test_clean_file_inside_boundary_opens(self):
+        _write_skill(self.boundary / "x", "bob-skill")
+        fd = path_containment.open_contained(self.boundary / "x" / "SKILL.md", str(self.boundary))
+        try:
+            self.assertIn(b"bob-skill", os.read(fd, 4096))
+        finally:
+            os.close(fd)
 
 
 class TestNoScannerHomeGrouping(unittest.TestCase):

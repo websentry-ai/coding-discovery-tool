@@ -119,7 +119,7 @@ try:
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
-    from .path_containment import is_within, owned_boundary
+    from .path_containment import owned_boundary
     from .s3_uploader import compute_payload_hash
     from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
@@ -208,7 +208,7 @@ except ImportError:
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
-    from scripts.coding_discovery_tools.path_containment import is_within, owned_boundary
+    from scripts.coding_discovery_tools.path_containment import owned_boundary
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
@@ -1378,35 +1378,37 @@ class AIToolsDetector:
 
     @staticmethod
     def _merge_plugin_skills_by_owner(
-        plugin_groups: List[Tuple[str, Path, List[Dict]]],
+        plugin_groups: List[Tuple[str, List[Dict]]],
         projects_dict: Dict[str, Dict],
     ) -> int:
         """File plugin-bundled skills under the home that owns each plugins dir.
 
-        ``plugin_groups`` is a list of ``(owner_home, plugins_dir, plugins)``
-        triples, one per scanned ``<home>/.<tool>/plugins`` dir. Each skill gets
-        its owner's home as ``project_path`` and is keyed under that home, the
-        same as standalone user skills. Keying by ``Path.home()`` instead breaks
-        root/all-users scans: Path.home() is the scanner's home (e.g. /var/root),
-        so the per-user filter drops every skill.
+        ``plugin_groups`` is a list of ``(owner_home, plugins)`` pairs, one per
+        scanned ``<home>/.<tool>/plugins`` dir. Each skill gets its owner's home
+        as ``project_path`` and is keyed under that home, the same as standalone
+        user skills. Keying by ``Path.home()`` instead breaks root/all-users
+        scans: Path.home() is the scanner's home (e.g. /var/root), so the
+        per-user filter drops every skill.
 
-        A skill is kept only if its real path is inside the plugins dir AND the
-        plugins dir's real path is inside the owner's home. ``installPath`` comes
-        from a user-writable ``installed_plugins.json``, and a user can symlink
-        their ``~/.claude``, ``~/.cursor`` or plugins dir, so under a root scan one
-        user could otherwise have root file another user's files under them.
+        For another user's home (a root/all-users scan), a SKILL.md is read only
+        if it really lives inside that home, checked as it is opened.
+        ``installPath`` comes from a user-writable ``installed_plugins.json`` and
+        a user can plant symlinks, so root could otherwise file another user's
+        files under them. Local/directory plugins installed elsewhere in the
+        owner's home still count. For the scanner's own home nothing changes:
+        the scan reads only what this account can already read.
         Returns the number of skills merged.
         """
         merged = 0
-        for owner_home, plugins_dir, group in plugin_groups:
-            plugins_real = owned_boundary(owner_home, plugins_dir)
-            if plugins_real is None:
-                logger.debug(f"Skipping plugin skills: {plugins_dir} resolves outside {owner_home}")
-                continue
-            for skill in extract_plugin_skills(group):
-                if not is_within(skill.get("file_path", ""), plugins_real):
-                    logger.debug(f"Skipping plugin skill outside {plugins_dir}: {skill.get('file_path')}")
+        scanner_home = os.path.realpath(str(Path.home()))
+        for owner_home, group in plugin_groups:
+            if os.path.realpath(owner_home) == scanner_home:
+                boundary_real = None
+            else:
+                boundary_real = owned_boundary(owner_home, owner_home)
+                if boundary_real is None:
                     continue
+            for skill in extract_plugin_skills(group, boundary_real=boundary_real):
                 skill["project_path"] = owner_home
                 project = projects_dict.setdefault(
                     owner_home,
@@ -2016,7 +2018,7 @@ class AIToolsDetector:
                 user_plugins = extract_claude_code_plugins(plugins_dir)
                 plugins.extend(user_plugins)
                 if user_plugins:
-                    plugin_groups.append((str(plugins_dir.parent.parent), plugins_dir, user_plugins))
+                    plugin_groups.append((str(plugins_dir.parent.parent), user_plugins))
 
             plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
             if plugins:
@@ -3249,8 +3251,7 @@ class AIToolsDetector:
                     user_plugins = extract_cursor_plugins(cursor_plugins_dir)
                     cursor_plugins.extend(user_plugins)
                     if user_plugins:
-                        cursor_plugin_groups.append(
-                            (str(cursor_plugins_dir.parent.parent), cursor_plugins_dir, user_plugins))
+                        cursor_plugin_groups.append((str(cursor_plugins_dir.parent.parent), user_plugins))
 
                 cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
                 if cursor_plugins:

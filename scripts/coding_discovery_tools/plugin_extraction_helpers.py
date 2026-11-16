@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .constants import is_symlink_or_junction
+from .path_containment import open_contained
 
 logger = logging.getLogger(__name__)
 
@@ -684,7 +685,7 @@ def find_plugin_provenance_by_path(
 MAX_SKILL_FILE_SIZE = 50 * 1024  # 50KB
 
 
-def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
+def extract_plugin_skills(plugins: List[Dict], boundary_real: Optional[str] = None) -> List[Dict]:
     """
     Extract skills bundled inside plugin install paths.
 
@@ -695,6 +696,10 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
     Args:
         plugins: List of plugin dicts from extract_claude_code_plugins or
                  extract_cursor_plugins.
+        boundary_real: When set, a SKILL.md is opened only if it really lives
+                 inside this real dir, checked and opened in one step
+                 (path_containment.open_contained), so a symlink swapped in
+                 during the scan cannot redirect the read.
 
     Returns:
         List of skill dicts ready to merge into user_skills.
@@ -723,8 +728,11 @@ def extract_plugin_skills(plugins: List[Dict]) -> List[Dict]:
                 # gap: the leaf can't be swapped for a link between the guard and the
                 # read.
                 try:
-                    fd = os.open(str(skill_file),
-                                 os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+                    if boundary_real is not None:
+                        fd = open_contained(skill_file, boundary_real)
+                    else:
+                        fd = os.open(str(skill_file),
+                                     os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
                 except OSError:
                     continue
                 try:

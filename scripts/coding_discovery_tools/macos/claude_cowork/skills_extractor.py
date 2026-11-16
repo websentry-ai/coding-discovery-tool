@@ -21,7 +21,7 @@ from ...claude_cowork_skills_helpers import (
     is_marketplace_catalog_path,
 )
 from ...macos_extraction_helpers import is_running_as_root, scan_user_directories
-from ...path_containment import is_within, owned_boundary
+from ...path_containment import owned_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -89,15 +89,13 @@ class MacOSClaudeCoworkSkillsExtractor(BaseClaudeCoworkSkillsExtractor):
                         continue
                     if candidate.name.lower() != SKILL_FILE_NAME_LOWER:
                         continue
-                    if boundary is not None and not is_within(candidate, boundary):
-                        continue
                     if is_ephemeral_session_path(candidate):
                         continue
                     if is_marketplace_catalog_path(candidate):
                         continue
                     if is_claude_code_path(candidate):
                         continue
-                    skill_dict = build_cowork_skill_dict(candidate, user_home=user_home)
+                    skill_dict = build_cowork_skill_dict(candidate, user_home=user_home, boundary_real=boundary)
                     if skill_dict is not None:
                         collected.append(skill_dict)
                 except (PermissionError, OSError) as e:

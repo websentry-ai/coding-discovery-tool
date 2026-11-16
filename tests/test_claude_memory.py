@@ -144,6 +144,19 @@ class TestMemoryDiscovery(_MemoryHome):
             ("SECRET-021", 5), ("SECRET-021", 6), ("SECRET-021", 7),
         })
 
+    def test_credentials_under_quoted_json_and_yaml_keys_are_flagged(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "config.md", "\n".join([
+            '{"password": "' + "s3cr3t" + 'Passw0rd!"}',
+            '{"api_key": "' + "a1b2c3d4e5" + 'f6g7h8i9j0"}',
+            "'db_password': " + "Hunter2" + "pass9",
+        ]) + "\n")
+
+        findings = self.collect()["folders"][0]["flagged"][0]["findings"]
+
+        self.assertEqual({(finding["rule_id"], finding["line"]) for finding in findings},
+                         {("SECRET-016", 1), ("SECRET-016", 2), ("SECRET-021", 3)})
+
     def test_unquoted_assignment_placeholder_values_are_not_flagged(self):
         memory = _memory_dir(self.home)
         _write(memory / "env.md", "\n".join([

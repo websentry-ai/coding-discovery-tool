@@ -91,9 +91,9 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
         'SECRET-016',
         re.compile(
             r'(?:'
-            r'(?:password|passwd|pwd)\s*[=:]\s*["\'][^\'"\s]{8,}["\']'
-            r'|(?:api[_-]?key|apikey)\s*[=:]\s*["\'][^\'"\s]{16,}["\']'
-            r'|(?:secret|token|auth[_-]?token|access[_-]?token)\s*[=:]\s*["\'][^\'"\s]{16,}["\']'
+            r'(?:password|passwd|pwd)["\']?\s*[=:]\s*["\'][^\'"\s]{8,}["\']'
+            r'|(?:api[_-]?key|apikey)["\']?\s*[=:]\s*["\'][^\'"\s]{16,}["\']'
+            r'|(?:secret|token|auth[_-]?token|access[_-]?token)["\']?\s*[=:]\s*["\'][^\'"\s]{16,}["\']'
             r')',
             re.IGNORECASE
         ),
@@ -125,7 +125,7 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     (
         'SECRET-021',
         re.compile(
-            r'(?:password|passwd|pwd|passphrase|secret|token|api_key|apikey)[A-Za-z0-9_.-]{0,20}[ \t]*[=:][ \t]*'
+            r'(?:password|passwd|pwd|passphrase|secret|token|api_key|apikey)[A-Za-z0-9_.-]{0,20}["\']?[ \t]*[=:][ \t]*'
             r'(?![$<{%*])(?=[^\s\'"]{0,200}[0-9])(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
             r'[^\s\'"]{8,}',
             re.IGNORECASE

@@ -124,6 +124,10 @@ try:
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from .mcp_extraction_helpers import (
+        claude_cli_and_desktop_share_account,
+        extract_claudeai_mcp_servers_with_root_support,
+    )
     from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
@@ -208,6 +212,10 @@ except ImportError:
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+        claude_cli_and_desktop_share_account,
+        extract_claudeai_mcp_servers_with_root_support,
+    )
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
 logger = logging.getLogger(__name__)
@@ -588,7 +596,7 @@ class AIToolsDetector:
             self._claude_settings_extractor = ClaudeSettingsExtractorFactory.create(self.system)
             self._claude_skills_extractor = ClaudeSkillsExtractorFactory.create(self.system)
 
-            # Initialize Claude Cowork extractor (skills only; Cowork has no rules/MCP/settings)
+            # Initialize Claude Cowork extractor (skills only; its claude.ai connectors come from the account)
             self._cowork_skills_extractor = ClaudeCoworkSkillsExtractorFactory.create(self.system)
             
             # Initialize Windsurf extractors
@@ -1354,6 +1362,17 @@ class AIToolsDetector:
             )
 
         return projects_dict
+
+    def _merge_desktop_surface_claudeai_connectors(self, projects_dict: Dict[str, Dict]) -> None:
+        """Add the claude.ai connector project to a desktop-app surface's report."""
+        connector_projects: List[Dict] = []
+        try:
+            extract_claudeai_mcp_servers_with_root_support(
+                connector_projects, home_filter=claude_cli_and_desktop_share_account
+            )
+            self._merge_mcp_configs_into_projects(connector_projects, projects_dict)
+        except Exception as e:
+            logger.debug(f"Error extracting claude.ai connectors for desktop surface: {e}")
 
     def _extract_and_merge_tool_skills(
         self,
@@ -3290,6 +3309,7 @@ class AIToolsDetector:
                     logger.info("  ℹ No Claude Cowork skills found")
             except Exception as e:
                 logger.error(f"Error extracting Claude Cowork skills: {e}", exc_info=True)
+            self._merge_desktop_surface_claudeai_connectors(projects_dict)
 
         elif tool_name == "windsurf":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -3369,6 +3389,7 @@ class AIToolsDetector:
                 self._claude_desktop_mcp_extractor,
                 list
             )
+            self._merge_desktop_surface_claudeai_connectors(projects_dict)
 
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(

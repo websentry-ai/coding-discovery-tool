@@ -11,7 +11,7 @@ import os
 import platform
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
 from .coding_tool_base import BaseToolDetector
@@ -448,15 +448,51 @@ def _detect_cursor_cli(detector: BaseToolDetector, user_home: Path) -> Optional[
     return None
 
 
+def _cowork_app_install(detector: BaseToolDetector, user_home: Path) -> Tuple[bool, Optional[Path]]:
+    """``(checked, app_install)``: checked is False when the install could not be looked for."""
+    find_install_dir = getattr(detector, "_find_install_dir", None)
+    if not callable(find_install_dir):
+        record_cowork_probe("bundle", "no_probe")
+        return False, None
+    try:
+        # Pass the scanned user's home so an admin/MDM multi-user scan probes
+        # THIS user's per-user install dir, not the scanner's (Windows).
+        return True, find_install_dir(user_home)
+    except OSError as e:
+        record_cowork_probe("bundle", "unreadable")
+        fail_if_anomalous(user_home, str(e))
+        return False, None
+
+
+def cowork_from_desktop_presence(detector: BaseToolDetector, user_home: Path, data_dir: Path) -> Optional[Dict]:
+    """Cowork row when the Claude Desktop rule holds: app installed and this user's ``data_dir`` exists."""
+    data_state = dir_state(data_dir)
+    record_cowork_probe("data_dir", data_state)
+    if data_state == "unreadable":
+        fail_if_anomalous(user_home, f"Claude data dir unreadable: {data_dir}")
+        return None
+    if data_state != "present":
+        return None
+    checked, app_install = _cowork_app_install(detector, user_home)
+    if not checked or app_install is None:
+        return None
+    return {
+        "name": detector.tool_name,
+        "version": detector.get_version(app_install),
+        "install_path": str(data_dir),
+    }
+
+
 def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Optional[Dict]:
     """Detect Claude Cowork installation for a user.
 
-    Requires BOTH the on-disk Cowork sessions tree AND a present Claude Desktop
-    install. The per-user Claude config tree (which holds the sessions dir)
-    survives uninstall (anthropics/claude-code#25013), so gating on the sessions
-    dir alone produced false positives. All three OSes AND-require an install dir
-    resolved by the OS detector's ``_find_install_dir`` (keeping the install-dir
-    candidate lists in the OS modules — one source of truth).
+    Reported when the Claude Desktop presence rule holds (macOS and Windows; Linux
+    has no Desktop row), or when the on-disk Cowork sessions tree exists AND a
+    Claude Desktop install is present. The per-user Claude config tree (which holds
+    the sessions dir) survives uninstall (anthropics/claude-code#25013), so gating
+    on the sessions dir alone produced false positives. All three OSes AND-require
+    an install dir resolved by the OS detector's ``_find_install_dir`` (keeping the
+    install-dir candidate lists in the OS modules — one source of truth).
 
     When the bundle is somewhere we do not probe, a session the app wrote recently
     stands in for it, as the session files do for Claude Code.
@@ -464,13 +500,13 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
     system = platform.system()
     if system == "Darwin":
         sessions_dir = user_home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
-        require_install_dir = True
+        has_desktop_rule = True
     elif system == "Linux":
         sessions_dir = user_home / ".config" / "Claude" / COWORK_SESSIONS_DIR
-        require_install_dir = True
+        has_desktop_rule = False
     else:
         sessions_dir = user_home / "AppData" / "Roaming" / "Claude" / COWORK_SESSIONS_DIR
-        require_install_dir = True
+        has_desktop_rule = True
 
     sessions_state = dir_state(sessions_dir)
     record_cowork_probe("sessions", sessions_state)
@@ -478,35 +514,24 @@ def _detect_claude_cowork(detector: BaseToolDetector, user_home: Path) -> Option
         fail_if_anomalous(user_home, f"Cowork sessions dir unreadable: {sessions_dir}")
         return None
     if sessions_state != "present":
-        return None
+        return cowork_from_desktop_presence(detector, user_home, sessions_dir.parent) if has_desktop_rule else None
 
-    app_install = None
-    if require_install_dir:
-        find_install_dir = getattr(detector, "_find_install_dir", None)
-        if not callable(find_install_dir):
-            record_cowork_probe("bundle", "no_probe")
+    checked, app_install = _cowork_app_install(detector, user_home)
+    if not checked:
+        return None
+    if app_install is None:
+        evidence = cowork_sessions_recent(user_home, sessions_dir)
+        if evidence is None:
+            # Evidence we could not read is unknown, which must not read as absent.
+            fail_if_anomalous(user_home, f"Cowork session evidence unreadable under {sessions_dir}")
             return None
-        try:
-            # Pass the scanned user's home so an admin/MDM multi-user scan probes
-            # THIS user's per-user install dir, not the scanner's (Windows).
-            app_install = find_install_dir(user_home)
-        except OSError as e:
-            record_cowork_probe("bundle", "unreadable")
-            fail_if_anomalous(user_home, str(e))
+        if not evidence:
             return None
-        if app_install is None:
-            evidence = cowork_sessions_recent(user_home, sessions_dir)
-            if evidence is None:
-                # Evidence we could not read is unknown, which must not read as absent.
-                fail_if_anomalous(user_home, f"Cowork session evidence unreadable under {sessions_dir}")
-                return None
-            if not evidence:
-                return None
-            return {
-                "name": detector.tool_name,
-                "version": "unknown",
-                "install_path": str(sessions_dir),
-            }
+        return {
+            "name": detector.tool_name,
+            "version": "unknown",
+            "install_path": str(sessions_dir),
+        }
 
     return {
         "name": detector.tool_name,

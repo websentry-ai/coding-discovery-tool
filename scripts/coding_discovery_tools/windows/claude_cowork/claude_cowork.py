@@ -7,8 +7,8 @@ A device is considered to have Cowork installed if BOTH:
     - The on-disk session tree exists at
       ``%APPDATA%/Claude/local-agent-mode-sessions/``.
 
-If only the app is present (Cowork never enabled / never used), there is
-nothing on disk to report so we return None.
+With no sessions tree, the Claude Desktop presence rule decides instead: the
+install is found AND ``%APPDATA%/Claude/`` exists.
 """
 
 import logging
@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
+from ...user_tool_detector import cowork_from_desktop_presence
 from ...utils import dir_state, record_cowork_probe
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,8 @@ class WindowsClaudeCoworkDetector(BaseToolDetector):
             return None
 
         if not sessions_present:
-            return None
+            home = Path(getattr(self, "user_home", None) or Path.home())
+            return cowork_from_desktop_presence(self, home, sessions_dir.parent)
 
         # Require the Claude Desktop install to be present. The per-user
         # ``%APPDATA%\Claude`` tree (which holds the sessions dir) survives an

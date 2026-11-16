@@ -479,13 +479,32 @@ class DesktopSurfaceSnapshotTest(unittest.TestCase):
             self.assertEqual(projects[0]["mcpServers"][0]["scan"]["tool_count"], 1)
             self.assertNotIn("url", json.dumps(projects))
 
-    def test_cli_list_wins_over_snapshot(self):
+    def test_snapshot_adds_only_missing_names(self):
         self._sign_in_cli(self.home)
-        _write_snapshot_store(self.home, _snapshot([NOTION], {}))
-        self.assertEqual(self._connector_names("Claude Cowork"), ["claude.ai Gmail", "claude.ai Linear"])
-        self.assertEqual(self._connector_names("Claude Desktop"), ["claude.ai Gmail", "claude.ai Linear"])
+        _write_snapshot_store(self.home, _snapshot([NOTION, LINEAR], {"u-linear": LINEAR_TOOLS}))
+        for tool_name in ("Claude Cowork", "Claude Desktop"):
+            projects = self._connector_projects(tool_name)
+            self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0]["mcpServers"], [
+                {"name": "claude.ai Gmail", "scope": "claudeai"},
+                {"name": "claude.ai Linear", "scope": "claudeai"},
+                {"name": "claude.ai Notion", "scope": "claudeai"},
+            ])
 
-    def test_empty_or_stale_snapshot_does_not_hide_cli_connectors(self):
+    def test_match_is_case_insensitive_and_never_duplicates(self):
+        self._sign_in_cli(self.home, ["claude.ai NOTION", "claude.ai linear"])
+        _write_snapshot_store(self.home, _snapshot([NOTION, LINEAR, dict(NOTION, uuid="u-2")], {}))
+        names = self._connector_names("Claude Desktop")
+        self.assertEqual(names, ["claude.ai NOTION", "claude.ai linear"])
+        self.assertEqual(len({name.lower() for name in names}), len(names))
+
+    def test_cli_entry_kept_as_is_when_in_both(self):
+        self._sign_in_cli(self.home)
+        expected = self._connector_projects("Claude Desktop")
+        _write_snapshot_store(self.home, _snapshot([LINEAR], {"u-linear": LINEAR_TOOLS}))
+        self.assertEqual(self._connector_projects("Claude Desktop"), expected)
+
+    def test_empty_or_stale_snapshot_hides_nothing(self):
         self._sign_in_cli(self.home)
         expected = self._connector_projects("Claude Desktop")
         for servers in ([HIDDEN], [], [LINEAR]):
@@ -493,14 +512,14 @@ class DesktopSurfaceSnapshotTest(unittest.TestCase):
             self.assertEqual(self._connector_projects("Claude Desktop"), expected)
             self.assertEqual(self._connector_projects("Claude Cowork"), expected)
 
-    def test_snapshot_fills_gap_when_cli_account_differs(self):
+    def test_snapshot_used_when_cli_account_differs(self):
         self._sign_in_cli(self.home)
         config = helpers._claude_app_support_dir(self.home) / "config.json"
         config.write_text(json.dumps({"lastKnownAccountUuid": "someone-else"}))
         _write_snapshot_store(self.home, _snapshot([NOTION], {}))
         self.assertEqual(self._connector_names("Claude Desktop"), ["claude.ai Notion"])
 
-    def test_snapshot_fills_gap_when_cli_lists_no_connectors(self):
+    def test_snapshot_used_when_cli_lists_no_connectors(self):
         self._sign_in_cli(self.home, names=())
         _write_snapshot_store(self.home, _snapshot([NOTION], {}))
         self.assertEqual(self._connector_names("Claude Cowork"), ["claude.ai Notion"])
@@ -532,11 +551,11 @@ class DesktopSurfaceSnapshotTest(unittest.TestCase):
         _write_snapshot_store(bob, _snapshot([LINEAR], {}))
         by_path = {p["path"]: [s["name"] for s in p["mcpServers"]] for p in self._connector_projects("Claude Desktop")}
         self.assertEqual(by_path, {
-            str(alice / ".claude"): ["claude.ai Gmail"],
+            str(alice / ".claude"): ["claude.ai Gmail", "claude.ai Linear"],
             str(bob / ".claude"): ["claude.ai Linear"],
         })
 
-    def test_probe_recorded_even_when_cli_list_wins(self):
+    def test_probe_recorded_when_snapshot_adds_nothing(self):
         self._sign_in_cli(self.home)
         _write_snapshot_store(self.home, _snapshot([LINEAR], {}, saved_at=1000))
         self._connector_projects("Claude Desktop")

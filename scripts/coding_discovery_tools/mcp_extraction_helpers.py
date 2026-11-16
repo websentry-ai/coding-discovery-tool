@@ -2990,7 +2990,7 @@ def read_claudeai_snapshot(home: Path) -> Tuple[str, Optional[Dict[str, Any]]]:
 
 
 def extract_desktop_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None:
-    """claude.ai connectors for the desktop surfaces: the shared CLI list, else the app's own cache when usable."""
+    """claude.ai connectors for the desktop surfaces: the shared CLI list plus any the app's own cache adds."""
     home = claude_dir.parent
     snapshot = None
     if _claude_app_support_dir(home).is_dir():
@@ -3003,13 +3003,15 @@ def extract_desktop_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict])
     cli_projects: List[Dict] = []
     if claude_cli_and_desktop_share_account(home):
         extract_claudeai_mcp_servers(claude_dir, cli_projects)
-    # The snapshot is a flag-gated prefetch cache seen to go stale, so it only fills a gap.
-    if cli_projects or snapshot is None:
-        projects.extend(cli_projects)
-        return
-    servers = _claudeai_snapshot_servers(snapshot)
-    if servers:
-        projects.append({"path": str(claude_dir), "mcpServers": servers, "scope": "claudeai"})
+    # The snapshot is a flag-gated prefetch cache seen to go stale, so it only adds names the CLI list lacks.
+    if snapshot is not None:
+        present = {server["name"].lower() for project in cli_projects for server in project["mcpServers"]}
+        added = [server for server in _claudeai_snapshot_servers(snapshot) if server["name"].lower() not in present]
+        if added:
+            if not cli_projects:
+                cli_projects.append({"path": str(claude_dir), "mcpServers": [], "scope": "claudeai"})
+            cli_projects[0]["mcpServers"].extend(added)
+    projects.extend(cli_projects)
 
 
 def extract_claudeai_mcp_servers_with_root_support(

@@ -305,6 +305,13 @@ class TestOpenContainedHandleCheck(unittest.TestCase):
         with self.assertRaises(path_containment.NotContainedError):
             self._open(self.boundary / "y" / "SKILL.md")
 
+    def test_file_owned_by_another_uid_is_refused(self):
+        # chown needs root in tests, so make the boundary's owner differ instead.
+        uid = os.stat(str(self.boundary)).st_uid
+        with mock.patch.object(path_containment, "_owner_uid", return_value=uid + 1):
+            with self.assertRaises(path_containment.NotContainedError):
+                self._open(self.boundary / "x" / "SKILL.md")
+
     def test_unknown_handle_path_fails_closed(self):
         with mock.patch.object(path_containment, "_fd_real_path", return_value=None):
             with self.assertRaises(path_containment.NotContainedError):

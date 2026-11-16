@@ -96,6 +96,10 @@ def _walk_open(file_real: str, leaf_flags: int) -> int:
         os.close(dfd)
 
 
+def _owner_uid(path: PathLike) -> int:
+    return os.stat(str(path)).st_uid
+
+
 def open_contained(path: PathLike, boundary_real: str) -> int:
     """Open ``path`` for reading only if it really lives inside ``boundary_real``.
 
@@ -133,6 +137,10 @@ def open_contained(path: PathLike, boundary_real: str) -> int:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
             raise NotContainedError(f"{path} is not a single-link regular file")
+        # A file owned by a different uid is not this owner's, even in-tree (same
+        # rule as rule_read_helpers._open_checked; st_uid is 0 on Windows).
+        if st.st_uid != _owner_uid(boundary_real):
+            raise NotContainedError(f"{path} is owned by uid {st.st_uid}, not the boundary's owner")
         if not _CAN_WALK:
             # No component-wise open here, so check the file actually opened
             # (the kernel's path for the handle), and fail closed if unknown.

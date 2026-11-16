@@ -1489,6 +1489,7 @@ def send_scan_event(
     covered_home_users: Optional[List[str]] = None,
     deadline: Optional[float] = None,
     failure: Optional[Dict] = None,
+    response: Optional[Dict] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -1511,6 +1512,7 @@ def send_scan_event(
         covered_home_users: Optional home users covered; sent only on "completed" to
             bound the prune scope.
         failure: Optional dict, as send_report_to_backend describes it.
+        response: Optional dict, as send_report_to_backend describes it.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1550,6 +1552,7 @@ def send_scan_event(
         sentry_context,
         deadline=deadline,
         failure=failure,
+        response=response,
     )
 
 
@@ -1599,7 +1602,7 @@ def curl_kill_grace(deadline: Optional[float]) -> int:
     return 1 if deadline is not None else CURL_KILL_GRACE_SECONDS
 
 
-def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None, failure: Optional[Dict] = None, stop_if_unreachable: bool = False) -> Tuple[bool, bool]:
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None, failure: Optional[Dict] = None, stop_if_unreachable: bool = False, response: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.
 
@@ -1634,6 +1637,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         stop_if_unreachable: give up on the first failure that never reached the
             backend, without retrying or sleeping. A caller whose queue is itself
             the retry gains nothing from a curve that cannot connect.
+        response: Optional dict the caller owns, whose "body" receives the body of
+            an accepted (2xx) answer from the report endpoint.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1688,6 +1693,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 payload_hash = compute_payload_hash(tools[0])
                 payload["tool_name"] = raw_name.strip()
                 payload["payload_hash"] = payload_hash
+                if isinstance(tools[0].get("memories"), dict):
+                    payload["memories_hash"] = tools[0]["memories"].get("hash")
             except Exception as e:
                 # Hash failure should never block the upload — log and proceed.
                 logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
@@ -1788,6 +1795,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
 
                 if 200 <= http_code < 300:
                     _note("delivered")
+                    if response is not None:
+                        response["body"] = response_body
                     return (True, False)
 
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
@@ -1944,6 +1953,17 @@ def _report_key(report) -> Optional[str]:
         return None
 
 
+def _without_memories(report: Dict) -> Dict:
+    """A copy of the report whose tools carry no memories block; the report itself is left as it is."""
+    tools = report.get("tools") if isinstance(report, dict) else None
+    if not isinstance(tools, list):
+        return report
+    return {**report, "tools": [
+        {key: value for key, value in tool.items() if key != "memories"} if isinstance(tool, dict) else tool
+        for tool in tools
+    ]}
+
+
 def _queued_at_by_report(envelopes: List[Dict]) -> Dict[str, str]:
     """Each report's earliest queued_at in the existing queue file."""
     found: Dict[str, str] = {}
@@ -1966,7 +1986,7 @@ def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
         first_queued = _queued_at_by_report(existing) if replace else {}
         envelopes = ([] if replace else existing) + [
             {"report": r, "queued_at": first_queued.get(_report_key(r), now_iso)}
-            for r in reports
+            for r in map(_without_memories, reports)
         ]
         # Keep only the most recent entries to prevent unbounded growth
         envelopes = envelopes[-MAX_QUEUE_SIZE:]

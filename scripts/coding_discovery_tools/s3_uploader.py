@@ -58,6 +58,8 @@ def _strip_ephemeral(tool: Dict) -> Dict:
        order, and MCP server tool order can all flip between scans without any
        content change, busting the hash."""
     cleaned = copy.deepcopy(tool)
+    # Memories carry their own hash, so a memory edit leaves the tool hash alone.
+    cleaned.pop("memories", None)
 
     for plugin in (cleaned.get("plugins") or []):
         if isinstance(plugin, dict):
@@ -216,6 +218,7 @@ def try_s3_upload(
         "sentry_metrics": payload.get("sentry_metrics"),
         "tool_name": payload.get("tool_name"),
         "payload_hash": payload.get("payload_hash"),
+        "memories_hash": payload.get("memories_hash"),
     }
     # Strip None values to avoid sending bogus keys.
     notify_body = {k: v for k, v in notify_body.items() if v is not None}

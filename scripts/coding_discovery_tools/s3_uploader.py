@@ -58,6 +58,8 @@ def _strip_ephemeral(tool: Dict) -> Dict:
        order, and MCP server tool order can all flip between scans without any
        content change, busting the hash."""
     cleaned = copy.deepcopy(tool)
+    # Memories carry their own hash, so a memory edit leaves the tool hash alone.
+    cleaned.pop("memories", None)
 
     for plugin in (cleaned.get("plugins") or []):
         if isinstance(plugin, dict):
@@ -216,6 +218,7 @@ def try_s3_upload(
         "sentry_metrics": payload.get("sentry_metrics"),
         "tool_name": payload.get("tool_name"),
         "payload_hash": payload.get("payload_hash"),
+        "memories_hash": payload.get("memories_hash"),
         # The dedup-skip answer happens before the blob is read, so the snapshot
         # time has to travel in the notification too.
         "scanned_at": payload.get("scanned_at"),

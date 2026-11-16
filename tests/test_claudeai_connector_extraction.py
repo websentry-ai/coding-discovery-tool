@@ -22,6 +22,8 @@ from pathlib import Path
 from unittest import mock
 
 import scripts.coding_discovery_tools.mcp_extraction_helpers as helpers
+from scripts.coding_discovery_tools import utils
+from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 
 
 def _write_json(path: Path, payload) -> Path:
@@ -309,6 +311,79 @@ class ClaudeAIRootScanTest(unittest.TestCase):
         self.assertEqual(
             [s["name"] for p in projects for s in p["mcpServers"]],
             ["claude.ai Gmail"],
+        )
+
+
+class ClaudeAIDesktopSurfaceMirrorTest(unittest.TestCase):
+    """Cowork and Desktop report the account-level connectors, but only when the
+    CLI and the desktop app are signed in to the same account."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        for patcher in (
+            mock.patch.object(utils, "_SENTRY_DSN", ""),
+            mock.patch.object(Path, "home", return_value=self.home),
+            mock.patch("platform.system", return_value="Darwin"),
+            mock.patch.object(helpers, "_iter_admin_user_homes", return_value=[]),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.detector = AIToolsDetector()
+        self.detector._claude_desktop_mcp_extractor = None
+        self.detector.extract_all_cowork_skills = lambda: {"user_skills": []}
+
+    def _sign_in(self, cli_account=None, desktop_account=None):
+        cli_config = {"claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Linear"]}
+        if cli_account:
+            cli_config["oauthAccount"] = {"accountUuid": cli_account}
+        _write_json(self.home / ".claude.json", cli_config)
+        if desktop_account:
+            _write_json(helpers._claude_app_support_dir(self.home) / "config.json",
+                        {"lastKnownAccountUuid": desktop_account})
+
+    def _connector_servers(self, tool_name):
+        result = self.detector.process_single_tool({"name": tool_name})
+        return [s for p in result.get("projects", []) for s in p["mcpServers"]
+                if s.get("scope") == "claudeai"]
+
+    def test_same_account_mirrors_to_cowork_and_desktop(self):
+        self._sign_in("acct-1", "acct-1")
+        expected = [
+            {"name": "claude.ai Gmail", "scope": "claudeai"},
+            {"name": "claude.ai Linear", "scope": "claudeai"},
+        ]
+        self.assertEqual(self._connector_servers("Claude Cowork"), expected)
+        self.assertEqual(self._connector_servers("Claude Desktop"), expected)
+
+    def test_different_accounts_are_not_mirrored(self):
+        self._sign_in("acct-1", "acct-2")
+        self.assertEqual(self._connector_servers("Claude Cowork"), [])
+        self.assertEqual(self._connector_servers("Claude Desktop"), [])
+
+    def test_missing_desktop_config_is_not_mirrored(self):
+        self._sign_in("acct-1", None)
+        self.assertEqual(self._connector_servers("Claude Desktop"), [])
+
+    def test_missing_oauth_account_is_not_mirrored(self):
+        self._sign_in(None, "acct-1")
+        self.assertEqual(self._connector_servers("Claude Cowork"), [])
+
+    def test_claude_code_output_is_unchanged_by_the_filter(self):
+        self._sign_in("acct-1", "acct-2")
+        projects = []
+        helpers.extract_claudeai_mcp_servers_with_root_support(projects)
+        self.assertEqual(
+            projects,
+            [{
+                "path": str(self.home / ".claude"),
+                "mcpServers": [
+                    {"name": "claude.ai Gmail", "scope": "claudeai"},
+                    {"name": "claude.ai Linear", "scope": "claudeai"},
+                ],
+                "scope": "claudeai",
+            }],
         )
 
 

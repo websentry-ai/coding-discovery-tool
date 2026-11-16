@@ -2899,14 +2899,36 @@ def extract_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None
     })
 
 
-def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None:
+def claude_cli_and_desktop_share_account(home: Path) -> bool:
+    """True only when CLI and desktop app under `home` have the same account id."""
+    cli_account = _read_json_dict(home / ".claude.json").get("oauthAccount")
+    cli_account_uuid = cli_account.get("accountUuid") if isinstance(cli_account, dict) else None
+    desktop_account_uuid = _read_json_dict(_claude_app_support_dir(home) / "config.json").get("lastKnownAccountUuid")
+    if not cli_account_uuid or not desktop_account_uuid:
+        logger.debug(f"claude.ai connectors not mirrored for {home}: account id missing")
+        return False
+    if cli_account_uuid != desktop_account_uuid:
+        logger.debug(f"claude.ai connectors not mirrored for {home}: CLI and desktop accounts differ")
+        return False
+    return True
+
+
+def extract_claudeai_mcp_servers_with_root_support(
+    projects: List[Dict],
+    home_filter: Optional[Callable[[Path], bool]] = None,
+) -> None:
     """
     Extract claude.ai native connectors with root user support.
 
     When running as root/admin, scans all user directories. Otherwise checks
-    only the current user's home directory.
+    only the current user's home directory. `home_filter`, when given, skips
+    every home for which it returns False.
     """
     import platform
+
+    def extract_for_home(claude_dir: Path) -> None:
+        if home_filter is None or home_filter(claude_dir.parent):
+            extract_claudeai_mcp_servers(claude_dir, projects)
 
     is_admin = False
     users_dir = None
@@ -2946,7 +2968,7 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
             # it, so gating on the directory would skip a user whose only
             # source is the config file. Both readers tolerate absent files.
             try:
-                extract_claudeai_mcp_servers(user_dir / ".claude", projects)
+                extract_for_home(user_dir / ".claude")
             except (PermissionError, OSError) as e:
                 logger.debug(f"Error scanning claude.ai servers for user {user_dir.name}: {e}")
 
@@ -2955,9 +2977,9 @@ def extract_claudeai_mcp_servers_with_root_support(projects: List[Dict]) -> None
         # double-counting its claude.ai MCP servers (WEB-4673).
         import platform as _platform
         if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
-            extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
+            extract_for_home(Path.home() / ".claude")
     else:
-        extract_claudeai_mcp_servers(Path.home() / ".claude", projects)
+        extract_for_home(Path.home() / ".claude")
 
 
 def _lookup_plugin_provenance(
